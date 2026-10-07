@@ -24,6 +24,13 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+  denylist:
+    # No project-specific details in the engine repo (see scripts/check-denylist.mjs).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: node scripts/check-denylist.mjs
+
   dco:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest

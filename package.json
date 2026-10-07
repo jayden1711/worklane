@@ -1,0 +1,36 @@
+{
+  "name": "@worklane/cli",
+  "version": "0.0.0",
+  "description": "Open-source harness for running a crew of Claude agents on a real codebase: parallel workers, an independent evaluator, a shared GitHub Issues backlog, and a live dashboard showing who owns every task.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jayden1711/worklane.git"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "worklane": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "rename": "node scripts/rename.mjs",
+    "check:dco": "node scripts/check-dco.mjs",
+    "check:denylist": "node scripts/check-denylist.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.3"
+  }
+}

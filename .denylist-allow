@@ -1,0 +1,13 @@
+# Intentional mentions: <path-glob> <term>
+# The repo lives under the maintainer's account until it moves to an org.
+README.md jayden1711
+package.json jayden1711
+SECURITY.md jayden1711
+.github/ISSUE_TEMPLATE/config.yml jayden1711
+docs/design.md jayden1711
+docs/names.md jayden1711
+# Code of Conduct reporting contact.
+CODE_OF_CONDUCT.md jaydenvasquez1711@gmail.com
+# Fixtures in the denylist's own tests.
+test/denylist.test.ts d792
+test/denylist.test.ts bob@corp.dev

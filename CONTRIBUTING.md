@@ -20,7 +20,9 @@ Signed-off-by: Your Name <you@example.com>
 
 ## Project-specific code
 
-Nothing specific to one project belongs in this repo. Project behavior is configured in that project's `.worklane/` folder; if the engine can't express what a project needs, add a generic extension point and an example under `examples/`.
+Nothing specific to one project belongs in this repo: no project or repo names, people's handles, environment or service names, file paths, or domain details. Describe the need generically (e.g. "a project whose staging and prod databases share a host name"); project behavior and notes live in that project's `.worklane/` folder. If the engine can't express what a project needs, add a generic extension point and an example under `examples/`.
+
+CI runs `npm run check:denylist`, which fails on known project-specific terms (stored hashed in `.denylist.json`) and on email addresses. Intentional mentions go in `.denylist-allow`.
 
 ## Development
 
