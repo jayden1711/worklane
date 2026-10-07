@@ -1,0 +1,4 @@
+# Extends the default ruleset. Add allowlist entries only with a comment
+# explaining why the match is not a secret.
+[extend]
+useDefault = true

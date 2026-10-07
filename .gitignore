@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+# local runtime state (event log, locks) never belongs in git
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+!.env.example

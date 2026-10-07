@@ -1,0 +1,19 @@
+name: Feature request
+description: Propose a change in behavior or a new capability
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+  - type: textarea
+    id: precedent
+    attributes:
+      label: Prior art
+      description: Has another tool solved this? We prefer proven patterns over invention.
