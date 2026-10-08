@@ -19,6 +19,7 @@ export const EventSchemas = {
   'issue.claimed': z.strictObject({ issue, instance: z.string(), lease: sha, base: sha, owner: z.string() }),
   'issue.claim_lost': z.strictObject({ issue, instance: z.string(), holder: z.string().nullable() }),
   'issue.released': z.strictObject({ issue, instance: z.string(), why: z.string() }),
+  'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string() }),
   // runs
   'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int() }),
   'run.heartbeat': z.strictObject({ issue, role: z.string(), note: z.string() }),

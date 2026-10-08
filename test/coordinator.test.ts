@@ -172,6 +172,10 @@ test('issues without a contract, or from outsiders, are never started', { skip }
   await c.idle();
   assert.equal(runner.calls.length, 0);
   assert.ok((await f.backlog.comments(noContract)).some((x) => /no contract, no build/.test(x.body)));
+  // Regression: unchanged issues aren't re-recorded on every tick (the log would grow forever).
+  const before = f.log.read(0, ['issue.seen']).length;
+  for (let i = 0; i < 3; i++) await c.tick();
+  assert.equal(f.log.read(0, ['issue.seen']).length, before);
 });
 
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {

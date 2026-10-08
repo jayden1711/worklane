@@ -74,6 +74,13 @@ export class Coordinator {
     return issue === undefined ? all : all.filter((e) => (e.payload as { issue?: number }).issue === issue);
   }
 
+  private lastSeen(issue: number): unknown {
+    return this.d.log
+      .read(0, ['issue.seen'])
+      .filter((e) => (e.payload as { issue: number }).issue === issue)
+      .at(-1)?.payload;
+  }
+
   /** USD spent today (UTC) by all runs, from the log. */
   spentToday(): number {
     const day = new Date().toISOString().slice(0, 10);
@@ -162,7 +169,10 @@ export class Coordinator {
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
       const act = await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog);
       const contract = parseContract(issue.body);
-      this.emit('issue.seen', { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why });
+      // Recorded only when something about the issue changed, not on every tick.
+      const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
+      const prev = this.lastSeen(issue.number);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(seen)) this.emit('issue.seen', seen);
       if (!act.actionable) continue;
       if (!contract.ok) {
         const seen = this.events(issue.number).some((e) => e.type === 'contract.missing');
@@ -550,6 +560,7 @@ export class Coordinator {
   }
 
   private async block(issue: number, owner: string, why: string, release_ = true) {
+    this.emit('issue.blocked', { issue, owner, why: why.slice(0, 1000) });
     await this.d.backlog.addLabels(issue, ['blocked']);
     await this.d.backlog.removeLabel(issue, 'agent:working');
     await this.d.backlog.comment(issue, `[${BRAND.cli}] @${owner} blocked: ${why}`);
