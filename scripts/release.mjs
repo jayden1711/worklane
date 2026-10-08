@@ -12,6 +12,13 @@ if (git('status', '--porcelain')) throw new Error('working tree not clean');
 const pkg = JSON.parse(git('show', 'HEAD:package.json'));
 if (pkg.version !== version) throw new Error(`package.json is ${pkg.version}, not ${version}`);
 const head = git('rev-parse', 'HEAD');
+// Where to come back to: the branch if on one, else the exact commit (a detached start has no `-`).
+let back = head;
+try {
+  back = git('symbolic-ref', '-q', '--short', 'HEAD');
+} catch {
+  // detached
+}
 execFileSync('npm', ['run', 'build'], { stdio: 'inherit' });
 execFileSync('npm', ['run', 'build:web'], { stdio: 'inherit' });
 execFileSync('npm', ['test'], { stdio: 'inherit' });
@@ -22,7 +29,7 @@ try {
   git('tag', '-a', `v${version}`, '-m', `v${version}`);
   console.log(`tagged v${version} at ${git('rev-parse', 'HEAD')} (on top of ${head.slice(0, 7)})`);
 } finally {
-  git('checkout', '-q', '-');
+  git('checkout', '-q', back);
   // Leaving the release commit deletes its tracked dist/ from the working tree.
   execFileSync('npm', ['run', 'build'], { stdio: 'ignore' });
   execFileSync('npm', ['run', 'build:web'], { stdio: 'ignore' });
