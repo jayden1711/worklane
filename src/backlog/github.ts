@@ -111,6 +111,14 @@ export class GitHubBacklog implements Backlog {
     await this.req('PATCH', `/repos/${this.repo}/issues/${n}`, { state: 'closed', state_reason: 'completed' });
   }
 
+  async createIssue(title: string, body: string, labels: string[]) {
+    return (await this.req<{ number: number }>('POST', `/repos/${this.repo}/issues`, { title, body, labels })).number;
+  }
+
+  async openPr(head: string, base: string, title: string, body: string) {
+    return (await this.req<{ html_url: string }>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body })).html_url;
+  }
+
   async ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]> {
     const existing = new Set((await this.req<{ name: string }[]>('GET', `/repos/${this.repo}/labels?per_page=100`)).map((l) => l.name));
     const created: string[] = [];

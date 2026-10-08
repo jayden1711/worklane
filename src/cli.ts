@@ -20,6 +20,7 @@ import { slotStatus } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
+import { buildReport } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { openUrl } from './os/index.js';
@@ -63,6 +64,7 @@ usage: ${BRAND.cli} <command> [options]
                                    the live dashboard on 127.0.0.1 (reads the event log)
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
+  report                           the report the coordinator would post now (since the last one)
   status                           what's running, waiting and spent, from the event log
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
@@ -365,6 +367,18 @@ async function main(argv: string[]): Promise<number> {
       }
       const r = await seedDemo(resolve(sub));
       console.log(`demo seeded: ${r.issues} issues worked by the real coordinator with scripted agents\n  project ${r.root}\n  open it: ${BRAND.cli} dashboard --root ${r.root} --user example-owner`);
+      return 0;
+    }
+
+    case 'report': {
+      const cfg = loadConfig(root);
+      const log = new EventLog(logPath(root));
+      try {
+        const last = log.read(0, ['report.posted']).at(-1);
+        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), previous: (last?.payload as { card?: never } | undefined)?.card ?? null }).markdown);
+      } finally {
+        log.close();
+      }
       return 0;
     }
 

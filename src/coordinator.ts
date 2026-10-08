@@ -22,6 +22,9 @@ import { scanRange } from './scan/secrets.js';
 import { fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
 import { effectiveStage, health, healthyStreak, regressed, relaxedFor } from './trust.js';
+import { buildReport, dueSlot } from './reports.js';
+import { lessonsMarkdown, pendingLessons, skillCandidates } from './lessons.js';
+import type { Scorecard } from './scorecard.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -132,6 +135,8 @@ export class Coordinator {
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('trust', () => this.maybeTrust(), undefined);
+    await step('report', () => this.maybeReport(), undefined);
+    await step('lessons', () => this.maybeLessons(), undefined);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -196,6 +201,52 @@ export class Coordinator {
   private lastHold: string | null = null;
   /** Actionable ready issues seen on the last dispatch pass (for idle-hours). */
   private readyCount = 0;
+
+  /** Post the report for the latest configured time already passed today, once. */
+  async maybeReport(now = new Date()) {
+    const slot = dueSlot(this.d.cfg.project.reports.times, now);
+    if (!slot) return;
+    const day = now.toLocaleDateString('en-CA');
+    const posted = this.d.log.read(0, ['report.posted']);
+    if (posted.some((e) => (e.payload as { day: string; slot: string }).day === day && (e.payload as { slot: string }).slot === slot)) return;
+    const last = posted.at(-1);
+    const since = last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000);
+    const prev = (last?.payload as { card?: Scorecard } | undefined)?.card ?? null;
+    const report = buildReport(this.d.log.read(), this.d.cfg, { since, now, previous: prev, slot });
+    const to = this.d.cfg.project.reports.to.length ? this.d.cfg.project.reports.to : [this.d.cfg.project.owners.default];
+    const mention = to.map((u) => `@${u}`).join(' ');
+    let issue = (await this.d.backlog.list('report'))[0]?.number ?? null;
+    if (issue === null) issue = await this.d.backlog.createIssue(`${BRAND.name} reports`, `Scheduled ${BRAND.name} reports are posted here as comments (${this.d.cfg.project.reports.times.join(' and ')}).`, ['report']);
+    await this.d.backlog.comment(issue, `${report.markdown}\n\n${mention}`.trim());
+    const card = Object.fromEntries(Object.entries(report.card).filter(([, v]) => typeof v !== 'object' || v === null)) as Record<string, number | string | null>;
+    this.emit('report.posted', { day, slot, issue, card });
+  }
+
+  /** Once a day: new lessons go to the project's lessons folder on a branch, as a PR for the owner. */
+  async maybeLessons(now = new Date()) {
+    const day = now.toLocaleDateString('en-CA');
+    if (this.d.log.read(0, ['lessons.pr']).some((e) => (e.payload as { day: string }).day === day)) return;
+    const events = this.d.log.read();
+    const lessons = pendingLessons(events);
+    if (!lessons.length) return;
+    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+    const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+    const name = `lessons-${day}`;
+    const branch = `${BRAND.cli}/${name}`;
+    const { path } = createWorktree({ ...this.wt, setup: [] }, name, branch, tip);
+    try {
+      const rel = `${BRAND.configDir}/lessons/${day}.md`;
+      mkdirSync(join(path, BRAND.configDir, 'lessons'), { recursive: true });
+      writeFileSync(join(path, rel), lessonsMarkdown(day, lessons, skillCandidates(events)) + '\n');
+      this.git(path, 'add', rel);
+      this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Lessons from ${lessons.length} task(s), ${day}`);
+      this.git(path, 'push', '-q', this.remote, `HEAD:refs/heads/${branch}`);
+      const url = await this.d.backlog.openPr(branch, this.branch, `Lessons from ${lessons.length} task(s), ${day}`, `Lessons agents proposed after their tasks. Approve to keep them; edit or drop any that are wrong.\n\n${lessons.map((l) => `- #${l.issue} ${l.title}`).join('\n')}`);
+      this.emit('lessons.pr', { day, branch, count: lessons.length, url });
+    } finally {
+      removeWorktree(this.wt, name);
+    }
+  }
 
   stage(): number {
     return effectiveStage(this.d.log.read(0, ['stage.changed']), this.d.cfg.agents.stage);

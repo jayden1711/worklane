@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
+import { BRAND } from '../src/brand.js';
 import { claimRef } from '../src/claims.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
@@ -554,4 +555,31 @@ test('trust: a healthy streak asks the owner to promote; approval changes stage;
   const change = f.log.read(0, ['stage.changed']).at(-1)!.payload as { by: string; reason: string };
   assert.equal(change.by, 'auto');
   assert.match(change.reason, /evaluator pass rate/);
+});
+
+test('reports post once per slot to one report issue; lessons go out as a PR branch, once a day', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.reports = { times: ['08:00', '18:00'], to: ['example-owner'] };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const morning = new Date(2026, 9, 8, 9, 0);
+  await c.maybeReport(morning);
+  await c.maybeReport(new Date(2026, 9, 8, 10, 0));
+  const reports = await f.backlog.list('report');
+  assert.equal(reports.length, 1);
+  let comments = await f.backlog.comments(reports[0]!.number);
+  assert.equal(comments.length, 1, 'same slot: posted once');
+  assert.match(comments[0]!.body, /report: .*2026-10-08 08:00[\s\S]*@example-owner/);
+  await c.maybeReport(new Date(2026, 9, 8, 18, 5));
+  comments = await f.backlog.comments(reports[0]!.number);
+  assert.equal(comments.length, 2, 'evening slot posts to the same issue');
+
+  f.log.append('lesson.proposed', { issue: 5, worked: 'ran one test first', failed: '', fix: 'read the runner config before editing' }, 'c');
+  await c.maybeLessons(morning);
+  await c.maybeLessons(morning);
+  const prs = f.backlog.prs();
+  assert.equal(prs.length, 1);
+  assert.equal(prs[0]!.base, 'main');
+  const file = execFileSync('git', ['show', `${prs[0]!.head}:${BRAND.configDir}/lessons/2026-10-08.md`], { cwd: f.remote, encoding: 'utf8' });
+  assert.match(file, /\*\*Fix:\*\* read the runner config before editing/);
+  assert.ok(!execFileSync('git', ['log', '--format=%s', 'main'], { cwd: f.remote, encoding: 'utf8' }).includes('Lessons'), 'main is untouched: lessons only land when the owner merges the PR');
 });

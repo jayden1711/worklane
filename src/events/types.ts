@@ -64,6 +64,8 @@ export const EventSchemas = {
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int(), active: z.number().int().optional(), ready: z.number().int().optional() }),
   'trust.evaluated': z.strictObject({ day: z.string(), stage: z.number().int(), healthy: z.boolean(), why: z.array(z.string()), card: z.record(z.string(), z.union([z.number(), z.string(), z.null()])) }),
   'stage.changed': z.strictObject({ from: z.number().int(), to: z.number().int(), by: z.string(), reason: z.string() }),
+  'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable(), card: z.record(z.string(), z.union([z.number(), z.string(), z.null()])) }),
+  'lessons.pr': z.strictObject({ day: z.string(), branch: z.string(), count: z.number().int(), url: z.string() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),

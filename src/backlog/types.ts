@@ -24,6 +24,9 @@ export interface Backlog {
   comment(n: number, body: string): Promise<void>;
   comments(n: number): Promise<{ author: string; body: string }[]>;
   close(n: number): Promise<void>;
+  createIssue(title: string, body: string, labels: string[]): Promise<number>;
+  /** Open a pull request from a pushed branch; returns its URL. */
+  openPr(head: string, base: string, title: string, body: string): Promise<string>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
 }
 
@@ -36,6 +39,7 @@ export const LABELS = [
   { name: 'money-path', color: '5319e7', description: 'Touches money-path code: extra verification' },
   { name: 'blocked', color: '000000', description: 'Cannot proceed; see the latest comment' },
   { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
+  { name: 'report', color: 'bfdadc', description: 'Scheduled reports are posted here' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },
   { name: 'size:M', color: 'fef2c0', description: 'Medium: plan mode first' },
   { name: 'size:L', color: 'f9d0c4', description: 'Large: plan mode first' },
