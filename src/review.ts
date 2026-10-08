@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
+import { NEVER_RELAXED } from './config/schema.js';
 
 export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
@@ -43,6 +44,8 @@ export interface LevelInput {
   verdict?: { patch_correct: boolean; test_correct: boolean; confidence: 'high' | 'medium' | 'low' };
   /** An agent may ask for more review, never less. */
   requested?: Level;
+  /** Categories relaxed by the current trust stage, and the level each now lands at. */
+  relaxed?: Record<string, Level>;
 }
 
 export interface LevelResult {
@@ -87,37 +90,33 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   if (input.labels.includes('money-path')) for (const f of input.files) if (!(categories['money-path'] ?? []).includes(f.path)) add('money-path', f.path);
 
   const L = cfg.levels;
+  const relaxed = input.relaxed ?? {};
   const reasons: string[] = [];
-  const present = (when: string[]) => when.filter((w) => categories[w]?.length);
   let level: Level = 'L0';
+  const raise = (to: Level, why: string) => {
+    if (ORDER.indexOf(to) > ORDER.indexOf(level)) level = to;
+    reasons.push(why);
+  };
+  // Each present category contributes a level; a trust stage may relax a category (never a protected one).
+  const contribute = (cat: string, base: Level, why: string) => {
+    const r = relaxed[cat];
+    const to = r && !NEVER_RELAXED.includes(cat) && ORDER.indexOf(r) < ORDER.indexOf(base) ? r : base;
+    raise(to, to === base ? why : `${why} (relaxed to ${to} by trust stage)`);
+  };
 
-  // L0 only when every file is docs/tests/comments and the change is small.
   const allLow = input.files.length > 0 && input.files.every((f) => isDocOrTest(f.path));
   if (allLow && lines <= (L.L0_auto.max_lines ?? Infinity)) reasons.push(`only docs/tests, ${lines} lines`);
-  else {
-    level = 'L1';
-    reasons.push(allLow ? `docs/tests but ${lines} lines (> ${L.L0_auto.max_lines})` : 'touches app code');
-  }
+  else raise('L1', allLow ? `docs/tests but ${lines} lines (> ${L.L0_auto.max_lines})` : 'touches app code');
+
   const l1Limits = (L.L1_evaluator.max_lines !== undefined && lines > L.L1_evaluator.max_lines) || (L.L1_evaluator.max_files !== undefined && input.files.length > L.L1_evaluator.max_files);
   if (l1Limits && (categories['app-non-money'] ?? []).length) {
     add('app-non-money-large', '*');
-    level = max(level, 'L2');
-    reasons.push(`large app change: ${lines} lines, ${input.files.length} files`);
+    contribute('app-non-money-large', 'L2', `large app change: ${lines} lines, ${input.files.length} files`);
   }
-  const l2 = present(L.L2_notify.when);
-  if (l2.length) {
-    level = max(level, 'L2');
-    reasons.push(...l2.map((c) => `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`));
-  }
-  const l3 = present(L.L3_human.when);
-  if (l3.length) {
-    level = 'L3';
-    reasons.push(...l3.map((c) => `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`));
-  }
-  if (L.L3_human.over_lines !== undefined && lines > L.L3_human.over_lines) {
-    level = 'L3';
-    reasons.push(`${lines} lines (> ${L.L3_human.over_lines})`);
-  }
+  for (const c of L.L2_notify.when) if (c !== 'app-non-money-large' && categories[c]?.length) contribute(c, 'L2', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  for (const c of L.L3_human.when) if (categories[c]?.length) contribute(c, 'L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  if (L.L3_human.over_lines !== undefined && lines > L.L3_human.over_lines) raise('L3', `${lines} lines (> ${L.L3_human.over_lines})`);
+
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;
     level = up(level);
