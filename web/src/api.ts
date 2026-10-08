@@ -65,6 +65,81 @@ export interface State {
   errors: { at: string; where: string; message: string }[];
   activity: Activity[];
   inbox: { decisions: Decision[]; blocked: Task[]; notify: Task[] };
+  runs: { active: Run[]; recent: Run[] };
+  landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
+  batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
+  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  trust: { stage: number | null; evaluations: { day: string; stage: number; healthy: boolean; why: string[] }[]; changes: { from: number; to: number; by: string; reason: string; at: string }[] };
+  reports: { day: string; slot: string; issue: number | null; at: string }[];
+  lessonPrs: { day: string; count: number; url: string; at: string }[];
+}
+
+export interface Run {
+  issue: number;
+  role: string;
+  model: string;
+  pid: number;
+  attempt: number;
+  startedAt: string;
+  lastHeartbeat: string | null;
+  note: string | null;
+  finishedAt: string | null;
+  reason: string | null;
+  costUsd: number;
+}
+
+export interface Scorecard {
+  from: string;
+  to: string;
+  tasksDone: number;
+  evaluatorPassRate: number | null;
+  unverifiedClaimRate: number | null;
+  reverts: number;
+  redCaught: number;
+  baselineGrowth: number;
+  costPerDoneUsd: number | null;
+  readyToDoneHours: number | null;
+  interventionsPerTask: number | null;
+  idleHours: number;
+  decisionWaitHours: number;
+  blockedHours: number;
+  spendUsd: number;
+}
+
+export interface ScorecardResponse { current: Scorecard; previous: Scorecard; health: { healthy: boolean; why: string[] }; report: string }
+
+export interface Settings {
+  configDir: string;
+  project: { name: string; repo: string; landMode: string; runtime: unknown };
+  owners: State['owners'];
+  reports: { times: string[]; to: string[] };
+  governor: { max_load?: number; min_free_disk_pct: number };
+  agents: { stage: number; budget: number; trust: Record<string, number>; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
+  tests: { gates: Record<string, string[]>; batchMax: number; nightlyAt: string | null; tiers: string[]; baselineParser: boolean };
+  review: { levels: Record<string, string[]>; stages: { stage: number; relax: { category: string; to: string }[] }[] } | null;
+  guardrails: { rules: number; protectedPaths: string[]; secretPaths: number; network: string; preApproved: string[] };
+  deploy: { environments: { name: string; production: boolean }[]; prodRead: boolean } | null;
+}
+
+export const getScorecard = () => api<ScorecardResponse>('/api/scorecard');
+export const getSettings = () => api<Settings>('/api/settings');
+
+/** Fetch once, and again whenever `dep` changes (e.g. the live pulse). */
+export function useFetch<T>(fn: () => Promise<T>, dep: unknown = 0): { data: T | null; error: string | null } {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    fn().then(
+      (d) => live && (setData(d), setError(null)),
+      (e: Error) => live && setError(e.message),
+    );
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dep]);
+  return { data, error };
 }
 
 function readToken(): string {

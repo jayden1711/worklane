@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, Gauge, Inbox as InboxIcon, ListChecks, Moon, Search, Sun, Vote } from 'lucide-react';
+import { Activity, BarChart3, Bot, GitMerge, Gauge, History, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { useLiveState, type State } from './api';
 import { Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
@@ -9,6 +9,12 @@ import { InboxPage } from './pages/Inbox';
 import { Decisions } from './pages/Decisions';
 import { Issues } from './pages/Issues';
 import { IssueDetail } from './pages/IssueDetail';
+import { Landing } from './pages/Landing';
+import { Agents } from './pages/Agents';
+import { ActivityPage } from './pages/Activity';
+import { Deploys } from './pages/Deploys';
+import { Reports } from './pages/Reports';
+import { SettingsPage } from './pages/Settings';
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -52,11 +58,27 @@ export function typing(e: KeyboardEvent) {
   return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
 }
 
+// A `g` chord is pending until its second key. Page listeners run before the
+// app's (React registers children first), so they must check this, or `g a`
+// on the Decisions page would approve a decision on its way to Agents.
+let chordUntil = 0;
+
+/** Whether a page's single-key shortcut may act on this key. */
+export function pageKey(e: KeyboardEvent) {
+  return !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey && Date.now() >= chordUntil;
+}
+
 const NAV = [
   { to: '/', label: 'Overview', icon: Gauge, chord: 'o' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i' },
   { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd' },
   { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's' },
+  { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l' },
+  { to: '/agents', label: 'Agents', icon: Bot, chord: 'a' },
+  { to: '/activity', label: 'Activity', icon: History, chord: 'e' },
+  { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y' },
+  { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r' },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',' },
 ];
 
 function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; setOpen: (v: boolean) => void; state: State | null; toggleTheme: () => void }) {
@@ -146,8 +168,6 @@ export function App() {
   const [menu, setMenu] = useState(false);
 
   useEffect(() => {
-    let chord = false;
-    let timer: number | undefined;
     const on = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
@@ -155,20 +175,16 @@ export function App() {
         return;
       }
       if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (chord) {
+      if (Date.now() < chordUntil) {
         const n = NAV.find((x) => x.chord === e.key);
-        chord = false;
+        chordUntil = 0;
         if (n) {
           e.preventDefault();
           navigate(n.to);
         }
         return;
       }
-      if (e.key === 'g') {
-        chord = true;
-        window.clearTimeout(timer);
-        timer = window.setTimeout(() => (chord = false), 1200);
-      }
+      if (e.key === 'g') chordUntil = Date.now() + 1200;
     };
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
@@ -183,6 +199,8 @@ export function App() {
       '/inbox': state ? state.inbox.decisions.length + state.inbox.blocked.length : 0,
       '/decisions': state?.decisions.filter((d) => !d.answer).length ?? 0,
       '/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
+      '/land': state?.landQueue.length ?? 0,
+      '/agents': state?.runs.active.length ?? 0,
     }),
     [state],
   );
@@ -194,6 +212,12 @@ export function App() {
   else if (path === '/decisions') page = <Decisions state={state} />;
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
   else if (path.startsWith('/issues')) page = <Issues state={state} />;
+  else if (path === '/land') page = <Landing state={state} />;
+  else if (path === '/agents') page = <Agents state={state} />;
+  else if (path === '/activity') page = <ActivityPage state={state} />;
+  else if (path === '/deploys') page = <Deploys state={state} />;
+  else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
+  else if (path === '/settings') page = <SettingsPage />;
   else page = <Overview state={state} pulse={pulse} />;
 
   return (

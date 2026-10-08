@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { decide, type Decision, type State } from '../api';
-import { navigate, typing } from '../App';
+import { navigate, pageKey, typing } from '../App';
 import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd } from '../components/ui';
 import { Header } from './Overview';
 
@@ -82,7 +82,7 @@ export function Decisions({ state }: { state: State }) {
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
-      if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!pageKey(e)) return;
       const cur = list[sel];
       if (e.key === 'j') setSel((s) => Math.min(list.length - 1, s + 1));
       else if (e.key === 'k') setSel((s) => Math.max(0, s - 1));

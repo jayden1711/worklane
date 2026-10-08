@@ -78,6 +78,29 @@ export interface Projection {
   coordinator: { instance: string; startedAt: string; lastTick: string | null } | null;
   errors: { at: string; where: string; message: string }[];
   activity: { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }[];
+  /** Agent runs in flight (started, not finished), and the most recent finished ones. */
+  runs: { active: Run[]; recent: Run[] };
+  /** Changes waiting to land, oldest first, and recent landing batches. */
+  landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
+  batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
+  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  trust: { stage: number | null; evaluations: { day: string; stage: number; healthy: boolean; why: string[] }[]; changes: { from: number; to: number; by: string; reason: string; at: string }[] };
+  reports: { day: string; slot: string; issue: number | null; at: string }[];
+  lessonPrs: { day: string; count: number; url: string; at: string }[];
+}
+
+export interface Run {
+  issue: number;
+  role: string;
+  model: string;
+  pid: number;
+  attempt: number;
+  startedAt: string;
+  lastHeartbeat: string | null;
+  note: string | null;
+  finishedAt: string | null;
+  reason: string | null;
+  costUsd: number;
 }
 
 const RUN_STATUS: Record<string, TaskStatus> = {
@@ -136,6 +159,22 @@ export function summarize(e: StoredEvent): string {
       return p.actionable ? 'seen: actionable' : `seen: ${p.why}`;
     case 'contract.missing':
       return `no contract: ${p.why}`;
+    case 'land.batch':
+      return `batch ${p.outcome}: ${(p.issues as number[]).map((x) => `#${x}`).join(' ')}`;
+    case 'governor.hold':
+      return `dispatch held: ${p.reason}`;
+    case 'governor.release':
+      return 'dispatch resumed';
+    case 'trust.evaluated':
+      return `trust: stage ${p.stage} ${p.healthy ? 'healthy' : `not healthy (${(p.why as string[]).join('; ')})`}`;
+    case 'stage.changed':
+      return `trust stage ${p.from} -> ${p.to} (${p.by})`;
+    case 'report.posted':
+      return `report posted (${p.slot})`;
+    case 'lessons.pr':
+      return `lessons PR opened (${p.count})`;
+    case 'nightly.queued':
+      return 'nightly runs queued';
     default:
       return e.type;
   }
@@ -151,6 +190,14 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
   let baseline: Projection['baseline'] = null;
   let coordinator: Projection['coordinator'] = null;
   const errors: Projection['errors'] = [];
+  const active = new Map<string, Run>();
+  const recent: Run[] = [];
+  const queue = new Map<number, Projection['landQueue'][number]>();
+  const batches = new Map<string, Projection['batches'][number]>();
+  let governor: Projection['governor'] = null;
+  const trust: Projection['trust'] = { stage: null, evaluations: [], changes: [] };
+  const reports: Projection['reports'] = [];
+  const lessonPrs: Projection['lessonPrs'] = [];
 
   const task = (n: number, ts: string): Task => {
     let t = tasks.get(n);
@@ -300,6 +347,68 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
         errors.push({ at: e.ts, where: String(p.where), message: String(p.message) });
         break;
     }
+    // Read models that sit beside the per-task fold.
+    switch (e.type) {
+      case 'run.started':
+        active.set(`${n}:${p.role}`, { issue: n!, role: String(p.role), model: String(p.model), pid: Number(p.pid), attempt: Number(p.attempt), startedAt: e.ts, lastHeartbeat: null, note: null, finishedAt: null, reason: null, costUsd: 0 });
+        break;
+      case 'run.heartbeat': {
+        const r = active.get(`${n}:${p.role}`);
+        if (r) {
+          r.lastHeartbeat = e.ts;
+          r.note = String(p.note).slice(0, 200);
+        }
+        break;
+      }
+      case 'run.finished': {
+        const r = active.get(`${n}:${p.role}`);
+        if (r) {
+          active.delete(`${n}:${p.role}`);
+          r.finishedAt = e.ts;
+          r.reason = String(p.reason);
+          recent.push(r);
+        }
+        break;
+      }
+      case 'run.cost': {
+        const r = [...recent].reverse().find((x) => x.issue === n && x.role === p.role && x.costUsd === 0) ?? active.get(`${n}:${p.role}`);
+        if (r) r.costUsd = Number(p.usd);
+        break;
+      }
+      case 'land.queued':
+        queue.set(n!, { issue: n!, title: t?.title ?? `#${n}`, head: String(p.head), level: String(p.level), queuedAt: e.ts, deferred: null });
+        break;
+      case 'land.result': {
+        const q = queue.get(n!);
+        if (q && p.outcome === 'deferred') q.deferred = String(p.detail).split('\n')[0]!.slice(0, 200);
+        else queue.delete(n!);
+        break;
+      }
+      case 'land.batch': {
+        const b = batches.get(String(p.id));
+        batches.set(String(p.id), { id: String(p.id), issues: p.issues as number[], tip: String(p.tip), outcome: String(p.outcome), detail: String(p.detail).slice(0, 300), at: b?.at ?? e.ts });
+        break;
+      }
+      case 'governor.hold':
+        governor = { held: true, reason: String(p.reason), load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts };
+        break;
+      case 'governor.release':
+        governor = { held: false, reason: null, load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts };
+        break;
+      case 'trust.evaluated':
+        trust.evaluations.push({ day: String(p.day), stage: Number(p.stage), healthy: Boolean(p.healthy), why: p.why as string[] });
+        break;
+      case 'stage.changed':
+        trust.stage = Number(p.to);
+        trust.changes.push({ from: Number(p.from), to: Number(p.to), by: String(p.by), reason: String(p.reason), at: e.ts });
+        break;
+      case 'report.posted':
+        reports.push({ day: String(p.day), slot: String(p.slot), issue: (p.issue as number | null) ?? null, at: e.ts });
+        break;
+      case 'lessons.pr':
+        lessonPrs.push({ day: String(p.day), count: Number(p.count), url: String(p.url), at: e.ts });
+        break;
+    }
   }
 
   const activity = events
@@ -320,6 +429,13 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
     coordinator,
     errors: errors.slice(-20).reverse(),
     activity,
+    runs: { active: [...active.values()], recent: recent.slice(-50).reverse() },
+    landQueue: [...queue.values()].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt)),
+    batches: [...batches.values()].slice(-30).reverse(),
+    governor,
+    trust: { stage: trust.stage, evaluations: trust.evaluations.slice(-30).reverse(), changes: trust.changes.reverse() },
+    reports: reports.slice(-30).reverse(),
+    lessonPrs: lessonPrs.slice(-30).reverse(),
   };
 }
 

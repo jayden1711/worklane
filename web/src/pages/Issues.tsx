@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Columns3, List, Save, X } from 'lucide-react';
 import { listViews, saveViews, type Filters, type SavedView, type State, type Task, type TaskStatus } from '../api';
-import { navigate, typing } from '../App';
+import { navigate, pageKey, typing } from '../App';
 import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd, LevelBadge, STATUS_LABEL, StatusBadge, usd } from '../components/ui';
 import { Header } from './Overview';
 
@@ -132,7 +132,7 @@ export function Issues({ state }: { state: State }) {
         (e.target as HTMLElement).blur();
         return;
       }
-      if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!pageKey(e)) return;
       if (e.key === 'j') setSel((s) => Math.min(rows.length - 1, s + 1));
       else if (e.key === 'k') setSel((s) => Math.max(0, s - 1));
       else if (e.key === 'Enter' && rows[sel]) navigate(`/issues/${rows[sel]!.issue}`);
