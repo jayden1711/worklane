@@ -1,4 +1,7 @@
 # Deploy verification: "done" means deployed and verified, not merged.
+# `verify` must print the commit the environment is SERVING (e.g. its newest
+# successful deployment), never "a deployment row mentioning the commit":
+# platforms record skipped or failed deploys of the same commit too.
 version: 1
 environments: []
 # - name: staging
