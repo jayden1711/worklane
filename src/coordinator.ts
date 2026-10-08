@@ -15,7 +15,7 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { childEnv, cpuCount, diskFree, killTree, machineLoad, spawnDetached } from './os/index.js';
-import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { computeLevel, loadMoneyPaths, maxLevel, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
@@ -25,6 +25,7 @@ import { effectiveStage, health, healthyStreak, regressed, relaxedFor } from './
 import { buildReport, dueSlot } from './reports.js';
 import { lessonsMarkdown, pendingLessons, skillCandidates } from './lessons.js';
 import type { Scorecard } from './scorecard.js';
+import { runExtras, securityReview, type ExtraCtx } from './extras.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -137,6 +138,7 @@ export class Coordinator {
     await step('trust', () => this.maybeTrust(), undefined);
     await step('report', () => this.maybeReport(), undefined);
     await step('lessons', () => this.maybeLessons(), undefined);
+    await step('extras', () => runExtras(this.extraCtx(), (b, f, c, t, body) => this.openDocPr(b, f, c, t, body)), undefined);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -229,20 +231,45 @@ export class Coordinator {
     const events = this.d.log.read();
     const lessons = pendingLessons(events);
     if (!lessons.length) return;
+    const branch = `${BRAND.cli}/lessons-${day}`;
+    const title = `Lessons from ${lessons.length} task(s), ${day}`;
+    const body = `Lessons agents proposed after their tasks. Approve to keep them; edit or drop any that are wrong.\n\n${lessons.map((l) => `- #${l.issue} ${l.title}`).join('\n')}`;
+    const url = await this.openDocPr(branch, `${BRAND.configDir}/lessons/${day}.md`, lessonsMarkdown(day, lessons, skillCandidates(events)) + '\n', title, body);
+    this.emit('lessons.pr', { day, branch, count: lessons.length, url });
+  }
+
+  private extraCtx(): ExtraCtx {
+    return {
+      cfg: this.d.cfg,
+      log: this.d.log,
+      backlog: this.d.backlog,
+      runner: this.d.runner,
+      repo: this.d.repo,
+      stateDir: this.d.stateDir,
+      branch: this.branch,
+      remote: this.remote,
+      emit: (type, payload) => this.emit(type, payload),
+      git: (cwd, ...args) => this.git(cwd, ...args),
+      sh: (command, cwd) => sh(command, cwd),
+      hold: () => this.governorHold()?.reason ?? null,
+      budgetLeft: () => this.d.cfg.agents.daily_budget_usd - this.spentToday(),
+      now: () => new Date(),
+    };
+  }
+
+  /** Write one file on a fresh branch off main and open a PR for it (lessons, release notes). Main is untouched. */
+  private async openDocPr(branch: string, file: string, content: string, title: string, body: string): Promise<string> {
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-    const name = `lessons-${day}`;
-    const branch = `${BRAND.cli}/${name}`;
+    const name = branch.replace(/[^a-z0-9-]+/gi, '-');
     const { path } = createWorktree({ ...this.wt, setup: [] }, name, branch, tip);
     try {
-      const rel = `${BRAND.configDir}/lessons/${day}.md`;
-      mkdirSync(join(path, BRAND.configDir, 'lessons'), { recursive: true });
-      writeFileSync(join(path, rel), lessonsMarkdown(day, lessons, skillCandidates(events)) + '\n');
-      this.git(path, 'add', rel);
-      this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Lessons from ${lessons.length} task(s), ${day}`);
+      mkdirSync(dirname(join(path, file)), { recursive: true });
+      writeFileSync(join(path, file), content);
+      this.git(path, 'add', file);
+      this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', title);
       this.git(path, 'push', '-q', this.remote, `HEAD:refs/heads/${branch}`);
-      const url = await this.d.backlog.openPr(branch, this.branch, `Lessons from ${lessons.length} task(s), ${day}`, `Lessons agents proposed after their tasks. Approve to keep them; edit or drop any that are wrong.\n\n${lessons.map((l) => `- #${l.issue} ${l.title}`).join('\n')}`);
-      this.emit('lessons.pr', { day, branch, count: lessons.length, url });
+      return await this.d.backlog.openPr(branch, this.branch, title, body);
     } finally {
       removeWorktree(this.wt, name);
     }
@@ -424,10 +451,12 @@ export class Coordinator {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
-        const lvl = computeLevel(
-          { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, relaxed: relaxedFor(this.stage(), this.d.cfg.review), ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? 'L2' } : {}) },
-          this.d.cfg.review ?? DEFAULT_REVIEW,
-        );
+        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, relaxed: relaxedFor(this.stage(), this.d.cfg.review), ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
+        let lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
+        // The optional security reviewer can only raise the level, never lower it.
+        const sec = await securityReview(this.extraCtx(), { issue: n, path, base, head, categories: Object.keys(lvl.categories).filter((c) => lvl.categories[c]!.length) });
+        if (sec.requested) lvl = computeLevel({ ...levelInput, requested: maxLevel(levelInput.requested ?? 'L0', sec.requested) }, this.d.cfg.review ?? DEFAULT_REVIEW);
+        lvl = { ...lvl, reasons: [...lvl.reasons, ...sec.receipts] };
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);

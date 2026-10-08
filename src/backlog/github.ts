@@ -119,6 +119,15 @@ export class GitHubBacklog implements Backlog {
     return (await this.req<{ html_url: string }>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body })).html_url;
   }
 
+  async ciStatus(sha: string) {
+    const r = await this.req<{ check_runs: { name: string; status: string; conclusion: string | null; html_url: string }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?per_page=100`);
+    const runs = r.check_runs;
+    if (!runs.length) return { state: 'none' as const, failing: [] };
+    const failing = runs.filter((c) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(c.conclusion ?? '')).map((c) => ({ name: c.name, url: c.html_url }));
+    const state = failing.length ? ('failure' as const) : runs.some((c) => c.status !== 'completed') ? ('pending' as const) : ('success' as const);
+    return { state, failing };
+  }
+
   async ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]> {
     const existing = new Set((await this.req<{ name: string }[]>('GET', `/repos/${this.repo}/labels?per_page=100`)).map((l) => l.name));
     const created: string[] = [];

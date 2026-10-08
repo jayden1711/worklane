@@ -583,3 +583,22 @@ test('reports post once per slot to one report issue; lessons go out as a PR bra
   assert.match(file, /\*\*Fix:\*\* read the runner config before editing/);
   assert.ok(!execFileSync('git', ['log', '--format=%s', 'main'], { cwd: f.remote, encoding: 'utf8' }).includes('Lessons'), 'main is untouched: lessons only land when the owner merges the PR');
 });
+
+test('security role in the pipeline: a change in its category that it blocks goes to the owner as L3, with the finding', { skip }, async () => {
+  const f = fixture();
+  f.cfg.agents.roles.security = { enabled: true, model: 'opus', applies_to: ['app-non-money'] };
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const runner = agents({ security: () => ({ verdict: 'block', findings: [{ severity: 'critical', file: 'src/price.js', issue: 'trusts a client-supplied price', evidence: 'src/price.js:2' }] }) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  assert.equal(runner.calls.filter((r) => r.role === 'security').length, 1);
+  const lvl = f.log.read(0, ['review.level_set']).at(-1)!.payload as { level: string; reasons: string[] };
+  assert.equal(lvl.level, 'L3');
+  assert.ok(lvl.reasons.some((r) => /security critical: src\/price\.js: trusts a client-supplied price/.test(r)), lvl.reasons.join(' | '));
+  const asked = f.log.read(0, ['decision.asked']).at(-1)!.payload as { kind: string; receipts: string[] };
+  assert.equal(asked.kind, 'land');
+  assert.ok(asked.receipts.some((r) => /trusts a client-supplied price/.test(r)));
+  assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands without the owner');
+});

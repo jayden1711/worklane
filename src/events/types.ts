@@ -29,7 +29,7 @@ export const EventSchemas = {
     reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch']),
     detail: z.string(),
   }),
-  'run.cost': z.strictObject({ issue, role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
+  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
   // verification
   'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),
@@ -66,6 +66,9 @@ export const EventSchemas = {
   'stage.changed': z.strictObject({ from: z.number().int(), to: z.number().int(), by: z.string(), reason: z.string() }),
   'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable(), card: z.record(z.string(), z.union([z.number(), z.string(), z.null()])) }),
   'lessons.pr': z.strictObject({ day: z.string(), branch: z.string(), count: z.number().int(), url: z.string() }),
+  /** An optional role ran on a trigger; key de-duplicates (one run per trigger). */
+  'extra.run': z.strictObject({ role: z.string(), key: z.string(), reason: z.string(), summary: z.string(), actions: z.array(z.string()) }),
+  'security.review': z.strictObject({ issue, head: sha, verdict: z.enum(['clear', 'concerns', 'block']), findings: z.array(z.strictObject({ severity: z.enum(['low', 'medium', 'high', 'critical']), file: z.string(), issue: z.string(), evidence: z.string() })) }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),

@@ -27,7 +27,14 @@ export interface Backlog {
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
   /** Open a pull request from a pushed branch; returns its URL. */
   openPr(head: string, base: string, title: string, body: string): Promise<string>;
+  /** CI on a commit: the overall state and the checks that failed. */
+  ciStatus(sha: string): Promise<CiStatus>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
+}
+
+export interface CiStatus {
+  state: 'success' | 'failure' | 'pending' | 'none';
+  failing: { name: string; url: string }[];
 }
 
 export const LABELS = [
@@ -39,6 +46,10 @@ export const LABELS = [
   { name: 'money-path', color: '5319e7', description: 'Touches money-path code: extra verification' },
   { name: 'blocked', color: '000000', description: 'Cannot proceed; see the latest comment' },
   { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
+  { name: 'red', color: 'e11d21', description: 'A new failure on main, attributed to the change that caused it' },
+  { name: 'ci', color: 'c5def5', description: 'CI is red on main' },
+  { name: 'qa', color: 'fef2c0', description: 'Found by the QA playtester on a test deployment' },
+  { name: 'incident', color: 'b60205', description: 'A deployment check failed; see the monitor comment' },
   { name: 'report', color: 'bfdadc', description: 'Scheduled reports are posted here' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },
   { name: 'size:M', color: 'fef2c0', description: 'Medium: plan mode first' },

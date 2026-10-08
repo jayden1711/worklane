@@ -79,6 +79,10 @@ const role = z.strictObject({
   max_fixes_per_pr: z.number().int().min(0).optional(),
   applies_to: z.array(z.string()).optional(),
   budget_usd: z.number().positive().optional(),
+  /** Scheduled roles (monitor): minutes between runs. */
+  every_minutes: z.number().int().min(5).max(1440).optional(),
+  /** Extra tools this role may use beyond its read-only defaults (e.g. a project's browser driver for qa_playtester). */
+  tools: z.array(z.string()).optional(),
 });
 
 export const RoleNames = [

@@ -11,7 +11,7 @@ import { NEVER_RELAXED } from './config/schema.js';
 export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
 const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
-const max = (a: Level, b: Level): Level => (ORDER.indexOf(a) >= ORDER.indexOf(b) ? a : b);
+export const maxLevel = (a: Level, b: Level): Level => (ORDER.indexOf(a) >= ORDER.indexOf(b) ? a : b);
 
 /** Built-in categories; review.yaml `categories` adds to or overrides them. */
 export const DEFAULT_CATEGORIES: Record<string, string[]> = {

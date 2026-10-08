@@ -9,5 +9,10 @@ roles:
   security:       { enabled: false, model: opus, applies_to: [money-path] }
   researcher:     { enabled: true,  model: sonnet, max_per_day: 10 }
   red_attributor: { enabled: false, model: haiku }
-  ci_repair:      { enabled: false, model: sonnet, max_fixes_per_pr: 2 }
+  ci_repair:      { enabled: false, model: sonnet, max_fixes_per_pr: 2 }   # max open CI issues at a time
+  qa_playtester:  { enabled: false, model: sonnet, max_per_day: 4 }       # tools: [your browser driver]
+  monitor:        { enabled: false, model: haiku, every_minutes: 30 }
+  release_prep:   { enabled: false, model: sonnet }
+# Every optional role is read-only. Its output becomes issues, comments or a
+# higher review level; none edits code, deploys, tags or holds a write token.
 auto_land: []               # labels unlocked by the scorecard, e.g. [docs, ui]
