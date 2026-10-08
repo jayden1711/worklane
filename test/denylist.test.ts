@@ -17,7 +17,7 @@ function repo(files: Record<string, string>, allow = '') {
     join(dir, '.denylist.json'),
     JSON.stringify({
       hashed: [sha('acmecorp'), sha('acme-api')],
-      patterns: ['\\bD[0-9]{2,4}\\b', '[A-Za-z0-9._%+-]+@(?!example\\.com\\b)[A-Za-z0-9.-]+\\.[A-Za-z]{2,}'],
+      patterns: ['\\bD[0-9]{2,4}\\b', '(?<![:/A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?!example\\.com\\b)[A-Za-z0-9.-]+\\.[A-Za-z]{2,}'],
     }),
   );
   if (allow) writeFileSync(join(dir, '.denylist-allow'), allow);
@@ -41,6 +41,7 @@ test('catches pattern matches: decision ids and non-example emails', () => {
   assert.equal(repo({ 'a.md': 'per D792' }).status, 1);
   assert.equal(repo({ 'a.md': 'mail bob@corp.dev' }).status, 1);
   assert.equal(repo({ 'a.md': 'mail ada@example.com' }).status, 0);
+  assert.equal(repo({ 'a.md': 'postgres://app:pw@db.internal:5432/app' }).status, 0, 'credentials in a URL are not an email');
 });
 
 test('allowlist permits a term only in the listed path', () => {

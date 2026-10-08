@@ -1,0 +1,23 @@
+# How the project's tests run. The engine never assumes a framework.
+version: 1
+runner:
+  kind: command
+  changed: "npm test"       # impact-selected run (e.g. `jest --changedSince=origin/main`)
+  full: "npm test"
+  one: "node --test {file}" # run a single test file
+vacuity:
+  test_globs: ["test/**/*.test.js"]
+  assertion_pattern: '\b(assert|expect)\b'
+  app_paths: ["src/**"]
+  dynamic: false            # true: also require the test to execute app code (V8 coverage)
+stop_gate:
+  timeout_s: 900
+  lock_wait_s: 30
+  busy_patterns: []         # output meaning "couldn't run now" (e.g. another full run holds the machine)
+worktree:
+  root: .claude/worktrees
+  setup: []
+  est_size_gb: 1
+land:
+  pre: []
+tiers: []

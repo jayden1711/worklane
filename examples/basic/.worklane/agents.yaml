@@ -1,0 +1,13 @@
+# Roster. Each role can be enabled or disabled; models are aliases or full IDs.
+stage: 1                    # trust stage; changes are owner-approved decisions
+daily_budget_usd: 40        # usage guard on estimated cost, whichever runtime is used
+roles:
+  chief_of_staff: { enabled: true,  model: sonnet }
+  pm:             { enabled: true,  model: haiku }
+  workers:        { enabled: true,  count: 1, max: 4, model: sonnet, hard_issues_model: opus }
+  evaluator:      { enabled: true,  model: opus }
+  security:       { enabled: false, model: opus, applies_to: [money-path] }
+  researcher:     { enabled: true,  model: sonnet, max_per_day: 10 }
+  red_attributor: { enabled: false, model: haiku }
+  ci_repair:      { enabled: false, model: sonnet, max_fixes_per_pr: 2 }
+auto_land: []               # labels unlocked by the scorecard, e.g. [docs, ui]

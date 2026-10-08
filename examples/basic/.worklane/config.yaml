@@ -1,0 +1,23 @@
+# Project settings. Validated at startup; unknown keys are errors.
+version: 1
+project:
+  name: example-shop
+  repo: example-org/example-shop            # owner/repo on GitHub
+  default_branch: main
+mode: local                 # local | shared
+backlog: github             # github | file
+runner: local               # where agents run: local | ci | remote-machine
+agent_runtime:
+  kind: cli                 # cli: installed `claude` with your own auth | sdk: Agent SDK + ANTHROPIC_API_KEY
+  max_concurrency: 2        # this harness's cap; the machine-wide slot cap still applies
+  run_windows: []           # e.g. [{ from: "08:00", to: "23:00" }]; empty = any time
+land_mode: pr               # direct (fast-forward to the default branch) | pr
+os: auto                    # auto | macos | linux | windows-wsl
+owners:
+  default: example-owner   # owns anything no area matches
+  writers: [example-owner, example-collaborator] # only issues opened or approved by these accounts are actionable
+  areas:
+    - { name: storefront, owner: example-collaborator, paths: ["web/**"], labels: [ui] }
+reports:
+  times: ["08:00", "18:00"]
+  to: [example-owner, example-collaborator]

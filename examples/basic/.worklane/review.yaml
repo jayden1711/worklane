@@ -1,0 +1,9 @@
+# Risk-based review levels, computed by code. The highest matching rule wins;
+# a failed or uncertain evaluator verdict bumps the level up one.
+version: 1
+# money_path_source: { file: path/to/your/money-path-list }
+levels:
+  L0_auto:      { when: [docs-only, tests-only, comments, copy], max_lines: 200 }
+  L1_evaluator: { when: [ui, app-non-money], max_lines: 400, max_files: 10 }
+  L2_notify:    { when: [app-non-money-large, dependency, test-machinery] }
+  L3_human:     { when: [money-path, migration, auth, secrets, deploy-config, release-config, harness-config, guardrail-config, deletes-data], over_lines: 800 }

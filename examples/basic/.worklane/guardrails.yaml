@@ -1,0 +1,106 @@
+# Guardrails: block the few truly dangerous actions and nothing else.
+# Every rule needs at least one must_block/must_ask example, and every change
+# is checked against the must_allow list (`guardrails check`) before it goes live.
+version: 1
+
+rules:
+  # Signing from a live wallet. Adjust the pattern to your project's signing tools.
+  - id: live-wallet-signing
+    action: block
+    reason: signing or sending transactions from a live wallet is never done by an agent
+    match: { command: { pattern: '\bcast\s+(send|publish|mktx)\b|\bcast\s+wallet\s+sign\b' } }
+    unless: { pattern: '--rpc-url[ =]\S*(localhost|127\.0\.0\.1)' }
+
+  # Production database writes, detected by connection fingerprint (not host
+  # name). Fill in fingerprints.prod-db below, then `guardrails refresh`.
+  - id: prod-db-connection
+    action: block
+    reason: this connection string is the production database; agents get read-only access only through a dedicated read-only role
+    match: { connection: { fingerprints: prod-db } }
+
+  # The deploy CLI: no shells or one-off processes in production.
+  - id: prod-platform-shell
+    action: block
+    reason: no shells or one-off processes in production; read production through the read-only path
+    match:
+      cli_env:
+        cli: railway
+        subcommands: [run, ssh, connect, shell]
+        environments: [production]
+        resolver: railway
+
+  - id: prod-platform-change
+    action: ask
+    reason: setting variables or deploying directly in production needs a human
+    match:
+      cli_env:
+        cli: railway
+        subcommands: [variables, variable, up]
+        flags_none: []
+        environments: [production]
+        resolver: railway
+
+  - id: user-agent-spoofing
+    action: block
+    reason: no User-Agent spoofing or workarounds for blocked sites
+    applies_to: [agent]
+    match: { command: { pattern: '\b(curl|wget|http)\b.*(\s-A\s|--user-agent|User-Agent:)' } }
+
+fingerprints:
+  prod-db:
+    # A read-only command that prints JSON containing the production connection
+    # string at `key`. Only a hash of it is stored.
+    command: "node scripts/print-prod-env.mjs"
+    key: DATABASE_URL
+
+# Agents may not write these; humans are asked.
+protected_paths:
+  - .worklane/**
+  - .claude/settings.json
+  - .claude/settings.local.json
+  - node_modules/@worklane/**
+
+# Credential files no Claude session may read (agents or humans). The CLIs
+# themselves still read their own config; only Claude's tools are denied.
+secret_paths:
+  - ./.env
+  - ./.env.*
+  - ~/.ssh/**
+  - ~/.aws/**
+  - ~/.config/gh/**
+  - ~/.railway/**
+  - ~/.npmrc
+  - ~/.claude/.credentials.json
+
+network:
+  allow: [docs.github.com, nodejs.org, registry.npmjs.org, developer.mozilla.org]
+
+# Commands agents may run without a permission prompt.
+pre_approved:
+  - Bash(npm test:*)
+  - Bash(git status:*)
+  - Bash(git diff:*)
+  - Bash(git log:*)
+
+examples:
+  fingerprints:
+    prod-db: ["postgres://app:PROD-SECRET@db.internal:5432/app"]
+  linked_environments:
+    ".": production
+  must_block:
+    - bash: "cast send 0xabc 'transfer(address,uint256)' 0xdef 1 --rpc-url https://mainnet.example"
+    - bash: "psql postgres://app:PROD-SECRET@db.internal:5432/app -c 'delete from users'"
+    - bash: "curl -A 'Mozilla/5.0' https://example.com"
+    - { tool: Edit, path: .worklane/guardrails.yaml }
+    - bash: "railway run --environment production node scripts/backfill.js"
+    - bash: "railway ssh"
+  must_ask:
+    - { tool: Edit, path: .worklane/guardrails.yaml, agent: false }
+    - bash: "railway variables --environment production --set FEATURE_X=1"
+  must_allow:
+    - bash: "npm test"
+    - bash: "cast send 0xabc 'f()' --rpc-url http://127.0.0.1:8545"
+    - bash: "psql postgres://app:STAGING-SECRET@db.internal:5432/app -c 'select 1'"
+    - { tool: Edit, path: src/price.js }
+    - bash: "railway variables --environment staging --set FEATURE_X=1"
+    - bash: "railway logs --environment production"
