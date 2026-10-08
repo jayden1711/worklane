@@ -42,7 +42,9 @@ function fixture(opts: { redMain?: boolean } = {}) {
   const slotsDir = join(base, 'slots');
   mkdirSync(slotsDir);
   writeFileSync(join(slotsDir, 'config.json'), JSON.stringify({ max_agents: 2 }));
-  return { base, remote, repo, cfg, backlog, log, slotsDir, stateDir: join(base, 'state') };
+  // Deterministic machine readings: the governor shouldn't depend on the CI runner's disk or load.
+  const machine = { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) };
+  return { base, remote, repo, cfg, backlog, log, slotsDir, stateDir: join(base, 'state'), machine };
 }
 
 const BUG = 'Orders with a zero or negative quantity are counted in totals.\n\n```done_when\n- test: test/price.test.js\n- repro: true\n```\n';
@@ -79,7 +81,7 @@ test('end to end: a writer files an issue; it is reproduced, fixed, verified, ev
   const f = fixture();
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const runner = agents();
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   await c.tick(); // lands
@@ -126,7 +128,7 @@ test('the worker sees the frozen repro; editing it gets the attempt rejected and
       return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   assert.equal(attempt, 2);
@@ -145,7 +147,7 @@ test('a high-risk change waits for the owner; a writer\'s /approve comment relea
       return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -167,7 +169,7 @@ test('issues without a contract, or from outsiders, are never started', { skip }
   const noContract = f.backlog.open({ title: 'vague', body: 'make it better', author: 'example-owner', labels: ['ready'] });
   f.backlog.open({ title: 'outsider', body: BUG, author: 'stranger', labels: ['ready'] });
   const runner = agents();
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   assert.equal(runner.calls.length, 0);
@@ -195,9 +197,9 @@ test('two coordinators on one repo: only one claims the issue', { skip }, async 
     await gate;
     return slow.run(req);
   });
-  const alice = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: blocking, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const alice = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: blocking, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   const bobLog = new EventLog(join(f.base, 'bob.db'));
-  const bob = new Coordinator({ cfg: loadConfig(other), log: bobLog, backlog: f.backlog, runner: agents(), repo: other, instance: 'bob', stateDir: join(f.base, 'bob-state'), slotsDir: f.slotsDir });
+  const bob = new Coordinator({ cfg: loadConfig(other), log: bobLog, backlog: f.backlog, runner: agents(), repo: other, instance: 'bob', stateDir: join(f.base, 'bob-state'), slotsDir: f.slotsDir, machine: f.machine });
   await alice.tick(); // alice claims and is now busy in the repro run
   await new Promise((r) => setTimeout(r, 200));
   // Bob's tick sees the issue no longer ready (alice moved it), and even if it were, the claim ref would refuse him.
@@ -214,11 +216,11 @@ test('after a restart mid-task, the task is requeued rather than left stuck', { 
   const crashing = new FakeRunner(() => {
     throw new Error('simulated crash');
   });
-  const c1 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: crashing, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c1 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: crashing, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c1.tick();
   await c1.idle();
   // A fresh process: same log, same repo.
-  const c2 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c2 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   assert.deepEqual(await c2.recover(), [n]);
   assert.ok((await f.backlog.get(n)).labels.includes('ready'));
   await c2.tick();
@@ -237,7 +239,7 @@ test('main is red: a fix lands when its only failures were already on main (base
   const run = spawnSync('node', ['--test', '--test-reporter=spec'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
   const main = git(f.repo, 'rev-parse', 'HEAD');
   assert.deepEqual(recordBaseline(f.log, 'test', main, run.status, run.stdout + run.stderr, f.cfg.tests.failures), { ok: true, failing: ['legacy flake'] });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -264,7 +266,7 @@ test('main is red: a change that adds a new failure does not land', { skip }, as
       return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -277,7 +279,7 @@ test('main is red: a change that adds a new failure does not land', { skip }, as
 test('main is red and no baseline is recorded: nothing lands', { skip }, async () => {
   const f = fixture({ redMain: true });
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -305,7 +307,7 @@ test('an investigation posts findings with evidence, lands nothing, and asks the
       };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   assert.deepEqual(runner.calls.map((r) => r.role), ['investigator']);
@@ -503,8 +505,53 @@ test('nightly: due once a day after the configured time; the coordinator queues 
   const f = fixture();
   f.cfg.tests.nightly_at = '00:00';
   const queued: string[] = [];
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, nightly: () => (queued.push('x'), [{ id: `job-${queued.length}` }]) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, nightly: () => (queued.push('x'), [{ id: `job-${queued.length}` }]) });
   for (let i = 0; i < 3; i++) await c.tick();
   assert.equal(queued.length, 1);
   assert.deepEqual((f.log.read(0, ['nightly.queued'])[0]!.payload as { jobs: string[] }).jobs, ['job-1']);
+});
+
+test('regression: a failing tick step (GitHub down during reconcile) does not stop landing', { skip }, async () => {
+  const f = fixture();
+  const c = await queueAll(f, ['a.js'], fileAgents());
+  const realGet = f.backlog.get.bind(f.backlog);
+  f.backlog.get = async () => {
+    throw Object.assign(new Error('GitHub 502'), { kind: 'server_error' });
+  };
+  await c.tick();
+  f.backlog.get = realGet;
+  assert.equal((f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string }).outcome, 'landed');
+  const errs = f.log.read(0, ['coordinator.error']).map((e) => e.payload as { where: string; kind: string });
+  assert.ok(errs.some((e) => e.where === 'reconcile' && e.kind === 'server_error'), JSON.stringify(errs));
+});
+
+test('trust: a healthy streak asks the owner to promote; approval changes stage; a regression demotes on its own', { skip }, async () => {
+  const f = fixture();
+  f.cfg.agents.trust = { window_days: 7, promote_after_days: 2, min_tasks: 1, min_evaluator_pass_rate: 0.8, max_unverified_claim_rate: 0.5, max_reverts: 0, max_baseline_growth: 0 };
+  f.cfg.review = { version: 1, stages: [{ stage: 2, relax: [{ category: 'app-non-money-large', to: 'L1' }] }], levels: { L0_auto: { when: ['docs-only'], max_lines: 200 }, L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 }, L2_notify: { when: ['app-non-money-large'] }, L3_human: { when: ['money-path'], over_lines: 800 } } };
+  // One good finished task and yesterday's healthy evaluation already in the log.
+  const sha = 'd'.repeat(40);
+  f.log.append('issue.seen', { issue: 99, title: 't', labels: [], author: 'example-owner', owner: null, actionable: true, why: '' }, 'c');
+  f.log.append('eval.verdict', { issue: 99, head: sha, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }, 'c');
+  f.log.append('land.result', { issue: 99, outcome: 'landed', landed: sha, detail: '' }, 'c');
+  f.log.append('issue.released', { issue: 99, instance: 'alice', why: 'landed' }, 'c');
+  f.log.append('trust.evaluated', { day: '2000-01-01', stage: 1, healthy: true, why: [], card: {} }, 'c');
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  const asked = f.log.read(0, ['decision.asked']).map((e) => e.payload as { id: string; kind: string; question: string });
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0]!.kind, 'stage');
+  assert.match(asked[0]!.question, /Promote to trust stage 2/);
+  assert.equal(c.stage(), 1, 'never promoted without the owner');
+  f.log.append('decision.answered', { id: asked[0]!.id, by: 'example-owner', answer: 'approve' }, 'example-owner', 'human');
+  await c.tick();
+  assert.equal(c.stage(), 2);
+  // Regression: a rejected patch drops the pass rate below the floor; tomorrow's evaluation demotes.
+  f.log.append('eval.verdict', { issue: 98, head: sha, patch_hash: 'h', patch_correct: false, test_correct: true, confidence: 'high', advice: 'wrong' }, 'c');
+  f.log.append('eval.verdict', { issue: 97, head: sha, patch_hash: 'h', patch_correct: false, test_correct: true, confidence: 'high', advice: 'wrong' }, 'c');
+  await (c as unknown as { maybeTrust(now: Date): Promise<void> }).maybeTrust(new Date(Date.now() + 86_400_000));
+  assert.equal(c.stage(), 1);
+  const change = f.log.read(0, ['stage.changed']).at(-1)!.payload as { by: string; reason: string };
+  assert.equal(change.by, 'auto');
+  assert.match(change.reason, /evaluator pass rate/);
 });

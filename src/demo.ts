@@ -111,7 +111,7 @@ export async function seedDemo(dir: string): Promise<{ root: string; eventsDb: s
   const slots = join(state, 'demo-slots');
   mkdirSync(slots, { recursive: true });
   writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 4 }));
-  const c = new Coordinator({ cfg, log, backlog, runner: agents(), repo: root, instance: 'demo@local', stateDir: state, slotsDir: slots, maxAttempts: 2 });
+  const c = new Coordinator({ cfg, log, backlog, runner: agents(), repo: root, instance: 'demo@local', stateDir: state, slotsDir: slots, maxAttempts: 2, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
   log.append('coordinator.started', { instance: 'demo@local', pid: process.pid, version: 'demo' }, 'demo@local');
   for (let i = 0; i < ISSUES.length + 3; i++) {
     await c.tick();
