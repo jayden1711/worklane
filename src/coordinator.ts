@@ -16,7 +16,7 @@ import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { childEnv } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
-import { issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
+import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
 import { scanPath } from './scan/secrets.js';
 import { tryAgentSlot } from './slots.js';
@@ -225,6 +225,8 @@ export class Coordinator {
       mkdirSync(dirname(taskFile), { recursive: true });
       writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen }));
 
+      if (issue.labels.includes('type:investigation')) return await this.investigate(issue, doneWhen, path, taskFile, base, owner);
+
       const repro = doneWhen.some((d) => 'repro' in d && d.repro) ? await this.reproduce(issue, doneWhen, base, path) : null;
       // The frozen test is off-limits to the worker: its hook denies writes to it.
       if (repro?.path) writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] }));
@@ -269,6 +271,53 @@ export class Coordinator {
     } finally {
       clearInterval(heartbeat);
     }
+  }
+
+  /** Read-only work: findings with evidence go to the owner; nothing is committed or landed. */
+  private async investigate(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, base: string, owner: string) {
+    const n = issue.number;
+    const role = this.d.cfg.agents.roles.workers!;
+    const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
+    const r = await this.d.runner.run({
+      role: 'investigator',
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, this.answers(n)),
+      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'investigator'),
+      cwd: path,
+      model,
+      allowedTools: ['Read', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
+      disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+      maxTurns: 150,
+      maxBudgetUsd: Math.min(role.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+      jsonSchema: INVESTIGATION_SCHEMA,
+      taskFile,
+      stallMs: 20 * 60_000,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'investigator', model, worktree: path, pid: p, pgid: p, attempt: 1 }),
+    });
+    this.cost(n, 'investigator', r);
+    this.emit('run.finished', { issue: n, role: 'investigator', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    // Read-only means read-only: any change it left behind is discarded and reported.
+    const touched = this.git(path, 'status', '--porcelain') || (this.git(path, 'rev-parse', 'HEAD') !== base ? 'commits' : '');
+    const s = r.structured as { summary: string; findings: { claim: string; evidence: string }[]; recommendation: string; confidence: string; unverified?: string[] } | undefined;
+    if (r.reason !== 'succeeded' || !s) {
+      await this.block(n, owner, `investigation run ended: ${r.reason} (${r.detail.slice(0, 300)})`);
+      return;
+    }
+    const body = [
+      `[${BRAND.cli}] Investigation findings (read-only, confidence ${s.confidence})${touched ? `\n\n**Note:** the run modified files despite being read-only; those changes were discarded.` : ''}`,
+      '',
+      s.summary,
+      '',
+      ...s.findings.map((f, i) => `${i + 1}. ${f.claim}\n   Evidence: ${f.evidence}`),
+      ...(s.unverified?.length ? ['', '**Unverified:**', ...s.unverified.map((u) => `- ${u}`)] : []),
+      '',
+      `**Recommendation:** ${s.recommendation}`,
+    ].join('\n');
+    await this.d.backlog.comment(n, body);
+    await this.d.backlog.removeLabel(n, 'agent:working');
+    await this.d.backlog.addLabels(n, ['in-review']);
+    await this.ask('question', n, owner, 'How should this proceed?', ['approve-fix', 'investigate-more', 'close'], s.recommendation.slice(0, 200), [`confidence ${s.confidence}`, `${s.findings.length} finding(s)`]);
   }
 
   private async reproduce(issue: Issue, doneWhen: DoneWhenList, base: string, workerPath: string): Promise<{ path: string; hash: string } & { unavailable?: string }> {
@@ -550,11 +599,23 @@ export class Coordinator {
           this.releaseClaim(q.issue, `landing ${a.answer} by ${a.by}`);
         }
       } else {
-        // A worker's question: release and requeue; the next run gets the answer in its brief.
-        await this.d.backlog.comment(q.issue, `[${BRAND.cli}] @${a.by} answered: ${a.answer}. Requeued.`);
+        const issue = await this.d.backlog.get(q.issue);
         this.releaseClaim(q.issue, `question answered by ${a.by}`);
         await this.d.backlog.removeLabel(q.issue, 'in-review');
-        await this.d.backlog.addLabels(q.issue, ['ready']);
+        if (issue.labels.includes('type:investigation') && a.answer !== 'investigate-more') {
+          // Investigations never turn into code changes on their own.
+          await this.d.backlog.comment(
+            q.issue,
+            a.answer === 'close'
+              ? `[${BRAND.cli}] @${a.by} closed the investigation.`
+              : `[${BRAND.cli}] @${a.by} approved a fix. Give the fix its own done_when contract (in this issue or a new one), remove \`type:investigation\`, and mark it ready.`,
+          );
+          if (a.answer === 'close') await this.d.backlog.close(q.issue);
+        } else {
+          // A worker's question: release and requeue; the next run gets the answer in its brief.
+          await this.d.backlog.comment(q.issue, `[${BRAND.cli}] @${a.by} answered: ${a.answer}. Requeued.`);
+          await this.d.backlog.addLabels(q.issue, ['ready']);
+        }
       }
     }
   }

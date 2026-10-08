@@ -281,3 +281,39 @@ test('main is red and no baseline is recorded: nothing lands', { skip }, async (
   assert.equal(r.outcome, 'red');
   assert.match(r.detail, /no baseline recorded/);
 });
+
+test('an investigation posts findings with evidence, lands nothing, and asks the owner', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({
+    title: 'Do negative quantities reach totals?',
+    body: 'Read-only: confirm with evidence.\n\n```done_when\n- manual: "findings posted with code evidence"\n```\n',
+    author: 'example-owner',
+    labels: ['ready', 'type:investigation', 'money-path'],
+  });
+  const runner = agents({
+    investigator: (req) => {
+      writeFileSync(join(req.cwd, 'scratch.txt'), 'notes'); // a read-only run that writes anyway
+      return {
+        summary: 'Yes: totalCents multiplies qty without a guard.',
+        findings: [{ claim: 'no qty guard', evidence: 'src/price.js:3 sum + cents * qty' }],
+        recommendation: 'Fix with a qty > 0 guard and a regression test.',
+        confidence: 'high',
+      };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(runner.calls.map((r) => r.role), ['investigator']);
+  assert.ok(runner.calls[0]!.disallowedTools?.includes('Edit'), 'edits are disallowed');
+  const comments = (await f.backlog.comments(n)).map((x) => x.body).join('\n');
+  assert.match(comments, /Investigation findings[\s\S]*src\/price\.js:3[\s\S]*Recommendation/);
+  assert.match(comments, /modified files despite being read-only; those changes were discarded/);
+  assert.equal(f.log.read(0, ['change.proposed', 'land.queued']).length, 0, 'nothing proposed or landed');
+  assert.ok((await f.backlog.get(n)).labels.includes('needs:decision'));
+  f.backlog.humanComment(n, 'example-owner', '/worklane approve-fix');
+  await c.tick();
+  const after = (await f.backlog.comments(n)).map((x) => x.body).join('\n');
+  assert.match(after, /approved a fix\. Give the fix its own done_when contract/);
+  assert.ok(!(await f.backlog.get(n)).labels.includes('ready'), 'not requeued as a code change');
+});

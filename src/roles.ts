@@ -51,7 +51,36 @@ export const VERDICT_SCHEMA = {
   },
 } as const;
 
+export const INVESTIGATION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'findings', 'recommendation', 'confidence'],
+  properties: {
+    summary: { type: 'string', description: 'The answer in 2-4 sentences.' },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['claim', 'evidence'],
+        properties: {
+          claim: { type: 'string' },
+          evidence: { type: 'string', description: 'file:line, a command and its output, or a query and its result. No claim without evidence.' },
+        },
+      },
+    },
+    recommendation: { type: 'string', description: 'What should happen next (a fix, more investigation, or nothing), for the owner to decide.' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    unverified: { type: 'array', items: { type: 'string' }, description: 'Anything you could not confirm.' },
+  },
+} as const;
+
 const DEFAULTS: Record<string, string> = {
+  investigator: `You are investigating a question on a real codebase. This is READ-ONLY work: do not edit, create or delete files, do not commit, and never write to any database. Your output is findings, not a change.
+- Every claim needs evidence: file:line, or a command or query and what it returned. Mark anything you couldn't confirm as unverified.
+- Trust the code over docs; treat docs as unverified until checked against the code.
+- Use the project's skills where they apply. Production data only through the sanctioned read path, if one is configured.
+- End with a recommendation for the owner. You don't decide; they do.`,
   worker: `You are a worker agent on a real codebase, working one GitHub issue in your own git worktree.
 - Read the issue and its done_when contract below. You are done only when every done_when check passes; a Stop gate runs them and will not let you finish otherwise.
 - If a frozen reproduction test is named below, it must pass when you're done. Never edit it.

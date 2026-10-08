@@ -35,6 +35,7 @@ export const LABELS = [
   { name: 'needs:decision', color: 'b60205', description: 'Waiting on a decision from the owner' },
   { name: 'money-path', color: '5319e7', description: 'Touches money-path code: extra verification' },
   { name: 'blocked', color: '000000', description: 'Cannot proceed; see the latest comment' },
+  { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },
   { name: 'size:M', color: 'fef2c0', description: 'Medium: plan mode first' },
   { name: 'size:L', color: 'f9d0c4', description: 'Large: plan mode first' },
