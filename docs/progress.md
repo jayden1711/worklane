@@ -50,3 +50,30 @@ One short note per step: what shipped, how it was verified, what's still unprove
   - Each fix has a regression test.
 - **Released:** v0.3.0 (steps 3 and 4), from a clean worktree after CI was green on all six OS x Node jobs.
 - **Unproven until the NUC:** promotion and demotion thresholds against real work (defaults: 10 tasks in 7 days, pass rate 0.8, unverified claims 0.1, zero reverts); report posting with real GitHub permissions; lessons PRs opened by the coordinator's token.
+
+## Step 6: the remaining dashboard pages and a desktop window (2026-10-08)
+
+- **Pages:**
+  - **Land queue:** queued changes in order, deferred ones with the reason; what's in review; recent batches with outcome; lessons PRs.
+  - **Agents:** the governor's state, machine-wide slots, spend by role, runs in flight with their last heartbeat, recent runs with outcome and cost.
+  - **Activity:** every event, filterable by group and text.
+  - **Deploys:** what each environment serves, landed but unverified changes, and history linked to issues.
+  - **Reports:** the scorecard against the previous week, trust stage with health reasons and daily checks, a preview of the next report, posted reports.
+  - **Settings:** read-only config; commands, connection fingerprints and deploy details stay out, and a test checks that.
+- **Keyboard:** the new `g` chords exposed a real hazard. Page listeners run before the app's, so `g a` on Decisions would have approved the selected decision. Page shortcuts now refuse keys while a chord is pending.
+- **Desktop window:** `worklane dashboard --app` opens the dashboard in a Tauri 2 shell built from source (`npm run build:desktop`), falling back to the browser. The shell accepts only a loopback http URL, keeps navigation on that origin, gets no IPC, and closing it stops the server. Rust tests cover both guards; CI runs them on macOS.
+- **Bug found by the demo:** with a deploy target, the scorecard counted no tasks as done. Done is now landed with no deploy target, or verified on an environment; regression test included.
+- **Verified:** projection and API tests; screenshots of every new page against the demo (headless Chrome now runs with its own `--timeout`; the virtual-time budget never settles while the live stream is open).
+- **Unproven:** the desktop shell on Windows and Linux (built and tested on macOS only); a human using the pages.
+
+## Step 7: optional roles (2026-10-08)
+
+- **Roles:** security, red_attributor, ci_repair, qa_playtester, monitor and release_prep. All are off by default, read-only (Read, Glob, Grep, read-only git; Edit and Write disallowed) and counted against the budget and governor. Each fires once per trigger. Their output becomes issues, comments or a higher review level; none edits code, deploys, tags or holds a write token.
+- **Security:** sits in the task pipeline after the verdict, for its `applies_to` categories. Block means L3, concerns mean L2, never lower. Findings set a floor under its own verdict, and a reviewer that touches the worktree counts as a block.
+- **Red attributor:** when main's baseline grows, a single landing in the window is blamed without an agent; with several, the agent attributes each failure or says unknown. The owner is told on their issue, and a triage issue is filed.
+- **CI repair:** one diagnosed triage issue per red tip, with a proposed done_when contract; at most `max_fixes_per_pr` open at a time.
+- **QA playtester:** each verified test deployment once, never production; capped per day; bugs de-duplicated by title. It needs a project-supplied browser tool (`tools`).
+- **Monitor:** every `every_minutes`, re-runs each environment's verify check. A pass-to-fail change opens an incident with a diagnosis (production incidents say a human must act); a recovery is noted.
+- **Release prep:** once a day, release notes for changes since the last tag, opened as a PR.
+- **Verified:** a test per role with a scripted runner and a real git remote; a pipeline test where a blocking security review sends the change to the owner as L3 with the finding; a test that every role defaults off and a pass runs no agent.
+- **Unproven until the NUC:** every role against a real model; the QA role needs a browser tool the project chooses; the monitor's schedule against real verify checks.
