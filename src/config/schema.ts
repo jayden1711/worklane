@@ -44,6 +44,15 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
+  /** Machine-wide limits checked before each new agent starts. */
+  governor: z
+    .strictObject({
+      /** Sustained load (max of 5/15-min averages) above which no new agent starts. Default: 2 x cores. */
+      max_load: z.number().positive().optional(),
+      /** Free disk that must remain after another worktree. */
+      min_free_disk_pct: z.number().min(1).max(90).default(15),
+    })
+    .prefault({}),
   os: z.enum(['auto', 'macos', 'linux', 'windows-wsl']).default('auto'),
   owners: z.strictObject({
     default: handle,

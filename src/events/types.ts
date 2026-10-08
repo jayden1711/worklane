@@ -61,6 +61,8 @@ export const EventSchemas = {
   'secret.detected': z.strictObject({ source: z.string(), findings: z.number().int().nonnegative() }),
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
+  'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
+  'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
   'lesson.proposed': z.strictObject({ issue, worked: z.string(), failed: z.string(), fix: z.string() }),
 } as const;

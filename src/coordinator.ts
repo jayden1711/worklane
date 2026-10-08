@@ -14,7 +14,7 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv, killTree, spawnDetached } from './os/index.js';
+import { childEnv, cpuCount, diskFree, killTree, machineLoad, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
@@ -38,6 +38,8 @@ export interface CoordinatorDeps {
   slotsDir?: string;
   maxAttempts?: number;
   leaseMs?: number;
+  /** Machine readings (tests inject these). */
+  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
@@ -182,13 +184,42 @@ export class Coordinator {
     return false;
   }
 
+  private lastHold: string | null = null;
+
+  /** Why no new agent may start right now, or null. Load and disk are machine-wide. */
+  governorHold(): { reason: string; load: number | null; freeDiskPct: number | null } | null {
+    const m = this.d.machine ?? { load: machineLoad, disk: diskFree };
+    const load = m.load();
+    const disk = m.disk(this.d.repo);
+    const est = this.d.cfg.tests.worktree.est_size_gb;
+    const freeAfter = disk.freePct - (est / Math.max(disk.totalGb, 1)) * 100;
+    const maxLoad = this.d.cfg.project.governor.max_load ?? cpuCount() * 2;
+    const minFree = this.d.cfg.project.governor.min_free_disk_pct;
+    if (this.spentToday() >= this.d.cfg.agents.daily_budget_usd) return { reason: `daily budget $${this.d.cfg.agents.daily_budget_usd} reached`, load, freeDiskPct: disk.freePct };
+    if (load !== null && load > maxLoad) return { reason: `machine load ${load.toFixed(0)} > ${maxLoad}`, load, freeDiskPct: disk.freePct };
+    if (freeAfter < minFree) return { reason: `free disk would drop to ${freeAfter.toFixed(1)}% (< ${minFree}%) with another ${est} GB worktree`, load, freeDiskPct: disk.freePct };
+    return null;
+  }
+
+  private noteHold(h: ReturnType<Coordinator['governorHold']>) {
+    const key = h?.reason.replace(/[\d.]+/g, '#') ?? null; // record changes of reason, not every reading
+    if (key === this.lastHold) return;
+    this.lastHold = key;
+    if (h) this.emit('governor.hold', { reason: h.reason, load: h.load, free_disk_pct: h.freeDiskPct });
+    else this.emit('governor.release', { load: (this.d.machine?.load ?? machineLoad)(), free_disk_pct: null });
+  }
+
   private async dispatch(): Promise<number> {
     if (this.stopped) return 0;
     const workers = this.d.cfg.agents.roles.workers;
     if (!workers?.enabled) return 0;
-    if (this.active.size >= (workers.count ?? 1)) return 0;
-    if (this.spentToday() >= this.d.cfg.agents.daily_budget_usd) return 0;
+    let started = 0;
+    // Fill free capacity this tick: one pass over the ready issues, one start per free worker.
     for (const issue of await this.d.backlog.list('ready')) {
+      if (this.active.size >= (workers.count ?? 1)) break;
+      const hold = this.governorHold();
+      this.noteHold(hold);
+      if (hold) break;
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
       const act = await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog);
       const contract = parseContract(issue.body);
@@ -206,7 +237,10 @@ export class Coordinator {
         continue;
       }
       const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${issue.number}`, this.d.slotsDir);
-      if (!slot) return 0; // machine at its cap: try again next tick
+      if (!slot) {
+        this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+        break; // try again next tick
+      }
       const p = this.runTask(issue, contract.done_when)
         .catch((e: Error) => {
           this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}`, kind: 'error', message: e.message.slice(0, 500) });
@@ -216,9 +250,9 @@ export class Coordinator {
           this.active.delete(issue.number);
         });
       this.active.set(issue.number, p);
-      return 1;
+      started++;
     }
-    return 0;
+    return started;
   }
 
   // ---------------------------------------------------------------- task pipeline

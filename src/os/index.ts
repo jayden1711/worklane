@@ -1,8 +1,8 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, loadavg } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
+import { availableParallelism, homedir, loadavg } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 
@@ -237,4 +237,16 @@ export function openUrl(url: string): void {
   } catch {
     // no browser here: the URL is printed anyway
   }
+}
+
+/** Free disk on the volume holding `path`: percent and GB. */
+export function diskFree(path: string): { freePct: number; freeGb: number; totalGb: number } {
+  const st = statfsSync(path);
+  const total = st.blocks * st.bsize;
+  const free = st.bavail * st.bsize;
+  return { freePct: total ? (free / total) * 100 : 0, freeGb: free / 1e9, totalGb: total / 1e9 };
+}
+
+export function cpuCount(): number {
+  return availableParallelism();
 }

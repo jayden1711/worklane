@@ -321,3 +321,84 @@ test('an investigation posts findings with evidence, lands nothing, and asks the
   assert.match(after, /approved a fix\. Give the fix its own done_when contract/);
   assert.ok(!(await f.backlog.get(n)).labels.includes('ready'), 'not requeued as a code change');
 });
+
+const easyIssue = (title: string, file: string) => ({ title, body: `Add ${file}.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n`, author: 'example-owner', labels: ['ready'] });
+
+/** Workers that each add their own file, and record how many ran at once. */
+function parallelAgents(gate: Promise<void>, seen: { now: number; max: number }) {
+  return new FakeRunner(async (req) => {
+    if (req.role === 'worker') {
+      seen.now++;
+      seen.max = Math.max(seen.max, seen.now);
+      await gate;
+      seen.now--;
+      const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
+      writeFileSync(join(req.cwd, 'src', name), `export const x = '${name}';\n`);
+      commitAll(req.cwd, `add ${name}`);
+      return { structured: { summary: 's', lesson: { worked: '', failed: '', fix: '' } } };
+    }
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+  });
+}
+
+test('parallel workers: several issues build at once, each in its own worktree, and all land', { skip }, async () => {
+  const f = fixture();
+  for (const name of ['a.js', 'b.js', 'c.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
+  f.cfg.agents.roles.workers!.count = 3;
+  writeFileSync(join(f.slotsDir, 'config.json'), JSON.stringify({ max_agents: 3 }));
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const seen = { now: 0, max: 0 };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: parallelAgents(gate, seen), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  await c.tick(); // one tick fills all three free workers
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.max, 3, 'three workers ran at the same time');
+  open();
+  await c.idle();
+  for (let i = 0; i < 4; i++) await c.tick();
+  const landed = f.log.read(0, ['land.result']).filter((e) => (e.payload as { outcome: string }).outcome === 'landed');
+  assert.equal(landed.length, 3);
+  git(f.repo, 'fetch', '-q', 'origin');
+  for (const name of ['a.js', 'b.js', 'c.js']) assert.match(git(f.repo, 'show', `origin/main:src/${name}`), /export const x/);
+});
+
+test('the machine-wide slot cap limits workers across harnesses, even when more are configured', { skip }, async () => {
+  const f = fixture();
+  for (const name of ['a.js', 'b.js', 'c.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
+  f.cfg.agents.roles.workers!.count = 3;
+  writeFileSync(join(f.slotsDir, 'config.json'), JSON.stringify({ max_agents: 2 }));
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const seen = { now: 0, max: 0 };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: parallelAgents(gate, seen), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  await c.tick();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.max, 2);
+  assert.ok(f.log.read(0, ['governor.hold']).some((e) => /agent cap/.test((e.payload as { reason: string }).reason)));
+  open();
+  await c.idle();
+});
+
+test('the governor holds dispatch on high load or low disk, and records it once, not every tick', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open(easyIssue('Add a.js', 'a.js'));
+  let load = 500;
+  let freePct = 80;
+  const runner = parallelAgents(Promise.resolve(), { now: 0, max: 0 });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => load, disk: () => ({ freePct, totalGb: 100 }) } });
+  for (let i = 0; i < 3; i++) await c.tick();
+  assert.equal(runner.calls.length, 0, 'nothing starts under load');
+  const holds = f.log.read(0, ['governor.hold']);
+  assert.equal(holds.length, 1, 'recorded once');
+  assert.match((holds[0]!.payload as { reason: string }).reason, /machine load 500 > /);
+  load = 1;
+  freePct = 15.5; // a 1 GB worktree on 100 GB would leave 14.5%
+  await c.tick();
+  assert.equal(runner.calls.length, 0);
+  assert.match((f.log.read(0, ['governor.hold']).at(-1)!.payload as { reason: string }).reason, /free disk would drop to 14\.5%/);
+  freePct = 80;
+  await c.tick();
+  await c.idle();
+  assert.ok(runner.calls.length > 0, 'starts once the machine has room');
+  assert.equal(f.log.read(0, ['governor.release']).length, 1);
+});
