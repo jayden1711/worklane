@@ -17,6 +17,10 @@ import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { slotStatus } from './slots.js';
+import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
+import { EventLog } from './events/log.js';
+import { LABELS } from './backlog/types.js';
+import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -38,6 +42,12 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
+  coordinator run [--once]         run the coordinator in the foreground (the service runs this)
+  up | down                        install or remove the coordinator as a per-user service
+                                   (launchd on macOS, systemd --user on Linux); survives sessions
+  status                           what's running, waiting and spent, from the event log
+  decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
+  labels                           create the backlog labels on the GitHub repo
   prod-read '<SQL>'                one read-only query against production, through the
                                    read-only role (deploy.yaml prod_read); prints JSON
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
@@ -217,6 +227,68 @@ async function main(argv: string[]): Promise<number> {
       console.log(`agents running on this machine: ${st.agents.length} of ${st.cap}`);
       for (const a of st.agents) console.log(`  ${a.slot}: ${a.owner} (pid ${a.pid}, since ${a.acquiredAt})`);
       console.log(`full test run: ${st.fullRun ? `${st.fullRun.owner} (pid ${st.fullRun.pid}, since ${st.fullRun.acquiredAt})` : 'none'}`);
+      return 0;
+    }
+
+    case 'coordinator': {
+      if (sub !== 'run') {
+        console.error('usage: coordinator run [--once]');
+        return 2;
+      }
+      return runCoordinator(root, { once: rest.includes('--once') });
+    }
+
+    case 'up': {
+      const cfg = loadConfig(root);
+      const r = installService({
+        label: serviceLabel(cfg),
+        program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--root', root],
+        workingDir: root,
+        logFile: join(projectStateDir(root), 'coordinator.log'),
+        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      });
+      console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
+      return r.started ? 0 : 1;
+    }
+
+    case 'down': {
+      console.log(`removed ${uninstallService(serviceLabel(loadConfig(root)))}`);
+      return 0;
+    }
+
+    case 'status': {
+      console.log(status(root));
+      return 0;
+    }
+
+    case 'decide': {
+      const [id, answer] = [sub, rest[0]];
+      if (!id || !answer) {
+        console.error('usage: decide <decision-id> <option>');
+        return 2;
+      }
+      const log = new EventLog(logPath(root));
+      try {
+        const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === id)?.payload as { options: string[] } | undefined;
+        if (!q) {
+          console.error(`no decision ${id}`);
+          return 1;
+        }
+        if (!q.options.includes(answer)) {
+          console.error(`options are: ${q.options.join(', ')}`);
+          return 2;
+        }
+        log.append('decision.answered', { id, by: instanceId(), answer }, instanceId(), 'human');
+        console.log(`recorded: ${id} -> ${answer} (the coordinator acts on its next tick)`);
+        return 0;
+      } finally {
+        log.close();
+      }
+    }
+
+    case 'labels': {
+      const created = await backlogFor(loadConfig(root), root).ensureLabels([...LABELS]);
+      console.log(created.length ? `created: ${created.join(', ')}` : 'all labels exist');
       return 0;
     }
 

@@ -1,9 +1,9 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
@@ -114,4 +114,106 @@ export function slotsDir(): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
   return '/var/tmp/agent-slots';
+}
+
+export interface ServiceSpec {
+  label: string; // reverse-DNS style id, unique per project
+  program: string[]; // argv
+  workingDir: string;
+  logFile: string;
+  env?: Record<string, string>;
+}
+
+/** Install and start a per-user service that restarts on failure and survives logout of any session. */
+export function installService(spec: ServiceSpec): { path: string; started: boolean; detail: string } {
+  if (process.platform === 'darwin') {
+    const path = join(homedir(), 'Library', 'LaunchAgents', `${spec.label}.plist`);
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const envXml = Object.entries(spec.env ?? {}).map(([k, v]) => `<key>${esc(k)}</key><string>${esc(v)}</string>`).join('');
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${esc(spec.label)}</string>
+<key>ProgramArguments</key><array>${spec.program.map((a) => `<string>${esc(a)}</string>`).join('')}</array>
+<key>WorkingDirectory</key><string>${esc(spec.workingDir)}</string>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>30</integer>
+<key>StandardOutPath</key><string>${esc(spec.logFile)}</string>
+<key>StandardErrorPath</key><string>${esc(spec.logFile)}</string>
+<key>EnvironmentVariables</key><dict>${envXml}</dict>
+</dict></plist>
+`;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, plist);
+    const uid = process.getuid?.() ?? 0;
+    try {
+      execFileSync('launchctl', ['bootout', `gui/${uid}/${spec.label}`], { stdio: 'ignore' });
+    } catch {
+      // not loaded yet
+    }
+    return { path, ...launch(['bootstrap', `gui/${uid}`, path]) };
+  }
+  if (process.platform === 'linux') {
+    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
+    const q = (s: string) => `"${s.replace(/(["\\])/g, '\\$1')}"`;
+    const unit = `[Unit]
+Description=${spec.label}
+
+[Service]
+ExecStart=${spec.program.map(q).join(' ')}
+WorkingDirectory=${spec.workingDir}
+Restart=always
+RestartSec=30
+StandardOutput=append:${spec.logFile}
+StandardError=append:${spec.logFile}
+${Object.entries(spec.env ?? {}).map(([k, v]) => `Environment=${q(`${k}=${v}`)}`).join('\n')}
+
+[Install]
+WantedBy=default.target
+`;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, unit);
+    try {
+      execFileSync('systemctl', ['--user', 'daemon-reload']);
+      execFileSync('systemctl', ['--user', 'enable', '--now', `${spec.label}.service`]);
+      return { path, started: true, detail: 'systemd --user unit enabled (run `loginctl enable-linger` so it runs without a login session)' };
+    } catch (e) {
+      return { path, started: false, detail: (e as Error).message };
+    }
+  }
+  return { path: '', started: false, detail: 'agents need macOS, Linux or WSL2; on native Windows run the coordinator on another machine' };
+}
+
+function launch(args: string[]): { started: boolean; detail: string } {
+  try {
+    execFileSync('launchctl', args, { stdio: 'pipe' });
+    return { started: true, detail: 'launchd agent loaded (KeepAlive, starts at login)' };
+  } catch (e) {
+    return { started: false, detail: (e as Error).message };
+  }
+}
+
+export function uninstallService(label: string): string {
+  if (process.platform === 'darwin') {
+    const path = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+    try {
+      execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 0}/${label}`], { stdio: 'ignore' });
+    } catch {
+      // not loaded
+    }
+    rmSync(path, { force: true });
+    return path;
+  }
+  if (process.platform === 'linux') {
+    try {
+      execFileSync('systemctl', ['--user', 'disable', '--now', `${label}.service`], { stdio: 'ignore' });
+    } catch {
+      // not enabled
+    }
+    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
+    rmSync(path, { force: true });
+    return path;
+  }
+  return '';
 }
