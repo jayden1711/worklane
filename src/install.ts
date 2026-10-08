@@ -74,6 +74,16 @@ function gitRemoteRepo(root: string): string | null {
   }
 }
 
+/**
+ * The engine as installed in the project's node_modules, if present. Preferred
+ * over the running engine's own path, which Node resolves through symlinks
+ * (npm link, workspaces) to a machine-specific location.
+ */
+export function projectLocalEngine(root: string): string | null {
+  const p = join(root, 'node_modules', ...BRAND.pkg.split('/'), 'dist', 'src', 'cli.js');
+  return existsSync(p) ? p : null;
+}
+
 export interface InstallOptions {
   root: string;
   /** Path to the engine's cli.js (defaults to this running engine). */
@@ -103,7 +113,7 @@ export function install(opts: InstallOptions): InstallReport {
   }
   // Settings are generated from valid config only; a broken config fails here, loudly.
   const cfg = loadConfig(root);
-  const engineCli = resolve(opts.engineCli ?? fileURLToPath(new URL('./cli.js', import.meta.url)));
+  const engineCli = resolve(opts.engineCli ?? projectLocalEngine(root) ?? fileURLToPath(new URL('./cli.js', import.meta.url)));
   const settingsPath = join(root, '.claude', 'settings.json');
   mkdirSync(dirname(settingsPath), { recursive: true });
   const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.tests.stop_gate.timeout_s, cfg.guardrails.secret_paths);

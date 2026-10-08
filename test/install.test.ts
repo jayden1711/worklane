@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
@@ -135,4 +135,13 @@ test('installed Stop hook blocks an agent until done_when passes', { skip: !unix
   const out = JSON.parse(fail.stdout) as { decision: string; reason: string };
   assert.equal(out.decision, 'block');
   assert.match(out.reason, /done_when not met/);
+});
+
+test('install references the project-local engine even when it is a symlink', { skip: !unixShell && 'symlinks need privileges on Windows' }, () => {
+  const { dir } = exampleProject();
+  mkdirSync(join(dir, 'node_modules', '@worklane'), { recursive: true });
+  symlinkSync(join(engineCli, '..', '..', '..'), join(dir, 'node_modules', '@worklane', 'cli'));
+  install({ root: dir });
+  const cmd = settingsOf(dir).hooks.PreToolUse!.find((e) => e.hooks[0]!.command.includes(HOOK_MARKER))!.hooks[0]!.command;
+  assert.match(cmd, /"\$CLAUDE_PROJECT_DIR\/node_modules\/@worklane\/cli\/dist\/src\/cli\.js"/);
 });
