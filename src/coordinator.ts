@@ -21,6 +21,7 @@ import type { AgentRunner, RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
 import { fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
+import { effectiveStage, health, healthyStreak, regressed, relaxedFor } from './trust.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -119,18 +120,22 @@ export class Coordinator {
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
   async tick(): Promise<void> {
-    let dispatched = 0;
-    let reconciled = 0;
-    try {
-      reconciled = await this.reconcile();
-      this.maybeNightly();
-      await this.handleDecisions();
-      await this.landNext();
-      dispatched = await this.dispatch();
-    } catch (e) {
-      this.emit('coordinator.error', { instance: this.d.instance, where: 'tick', kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
-    }
-    this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
+    // Each step is guarded on its own: a GitHub hiccup in reconcile must not stop landing or dispatch.
+    const step = async <T>(where: string, fn: () => Promise<T> | T, fallback: T): Promise<T> => {
+      try {
+        return await fn();
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+        return fallback;
+      }
+    };
+    const reconciled = await step('reconcile', () => this.reconcile(), 0);
+    await step('nightly', () => this.maybeNightly(), undefined);
+    await step('trust', () => this.maybeTrust(), undefined);
+    await step('decisions', () => this.handleDecisions(), undefined);
+    await step('land', () => this.landNext(), undefined);
+    const dispatched = await step('dispatch', () => this.dispatch(), 0);
+    this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled, active: this.active.size, ready: this.readyCount });
   }
 
   /**
@@ -189,6 +194,40 @@ export class Coordinator {
   }
 
   private lastHold: string | null = null;
+  /** Actionable ready issues seen on the last dispatch pass (for idle-hours). */
+  private readyCount = 0;
+
+  stage(): number {
+    return effectiveStage(this.d.log.read(0, ['stage.changed']), this.d.cfg.agents.stage);
+  }
+
+  /**
+   * Once a day: score the window. A regression demotes one stage on its own
+   * (never below the configured start); a healthy streak asks the owner to
+   * promote, if review.yaml defines a next stage.
+   */
+  private async maybeTrust(now = new Date()) {
+    const day = now.toLocaleDateString('en-CA');
+    if (this.d.log.read(0, ['trust.evaluated']).some((e) => (e.payload as { day: string }).day === day)) return;
+    const events = this.d.log.read();
+    const stage = this.stage();
+    const h = health(events, this.d.cfg.agents.trust, now);
+    const card = Object.fromEntries(Object.entries(h.card).filter(([, v]) => typeof v !== 'object' || v === null)) as Record<string, number | string | null>;
+    this.emit('trust.evaluated', { day, stage, healthy: h.healthy, why: h.why, card });
+    if (regressed(h) && stage > this.d.cfg.agents.stage) {
+      this.emit('stage.changed', { from: stage, to: stage - 1, by: 'auto', reason: `regression: ${h.why.join('; ')}` });
+      return;
+    }
+    const next = (this.d.cfg.review?.stages ?? []).find((s) => s.stage === stage + 1);
+    const openStage = this.d.log.read(0, ['decision.asked']).some((q) => (q.payload as { kind: string }).kind === 'stage' && !this.d.log.read(q.id, ['decision.answered']).some((a) => (a.payload as { id: string }).id === (q.payload as { id: string }).id));
+    if (h.healthy && next && !openStage && healthyStreak(this.d.log.read()) >= this.d.cfg.agents.trust.promote_after_days) {
+      await this.ask('stage', null, this.d.cfg.project.owners.default, `Promote to trust stage ${next.stage}?`, ['approve', 'reject'], 'approve', [
+        `healthy ${this.d.cfg.agents.trust.promote_after_days} days in a row`,
+        `would relax: ${next.relax.map((r) => `${r.category} -> ${r.to}`).join(', ')}`,
+        `evaluator pass rate ${h.card.evaluatorPassRate}, unverified claims ${h.card.unverifiedClaimRate}, reverts ${h.card.reverts}`,
+      ]);
+    }
+  }
 
   /** Queue the nightly runs once a day, after tests.yaml nightly_at. */
   private maybeNightly() {
@@ -226,8 +265,11 @@ export class Coordinator {
     const workers = this.d.cfg.agents.roles.workers;
     if (!workers?.enabled) return 0;
     let started = 0;
+    const ready = await this.d.backlog.list('ready');
+    // Real waiting work only: last seen as actionable (writer-approved, with a contract), not running.
+    this.readyCount = ready.filter((i) => !this.active.has(i.number) && this.isTerminal(i.number) && (this.lastSeen(i.number) as { actionable?: boolean } | undefined)?.actionable === true).length;
     // Fill free capacity this tick: one pass over the ready issues, one start per free worker.
-    for (const issue of await this.d.backlog.list('ready')) {
+    for (const issue of ready) {
       if (this.active.size >= (workers.count ?? 1)) break;
       const hold = this.governorHold();
       this.noteHold(hold);
@@ -332,7 +374,7 @@ export class Coordinator {
           continue;
         }
         const lvl = computeLevel(
-          { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? 'L2' } : {}) },
+          { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, relaxed: relaxedFor(this.stage(), this.d.cfg.review), ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? 'L2' } : {}) },
           this.d.cfg.review ?? DEFAULT_REVIEW,
         );
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
@@ -618,9 +660,10 @@ export class Coordinator {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  private async ask(kind: 'land' | 'question', issue: number, owner: string, question: string, options: string[], recommendation: string, receipts: string[]) {
-    const id = `d-${issue}-${randomBytes(3).toString('hex')}`;
+  private async ask(kind: 'land' | 'question' | 'stage', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]) {
+    const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
+    if (issue === null) return; // not tied to an issue: answered from the dashboard or CLI
     await this.d.backlog.addLabels(issue, ['needs:decision']);
     await this.d.backlog.comment(
       issue,
@@ -656,6 +699,15 @@ export class Coordinator {
     const cmd = new RegExp(`^/${BRAND.cli}\\s+(\\S+)`, 'm');
     for (const asked of this.d.log.read(0, ['decision.asked'])) {
       const q = asked.payload as EventPayload<'decision.asked'>;
+      if (q.kind === 'stage') {
+        const a = this.d.log.read(asked.id, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
+        const acted = this.d.log.read(asked.id, ['stage.changed']).length > 0;
+        if (a && !acted && a.answer === 'approve') {
+          const to = Number(q.question.match(/stage (\d+)/)?.[1] ?? this.stage() + 1);
+          this.emit('stage.changed', { from: this.stage(), to, by: a.by, reason: `approved by ${a.by}` });
+        }
+        continue;
+      }
       if (q.issue === null) continue;
       const later = this.events(q.issue).filter((e) => e.id > asked.id);
       // Already acted on: something moved the task on since the question.
@@ -940,6 +992,7 @@ export class Coordinator {
 
 const DEFAULT_REVIEW = {
   version: 1 as const,
+  stages: [],
   levels: {
     L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 },
     L1_evaluator: { when: ['ui', 'app-non-money'], max_lines: 400, max_files: 10 },
