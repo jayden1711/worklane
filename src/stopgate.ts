@@ -21,6 +21,8 @@ export const DoneWhen = z.array(
 export const TaskFile = z.strictObject({
   id: z.string().min(1),
   done_when: DoneWhen.min(1),
+  /** Repo-relative files the agent must not change (e.g. a frozen reproduction test). */
+  frozen: z.array(z.string()).default([]),
 });
 export type TaskFile = z.infer<typeof TaskFile>;
 

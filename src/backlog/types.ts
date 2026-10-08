@@ -22,6 +22,8 @@ export interface Backlog {
   removeLabel(n: number, label: string): Promise<void>;
   setAssignees(n: number, logins: string[]): Promise<void>;
   comment(n: number, body: string): Promise<void>;
+  comments(n: number): Promise<{ author: string; body: string }[]>;
+  close(n: number): Promise<void>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
 }
 

@@ -17,6 +17,10 @@ interface StoredSets {
 
 /** Per-project state folder, keyed by the project's absolute path. */
 export function projectStateDir(projectRoot: string): string {
+  // Agent runs inherit the coordinator's project state dir, so hook logs from
+  // worktrees land with the project rather than under each worktree's path.
+  const inherited = process.env[`${BRAND.envPrefix}_PROJECT_STATE_DIR`];
+  if (inherited) return inherited;
   const key = createHash('sha256').update(resolve(projectRoot)).digest('hex').slice(0, 16);
   return join(stateDir(), 'projects', key);
 }

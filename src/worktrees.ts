@@ -1,0 +1,65 @@
+// Worktrees the coordinator creates and owns. It never lists, touches or
+// removes a worktree it didn't create: names carry our prefix AND must be in
+// our ownership record, so other sessions' worktrees are always safe.
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { BRAND } from './brand.js';
+import { childEnv } from './os/index.js';
+
+export interface WorktreeOptions {
+  repo: string;
+  root: string; // relative to repo, e.g. .claude/worktrees
+  stateDir: string;
+  setup: string[];
+}
+
+const ownedFile = (o: WorktreeOptions) => join(o.stateDir, 'worktrees.json');
+
+function owned(o: WorktreeOptions): string[] {
+  try {
+    return JSON.parse(readFileSync(ownedFile(o), 'utf8')) as string[];
+  } catch {
+    return [];
+  }
+}
+function setOwned(o: WorktreeOptions, list: string[]) {
+  mkdirSync(o.stateDir, { recursive: true });
+  writeFileSync(ownedFile(o), JSON.stringify([...new Set(list)], null, 2));
+}
+
+const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+export function worktreePath(o: WorktreeOptions, name: string): string {
+  return resolve(o.repo, o.root, `${BRAND.cli}-${name}`);
+}
+
+/** Create a worktree on a new branch at `base`, then run the project's setup steps. */
+export function createWorktree(o: WorktreeOptions, name: string, branch: string, base: string): { path: string; setupErrors: string[] } {
+  const path = worktreePath(o, name);
+  if (existsSync(path)) removeWorktree(o, name);
+  setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
+  git(o.repo, 'worktree', 'add', '-q', '-B', branch, path, base);
+  const setupErrors: string[] = [];
+  for (const step of o.setup) {
+    const r = spawnSync(step, { cwd: path, shell: true, encoding: 'utf8', env: childEnv(), timeout: 900_000 });
+    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
+  }
+  return { path, setupErrors };
+}
+
+/** Remove one of OUR worktrees; refuses anything not in the ownership record. Verified after. */
+export function removeWorktree(o: WorktreeOptions, name: string): boolean {
+  const path = worktreePath(o, name);
+  if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
+  spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
+  spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
+  const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${path}\n`);
+  if (gone) setOwned(o, owned(o).filter((p) => p !== path));
+  return gone;
+}
+
+/** Our worktrees still on disk (for startup cleanup of terminal tasks). */
+export function ownedWorktrees(o: WorktreeOptions): string[] {
+  return owned(o).filter((p) => existsSync(p));
+}

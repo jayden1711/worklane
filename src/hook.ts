@@ -2,13 +2,13 @@
 // Hooks read one JSON object on stdin. Every failure inside a hook fails
 // closed (deny or block with a reason); the generated settings also append
 // `|| exit 2`, so a missing or crashing engine blocks instead of allowing.
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
-import { runStopGate } from './stopgate.js';
+import { runStopGate, TaskFile } from './stopgate.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
 import { splitCommands } from './guardrails/shell.js';
 
@@ -50,6 +50,16 @@ function log(root: string, file: string, entry: object) {
 
 const isAgent = (env: NodeJS.ProcessEnv) => env[`${BRAND.envPrefix}_AGENT`] === '1';
 
+function withFrozen(g: Config['guardrails'], taskFile: string | undefined): Config['guardrails'] {
+  if (!taskFile) return g;
+  try {
+    const frozen = TaskFile.parse(JSON.parse(readFileSync(taskFile, 'utf8'))).frozen;
+    return frozen.length ? { ...g, protected_paths: [...g.protected_paths, ...frozen] } : g;
+  } catch {
+    return g;
+  }
+}
+
 function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   const cwd = input.cwd ?? process.cwd();
   const root = env.CLAUDE_PROJECT_DIR && existsSync(join(env.CLAUDE_PROJECT_DIR, BRAND.configDir)) ? env.CLAUDE_PROJECT_DIR : findProjectRoot(cwd);
@@ -65,7 +75,9 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const msg = e instanceof ConfigInvalid ? e.message : (e as Error).message;
     return decide(isAgent(env) ? 'deny' : 'ask', `guardrails can't load, so this call can't be checked: ${msg}`);
   }
-  const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, cfg.guardrails, liveContext(root, env));
+  // An agent's task can freeze files (a reproduction test): treat them as protected for this run.
+  const guardrails = isAgent(env) ? withFrozen(cfg.guardrails, env[`${BRAND.envPrefix}_TASK_FILE`]) : cfg.guardrails;
+  const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
   if (v.decision === 'none') {
     // Agents: every commit is secret-scanned first. Humans opt in with a git pre-commit hook.
     const commit = isAgent(env) && input.tool_name === 'Bash' ? gitCommit(String(input.tool_input?.command ?? '')) : null;
@@ -103,7 +115,16 @@ async function stop(input: HookInput, env: NodeJS.ProcessEnv): Promise<HookOutpu
     if (root) log(root, 'stopgate.jsonl', { outcome: 'human_session', session: input.session_id });
     return { exitCode: 0 };
   }
-  if (!taskFile) return block('agent session without a task file; the coordinator must set one');
+  const role = env[`${BRAND.envPrefix}_ROLE`];
+  if (!taskFile && role && role !== 'worker') {
+    // Evaluators change no code; their output is validated by the coordinator instead.
+    if (root) log(root, 'stopgate.jsonl', { outcome: 'no_gate_for_role', role, session: input.session_id });
+    return { exitCode: 0 };
+  }
+  if (!taskFile) {
+    if (root) log(root, 'stopgate.jsonl', { outcome: 'block', reason: 'agent without a task file', session: input.session_id });
+    return block('agent session without a task file; the coordinator must set one');
+  }
   if (!root) return taskFile ? block(`no ${BRAND.configDir}/ found; can't verify done_when`) : { exitCode: 0 };
   let cfg: Config;
   try {

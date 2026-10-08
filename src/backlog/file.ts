@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 import type { Backlog, Issue } from './types.js';
 
 interface FileState {
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { body: string }[] })[];
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[] })[];
   labels: string[];
 }
 
@@ -49,12 +49,9 @@ export class FileBacklog implements Backlog {
     return number;
   }
 
-  comments(n: number): string[] {
-    return this.load().issues.find((x) => x.number === n)?.comments.map((c) => c.body) ?? [];
-  }
-
-  close(n: number) {
-    this.edit(n, (i) => (i.state = 'closed'));
+  /** Test helper: a human comments on an issue. */
+  humanComment(n: number, author: string, body: string) {
+    this.edit(n, (i) => i.comments.push({ author, body }));
   }
 
   async list(label: string) {
@@ -83,7 +80,13 @@ export class FileBacklog implements Backlog {
     this.edit(n, (i) => (i.assignees = [...new Set([...i.assignees, ...logins])]));
   }
   async comment(n: number, body: string) {
-    this.edit(n, (i) => i.comments.push({ body }));
+    this.edit(n, (i) => i.comments.push({ author: this.actor, body }));
+  }
+  async comments(n: number) {
+    return this.load().issues.find((x) => x.number === n)?.comments ?? [];
+  }
+  async close(n: number) {
+    this.edit(n, (i) => (i.state = 'closed'));
   }
   async ensureLabels(labels: { name: string }[]) {
     const s = this.load();
