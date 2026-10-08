@@ -16,6 +16,7 @@
   },
   "files": [
     "dist/src",
+    "templates",
     "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md"
@@ -32,5 +33,9 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
   }
 }
