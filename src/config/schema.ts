@@ -206,6 +206,8 @@ export const TestsConfig = z.strictObject({
     })
     .prefault({}),
   land: z.strictObject({ pre: z.array(z.string()).default([]) }).prefault({}),
+  /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
+  checks: z.array(z.string()).default([]),
   tiers: z
     .array(
       z.strictObject({

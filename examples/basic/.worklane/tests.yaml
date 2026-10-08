@@ -20,4 +20,5 @@ worktree:
   est_size_gb: 1
 land:
   pre: []
+checks: []                  # project lints for the PR gate, e.g. node .worklane/checks/my-lint.mjs
 tiers: []
