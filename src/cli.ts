@@ -14,6 +14,11 @@ import { install } from './install.js';
 import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
+import { prodRead } from './prodread.js';
+import { listJobs, queueJob, runJob } from './queue.js';
+import { slotStatus } from './slots.js';
+import { projectStateDir } from './guardrails/context.js';
+import { fileURLToPath } from 'node:url';
 
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -29,6 +34,12 @@ usage: ${BRAND.cli} <command> [options]
   vacuity [files...]               flag tests that assert nothing or touch no app code
                                    (default: test files changed vs the default branch)
   scan transcripts [dir]           secret-scan Claude Code transcripts for this project
+  queue full-run [-- <command>]    queue the full test run; starts by itself when the machine-wide
+                                   full-run slot is free and tests.yaml idle_probe passes
+  jobs                             queued and finished runs, with log paths
+  slots                            machine-wide agent slots in use (all harnesses) and the cap
+  prod-read '<SQL>'                one read-only query against production, through the
+                                   read-only role (deploy.yaml prod_read); prints JSON
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
 
 options: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;
@@ -172,6 +183,56 @@ async function main(argv: string[]): Promise<number> {
       }
       console.log(`${files.length} transcript(s) scanned, ${leaks} finding(s)`);
       return leaks ? 1 : 0;
+    }
+
+    case 'queue': {
+      if (sub !== 'full-run') {
+        console.error('usage: queue full-run [-- <command>]');
+        return 2;
+      }
+      const cfg = loadConfig(root);
+      const dash = rest.indexOf('--');
+      const command = dash >= 0 ? rest.slice(dash + 1).join(' ') : cfg.tests.runner.full;
+      const job = queueJob({ stateDir: projectStateDir(root), cwd: process.cwd(), command, idleProbe: cfg.tests.idle_probe, cliPath: fileURLToPath(import.meta.url) });
+      console.log(`queued ${job.id}: ${command}\n  in ${job.cwd}\n  runner pid ${job.runnerPid} (detached; survives this session)\n  log ${job.log}\n  status: ${BRAND.cli} jobs`);
+      return 0;
+    }
+
+    case '_run-job': {
+      const job = await runJob(sub!, rest[0]!);
+      return job.status === 'passed' ? 0 : 1;
+    }
+
+    case 'jobs': {
+      const jobs = listJobs(projectStateDir(root));
+      for (const j of jobs) {
+        console.log(`${j.id}  ${j.status.padEnd(7)}  ${j.command}${j.waitingFor ? `  (waiting: ${j.waitingFor})` : ''}${j.exitCode !== undefined ? `  exit ${j.exitCode}` : ''}\n    ${j.cwd}\n    log ${j.log}`);
+      }
+      if (!jobs.length) console.log('no jobs');
+      return 0;
+    }
+
+    case 'slots': {
+      const st = slotStatus();
+      console.log(`agents running on this machine: ${st.agents.length} of ${st.cap}`);
+      for (const a of st.agents) console.log(`  ${a.slot}: ${a.owner} (pid ${a.pid}, since ${a.acquiredAt})`);
+      console.log(`full test run: ${st.fullRun ? `${st.fullRun.owner} (pid ${st.fullRun.pid}, since ${st.fullRun.acquiredAt})` : 'none'}`);
+      return 0;
+    }
+
+    case 'prod-read': {
+      const pr = loadConfig(root).deploy?.prod_read;
+      if (!pr) {
+        console.error('no production read path configured (deploy.yaml prod_read); production reads are off');
+        return 2;
+      }
+      const r = prodRead(pr, [sub, ...rest].join(' '), root);
+      if (!r.ok) {
+        console.error(`prod-read failed: ${r.error}`);
+        return 1;
+      }
+      console.log(r.output);
+      return 0;
     }
 
     default:
