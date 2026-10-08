@@ -20,6 +20,9 @@ import { slotStatus } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { createWorktree } from './worktrees.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
+import { startDashboard } from './dashboard.js';
+import { seedDemo } from './demo.js';
+import { openUrl } from './os/index.js';
 import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -56,6 +59,10 @@ usage: ${BRAND.cli} <command> [options]
   coordinator run [--once]         run the coordinator in the foreground (the service runs this)
   up | down                        install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
+  dashboard [--port n] [--user login] [--no-open]
+                                   the live dashboard on 127.0.0.1 (reads the event log)
+  demo <dir>                       seed a demo project worked by the real coordinator, then
+                                   open its dashboard: dashboard --root <dir>/shop
   status                           what's running, waiting and spent, from the event log
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
@@ -344,6 +351,38 @@ async function main(argv: string[]): Promise<number> {
 
     case 'down': {
       console.log(`removed ${uninstallService(serviceLabel(loadConfig(root)))}`);
+      return 0;
+    }
+
+    case 'dashboard': {
+      const cfg = loadConfig(root);
+      // No subcommand here: options start right after the command.
+      const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
+      const portOpt = option(opts, '--port');
+      const userOpt = option(opts, '--user');
+      const noOpen = flag(opts, '--no-open');
+      let user = userOpt ?? process.env[`${BRAND.envPrefix}_USER`];
+      if (!user) {
+        try {
+          user = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        } catch {
+          user = cfg.project.owners.default;
+        }
+      }
+      const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: user || cfg.project.owners.default, port: portOpt ? Number(portOpt) : 4317 });
+      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}, as @${user}\n  ${d.url}\n(local only; Ctrl+C to stop)`);
+      if (!noOpen) openUrl(d.url);
+      await new Promise(() => {});
+      return 0;
+    }
+
+    case 'demo': {
+      if (!sub) {
+        console.error('usage: demo <new-dir>');
+        return 2;
+      }
+      const r = await seedDemo(resolve(sub));
+      console.log(`demo seeded: ${r.issues} issues worked by the real coordinator with scripted agents\n  project ${r.root}\n  open it: ${BRAND.cli} dashboard --root ${r.root} --user example-owner`);
       return 0;
     }
 

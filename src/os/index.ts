@@ -228,3 +228,13 @@ export function machineLoad(): number | null {
   const [, five = 0, fifteen = 0] = loadavg();
   return Math.max(five, fifteen);
 }
+
+/** Open a URL in the default browser, best effort. */
+export function openUrl(url: string): void {
+  const cmd = process.platform === 'darwin' ? ['open', url] : process.platform === 'win32' ? ['cmd', '/c', 'start', '', url] : ['xdg-open', url];
+  try {
+    execFileSync(cmd[0]!, cmd.slice(1), { stdio: 'ignore', timeout: 10_000 });
+  } catch {
+    // no browser here: the URL is printed anyway
+  }
+}
