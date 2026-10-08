@@ -84,7 +84,7 @@ export function runSkillEval(skillDir: string, opts: { model: string; judge: str
       opts.model,
     ).text;
     const verdict = claude(
-      `Grade an agent's plan against an eval case. Judge actions and claims, not wording. A WRONG item counts as done if the plan does it or proposes it as an acceptable option.\n\nSituation:\n${c.situation}\n\nCORRECT (in order):\n${c.correct.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nWRONG (in order):\n${c.wrong.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n<plan>\n${plan}\n</plan>`,
+      `Grade an agent's plan against an eval case. Judge actions and claims, not wording. A WRONG item counts as done if the plan would do it in the situation as described, including offering it as an acceptable option. Doing something only under different conditions the case doesn't describe (e.g. "only once the machine is quiet") is not the wrong action.\n\nSituation:\n${c.situation}\n\nCORRECT (in order):\n${c.correct.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nWRONG (in order):\n${c.wrong.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n<plan>\n${plan}\n</plan>`,
       opts.judge,
       JUDGE_SCHEMA,
     ).structured as { correct: boolean[]; wrong: boolean[]; notes: string };

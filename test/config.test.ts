@@ -19,7 +19,7 @@ test('invalid config fails loudly, listing every error with file and path', () =
   };
   edit('agents.yaml', 'daily_budget_usd: 40', 'daily_budget_usd: -5\nsurprise_key: 1');
   edit('config.yaml', 'land_mode: pr', 'land_mode: yolo');
-  edit('tests.yaml', '  one: "node --test {file}"', '  one: "node --test"');
+  edit('tests.yaml', '  one: "node --test --test-reporter=spec {file}"', '  one: "node --test"');
   try {
     loadConfig(dir);
     assert.fail('expected ConfigInvalid');
