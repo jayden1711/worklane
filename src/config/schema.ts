@@ -216,9 +216,25 @@ export const TestsConfig = z.strictObject({
       est_size_gb: z.number().positive().default(1),
     })
     .prefault({}),
-  land: z.strictObject({ pre: z.array(z.string()).default([]) }).prefault({}),
+  land: z
+    .strictObject({
+      pre: z.array(z.string()).default([]),
+      /** Changes tested and landed together; 1 = strictly serial. A red batch is split in half. */
+      batch_max: z.number().int().min(1).max(32).default(4),
+    })
+    .prefault({}),
+  /** Which tiers gate what. Names are tiers[] entries, or "changed" / "full" (runner commands). */
+  gates: z
+    .strictObject({
+      land: z.array(z.string()).min(1).default(['changed']),
+      money_path: z.array(z.string()).default([]),
+      nightly: z.array(z.string()).default(['full']),
+    })
+    .prefault({}),
   /** How the runner lists failures, for the baseline gate ("no new failures vs main"). */
   failures: z.strictObject({ section: regex, item: regex }).optional(),
+  /** Local time (HH:MM) to queue the nightly full run (re-records main's baseline) and nightly tiers. */
+  nightly_at: hhmm.optional(),
   /** Exits 0 when no full test run is live on this machine (any harness or session). Queued full runs wait for it. */
   idle_probe: z.string().optional(),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */

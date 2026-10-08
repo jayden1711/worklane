@@ -20,3 +20,18 @@ One short note per step: what shipped, how it was verified, what's still unprove
 - **Verified:** API tests (token, SSE on log growth from another process, decisions recorded once with a valid option, path traversal blocked, saved views). Projection tests. Headless-Chrome screenshots of every page read and checked.
 - **Bugs the screenshots found:** the coordinator re-recorded unchanged issues every tick (now only on change, with a regression test); avatar fallback; CLI option parsing.
 - **Unproven:** the Chrome extension couldn't reach this Mac's localhost, so screenshots came from a local headless Chrome. Not yet used by a human.
+
+## Step 4: parallel workers, governor, tiered tests, batched landing (2026-10-08)
+
+- **Parallel workers:** each tick fills every free worker (`workers.count`), each in its own worktree. Project commands run async, so one long test run can't stall other agents' streams.
+- **Governor:** before each start it checks the daily budget, sustained load (higher of the 5- and 15-minute averages; `governor.max_load`, default 2 x cores), free disk after another worktree (`min_free_disk_pct`, default 15%) and the machine-wide slot cap shared with other harnesses. Holds are recorded when the reason changes.
+- **Tiered gates** (`tests.yaml gates`): `land` (e.g. `changed`) for every batch; `money_path` (e.g. `full`) added when a batch touches money paths. Exclusive tiers take the machine-wide full-run slot; a busy slot defers the batch, it never fails it. Every gate is judged against main's baseline and retried once for flakes.
+- **Batched landing:**
+  - Seed with the oldest; add non-overlapping changes up to `land.batch_max` (default 4), at most one L3.
+  - One tested commit per batch. A conflict ejects only that change.
+  - A red batch splits in half recursively until the culprit is isolated and blocked; the rest land.
+  - A rejected push (the tip moved) defers rather than fails.
+- **Nightly** (`tests.yaml nightly_at`): queues a full run on the tip of main that re-records the baseline, plus extra nightly tiers such as mutation testing, all behind the full-run lock, the idle probe and the load gate.
+- **Also fixed:** secret scans cover exactly the change's commits, not the worktree (which includes dependencies).
+- **Verified:** tests for three concurrent workers landing, the cross-harness cap, governor holds on load and disk, one-commit batches, split-to-culprit, overlap separation, deferral on a held full-run slot, and the nightly schedule.
+- **Unproven until the NUC:** real parallel Claude runs at the target cap; batch sizes against a project whose full suite takes hours (a split costs another gate run).

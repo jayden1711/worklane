@@ -19,7 +19,8 @@ import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './rev
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
-import { tryAgentSlot } from './slots.js';
+import { fullRunLock, tryAgentSlot } from './slots.js';
+import { nightlyDue, queueNightly } from './nightly.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -38,6 +39,8 @@ export interface CoordinatorDeps {
   slotsDir?: string;
   maxAttempts?: number;
   leaseMs?: number;
+  /** Nightly queuing (tests inject this). */
+  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
 }
@@ -120,6 +123,7 @@ export class Coordinator {
     let reconciled = 0;
     try {
       reconciled = await this.reconcile();
+      this.maybeNightly();
       await this.handleDecisions();
       await this.landNext();
       dispatched = await this.dispatch();
@@ -185,6 +189,14 @@ export class Coordinator {
   }
 
   private lastHold: string | null = null;
+
+  /** Queue the nightly runs once a day, after tests.yaml nightly_at. */
+  private maybeNightly() {
+    const last = this.d.log.read(0, ['nightly.queued']).at(-1)?.payload as { day: string } | undefined;
+    if (!nightlyDue(this.d.cfg.tests.nightly_at, last?.day ?? null)) return;
+    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance);
+    this.emit('nightly.queued', { day: new Date().toLocaleDateString('en-CA'), jobs: jobs.map((j) => j.id) });
+  }
 
   /** Why no new agent may start right now, or null. Load and disk are machine-wide. */
   governorHold(): { reason: string; load: number | null; freeDiskPct: number | null } | null {
@@ -700,72 +712,186 @@ export class Coordinator {
 
   // ---------------------------------------------------------------- landing
 
+  /** Queued changes without a final landing result, oldest first. "deferred" isn't final. */
+  private landQueue(): EventPayload<'land.queued'>[] {
+    const out: EventPayload<'land.queued'>[] = [];
+    for (const q of this.d.log.read(0, ['land.queued'])) {
+      const p = q.payload as EventPayload<'land.queued'>;
+      const final = this.d.log.read(q.id, ['land.result']).some((r) => (r.payload as { issue: number; outcome: string }).issue === p.issue && (r.payload as { outcome: string }).outcome !== 'deferred');
+      if (!final && !out.some((x) => x.issue === p.issue)) out.push(p);
+    }
+    return out;
+  }
+
+  private filesOf(issue: number, head: string): string[] {
+    const e = this.events(issue).filter((x) => x.type === 'change.proposed' && (x.payload as { head: string }).head === head).at(-1);
+    return (e?.payload as { files?: string[] } | undefined)?.files ?? [];
+  }
+
+  /** Seed with the oldest; add later changes whose files don't overlap, at most one L3, up to batch_max. */
+  buildBatch(queue: EventPayload<'land.queued'>[]): EventPayload<'land.queued'>[] {
+    const max = this.d.cfg.tests.land.batch_max;
+    const batch: EventPayload<'land.queued'>[] = [];
+    const files = new Set<string>();
+    for (const q of queue) {
+      if (batch.length >= max) break;
+      const f = this.filesOf(q.issue, q.head);
+      if (batch.length && f.some((x) => files.has(x))) continue;
+      if (q.level === 'L3' && batch.some((b) => b.level === 'L3')) continue;
+      batch.push(q);
+      f.forEach((x) => files.add(x));
+    }
+    return batch;
+  }
+
   private async landNext() {
     if (this.landing) return;
-    const queued = this.d.log.read(0, ['land.queued']).filter((q) => !this.d.log.read(q.id, ['land.result']).some((r) => (r.payload as { issue: number }).issue === (q.payload as { issue: number }).issue));
-    const next = queued[0];
-    if (!next) return;
+    const queue = this.landQueue();
+    if (!queue.length) return;
     this.landing = true;
     try {
-      await this.land(next.payload as EventPayload<'land.queued'>);
+      await this.landBatch(this.buildBatch(queue));
     } finally {
       this.landing = false;
     }
   }
 
-  /** Serial landing: rebase onto the tip, pre-land steps, tests, secret scan, fast-forward push. */
-  private async land(q: EventPayload<'land.queued'>) {
-    const n = q.issue;
-    const name = `land-${n}`;
-    const result = (outcome: EventPayload<'land.result'>['outcome'], landed: string | null, detail: string) => this.emit('land.result', { issue: n, outcome, landed, detail: detail.slice(0, 2000) });
+  private gateTiers(batch: EventPayload<'land.queued'>[]): string[] {
+    const gates = this.d.cfg.tests.gates;
+    const money = loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source);
+    const touchesMoney = batch.some((q) => this.filesOf(q.issue, q.head).some((f) => money.some((re) => re.test(f))) || this.events(q.issue).some((e) => e.type === 'issue.seen' && (e.payload as { labels: string[] }).labels.includes('money-path')));
+    return [...new Set([...gates.land, ...(touchesMoney ? gates.money_path : [])])];
+  }
+
+  private tierCommand(name: string): { command: string; exclusive: boolean } {
+    const t = this.d.cfg.tests.tiers.find((x) => x.name === name);
+    if (t) return { command: t.command, exclusive: t.exclusive };
+    if (name === 'full') return { command: this.d.cfg.tests.runner.full, exclusive: true };
+    return { command: this.d.cfg.tests.runner.changed, exclusive: false };
+  }
+
+  /** Run the land gates: baseline-aware, a failure retried once (flake), exclusive tiers under the machine-wide lock. */
+  private async runGates(path: string, tiers: string[]): Promise<{ ok: true; notes: string[] } | { ok: false; deferred: boolean; note: string }> {
+    const notes: string[] = [];
+    for (const tier of tiers) {
+      const { command, exclusive } = this.tierCommand(tier);
+      let lock: { release(): void } | null = null;
+      if (exclusive) {
+        const got = await fullRunLock(`${BRAND.cli} land gate ${tier}`, 5_000, this.d.slotsDir);
+        if (!('lock' in got)) return { ok: false, deferred: true, note: `tier ${tier} needs the machine-wide full-run slot (held by ${got.holder?.owner ?? 'another run'}); deferred` };
+        lock = got.lock;
+      }
+      try {
+        let verdict = null as ReturnType<typeof baselineGate> | null;
+        let tail = '';
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          const r = await sh(command, path);
+          verdict = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
+          tail = r.tail;
+          if (verdict.outcome === 'pass') break;
+        }
+        if (verdict!.outcome === 'fail') return { ok: false, deferred: false, note: `${tier}: ${verdict!.note}${verdict!.newFailures.length ? `: ${verdict!.newFailures.join(', ')}` : ''}\n${tail}` };
+        notes.push(`${tier}: ${verdict!.note}`);
+      } finally {
+        lock?.release();
+      }
+    }
+    return { ok: true, notes };
+  }
+
+  /**
+   * Land a batch on the tip in one tested commit. On a red gate: retry once
+   * (flake), then split in half and land each half on its own (bors-style
+   * bisection); a single change that's still red is ejected with the evidence.
+   */
+  private async landBatch(batch: EventPayload<'land.queued'>[]): Promise<void> {
+    if (!batch.length) return;
+    const id = `b-${randomBytes(3).toString('hex')}`;
+    const issues = batch.map((q) => q.issue);
+    const result = (n: number, outcome: EventPayload<'land.result'>['outcome'], landed: string | null, detail: string) => this.emit('land.result', { issue: n, outcome, landed, detail: `[batch ${id}] ${detail}`.slice(0, 2000) });
+    const ownerOf = (n: number) => (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).owner;
     if (this.d.cfg.project.land_mode === 'pr') {
-      result('rejected', null, 'land_mode pr: opening and merging PRs arrives with the dashboard (step 3); land manually for now');
+      for (const n of issues) result(n, 'rejected', null, 'land_mode pr: PRs are opened and merged from the dashboard; land manually for now');
       return;
     }
-    const claimed = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
-      const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-      const { path, setupErrors } = createWorktree(this.wt, name, `${BRAND.cli}/land-${n}`, tip);
-      try {
-        if (setupErrors.length) return result('error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+    const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+    this.emit('land.batch', { id, issues, tip, outcome: 'started', detail: '' });
+    const name = `land-${id}`;
+    const { path, setupErrors } = createWorktree(this.wt, name, `${BRAND.cli}/${name}`, tip);
+    let applied: EventPayload<'land.queued'>[] = [];
+    let split = false;
+    try {
+      if (setupErrors.length) {
+        for (const n of issues) result(n, 'error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+        return;
+      }
+      for (const q of batch) {
+        const claimed = this.events(q.issue).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>;
         const pick = spawnSync('git', ['cherry-pick', `${claimed.base}..${q.head}`], { cwd: path, encoding: 'utf8' });
         if (pick.status !== 0) {
           spawnSync('git', ['cherry-pick', '--abort'], { cwd: path });
-          result('conflict', null, `does not apply cleanly on ${tip.slice(0, 8)}; never guessing at conflicts`);
-          return this.block(n, claimed.owner, `conflicts with ${this.branch}; needs a rebase`);
+          result(q.issue, 'conflict', null, `does not apply cleanly on ${tip.slice(0, 8)}${applied.length ? ` after ${applied.map((a) => `#${a.issue}`).join(', ')}` : ''}; never guessing at conflicts`);
+          await this.block(q.issue, ownerOf(q.issue), `conflicts with ${this.branch}; needs a rebase`);
+          continue;
         }
-        for (const step of this.d.cfg.tests.land.pre) {
-          const r = await sh(step, path);
-          if (r.code !== 0) return result('error', null, `pre-land step failed: ${step}\n${r.tail}`);
-        }
-        if (this.git(path, 'status', '--porcelain')) {
-          this.git(path, 'add', '-A');
-          this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Pre-land steps for #${n}`);
-        }
-        // Main may be red; a change may not add red. No new failures vs main's recorded baseline.
-        const tests = await sh(this.d.cfg.tests.runner.changed, path);
-        const gate = baselineGate(tests.code, tests.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
-        if (gate.outcome === 'fail') {
-          result('red', null, `${gate.note}${gate.newFailures.length ? `: ${gate.newFailures.join(', ')}` : ''}\n${tests.tail}`);
-          return this.block(n, claimed.owner, `tests after rebasing onto ${this.branch}: ${gate.note}`);
-        }
-        this.emit('check.result', { issue: n, head: tip, stage: 'land', checks: [{ check: `${this.d.cfg.tests.runner.changed} (baseline gate: ${gate.note})`, status: 'pass', exitCode: tests.code }] });
-        const scan = await scanRange(path, `${tip}..HEAD`);
-        if (scan.status !== 'clean') return result('rejected', null, `secret scan ${scan.status} at landing`);
-        const head = this.git(path, 'rev-parse', 'HEAD');
-        // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
-        const push = spawnSync('git', ['push', this.remote, `${head}:refs/heads/${this.branch}`], { cwd: path, encoding: 'utf8' });
-        if (push.status !== 0) {
-          if (attempt < 2 && /rejected|fetch first|non-fast-forward/.test(push.stderr)) continue;
-          return result('error', null, `push failed: ${push.stderr.trim().split('\n').pop()}`);
-        }
-        result('landed', head, `landed on ${this.branch}`);
-        await this.afterLand(n, head, claimed.owner);
-        return;
-      } finally {
-        removeWorktree(this.wt, name);
+        applied.push(q);
       }
+      if (!applied.length) return;
+      for (const step of this.d.cfg.tests.land.pre) {
+        const r = await sh(step, path);
+        if (r.code !== 0) {
+          for (const q of applied) result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
+          return;
+        }
+      }
+      if (this.git(path, 'status', '--porcelain')) {
+        this.git(path, 'add', '-A');
+        this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Pre-land steps for ${applied.map((a) => `#${a.issue}`).join(', ')}`);
+      }
+      const gates = await this.runGates(path, this.gateTiers(applied));
+      if (!gates.ok) {
+        if (gates.deferred) {
+          for (const q of applied) result(q.issue, 'deferred', null, gates.note);
+          this.emit('land.batch', { id, issues, tip, outcome: 'deferred', detail: gates.note.slice(0, 500) });
+          return;
+        }
+        if (applied.length === 1) {
+          const q = applied[0]!;
+          result(q.issue, 'red', null, gates.note);
+          this.emit('land.batch', { id, issues, tip, outcome: 'red', detail: gates.note.slice(0, 500) });
+          await this.block(q.issue, ownerOf(q.issue), `land gate red after rebasing onto ${this.branch}: ${gates.note.split('\n')[0]}`);
+          return;
+        }
+        this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'split', detail: gates.note.slice(0, 500) });
+        split = true;
+        return;
+      }
+      const scan = await scanRange(path, `${tip}..HEAD`);
+      if (scan.status !== 'clean') {
+        for (const q of applied) result(q.issue, 'rejected', null, `secret scan ${scan.status} at landing`);
+        return;
+      }
+      const head = this.git(path, 'rev-parse', 'HEAD');
+      // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
+      const push = spawnSync('git', ['push', this.remote, `${head}:refs/heads/${this.branch}`], { cwd: path, encoding: 'utf8' });
+      if (push.status !== 0) {
+        // The tip moved under us: leave them queued; the next tick rebuilds on the new tip.
+        for (const q of applied) result(q.issue, 'deferred', null, `push rejected (tip moved): ${push.stderr.trim().split('\n').pop()}`);
+        return;
+      }
+      this.emit('check.result', { issue: applied[0]!.issue, head, stage: 'land', checks: gates.notes.map((note) => ({ check: note, status: 'pass', exitCode: 0 })) });
+      this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'landed', detail: gates.notes.join('; ') });
+      for (const q of applied) result(q.issue, 'landed', head, `landed on ${this.branch} (${gates.notes.join('; ')})`);
+      for (const q of applied) await this.afterLand(q.issue, head, ownerOf(q.issue));
+    } finally {
+      removeWorktree(this.wt, name);
+      if (split) {
+        const mid = Math.ceil(applied.length / 2);
+        await this.landBatch(applied.slice(0, mid));
+        await this.landBatch(applied.slice(mid));
+      }
+      applied = [];
     }
   }
 

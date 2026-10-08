@@ -245,7 +245,10 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
         t!.status = 'queued';
         break;
       case 'land.result':
-        if (p.outcome === 'landed') {
+        if (p.outcome === 'deferred') {
+          t!.status = 'queued';
+          t!.blockedReason = null;
+        } else if (p.outcome === 'landed') {
           t!.landed = String(p.landed);
           t!.status = 'landed';
           if (e.ts.startsWith(today)) landedToday++;

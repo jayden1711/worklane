@@ -402,3 +402,109 @@ test('the governor holds dispatch on high load or low disk, and records it once,
   assert.ok(runner.calls.length > 0, 'starts once the machine has room');
   assert.equal(f.log.read(0, ['governor.release']).length, 1);
 });
+
+/** Workers that write a given file; optionally one that also adds a failing test. */
+function fileAgents(redFor?: string) {
+  return new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
+    writeFileSync(join(req.cwd, 'src', name), `export const x = '${name}';\n`);
+    if (name === redFor) writeFileSync(join(req.cwd, 'test', 'new-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('brand new failure', () => { assert.equal(1, 2); });\n");
+    commitAll(req.cwd, `add ${name}`);
+    return { structured: { summary: 's', lesson: { worked: '', failed: '', fix: '' } } };
+  });
+}
+
+async function queueAll(f: ReturnType<typeof fixture>, names: string[], runner: FakeRunner) {
+  for (const name of names) f.backlog.open(easyIssue(`Add ${name}`, name));
+  f.cfg.agents.roles.workers!.count = names.length;
+  writeFileSync(join(f.slotsDir, 'config.json'), JSON.stringify({ max_agents: names.length }));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  // Build everything first, without landing, so the land queue sees all of them at once.
+  (c as unknown as { landing: boolean }).landing = true;
+  await c.tick();
+  await c.idle();
+  (c as unknown as { landing: boolean }).landing = false;
+  assert.equal(f.log.read(0, ['land.queued']).length, names.length);
+  return c;
+}
+
+const batches = (log: EventLog) => log.read(0, ['land.batch']).map((e) => e.payload as { issues: number[]; outcome: string });
+
+test('batched landing: compatible changes are tested and landed together as one commit', { skip }, async () => {
+  const f = fixture();
+  const c = await queueAll(f, ['a.js', 'b.js', 'c.js'], fileAgents());
+  await c.tick();
+  const results = f.log.read(0, ['land.result']).map((e) => e.payload as { outcome: string; landed: string });
+  assert.deepEqual(results.map((r) => r.outcome), ['landed', 'landed', 'landed']);
+  assert.equal(new Set(results.map((r) => r.landed)).size, 1, 'one tested commit for the batch');
+  assert.deepEqual(batches(f.log).map((b) => b.outcome), ['started', 'landed']);
+});
+
+test('batched landing: a red batch is split until the culprit is isolated; the rest land', { skip }, async () => {
+  const f = fixture();
+  const c = await queueAll(f, ['a.js', 'b.js', 'c.js', 'd.js'], fileAgents('c.js'));
+  await c.tick();
+  const byIssue = Object.fromEntries(f.log.read(0, ['land.result']).map((e) => [(e.payload as { issue: number }).issue, (e.payload as { outcome: string }).outcome]));
+  const culprit = Number(Object.entries(byIssue).find(([, o]) => o === 'red')?.[0]);
+  const issueTitle = (await f.backlog.get(culprit)).title;
+  assert.equal(issueTitle, 'Add c.js', 'the change that added the failure is the one ejected');
+  assert.equal(Object.values(byIssue).filter((o) => o === 'landed').length, 3);
+  assert.ok(batches(f.log).some((b) => b.outcome === 'split'));
+  assert.ok((await f.backlog.get(culprit)).labels.includes('blocked'));
+  git(f.repo, 'fetch', '-q', 'origin');
+  assert.throws(() => git(f.repo, 'show', 'origin/main:test/new-red.test.js'), 'the failing test never reached main');
+});
+
+test('batched landing: changes to the same files go in separate batches', { skip }, async () => {
+  const f = fixture();
+  // Two workers editing the same file conflict-free in sequence, but must not share a batch.
+  const runner = new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
+    writeFileSync(join(req.cwd, 'src', 'shared.js'), `export const who = '${name}';\n`);
+    commitAll(req.cwd, `touch shared for ${name}`);
+    return { structured: { summary: 's', lesson: { worked: '', failed: '', fix: '' } } };
+  });
+  const c = await queueAll(f, ['a.js', 'b.js'], runner);
+  await c.tick();
+  const first = batches(f.log).filter((b) => b.outcome === 'started');
+  assert.equal(first.length, 1);
+  assert.deepEqual(first[0]!.issues.length, 1, 'only one of the overlapping changes in the batch');
+});
+
+test('a gate tier that needs the machine-wide full-run slot defers while another full run holds it', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.gates.land = ['changed', 'full'];
+  f.cfg.tests.runner.full = 'node --test --test-reporter=spec';
+  const c = await queueAll(f, ['a.js'], fileAgents());
+  const { fullRunLock } = await import('../src/slots.js');
+  const held = await fullRunLock('another session', 1000, f.slotsDir);
+  assert.ok('lock' in held);
+  await c.tick();
+  assert.equal((f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string }).outcome, 'deferred');
+  held.lock.release();
+  await c.tick();
+  assert.equal((f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string }).outcome, 'landed', 'lands once the slot is free');
+});
+
+test('nightly: due once a day after the configured time; the coordinator queues it exactly once', { skip }, async () => {
+  const { nightlyDue } = await import('../src/nightly.js');
+  const at = (h: number, m: number) => {
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d;
+  };
+  const today = at(12, 0).toLocaleDateString('en-CA');
+  assert.equal(nightlyDue('02:00', null, at(1, 59)), false, 'not before the time');
+  assert.equal(nightlyDue('02:00', null, at(2, 0)), true);
+  assert.equal(nightlyDue('02:00', today, at(3, 0)), false, 'already queued today');
+  assert.equal(nightlyDue(undefined, null, at(3, 0)), false, 'off unless configured');
+  const f = fixture();
+  f.cfg.tests.nightly_at = '00:00';
+  const queued: string[] = [];
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, nightly: () => (queued.push('x'), [{ id: `job-${queued.length}` }]) });
+  for (let i = 0; i < 3; i++) await c.tick();
+  assert.equal(queued.length, 1);
+  assert.deepEqual((f.log.read(0, ['nightly.queued'])[0]!.payload as { jobs: string[] }).jobs, ['job-1']);
+});

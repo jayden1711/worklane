@@ -51,7 +51,8 @@ export const EventSchemas = {
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
-  'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'conflict', 'red', 'rejected', 'error']), landed: sha.nullable(), detail: z.string() }),
+  'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),
+  'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
   'deploy.requested': z.strictObject({ env: z.string(), sha }),
   'deploy.verified': z.strictObject({ env: z.string(), sha }),
   'deploy.failed': z.strictObject({ env: z.string(), sha, why: z.string() }),
@@ -61,6 +62,7 @@ export const EventSchemas = {
   'secret.detected': z.strictObject({ source: z.string(), findings: z.number().int().nonnegative() }),
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
+  'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),

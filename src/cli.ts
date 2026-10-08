@@ -18,8 +18,8 @@ import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { slotStatus } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
-import { createWorktree } from './worktrees.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
+import { queueBaselineRun } from './nightly.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { openUrl } from './os/index.js';
@@ -268,26 +268,8 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       if (rest.includes('--queue')) {
-        const branch = cfg.project.project.default_branch;
-        execFileSync('git', ['fetch', '-q', 'origin', branch], { cwd: root });
-        const sha = execFileSync('git', ['rev-parse', `origin/${branch}`], { cwd: root, encoding: 'utf8' }).trim();
-        const state = projectStateDir(root);
-        const name = `baseline-${sha.slice(0, 8)}`;
-        const wt = { repo: root, root: cfg.tests.worktree.root, stateDir: state, setup: cfg.tests.worktree.setup };
-        const { path, setupErrors } = createWorktree(wt, name, `${BRAND.cli}/${name}`, sha);
-        if (setupErrors.length) {
-          console.error(`worktree setup failed: ${setupErrors.join('; ')}`);
-          return 1;
-        }
-        const job = queueJob({
-          stateDir: state,
-          cwd: path,
-          command: cfg.tests.runner.full,
-          idleProbe: cfg.tests.idle_probe,
-          cliPath: fileURLToPath(import.meta.url),
-          after: { baseline: { eventsDb: logPath(root), sha, section: fmt.section, item: fmt.item, actor: instanceId() }, cleanup: { repo: root, root: cfg.tests.worktree.root, stateDir: state, name } },
-        });
-        console.log(`queued baseline run ${job.id} on ${branch} at ${sha.slice(0, 8)}\n  in ${path}\n  log ${job.log}\n  starts when no other full run is live; records the baseline when it finishes`);
+        const job = queueBaselineRun(root, cfg, logPath(root), instanceId(), cfg.project.governor.max_load);
+        console.log(`queued baseline run ${job.id} on ${cfg.project.project.default_branch}\n  in ${job.cwd}\n  log ${job.log}\n  starts when no other full run is live and load allows; records the baseline when it finishes`);
         return 0;
       }
       const file = option(rest, '--log');
