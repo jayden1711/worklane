@@ -3,7 +3,7 @@
 // step is decided from events plus GitHub, so a restart picks up where the
 // log says it was. Agents only ever propose: they commit on their own
 // branch in their own worktree; everything outward-facing happens here.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -14,11 +14,11 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv } from './os/index.js';
+import { childEnv, killTree, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
-import { scanPath } from './scan/secrets.js';
+import { scanRange } from './scan/secrets.js';
 import { tryAgentSlot } from './slots.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
@@ -42,10 +42,33 @@ export interface CoordinatorDeps {
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
 
-function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS) {
-  const r = spawnSync(command, { cwd, shell: true, encoding: 'utf8', env: childEnv(), timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 });
-  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  return { code: r.error ? null : r.status, tail: out.trim().split('\n').slice(-20).join('\n'), out };
+/**
+ * Run a project command without blocking the event loop: with several agents
+ * in flight, a blocking test run would starve their output streams and trip
+ * their stall timers. Output is capped; the tail is kept for reports.
+ */
+function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<{ code: number | null; tail: string; out: string }> {
+  return new Promise((resolveRun) => {
+    const child = spawn(command, { cwd, shell: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+    let out = '';
+    const take = (d: Buffer) => {
+      out += d.toString();
+      if (out.length > 32_000_000) out = out.slice(-16_000_000);
+    };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child.pid, () => child.kill('SIGKILL'));
+    }, timeoutMs);
+    const finish = (code: number | null) => {
+      clearTimeout(timer);
+      resolveRun({ code: timedOut ? null : code, tail: out.trim().split('\n').slice(-20).join('\n'), out });
+    };
+    child.on('error', () => finish(null));
+    child.on('close', (code) => finish(code));
+  });
 }
 
 export class Coordinator {
@@ -246,13 +269,13 @@ export class Coordinator {
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt);
         if (out.stop) return;
         const head = this.git(path, 'rev-parse', 'HEAD');
-        const change = this.inspect(n, path, base, head, repro);
+        const change = await this.inspect(n, path, base, head, repro);
         if ('rejected' in change) {
           this.emit('change.rejected', { issue: n, why: change.rejected });
           feedback = [`Your previous attempt was rejected: ${change.rejected}`];
           continue;
         }
-        const checks = this.verify(n, path, head, doneWhen, repro);
+        const checks = await this.verify(n, path, head, doneWhen, repro);
         if (checks.some((c) => c.status !== 'pass')) {
           feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
           continue;
@@ -363,7 +386,7 @@ export class Coordinator {
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;
       if (!one) return unavailable('tests.yaml runner.one is not set');
-      const onBase = sh(one.replaceAll('{file}', s.test_path), path);
+      const onBase = await sh(one.replaceAll('{file}', s.test_path), path);
       if (onBase.code === 0) return unavailable(`the test passes on the unfixed code, so it doesn't reproduce the issue`);
       // Freeze it: commit the test into the worker's branch; its hash is checked later.
       mkdirSync(dirname(join(workerPath, s.test_path)), { recursive: true });
@@ -426,7 +449,7 @@ export class Coordinator {
   }
 
   /** Mechanical checks on what the worker produced, before anyone trusts it. */
-  private inspect(n: number, path: string, base: string, head: string, repro: { path: string; hash: string } | null) {
+  private async inspect(n: number, path: string, base: string, head: string, repro: { path: string; hash: string } | null) {
     if (repro?.path) {
       let blob = '';
       try {
@@ -443,8 +466,8 @@ export class Coordinator {
     const protectedRes = this.d.cfg.guardrails.protected_paths.map((g) => globToRegExp(g));
     const prot = names.filter((f) => protectedRes.some((re) => re.test(f)));
     if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
-    const scan = scanPath(path);
-    if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the worktree` };
+    const scan = await scanRange(path, `${base}..${head}`);
+    if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };
     if (scan.status === 'unavailable') return { rejected: `secret scan could not run (${scan.error}); not accepting an unscanned change` };
     const numstat = this.git(path, 'diff', '--numstat', `${base}..${head}`).split('\n').filter(Boolean);
     const files: ChangeFile[] = numstat.map((l) => {
@@ -475,29 +498,29 @@ export class Coordinator {
   }
 
   /** The coordinator's own run of the contract: it never trusts the agent's word or its Stop gate alone. */
-  private verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
+  private async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
     const checks: { check: string; status: 'pass' | 'fail' | 'unavailable'; exitCode: number | null; tail: string }[] = [];
-    const run = (command: string) => {
-      const r = sh(command, path);
+    const run = async (command: string) => {
+      const r = await sh(command, path);
       const busy = this.d.cfg.tests.stop_gate.busy_patterns.some((p) => new RegExp(p, 'm').test(r.out));
       checks.push({ check: command, status: busy || r.code === null ? 'unavailable' : r.code === 0 ? 'pass' : 'fail', exitCode: r.code, tail: r.tail });
     };
     const one = this.d.cfg.tests.runner.one;
     for (const d of doneWhen) {
-      if ('command' in d) run(d.command);
+      if ('command' in d) await run(d.command);
       else if ('suite' in d) {
         const cmd = d.suite === 'full' ? this.d.cfg.tests.runner.full : this.d.cfg.tests.runner.changed;
-        const r = sh(cmd, path);
+        const r = await sh(cmd, path);
         const v = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
         checks.push({ check: `${cmd} (baseline gate)`, status: v.outcome === 'pass' ? 'pass' : r.code === null ? 'unavailable' : 'fail', exitCode: r.code, tail: v.outcome === 'fail' ? `${v.note}${v.newFailures.length ? `: ${v.newFailures.join(', ')}` : ''}\n${r.tail}` : v.note });
       }
       else if ('test' in d) {
-        if (one) run(one.replaceAll('{file}', d.test));
+        if (one) await run(one.replaceAll('{file}', d.test));
         else checks.push({ check: `test ${d.test}`, status: 'unavailable', exitCode: null, tail: 'tests.yaml runner.one not set' });
       }
     }
-    if (repro?.path && one) run(one.replaceAll('{file}', repro.path));
-    for (const c of this.d.cfg.tests.checks) run(c);
+    if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
+    for (const c of this.d.cfg.tests.checks) await run(c);
     this.emit('check.result', { issue: n, head, stage: 'verify', checks: checks.map(({ tail: _t, ...c }) => c) });
     return checks;
   }
@@ -679,7 +702,7 @@ export class Coordinator {
           return this.block(n, claimed.owner, `conflicts with ${this.branch}; needs a rebase`);
         }
         for (const step of this.d.cfg.tests.land.pre) {
-          const r = sh(step, path);
+          const r = await sh(step, path);
           if (r.code !== 0) return result('error', null, `pre-land step failed: ${step}\n${r.tail}`);
         }
         if (this.git(path, 'status', '--porcelain')) {
@@ -687,14 +710,14 @@ export class Coordinator {
           this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Pre-land steps for #${n}`);
         }
         // Main may be red; a change may not add red. No new failures vs main's recorded baseline.
-        const tests = sh(this.d.cfg.tests.runner.changed, path);
+        const tests = await sh(this.d.cfg.tests.runner.changed, path);
         const gate = baselineGate(tests.code, tests.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
         if (gate.outcome === 'fail') {
           result('red', null, `${gate.note}${gate.newFailures.length ? `: ${gate.newFailures.join(', ')}` : ''}\n${tests.tail}`);
           return this.block(n, claimed.owner, `tests after rebasing onto ${this.branch}: ${gate.note}`);
         }
         this.emit('check.result', { issue: n, head: tip, stage: 'land', checks: [{ check: `${this.d.cfg.tests.runner.changed} (baseline gate: ${gate.note})`, status: 'pass', exitCode: tests.code }] });
-        const scan = scanPath(path);
+        const scan = await scanRange(path, `${tip}..HEAD`);
         if (scan.status !== 'clean') return result('rejected', null, `secret scan ${scan.status} at landing`);
         const head = this.git(path, 'rev-parse', 'HEAD');
         // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
@@ -737,13 +760,13 @@ export class Coordinator {
   /** Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. */
   async deploy(env: string, trigger: string, verify: string, sha: string, polls = 60, pollMs = 15_000): Promise<boolean> {
     this.emit('deploy.requested', { env, sha });
-    const t = sh(trigger, this.d.repo);
+    const t = await sh(trigger, this.d.repo);
     if (t.code !== 0) {
       this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}` });
       return false;
     }
     for (let i = 0; i < polls; i++) {
-      const v = sh(verify, this.d.repo, 120_000);
+      const v = await sh(verify, this.d.repo, 120_000);
       if (v.code === 0 && v.out.includes(sha)) {
         this.emit('deploy.verified', { env, sha });
         return true;
