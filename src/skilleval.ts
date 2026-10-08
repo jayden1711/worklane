@@ -35,11 +35,11 @@ export function parseCases(md: string): EvalCase[] {
 const JUDGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['correct', 'wrong', 'notes'],
+  required: ['notes', 'correct', 'wrong'],
   properties: {
+    notes: { type: 'string', description: 'Reason through each item FIRST, then fill in the booleans to match your reasoning.' },
     correct: { type: 'array', items: { type: 'boolean' }, description: 'For each CORRECT item in order: does the plan substantially do it?' },
-    wrong: { type: 'array', items: { type: 'boolean' }, description: 'For each WRONG item in order: does the plan do it, or leave it open as an option?' },
-    notes: { type: 'string' },
+    wrong: { type: 'array', items: { type: 'boolean' }, description: 'For each WRONG item in order: would the plan do it in this situation?' },
   },
 };
 
@@ -47,6 +47,8 @@ export interface CaseResult {
   id: string;
   title: string;
   pass: boolean;
+  /** Samples that passed, e.g. "2/3". A case passes on a strict majority. */
+  samples: string;
   correct: string;
   wrongDone: string[];
   notes: string;
@@ -74,24 +76,38 @@ function claude(prompt: string, model: string, schema?: object): { text: string;
 
 export const CORRECT_THRESHOLD = 0.8;
 
-export function runSkillEval(skillDir: string, opts: { model: string; judge: string; only?: string[] }): EvalResults {
+export function runSkillEval(skillDir: string, opts: { model: string; judge: string; only?: string[]; samples?: number }): EvalResults {
+  const k = opts.samples ?? 3;
   const skill = readFileSync(join(skillDir, 'SKILL.md'), 'utf8');
   const cases = parseCases(readFileSync(join(skillDir, 'evals', 'cases.md'), 'utf8')).filter((c) => !opts.only?.length || opts.only.includes(c.id));
   const results: CaseResult[] = [];
   for (const c of cases) {
+    const runs = Array.from({ length: k }, () => sampleCase(skill, c, opts.model, opts.judge));
+    const passed = runs.filter((r) => r.pass);
+    const best = passed[0] ?? runs[0]!;
+    results.push({ ...best, pass: passed.length * 2 > k, samples: `${passed.length}/${k}` });
+  }
+  return finish(skillDir, skill, opts, results);
+}
+
+function sampleCase(skill: string, c: EvalCase, model: string, judge: string): Omit<CaseResult, 'samples'> {
+  {
     const plan = claude(
       `You are an agent working under this skill:\n\n<skill>\n${skill}\n</skill>\n\nSituation:\n${c.situation}\n\nYou cannot run anything right now. Write, in order, exactly what you would do (commands, queries, files to read) and what you would report or decide. Be concrete.`,
-      opts.model,
+      model,
     ).text;
     const verdict = claude(
       `Grade an agent's plan against an eval case. Judge actions and claims, not wording. A WRONG item counts as done if the plan would do it in the situation as described, including offering it as an acceptable option. Doing something only under different conditions the case doesn't describe (e.g. "only once the machine is quiet") is not the wrong action.\n\nSituation:\n${c.situation}\n\nCORRECT (in order):\n${c.correct.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nWRONG (in order):\n${c.wrong.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n<plan>\n${plan}\n</plan>`,
-      opts.judge,
+      judge,
       JUDGE_SCHEMA,
     ).structured as { correct: boolean[]; wrong: boolean[]; notes: string };
     const hits = verdict.correct.filter(Boolean).length;
     const wrongDone = c.wrong.filter((_, i) => verdict.wrong[i]);
-    results.push({ id: c.id, title: c.title, pass: !wrongDone.length && hits >= Math.ceil(c.correct.length * CORRECT_THRESHOLD), correct: `${hits}/${c.correct.length}`, wrongDone, notes: verdict.notes.slice(0, 600) });
+    return { id: c.id, title: c.title, pass: !wrongDone.length && hits >= Math.ceil(c.correct.length * CORRECT_THRESHOLD), correct: `${hits}/${c.correct.length}`, wrongDone, notes: verdict.notes.slice(0, 600) };
   }
+}
+
+function finish(skillDir: string, skill: string, opts: { model: string; judge: string; only?: string[] }, results: CaseResult[]): EvalResults {
   const res: EvalResults = {
     skill_sha256: createHash('sha256').update(skill).digest('hex'),
     model: opts.model,

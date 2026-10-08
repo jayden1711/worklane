@@ -45,7 +45,7 @@ usage: ${BRAND.cli} <command> [options]
                                    record main's failing set from a full run's output
   baseline record --queue          queue a full run on the tip of main; records the baseline when done
   baseline show                    main's recorded failing set
-  skill eval <skill-dir> [--model m] [--judge m]
+  skill eval <skill-dir> [--model m] [--judge m] [--samples k]
                                    run a skill's evals (evals/cases.md); writes evals/results.json
   skill status                     each project skill: evaluated, failing, stale or draft
   queue full-run [-- <command>]    queue the full test run; starts by itself when the machine-wide
@@ -230,8 +230,9 @@ async function main(argv: string[]): Promise<number> {
       }
       const model = option(rest, '--model') ?? 'sonnet';
       const judge = option(rest, '--judge') ?? 'sonnet';
-      const r = runSkillEval(resolve(rest[0]), { model, judge });
-      for (const c of r.cases) console.log(`${c.pass ? 'pass' : 'FAIL'}  ${c.id}. ${c.title}  (correct ${c.correct}${c.wrongDone.length ? `; WRONG: ${c.wrongDone.join(' | ')}` : ''})`);
+      const samples = Number(option(rest, '--samples') ?? 3);
+      const r = runSkillEval(resolve(rest[0]), { model, judge, samples });
+      for (const c of r.cases) console.log(`${c.pass ? 'pass' : 'FAIL'}  ${c.id}. ${c.title}  (${c.samples} samples passed${c.pass ? '' : `; e.g. correct ${c.correct}${c.wrongDone.length ? `, WRONG: ${c.wrongDone.join(' | ')}` : ''}`})`);
       console.log(`${r.passed}/${r.total} passed (model ${model}, judge ${judge})`);
       return r.passed === r.total ? 0 : 1;
     }
