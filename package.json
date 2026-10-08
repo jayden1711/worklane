@@ -16,6 +16,7 @@
   },
   "files": [
     "dist/src",
+    "dist/web",
     "templates",
     "LICENSE",
     "NOTICE",
@@ -24,15 +25,27 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "node scripts/prepare.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json",
     "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
     "rename": "node scripts/rename.mjs",
     "check:dco": "node scripts/check-dco.mjs",
-    "check:denylist": "node scripts/check-denylist.mjs"
+    "check:denylist": "node scripts/check-denylist.mjs",
+    "build:web": "vite build --config web/vite.config.ts --logLevel warn && node scripts/web-licenses.mjs"
   },
   "devDependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@tailwindcss/vite": "4.3.3",
     "@types/node": "^22.10.0",
-    "typescript": "^5.6.3"
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "cmdk": "1.1.1",
+    "lucide-react": "1.47.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "8.3.0"
   },
   "dependencies": {
     "yaml": "^2.9.1",

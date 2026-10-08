@@ -38,6 +38,9 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run typecheck
       - run: npm test
+      - name: build the dashboard UI
+        if: runner.os == 'Linux'
+        run: npm run build:web
 
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.

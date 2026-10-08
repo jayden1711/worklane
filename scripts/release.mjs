@@ -13,10 +13,11 @@ const pkg = JSON.parse(git('show', 'HEAD:package.json'));
 if (pkg.version !== version) throw new Error(`package.json is ${pkg.version}, not ${version}`);
 const head = git('rev-parse', 'HEAD');
 execFileSync('npm', ['run', 'build'], { stdio: 'inherit' });
+execFileSync('npm', ['run', 'build:web'], { stdio: 'inherit' });
 execFileSync('npm', ['test'], { stdio: 'inherit' });
 git('checkout', '-q', '--detach');
 try {
-  git('add', '-f', 'dist/src');
+  git('add', '-f', 'dist/src', 'dist/web');
   git('commit', '-q', '-s', '-m', `Release v${version} (with built dist/)`);
   git('tag', '-a', `v${version}`, '-m', `v${version}`);
   console.log(`tagged v${version} at ${git('rev-parse', 'HEAD')} (on top of ${head.slice(0, 7)})`);
@@ -24,5 +25,6 @@ try {
   git('checkout', '-q', '-');
   // Leaving the release commit deletes its tracked dist/ from the working tree.
   execFileSync('npm', ['run', 'build'], { stdio: 'ignore' });
+  execFileSync('npm', ['run', 'build:web'], { stdio: 'ignore' });
 }
 console.log(`push with: git push origin v${version}`);
