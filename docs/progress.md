@@ -35,3 +35,18 @@ One short note per step: what shipped, how it was verified, what's still unprove
 - **Also fixed:** secret scans cover exactly the change's commits, not the worktree (which includes dependencies).
 - **Verified:** tests for three concurrent workers landing, the cross-harness cap, governor holds on load and disk, one-commit batches, split-to-culprit, overlap separation, deferral on a held full-run slot, and the nightly schedule.
 - **Unproven until the NUC:** real parallel Claude runs at the target cap; batch sizes against a project whose full suite takes hours (a split costs another gate run).
+
+## Step 5: reports, scorecard, trust stages, learning loop (2026-10-08)
+
+- **Scorecard:** computed from the event log over a window, never stored. Evaluator pass rate, unverified-claim rate (a worker said done, then inspection or checks disagreed), reverts, new reds caught and baseline growth, cost per finished task, ready-to-done time, interventions per task, **idle hours** (ready work waiting with nothing running; ticks now record active and ready counts) and **hours blocked on the owner** (decisions waiting, tasks blocked).
+- **Reports:** at each `reports.times` slot the coordinator posts one comment to a single report issue, mentioning `reports.to` (or the default owner). The comment lists what landed (and whether it is verified on staging), what's in review, decisions waiting with owner and wait time, what's blocked and why, spend, governor holds, and the scorecard with changes since the last report. `worklane report` prints the current one. The dashboard Reports page comes in step 6.
+- **Trust stages:** once a day the window is scored. After `promote_after_days` healthy days the owner is asked to promote to the next stage defined in review.yaml; only an approval promotes. A quality regression (pass rate, unverified claims, reverts, baseline growth) demotes one stage on its own; too little work is not a regression. A stage relaxes only the categories it lists. Money-path, migration, auth, secrets, deploy, release, harness and guardrail config can never be relaxed: config validation rejects it, and the level computation ignores it even if asked.
+- **Learning loop:** once a day, new lessons go to `<config dir>/lessons/<day>.md` on a branch, opened as a PR. They reach main only when the owner merges. Advice that recurs across three or more tasks is listed as a skill candidate; turning one into a skill (with evals) stays a human step.
+- **Also fixed:**
+  - Each tick step is guarded on its own, so a GitHub error in reconcile no longer stops landing.
+  - Coordinator tests now use fixed machine readings; CI macOS runners' low disk had held dispatch.
+  - A task blocked before any claim now reaches its owner's inbox.
+  - release.mjs returns to the starting commit when run detached.
+  - Each fix has a regression test.
+- **Released:** v0.3.0 (steps 3 and 4), from a clean worktree after CI was green on all six OS x Node jobs.
+- **Unproven until the NUC:** promotion and demotion thresholds against real work (defaults: 10 tasks in 7 days, pass rate 0.8, unverified claims 0.1, zero reverts); report posting with real GitHub permissions; lessons PRs opened by the coordinator's token.
