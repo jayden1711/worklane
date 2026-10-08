@@ -8,11 +8,14 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { acquireLock } from './locks.js';
 import { childEnv, killTree, spawnDetached } from './os/index.js';
+import { baselineGate, type Baseline, type FailureFormat } from './baseline.js';
 
 export const DoneWhen = z.array(
   z.union([
     z.strictObject({ command: z.string().min(1), timeout_s: z.number().int().positive().optional() }),
     z.strictObject({ test: z.string().min(1), timeout_s: z.number().int().positive().optional() }),
+    // The project's own suite, judged by the baseline gate: no new failures vs main.
+    z.strictObject({ suite: z.enum(['changed', 'full']), timeout_s: z.number().int().positive().optional() }),
     z.strictObject({ manual: z.string().min(1) }),
     z.strictObject({ repro: z.boolean() }),
   ]),
@@ -56,12 +59,17 @@ export interface GateOptions {
   busyPatterns: string[];
   /** Template for running one test file, with {file}. */
   testCommand?: string | undefined;
+  /** For `suite` checks: the project's commands, failure format and main's baseline. */
+  suites?: { changed: string; full: string } | undefined;
+  failures?: FailureFormat | undefined;
+  baseline?: Baseline | null | undefined;
 }
 
-function runCheck(command: string, cwd: string, timeoutMs: number, busy: RegExp[]): Promise<CheckRun> {
+function runCheck(command: string, cwd: string, timeoutMs: number, busy: RegExp[], judge?: (code: number | null, out: string) => { pass: boolean; detail: string }): Promise<CheckRun> {
   const started = Date.now();
   return new Promise((resolveRun) => {
     let out = '';
+    let full = '';
     let settled = false;
     const done = (r: Omit<CheckRun, 'check' | 'durationMs'>) => {
       if (settled) return;
@@ -76,6 +84,7 @@ function runCheck(command: string, cwd: string, timeoutMs: number, busy: RegExp[
     }, timeoutMs);
     const collect = (b: Buffer) => {
       out += b.toString();
+      if (judge && full.length < 16_000_000) full += b.toString();
       if (out.length > 64_000) out = out.slice(-32_000);
     };
     child.stdout.on('data', collect);
@@ -84,7 +93,10 @@ function runCheck(command: string, cwd: string, timeoutMs: number, busy: RegExp[
     child.on('close', (code) => {
       const tail = out.trim().split('\n').slice(-15).join('\n');
       if (busy.some((re) => re.test(out))) done({ status: 'unavailable', exitCode: code, detail: `runner reported busy:\n${tail}` });
-      else if (code === 0) done({ status: 'pass', exitCode: 0, detail: '' });
+      else if (judge) {
+        const j = judge(code, full);
+        done({ status: j.pass ? 'pass' : 'fail', exitCode: code, detail: j.pass ? j.detail : `${j.detail}\n${tail}` });
+      } else if (code === 0) done({ status: 'pass', exitCode: 0, detail: '' });
       else done({ status: 'fail', exitCode: code, detail: tail });
     });
   });
@@ -136,6 +148,25 @@ async function evaluateGate(opts: GateOptions): Promise<GateResult> {
       }
       if ('repro' in item) continue; // the evaluator owns reproduction tests
       let command: string;
+      if ('suite' in item) {
+        if (!opts.suites) {
+          checks.push({ check: `suite ${item.suite}`, status: 'unavailable', exitCode: null, durationMs: 0, detail: 'no suite commands configured' });
+          continue;
+        }
+        const cmd = opts.suites[item.suite];
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          checks.push({ check: cmd, status: 'unavailable', exitCode: null, durationMs: 0, detail: 'gate time budget exhausted before this check ran' });
+          continue;
+        }
+        checks.push(
+          await runCheck(cmd, opts.cwd, Math.min(remainingMs, (item.timeout_s ?? opts.timeoutS) * 1000), busy, (code, out) => {
+            const v = baselineGate(code, out, opts.failures, opts.baseline ?? null);
+            return { pass: v.outcome === 'pass', detail: v.outcome === 'fail' && v.newFailures.length ? `${v.note}: ${v.newFailures.join(', ')}` : v.note };
+          }),
+        );
+        continue;
+      }
       if ('test' in item) {
         if (!opts.testCommand) {
           checks.push({ check: `test ${item.test}`, status: 'unavailable', exitCode: null, durationMs: 0, detail: 'no tests.yaml runner.one command to run a single test' });

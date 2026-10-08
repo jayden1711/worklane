@@ -17,6 +17,7 @@ import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { CliRunner } from './runner.js';
+import { latestBaseline } from './baseline.js';
 
 export const instanceId = () => `${userInfo().username}@${hostname().split('.')[0]}`;
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
@@ -86,11 +87,16 @@ export function status(root: string): string {
     const slots = slotStatus();
     const started = ev.filter((e) => e.type === 'coordinator.started').at(-1);
     const lastTick = ev.filter((e) => e.type === 'coordinator.tick').at(-1);
+    const base = latestBaseline(log);
+    const baseLine = base
+      ? `main baseline: ${base.failing.length} failing at ${base.sha.slice(0, 8)} (recorded ${base.recordedAt})${base.failing.length ? `: ${base.failing.slice(0, 8).join(', ')}${base.failing.length > 8 ? ', ...' : ''}` : ''}`
+      : `main baseline: none recorded (landing blocks on any red until \`${BRAND.cli} baseline record\`)`;
     return [
       `${BRAND.name}: ${cfg.project.project.name} (${cfg.project.project.repo}), land mode ${cfg.project.land_mode}`,
       `coordinator: ${started ? `started ${started.ts} by ${started.actor}` : 'never started'}; last tick ${lastTick?.ts ?? 'never'}`,
       `agents running on this machine: ${slots.agents.length} of ${slots.cap}`,
       `spend today: $${spent.toFixed(2)} of $${cfg.agents.daily_budget_usd}`,
+      baseLine,
       `in progress: ${open.length ? open.map(([n, t]) => `#${n} (${t})`).join(', ') : 'none'}`,
       `decisions waiting: ${decisions.length ? decisions.map((d) => `${(d.payload as { id: string }).id} for @${(d.payload as { owner: string }).owner}: ${(d.payload as { question: string }).question}`).join('; ') : 'none'}`,
     ].join('\n');

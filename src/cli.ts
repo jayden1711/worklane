@@ -17,6 +17,8 @@ import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { slotStatus } from './slots.js';
+import { latestBaseline, recordBaseline } from './baseline.js';
+import { createWorktree } from './worktrees.js';
 import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -38,6 +40,10 @@ usage: ${BRAND.cli} <command> [options]
   vacuity [files...]               flag tests that assert nothing or touch no app code
                                    (default: test files changed vs the default branch)
   scan transcripts [dir]           secret-scan Claude Code transcripts for this project
+  baseline record --log <file> --sha <sha>
+                                   record main's failing set from a full run's output
+  baseline record --queue          queue a full run on the tip of main; records the baseline when done
+  baseline show                    main's recorded failing set
   queue full-run [-- <command>]    queue the full test run; starts by itself when the machine-wide
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
@@ -206,6 +212,66 @@ async function main(argv: string[]): Promise<number> {
       const job = queueJob({ stateDir: projectStateDir(root), cwd: process.cwd(), command, idleProbe: cfg.tests.idle_probe, cliPath: fileURLToPath(import.meta.url) });
       console.log(`queued ${job.id}: ${command}\n  in ${job.cwd}\n  runner pid ${job.runnerPid} (detached; survives this session)\n  log ${job.log}\n  status: ${BRAND.cli} jobs`);
       return 0;
+    }
+
+    case 'baseline': {
+      const cfg = loadConfig(root);
+      const fmt = cfg.tests.failures;
+      if (sub === 'show') {
+        const log = new EventLog(logPath(root));
+        try {
+          const b = latestBaseline(log);
+          console.log(b ? `main baseline at ${b.sha} (recorded ${b.recordedAt}): ${b.failing.length} failing\n${b.failing.map((f) => `  - ${f}`).join('\n')}` : 'no baseline recorded');
+        } finally {
+          log.close();
+        }
+        return 0;
+      }
+      if (sub !== 'record') {
+        console.error('usage: baseline record --log <file> --sha <sha> | baseline record --queue | baseline show');
+        return 2;
+      }
+      if (!fmt) {
+        console.error('tests.yaml needs a failures: { section, item } format to record a baseline');
+        return 2;
+      }
+      if (rest.includes('--queue')) {
+        const branch = cfg.project.project.default_branch;
+        execFileSync('git', ['fetch', '-q', 'origin', branch], { cwd: root });
+        const sha = execFileSync('git', ['rev-parse', `origin/${branch}`], { cwd: root, encoding: 'utf8' }).trim();
+        const state = projectStateDir(root);
+        const name = `baseline-${sha.slice(0, 8)}`;
+        const wt = { repo: root, root: cfg.tests.worktree.root, stateDir: state, setup: cfg.tests.worktree.setup };
+        const { path, setupErrors } = createWorktree(wt, name, `${BRAND.cli}/${name}`, sha);
+        if (setupErrors.length) {
+          console.error(`worktree setup failed: ${setupErrors.join('; ')}`);
+          return 1;
+        }
+        const job = queueJob({
+          stateDir: state,
+          cwd: path,
+          command: cfg.tests.runner.full,
+          idleProbe: cfg.tests.idle_probe,
+          cliPath: fileURLToPath(import.meta.url),
+          after: { baseline: { eventsDb: logPath(root), sha, section: fmt.section, item: fmt.item, actor: instanceId() }, cleanup: { repo: root, root: cfg.tests.worktree.root, stateDir: state, name } },
+        });
+        console.log(`queued baseline run ${job.id} on ${branch} at ${sha.slice(0, 8)}\n  in ${path}\n  log ${job.log}\n  starts when no other full run is live; records the baseline when it finishes`);
+        return 0;
+      }
+      const file = option(rest, '--log');
+      const sha = option(rest, '--sha');
+      if (!file || !sha) {
+        console.error('usage: baseline record --log <file> --sha <sha>');
+        return 2;
+      }
+      const log = new EventLog(logPath(root));
+      try {
+        const r = recordBaseline(log, instanceId(), sha, rest.includes('--passed') ? 0 : 1, readFileSync(file, 'utf8'), fmt);
+        console.log(r.ok ? `recorded: ${r.failing.length} failing at ${sha.slice(0, 8)}` : `NOT recorded: ${r.why}`);
+        return r.ok ? 0 : 1;
+      } finally {
+        log.close();
+      }
     }
 
     case '_run-job': {

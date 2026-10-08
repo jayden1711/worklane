@@ -20,6 +20,7 @@ import { issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } f
 import type { AgentRunner, RunResult } from './runner.js';
 import { scanPath } from './scan/secrets.js';
 import { tryAgentSlot } from './slots.js';
+import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
 
@@ -425,6 +426,12 @@ export class Coordinator {
     const one = this.d.cfg.tests.runner.one;
     for (const d of doneWhen) {
       if ('command' in d) run(d.command);
+      else if ('suite' in d) {
+        const cmd = d.suite === 'full' ? this.d.cfg.tests.runner.full : this.d.cfg.tests.runner.changed;
+        const r = sh(cmd, path);
+        const v = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
+        checks.push({ check: `${cmd} (baseline gate)`, status: v.outcome === 'pass' ? 'pass' : r.code === null ? 'unavailable' : 'fail', exitCode: r.code, tail: v.outcome === 'fail' ? `${v.note}${v.newFailures.length ? `: ${v.newFailures.join(', ')}` : ''}\n${r.tail}` : v.note });
+      }
       else if ('test' in d) {
         if (one) run(one.replaceAll('{file}', d.test));
         else checks.push({ check: `test ${d.test}`, status: 'unavailable', exitCode: null, tail: 'tests.yaml runner.one not set' });
@@ -607,11 +614,14 @@ export class Coordinator {
           this.git(path, 'add', '-A');
           this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Pre-land steps for #${n}`);
         }
+        // Main may be red; a change may not add red. No new failures vs main's recorded baseline.
         const tests = sh(this.d.cfg.tests.runner.changed, path);
-        if (tests.code !== 0) {
-          result('red', null, `tests failed on the rebased change:\n${tests.tail}`);
-          return this.block(n, claimed.owner, `tests fail after rebasing onto ${this.branch}`);
+        const gate = baselineGate(tests.code, tests.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
+        if (gate.outcome === 'fail') {
+          result('red', null, `${gate.note}${gate.newFailures.length ? `: ${gate.newFailures.join(', ')}` : ''}\n${tests.tail}`);
+          return this.block(n, claimed.owner, `tests after rebasing onto ${this.branch}: ${gate.note}`);
         }
+        this.emit('check.result', { issue: n, head: tip, stage: 'land', checks: [{ check: `${this.d.cfg.tests.runner.changed} (baseline gate: ${gate.note})`, status: 'pass', exitCode: tests.code }] });
         const scan = scanPath(path);
         if (scan.status !== 'clean') return result('rejected', null, `secret scan ${scan.status} at landing`);
         const head = this.git(path, 'rev-parse', 'HEAD');

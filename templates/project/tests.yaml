@@ -20,6 +20,8 @@ worktree:
   est_size_gb: 1
 land:
   pre: []
+# How the runner lists failures; enables the baseline gate (no NEW failures vs main).
+# failures: { section: '^✖ failing tests:', item: '^✖ (.+?) \(\d' }   # node --test spec reporter
 # idle_probe: "..."        # exits 0 when no full test run is live on this machine; queued full runs wait for it
 checks: []                  # project lints for the PR gate, e.g. node .worklane/checks/my-lint.mjs
 tiers: []

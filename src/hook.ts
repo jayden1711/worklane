@@ -9,6 +9,7 @@ import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
 import { runStopGate, TaskFile } from './stopgate.js';
+import { readBaseline } from './baseline.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
 import { splitCommands } from './guardrails/shell.js';
 
@@ -140,6 +141,9 @@ async function stop(input: HookInput, env: NodeJS.ProcessEnv): Promise<HookOutpu
     lockWaitS: cfg.tests.stop_gate.lock_wait_s,
     busyPatterns: cfg.tests.stop_gate.busy_patterns,
     testCommand: cfg.tests.runner.one,
+    suites: { changed: cfg.tests.runner.changed, full: cfg.tests.runner.full },
+    failures: cfg.tests.failures,
+    baseline: readBaseline(join(projectStateDir(root), 'events.db')),
   });
   return r.outcome === 'block' ? block(r.reason) : { exitCode: 0 };
 }

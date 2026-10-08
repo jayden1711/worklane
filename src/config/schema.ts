@@ -208,6 +208,8 @@ export const TestsConfig = z.strictObject({
     })
     .prefault({}),
   land: z.strictObject({ pre: z.array(z.string()).default([]) }).prefault({}),
+  /** How the runner lists failures, for the baseline gate ("no new failures vs main"). */
+  failures: z.strictObject({ section: regex, item: regex }).optional(),
   /** Exits 0 when no full test run is live on this machine (any harness or session). Queued full runs wait for it. */
   idle_probe: z.string().optional(),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */

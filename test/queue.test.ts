@@ -68,9 +68,10 @@ test('a queued full run waits while another run is live, then starts by itself',
   process.env.AGENT_SLOTS_DIR = join(base, 'slots');
   try {
     const job = queueJob({ stateDir, cwd: base, cliPath: engineCli, idleProbe: `test ! -e ${JSON.stringify(busy)}`, command: 'echo done > ran' });
-    await new Promise((r) => setTimeout(r, 1500));
+    // Wait until the runner reports it's blocked by the probe (no fixed sleeps: CI machines are slow).
+    assert.ok(await until(() => /idle probe/.test(readJob(stateDir, job.id).waitingFor ?? ''), 60_000), 'runner reports waiting on the probe');
+    await new Promise((r) => setTimeout(r, 500));
     assert.equal(existsSync(join(base, 'ran')), false, 'did not start while another run was live');
-    assert.match(readJob(stateDir, job.id).waitingFor ?? '', /idle probe|full-run lock/);
     const { unlinkSync } = await import('node:fs');
     unlinkSync(busy);
     assert.ok(await until(() => readJob(stateDir, job.id).status === 'passed', 60_000), readJob(stateDir, job.id).status);

@@ -10,19 +10,21 @@ import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
-import { which } from '../src/os/index.js';
+import { childEnv, which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /** A "GitHub" remote, the coordinator's clone of the example project, a file backlog and a log. */
-function fixture() {
+function fixture(opts: { redMain?: boolean } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'coord-'));
   const remote = join(base, 'remote.git');
   const seed = join(base, 'seed');
   cpSync(join(repoRoot, 'examples', 'basic'), seed, { recursive: true });
   writeFileSync(join(seed, '.gitignore'), '.claude/worktrees/\n');
+  // A main that is already red, the common real-world case.
+  if (opts.redMain) writeFileSync(join(seed, 'test', 'known-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('legacy flake', () => { assert.equal(1, 2); });\n");
   git(base, 'init', '-q', '--bare', '-b', 'main', remote);
   git(seed, 'init', '-q', '-b', 'main');
   git(seed, '-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', 'add', '-A');
@@ -220,4 +222,62 @@ test('after a restart mid-task, the task is requeued rather than left stuck', { 
   await c2.tick();
   assert.equal((await f.backlog.get(n)).state, 'closed');
   assert.ok(!existsSync(join(f.repo, '.claude', 'worktrees', 'worklane-issue-1')));
+});
+
+test('main is red: a fix lands when its only failures were already on main (baseline gate)', { skip }, async () => {
+  const f = fixture({ redMain: true });
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG.replace('- test: test/price.test.js', '- suite: changed'), author: 'example-owner', labels: ['ready'] });
+  // Record main's baseline from a real run of the red main.
+  const { recordBaseline } = await import('../src/baseline.js');
+  const { spawnSync } = await import('node:child_process');
+  const run = spawnSync('node', ['--test'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
+  const main = git(f.repo, 'rev-parse', 'HEAD');
+  assert.deepEqual(recordBaseline(f.log, 'test', main, run.status, run.stdout + run.stderr, f.cfg.tests.failures), { ok: true, failing: ['legacy flake'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const landed = f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string };
+  assert.equal(landed.outcome, 'landed');
+  const gateNotes = f.log.read(0, ['check.result']).flatMap((e) => (e.payload as { checks: { check: string }[] }).checks.map((x) => x.check)).join('\n');
+  assert.match(gateNotes, /no new failures; 1 already failing on main/);
+  assert.equal((await f.backlog.get(n)).state, 'closed');
+});
+
+test('main is red: a change that adds a new failure does not land', { skip }, async () => {
+  const f = fixture({ redMain: true });
+  f.backlog.open({ title: 'Refactor totals', body: 'Refactor.\n\n```done_when\n- test: test/price.test.js\n```\n', author: 'example-owner', labels: ['ready'] });
+  const { recordBaseline } = await import('../src/baseline.js');
+  const { spawnSync } = await import('node:child_process');
+  const run = spawnSync('node', ['--test'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
+  recordBaseline(f.log, 'test', git(f.repo, 'rev-parse', 'HEAD'), run.status, run.stdout + run.stderr, f.cfg.tests.failures);
+  const runner = agents({
+    worker: (req) => {
+      writeFileSync(join(req.cwd, 'test', 'new-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('brand new failure', () => { assert.equal('a', 'b'); });\n");
+      const p = join(req.cwd, 'src', 'price.js');
+      writeFileSync(p, readFileSync(p, 'utf8') + '\n// refactored\n');
+      commitAll(req.cwd, 'refactor');
+      return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const r = f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string; detail: string };
+  assert.equal(r.outcome, 'red');
+  assert.match(r.detail, /1 new failure\(s\) not in main's baseline.*brand new failure/s);
+  assert.equal(git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], git(f.repo, 'rev-parse', 'origin/main'), 'main did not move');
+});
+
+test('main is red and no baseline is recorded: nothing lands', { skip }, async () => {
+  const f = fixture({ redMain: true });
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const r = f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string; detail: string };
+  assert.equal(r.outcome, 'red');
+  assert.match(r.detail, /no baseline recorded/);
 });

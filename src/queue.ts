@@ -9,6 +9,9 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { childEnv, pidAlive } from './os/index.js';
 import { fullRunLock } from './slots.js';
+import { EventLog } from './events/log.js';
+import { recordBaseline } from './baseline.js';
+import { removeWorktree } from './worktrees.js';
 
 export interface Job {
   id: string;
@@ -25,6 +28,12 @@ export interface Job {
   waitingFor?: string;
   log: string;
   error?: string;
+  /** After the command: record main's baseline from its output, then remove the worktree it ran in. */
+  after?: {
+    baseline?: { eventsDb: string; sha: string; section: string; item: string; actor: string };
+    cleanup?: { repo: string; root: string; stateDir: string; name: string };
+  };
+  result?: string;
 }
 
 const jobsDir = (stateDir: string) => join(stateDir, 'jobs');
@@ -54,10 +63,10 @@ export function listJobs(stateDir: string): Job[] {
 }
 
 /** Queue a job and start its detached runner. Returns immediately. */
-export function queueJob(opts: { stateDir: string; cwd: string; command: string; idleProbe?: string | undefined; cliPath: string }): Job {
+export function queueJob(opts: { stateDir: string; cwd: string; command: string; idleProbe?: string | undefined; cliPath: string; after?: Job['after'] }): Job {
   mkdirSync(jobsDir(opts.stateDir), { recursive: true });
   const id = `${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}-${randomBytes(3).toString('hex')}`;
-  const job: Job = { id, kind: 'full-run', cwd: opts.cwd, command: opts.command, idleProbe: opts.idleProbe, createdAt: new Date().toISOString(), status: 'queued', log: join(jobsDir(opts.stateDir), `${id}.log`) };
+  const job: Job = { id, kind: 'full-run', cwd: opts.cwd, command: opts.command, idleProbe: opts.idleProbe, createdAt: new Date().toISOString(), status: 'queued', log: join(jobsDir(opts.stateDir), `${id}.log`), ...(opts.after ? { after: opts.after } : {}) };
   writeJob(opts.stateDir, job);
   const out = openSync(job.log, 'a');
   const child = spawn(process.execPath, [opts.cliPath, '_run-job', opts.stateDir, id], { detached: true, stdio: ['ignore', out, out], env: childEnv() });
@@ -102,6 +111,24 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
       const code = await sh(job.command, job.cwd, fd);
       closeSync(fd);
       update({ status: code === 0 ? 'passed' : code === null ? 'error' : 'failed', exitCode: code, finishedAt: new Date().toISOString() });
+      if (job.after?.baseline) {
+        const b = job.after.baseline;
+        const log = new EventLog(b.eventsDb);
+        try {
+          const r = recordBaseline(log, b.actor, b.sha, code, readFileSync(job.log, 'utf8'), { section: b.section, item: b.item });
+          // A red baseline run is the expected case: the job succeeded if the baseline was recorded.
+          update(r.ok ? { status: 'passed', result: `baseline recorded at ${b.sha.slice(0, 8)}: ${r.failing.length} failing` } : { status: 'error', result: `baseline NOT recorded: ${r.why}` });
+        } finally {
+          log.close();
+        }
+      }
+      if (job.after?.cleanup) {
+        try {
+          removeWorktree({ ...job.after.cleanup, setup: [] }, job.after.cleanup.name);
+        } catch (e) {
+          update({ error: `worktree cleanup: ${(e as Error).message}` });
+        }
+      }
       return job;
     } finally {
       got.lock.release();
