@@ -368,6 +368,19 @@ How each level is cleared:
 
 ## 12. Guardrails (step 1)
 
+**Two modes**, chosen by `WORKLANE_AGENT=1`, which the coordinator sets on every headless run:
+
+| | Agent mode (headless runs) | Human mode (anyone's interactive session) |
+|---|---|---|
+| Production DB, live-wallet signing | blocked | blocked |
+| Production variable sets and deploys | ask | ask |
+| Harness-file edits, secret files, domain allowlist | blocked | not applied |
+| Commit secret scan | every `git commit` (PreToolUse) | opt-in git pre-commit hook (`install --git-hooks`) |
+| Stop gate | runs `done_when` | none (recorded) |
+| Engine not installed | every hook blocks | one-line warning at session start; nothing blocks |
+
+Hooks are POSIX shell commands. Claude Code runs them with `sh` on macOS and Linux and with Git Bash on Windows, so human mode works on Windows without WSL. CI runs the hook tests on all three.
+
 Enforcement is layered, so no single layer is trusted:
 1. Credentials that make the action impossible
 2. PreToolUse hook
@@ -383,6 +396,12 @@ Enforcement is layered, so no single layer is trusted:
   - The coordinator fetches the production connection string read-only at startup, through a project-configured command, and stores only the hash.
 - **Architecture first.** Agents never receive a prod DB credential: the environment is scrubbed and there's no `.env` in worktrees.
   - Production reads that must stay allowed go through a dedicated **read-only database role**: SELECT only, a connection limit and a statement timeout. The project owner creates it.
+  - **One sanctioned read path:** `prod-read "<SQL>"`. It runs a fixed client **inside** a production service, where the database's private host resolves, over the platform CLI's ssh. The client:
+    - connects only with the read-only role's URL, stored on that service by the owner
+    - wraps the query in a `READ ONLY` transaction
+    - refuses multi-statement SQL
+
+    SQL and client travel base64-encoded, so nothing can be injected into the remote shell. Production credentials never reach the agent's machine, and the database stays off the public internet. Every other production shell stays blocked.
   - Until the role exists, agents get no production DB access at all.
 - **Hook rules**, in `guardrails.yaml`, with detection by fingerprint and environment rather than file name:
   - Deploy-platform commands that open a shell or run a process in production. The environment is resolved from an explicit flag, otherwise from the CLI's linked environment. **An environment that can't be resolved counts as production.**

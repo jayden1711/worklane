@@ -27,6 +27,11 @@ npx worklane doctor    # verifies the install
 npx worklane up        # starts the coordinator and dashboard
 ```
 
+## Secret scanning
+
+- **CI and agent sessions:** gitleaks scans every commit (agents can't commit unscanned) and every session transcript.
+- **Humans:** opt in with `npx worklane install --git-hooks`, which adds a gitleaks pre-commit hook for every worktree of the repo. Without it, human commits are still scanned in CI.
+
 ## Using it responsibly
 
 Worklane runs the Claude Code CLI you already have, with your own login or API key, on your own machine and repositories. It has no sign-in flow and never touches credentials. You're responsible for using it within your Anthropic plan's terms; see [docs/auth.md](docs/auth.md).
