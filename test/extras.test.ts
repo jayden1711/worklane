@@ -180,7 +180,7 @@ test('monitor: on schedule, a failing check opens an incident with a diagnosis; 
   f.enable('monitor', { every_minutes: 30 });
   const flag = join(f.dir, 'healthy');
   writeFileSync(flag, '');
-  f.cfg.deploy = { version: 1, environments: [{ name: 'staging', verify: `test -f ${flag}`, production: false }] };
+  f.cfg.deploy = { version: 1, environments: [{ name: 'staging', verify: `test -f '${flag.replaceAll('\\', '/')}'`, production: false }] };
   f.log.append('deploy.verified', { env: 'staging', sha: 'a'.repeat(40) }, 'c');
   await runExtras(f.ctx, f.pr);
   assert.equal((await f.backlog.list('incident')).length, 0);
