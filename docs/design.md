@@ -215,7 +215,7 @@ roles:
   - A per-harness `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `strictMcpConfig`.
   - An explicit `permissionMode`, never left to default to auto.
   - `maxBudgetUsd` per run and `maxTurns`.
-  - Pre-approved safe commands come from config, so agents don't stall on prompts.
+  - Pre-approved safe commands come from config, so agents don't stall on prompts. They are passed as `--allowedTools` on every run. Verified 2026-10-07: a headless session in an untrusted directory (every new worktree) ignores `permissions.allow` from project settings, while hooks still run.
   - The full model ID, `total_cost_usd` and `modelUsage` are recorded as `run.cost`.
 - **Environment scrubbing.** Agent processes get an allowlisted environment.
   - Removed: `GH_TOKEN`, `GITHUB_TOKEN` and any `*_TOKEN` or `*_KEY` not on the allowlist.
