@@ -1,0 +1,132 @@
+// GitHub Issues backlog over REST. Only the coordinator holds the token;
+// agents never see it. Errors are classified (a 403 isn't "missing
+// permission" unless it is).
+import { execFileSync } from 'node:child_process';
+import { classifyGitHubError } from '../github/errors.js';
+export class GitHubError extends Error {
+    status;
+    kind;
+    retryAfter;
+    constructor(status, kind, message, retryAfter) {
+        super(`GitHub ${status} ${kind}: ${message}`);
+        this.status = status;
+        this.kind = kind;
+        this.retryAfter = retryAfter;
+    }
+}
+export function ghToken() {
+    return execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim();
+}
+export class GitHubBacklog {
+    repo;
+    token;
+    fetchImpl;
+    api;
+    constructor(repo, token = ghToken, fetchImpl = fetch, api = 'https://api.github.com') {
+        this.repo = repo;
+        this.token = token;
+        this.fetchImpl = fetchImpl;
+        this.api = api;
+    }
+    async req(method, path, body) {
+        const res = await this.fetchImpl(`${this.api}${path}`, {
+            method,
+            headers: {
+                authorization: `Bearer ${this.token()}`,
+                accept: 'application/vnd.github+json',
+                'x-github-api-version': '2022-11-28',
+                ...(body ? { 'content-type': 'application/json' } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        if (res.status === 204)
+            return undefined;
+        const text = await res.text();
+        const json = text ? JSON.parse(text) : undefined;
+        if (!res.ok) {
+            const c = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), json);
+            throw new GitHubError(res.status, c.kind, c.message, c.retryAfter);
+        }
+        return json;
+    }
+    toIssue(i) {
+        return {
+            number: i.number,
+            title: i.title,
+            body: i.body ?? '',
+            labels: i.labels.map((l) => (typeof l === 'string' ? l : l.name)),
+            author: i.user?.login ?? '',
+            assignees: (i.assignees ?? []).map((a) => a.login),
+            state: i.state === 'closed' ? 'closed' : 'open',
+        };
+    }
+    async list(label) {
+        const out = [];
+        for (let page = 1; page < 20; page++) {
+            const batch = await this.req('GET', `/repos/${this.repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`);
+            out.push(...batch.filter((i) => !i.pull_request).map((i) => this.toIssue(i)));
+            if (batch.length < 100)
+                break;
+        }
+        return out;
+    }
+    async get(n) {
+        return this.toIssue(await this.req('GET', `/repos/${this.repo}/issues/${n}`));
+    }
+    async labelAdders(n, label) {
+        const events = await this.req('GET', `/repos/${this.repo}/issues/${n}/events?per_page=100`);
+        return events.filter((e) => e.event === 'labeled' && e.label?.name === label && e.actor).map((e) => e.actor.login);
+    }
+    async addLabels(n, labels) {
+        await this.req('POST', `/repos/${this.repo}/issues/${n}/labels`, { labels });
+    }
+    async removeLabel(n, label) {
+        try {
+            await this.req('DELETE', `/repos/${this.repo}/issues/${n}/labels/${encodeURIComponent(label)}`);
+        }
+        catch (e) {
+            if (!(e instanceof GitHubError && e.kind === 'not_found'))
+                throw e;
+        }
+    }
+    async setAssignees(n, logins) {
+        await this.req('POST', `/repos/${this.repo}/issues/${n}/assignees`, { assignees: logins });
+    }
+    async comment(n, body) {
+        await this.req('POST', `/repos/${this.repo}/issues/${n}/comments`, { body });
+    }
+    async comments(n) {
+        const list = await this.req('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
+        return list.map((c) => ({ author: c.user?.login ?? '', body: c.body ?? '' }));
+    }
+    async close(n) {
+        await this.req('PATCH', `/repos/${this.repo}/issues/${n}`, { state: 'closed', state_reason: 'completed' });
+    }
+    async createIssue(title, body, labels) {
+        return (await this.req('POST', `/repos/${this.repo}/issues`, { title, body, labels })).number;
+    }
+    async openPr(head, base, title, body) {
+        return (await this.req('POST', `/repos/${this.repo}/pulls`, { head, base, title, body })).html_url;
+    }
+    async ciStatus(sha) {
+        const r = await this.req('GET', `/repos/${this.repo}/commits/${sha}/check-runs?per_page=100`);
+        const runs = r.check_runs;
+        if (!runs.length)
+            return { state: 'none', failing: [] };
+        const failing = runs.filter((c) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(c.conclusion ?? '')).map((c) => ({ name: c.name, url: c.html_url }));
+        const state = failing.length ? 'failure' : runs.some((c) => c.status !== 'completed') ? 'pending' : 'success';
+        return { state, failing };
+    }
+    async ensureLabels(labels) {
+        const existing = new Set((await this.req('GET', `/repos/${this.repo}/labels?per_page=100`)).map((l) => l.name));
+        const created = [];
+        for (const l of labels) {
+            if (existing.has(l.name))
+                continue;
+            await this.req('POST', `/repos/${this.repo}/labels`, l);
+            created.push(l.name);
+        }
+        return created;
+    }
+}
+//# sourceMappingURL=github.js.map
