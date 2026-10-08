@@ -65,6 +65,15 @@ test('projection: blocked is explicit and wins over release; a later claim clear
   assert.equal(p.tasks[0]!.blockedReason, null);
 });
 
+test('regression: a task blocked before any claim reaches its owner\'s inbox', () => {
+  const { log } = logWith();
+  log.append('issue.seen', { ...seen(4), owner: null }, 'c');
+  log.append('issue.blocked', { issue: 4, owner: 'example-owner', why: 'investigation needs a decision' }, 'c');
+  const p = project(log.read());
+  assert.equal(p.tasks[0]!.owner, 'example-owner');
+  assert.equal(inbox(p, 'example-owner').blocked.length, 1);
+});
+
 async function server(withWeb = true) {
   const { dir, log, db } = logWith();
   const { dir: root } = exampleProject();

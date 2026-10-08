@@ -176,6 +176,8 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
         t!.author = String(p.author);
         t!.actionable = Boolean(p.actionable);
         t!.why = String(p.why);
+        // The assigned owner, until a claim names the routed one.
+        if (!t!.owner && typeof p.owner === 'string') t!.owner = p.owner;
         if (['triage', 'ready', 'released'].includes(t!.status)) t!.status = p.actionable ? 'ready' : 'triage';
         break;
       case 'contract.agreed':
@@ -260,6 +262,8 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       case 'issue.blocked':
         t!.status = 'blocked';
         t!.blockedReason = String(p.why);
+        // A block can come before any claim (e.g. an investigation); it names who must unblock it.
+        t!.owner = String(p.owner);
         break;
       case 'issue.released':
         if (t!.status === 'landed' || p.why === 'landed') t!.status = 'done';
