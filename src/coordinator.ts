@@ -310,7 +310,8 @@ export class Coordinator {
       cpSync(join(path, s.test_path), join(workerPath, s.test_path));
       this.git(workerPath, 'add', s.test_path);
       this.git(workerPath, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Add reproduction test for #${n} (frozen)`);
-      const hash = createHash('sha256').update(readFileSync(join(workerPath, s.test_path))).digest('hex');
+      // Git's blob id of the committed test: line-ending normalized, and exactly what would land.
+      const hash = this.git(workerPath, 'rev-parse', `HEAD:${s.test_path}`);
       this.emit('repro.frozen', { issue: n, path: s.test_path, hash, fails_on_base: true });
       return { path: s.test_path, hash };
     } finally {
@@ -366,8 +367,14 @@ export class Coordinator {
 
   /** Mechanical checks on what the worker produced, before anyone trusts it. */
   private inspect(n: number, path: string, base: string, head: string, repro: { path: string; hash: string } | null) {
-    if (repro?.path && (!existsSync(join(path, repro.path)) || createHash('sha256').update(readFileSync(join(path, repro.path))).digest('hex') !== repro.hash)) {
-      return { rejected: `modified the frozen reproduction test ${repro.path}` };
+    if (repro?.path) {
+      let blob = '';
+      try {
+        blob = this.git(path, 'rev-parse', `${head}:${repro.path}`);
+      } catch {
+        // deleted
+      }
+      if (blob !== repro.hash) return { rejected: `modified the frozen reproduction test ${repro.path}` };
     }
     if (this.git(path, 'status', '--porcelain')) return { rejected: 'uncommitted changes left in the worktree; commit your work' };
     const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);

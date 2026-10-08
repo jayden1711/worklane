@@ -30,7 +30,7 @@ export const EventSchemas = {
   }),
   'run.cost': z.strictObject({ issue, role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
   // verification
-  'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string(), fails_on_base: z.literal(true) }),
+  'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),
   'change.proposed': z.strictObject({ issue, branch: z.string(), base: sha, head: sha, files: z.array(z.string()), lines: z.number().int().nonnegative(), patch_hash: z.string() }),
   'change.rejected': z.strictObject({ issue, why: z.string() }),
