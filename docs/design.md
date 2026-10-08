@@ -554,6 +554,20 @@ Install adds config only. A project's application code is never changed. Any sma
 
 These ship in step 1 or step 2, whichever step introduces the code they guard. Step 1 ships the Stop gate, check-status and 403 tests.
 
+## 17a. Step 2 as built (2026-10-07)
+
+What exists, and where it deviates from the plan above:
+
+- **Event log:** `node:sqlite`, zod-typed events, append-only enforced by triggers, redaction on write. Backups are verified by read-back. Projections are computed from the log on read; there are no cached projection tables yet.
+- **Claims:** compare-and-swap lease refs (`refs/worklane/claims/issue-<n>`). Verified against GitHub. Lease commits are parentless.
+- **Safe outputs, as built:** agents emit structured JSON (`--json-schema`) and commit on their own branch. The coordinator validates both and performs every outward action. Agents have no GitHub credentials (verified: `git credential fill` returns nothing in the agent environment). The MCP `propose` tool from §7 isn't needed for step 2's actions.
+- **Reproduction tests:** one candidate per issue (K=1). A test that passes on the unfixed code, or an issue the evaluator says can't be reproduced, is recorded as `repro.unavailable`, and the change goes to at least L2 instead of blocking.
+- **Decisions:** answered by `worklane decide <id> <option>`, or by a writer commenting `/worklane <option>` on the issue. The Decisions page arrives in step 3.
+- **Landing:** direct mode is complete. In PR mode the coordinator records `rejected` with a pointer to step 3; opening and merging PRs ships with the dashboard.
+- **Gate at landing:** the project's `changed` test command must exit 0. The "no new failures against the recorded baseline" comparison needs a per-runner failure parser, and arrives with tiered tests in step 4. Until then, a red main blocks landing, so getting main green is the first backlog item.
+- **Runner:** `claude -p` with `--setting-sources project`, `--strict-mcp-config`, `--permission-mode dontAsk`, explicit allowed tools, and per-run turn and USD caps. `claude auth status` is checked before each run. The Agent SDK path (`agent_runtime.kind: sdk`) uses the same CLI with an API key. An in-process SDK runner is deferred.
+- **Live verification:** the example project ran end to end with the real CLI (haiku for every role). Repro, then fix, then the coordinator's checks, then the verdict, then L1, then landed and closed, in under a minute for about $0.01.
+
 ## 18. Build order
 
 | Step | Contents | Ends with |
