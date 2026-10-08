@@ -79,9 +79,15 @@ export function scorecard(events: StoredEvent[], opts: { from: Date; to?: Date; 
   const latest = [...baselines].reverse().find((e) => Date.parse(e.ts) <= to);
   const baselineGrowth = before && latest ? p<{ failing: string[] }>(latest).failing.filter((f) => !p<{ failing: string[] }>(before).failing.includes(f)).length : 0;
 
-  // Done: released after landing. Ready-to-done from the first actionable sighting.
+  // Ready-to-done runs from the first actionable sighting.
+  // Done is landed when there's no deploy target, or verified on an environment when there is.
+  const issueBySha = new Map<string, number>();
+  for (const e of events) if (e.type === 'land.result' && p<{ outcome: string }>(e).outcome === 'landed') issueBySha.set(p<{ landed: string }>(e).landed, p<{ issue: number }>(e).issue);
   const doneAt = new Map<number, number>();
-  for (const e of win) if (e.type === 'issue.released' && p<{ why: string }>(e).why === 'landed') doneAt.set(p<{ issue: number }>(e).issue, Date.parse(e.ts));
+  for (const e of win) {
+    const n = e.type === 'issue.released' && p<{ why: string }>(e).why === 'landed' ? p<{ issue: number }>(e).issue : e.type === 'deploy.verified' ? issueBySha.get(p<{ sha: string }>(e).sha) : undefined;
+    if (n !== undefined && !doneAt.has(n)) doneAt.set(n, Date.parse(e.ts));
+  }
   const firstReady = new Map<number, number>();
   for (const e of events) if (e.type === 'issue.seen' && p<{ actionable: boolean }>(e).actionable && !firstReady.has(p<{ issue: number }>(e).issue)) firstReady.set(p<{ issue: number }>(e).issue, Date.parse(e.ts));
   const leadTimes = [...doneAt].filter(([n]) => firstReady.has(n)).map(([n, t]) => (t - firstReady.get(n)!) / H);

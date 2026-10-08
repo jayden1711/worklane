@@ -53,6 +53,20 @@ test('scorecard: idle hours (ready work waiting, nothing running) and hours bloc
   assert.equal(c.blockedHours, 2);
 });
 
+test('regression: with a deploy target, a task is done when an environment verifies its landed commit', () => {
+  const sha = 'e'.repeat(40);
+  const events = [
+    ev(0, 'issue.seen', { issue: 7, title: 't', labels: [], author: 'a', owner: null, actionable: true, why: '' }),
+    ev(1, 'land.result', { issue: 7, outcome: 'landed', landed: sha, detail: '' }),
+    ev(1.5, 'deploy.verified', { env: 'staging', sha }),
+    ev(2, 'deploy.verified', { env: 'production', sha }),
+    ev(3, 'issue.released', { issue: 7, instance: 'i', why: 'issue closed on GitHub' }),
+  ];
+  const c = scorecard(events, { from: new Date(T0), to: new Date(T0 + 24 * 3_600_000) });
+  assert.equal(c.tasksDone, 1);
+  assert.equal(c.readyToDoneHours, 1.5, 'done at the first verification');
+});
+
 const trust = { window_days: 7, promote_after_days: 3, min_tasks: 2, min_evaluator_pass_rate: 0.8, max_unverified_claim_rate: 0.1, max_reverts: 0, max_baseline_growth: 0 };
 
 test('health: healthy with enough good work; a breach is a regression, too little work is not', () => {
