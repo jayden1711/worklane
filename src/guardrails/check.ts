@@ -23,7 +23,7 @@ function describe(e: Example): string {
 
 function toCall(e: Example, root: string): ToolCall {
   if ('bash' in e) return { tool: 'Bash', input: { command: e.bash }, cwd: e.cwd ? resolve(root, e.cwd) : root };
-  if ('tool' in e) return { tool: e.tool, input: { file_path: resolve(root, e.path) }, cwd: root };
+  if ('tool' in e) return { tool: e.tool, input: { file_path: e.path.startsWith('~/') ? e.path : resolve(root, e.path) }, cwd: root };
   return { tool: 'WebFetch', input: { url: e.fetch }, cwd: root };
 }
 
@@ -38,6 +38,7 @@ export function exampleContext(cfg: GuardrailsConfig, root: string, agent: boole
     projectRoot: root,
     agent,
     env: {},
+    home: '/home/example',
     fingerprints: sets,
     linkedEnvironment(_resolver, cwd) {
       for (const [dir, env] of Object.entries(links)) if (resolve(root, dir) === resolve(cwd)) return env;

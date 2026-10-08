@@ -43,3 +43,16 @@ export function scanPath(path: string, binary = which('gitleaks')): ScanResult {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+/** Scan what a `git commit` is about to record: staged changes, plus unstaged ones for `commit -a`. */
+export function scanCommit(cwd: string, includeUnstaged: boolean, binary = which('gitleaks')): ScanResult {
+  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  const findings: Finding[] = [];
+  for (const args of includeUnstaged ? [['--staged'], []] : [['--staged']]) {
+    const r = spawnSync(binary, ['git', '--pre-commit', ...args, '--redact', '--no-banner', '--exit-code', String(LEAKS_EXIT), '.'], { cwd, encoding: 'utf8', timeout: 120_000 });
+    if (r.error) return { status: 'unavailable', error: r.error.message };
+    if (r.status === LEAKS_EXIT) findings.push({ rule: 'see gitleaks output', file: '(staged changes)', line: 0 });
+    else if (r.status !== 0) return { status: 'unavailable', error: `gitleaks exited ${r.status}` };
+  }
+  return findings.length ? { status: 'leaks', findings } : { status: 'clean' };
+}

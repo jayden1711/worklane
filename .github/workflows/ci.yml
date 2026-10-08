@@ -21,16 +21,21 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - name: install gitleaks (linux; scanner tests skip elsewhere and say so)
-        if: runner.os == 'Linux'
+      - name: install gitleaks
+        shell: bash
         env:
           GITLEAKS_VERSION: 8.30.1
-          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
-          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
-          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
-          sudo tar -xzf "$tarball" -C /usr/local/bin gitleaks
+          case "$RUNNER_OS" in
+            Linux)   f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz";   sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+            macOS)   f="gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz"; sum=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 ;;
+            Windows) f="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip";     sum=d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "${sum}  ${f}" | sha256sum -c -
+          case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run typecheck
       - run: npm test
 

@@ -137,7 +137,7 @@ export const Rule = z.strictObject({
 
 export const Example = z.union([
   z.strictObject({ bash: z.string().min(1), agent: z.boolean().default(true), cwd: z.string().optional() }),
-  z.strictObject({ tool: z.enum(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read']), path: z.string().min(1), agent: z.boolean().default(true) }),
+  z.strictObject({ tool: z.enum(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read', 'Grep']), path: z.string().min(1), agent: z.boolean().default(true) }),
   z.strictObject({ fetch: z.string().url(), agent: z.boolean().default(true) }),
 ]);
 
@@ -155,8 +155,10 @@ export const GuardrailsConfig = z.strictObject({
     )
     .default({}),
   protected_paths: z.array(z.string()).default([]),
-  /** Credential files no Claude session may read (written as Read(...) deny rules). */
+  /** Files agents may not read or write (hook-enforced, agent mode only). */
   secret_paths: z.array(z.string()).default([]),
+  /** Tool credential stores no Claude session reads, agent or human (written as Read(...) deny rules). */
+  credential_stores: z.array(z.string()).default([]),
   network: z.strictObject({ allow: z.array(z.string()).default([]) }).prefault({}),
   pre_approved: z.array(z.string()).default([]),
   examples: z
@@ -206,6 +208,8 @@ export const TestsConfig = z.strictObject({
     })
     .prefault({}),
   land: z.strictObject({ pre: z.array(z.string()).default([]) }).prefault({}),
+  /** Exits 0 when no full test run is live on this machine (any harness or session). Queued full runs wait for it. */
+  idle_probe: z.string().optional(),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
   checks: z.array(z.string()).default([]),
   tiers: z
@@ -241,6 +245,17 @@ export const ReviewConfig = z.strictObject({
 
 export const DeployConfig = z.strictObject({
   version: z.literal(1),
+  /** The one sanctioned production read path (see prodread.ts). Absent = no production reads. */
+  prod_read: z
+    .strictObject({
+      via: z.literal('railway-ssh'),
+      service: z.string().min(1),
+      environment: z.string().min(1),
+      url_var: z.string().regex(/^[A-Z_][A-Z0-9_]*$/),
+      max_rows: z.number().int().positive().max(10_000).default(500),
+      timeout_s: z.number().int().positive().max(120).default(15),
+    })
+    .optional(),
   environments: z.array(
     z.strictObject({
       name: z.string().min(1),

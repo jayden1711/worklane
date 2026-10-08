@@ -104,3 +104,14 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
   delete env.NODE_TEST_CONTEXT;
   return env;
 }
+
+/**
+ * Machine-wide slot directory shared by every agent harness on the box (not
+ * just this one), so the name is deliberately unbranded. Override with
+ * AGENT_SLOTS_DIR. See docs/slots.md.
+ */
+export function slotsDir(): string {
+  if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
+  if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
+  return '/var/tmp/agent-slots';
+}

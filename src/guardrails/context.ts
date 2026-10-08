@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { GuardrailsConfig } from '../config/schema.js';
-import { stateDir } from '../os/index.js';
+import { homeDir, stateDir } from '../os/index.js';
 import { railwayLinkedEnvironment } from '../adapters/railway.js';
 import type { EvalContext } from './engine.js';
 import { findConnections, fingerprint } from './fingerprint.js';
@@ -74,6 +74,7 @@ export function liveContext(projectRoot: string, env: NodeJS.ProcessEnv = proces
     projectRoot,
     agent: env[`${BRAND.envPrefix}_AGENT`] === '1',
     env,
+    home: homeDir(),
     fingerprints: sets,
     linkedEnvironment(resolver, cwd) {
       return resolver === 'railway' ? railwayLinkedEnvironment(cwd) : null;

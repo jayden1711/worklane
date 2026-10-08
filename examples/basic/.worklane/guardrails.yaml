@@ -53,23 +53,33 @@ fingerprints:
     command: "node scripts/print-prod-env.mjs"
     key: DATABASE_URL
 
-# Agents may not write these; humans are asked.
+# Agents may not write these (agent sessions only).
 protected_paths:
   - .worklane/**
   - .claude/settings.json
   - .claude/settings.local.json
   - node_modules/@worklane/**
 
-# Credential files no Claude session may read (agents or humans). The CLIs
-# themselves still read their own config; only Claude's tools are denied.
+# Agents never read or write these (hook-enforced; agent sessions only).
+# A leading "!" excludes.
 secret_paths:
   - ./.env
   - ./.env.*
+  - "!./.env.example"
   - ~/.ssh/**
   - ~/.aws/**
   - ~/.config/gh/**
   - ~/.railway/**
   - ~/.npmrc
+  - ~/.claude/.credentials.json
+
+# Tool credential stores no Claude session reads, agent or human
+# (written into .claude/settings.json as Read(...) deny rules).
+credential_stores:
+  - ~/.ssh/**
+  - ~/.aws/**
+  - ~/.config/gh/**
+  - ~/.railway/**
   - ~/.claude/.credentials.json
 
 network:
@@ -88,6 +98,9 @@ examples:
   linked_environments:
     ".": production
   must_block:
+    - { tool: Read, path: .env }
+    - bash: "cat ~/.railway/config.json"
+    - fetch: "https://unlisted.example/docs"
     - bash: "cast send 0xabc 'transfer(address,uint256)' 0xdef 1 --rpc-url https://mainnet.example"
     - bash: "psql postgres://app:PROD-SECRET@db.internal:5432/app -c 'delete from users'"
     - bash: "curl -A 'Mozilla/5.0' https://example.com"
@@ -95,9 +108,13 @@ examples:
     - bash: "railway run --environment production node scripts/backfill.js"
     - bash: "railway ssh"
   must_ask:
-    - { tool: Edit, path: .worklane/guardrails.yaml, agent: false }
     - bash: "railway variables --environment production --set FEATURE_X=1"
   must_allow:
+    - { tool: Edit, path: .worklane/guardrails.yaml, agent: false }
+    - { tool: Read, path: .env, agent: false }
+    - { tool: Edit, path: .env.example }
+    - fetch: "https://unlisted.example/docs"
+      agent: false
     - bash: "npm test"
     - bash: "cast send 0xabc 'f()' --rpc-url http://127.0.0.1:8545"
     - bash: "psql postgres://app:STAGING-SECRET@db.internal:5432/app -c 'select 1'"

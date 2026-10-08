@@ -7,3 +7,12 @@ environments: []
 # - name: production
 #   verify: "..."
 #   production: true
+
+# The one sanctioned production read path (`worklane prod-read "<SQL>"`): a
+# fixed read-only client runs inside a production service using a read-only
+# role's URL stored on that service. Omit to keep production reads off.
+# prod_read:
+#   via: railway-ssh
+#   service: web
+#   environment: production
+#   url_var: WORKLANE_READONLY_DATABASE_URL

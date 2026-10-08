@@ -85,13 +85,30 @@ test('setting production variables asks; staging is frictionless', () => {
   assert.equal(bash('railway variables --environment staging --set A=1'), 'none');
 });
 
-test('protected harness files: agents denied, humans asked, including shell redirects', () => {
+test('protected harness files: agents denied (including shell redirects); humans unaffected', () => {
   const edit = (path: string, agent: boolean) => evaluate({ tool: 'Edit', input: { file_path: `/p/${path}` }, cwd: '/p' }, cfg, ctx(agent)).decision;
   assert.equal(edit('.worklane/guardrails.yaml', true), 'deny');
-  assert.equal(edit('.worklane/guardrails.yaml', false), 'ask');
+  assert.equal(edit('.worklane/guardrails.yaml', false), 'none');
   assert.equal(edit('src/payments/ledger.js', true), 'none', 'money-path code stays editable');
   assert.equal(bash('echo x > .claude/settings.json'), 'deny');
   assert.equal(bash('echo x | tee .worklane/a.yaml'), 'deny');
+  assert.equal(bash('echo x > .claude/settings.json', '/p', false), 'none');
+});
+
+test('secret files: agents may not read them by tool or shell; exclusions apply; humans unaffected', () => {
+  const withSecrets = GuardrailsConfig.parse({ ...cfg, secret_paths: ['./.env', './.env.*', '!./.env.example', '~/.railway/**'] });
+  const c = (agent: boolean) => ({ ...exampleContext(withSecrets, '/p', agent), home: '/home/u' });
+  const read = (path: string, agent = true) => evaluate({ tool: 'Read', input: { file_path: path }, cwd: '/p' }, withSecrets, c(agent)).decision;
+  const sh = (command: string, agent = true) => evaluate({ tool: 'Bash', input: { command }, cwd: '/p' }, withSecrets, c(agent)).decision;
+  assert.equal(read('/p/.env'), 'deny');
+  assert.equal(read('/p/.env.production'), 'deny');
+  assert.equal(read('/p/.env.example'), 'none');
+  assert.equal(read('/home/u/.railway/config.json'), 'deny');
+  assert.equal(sh('cat .env'), 'deny');
+  assert.equal(sh('grep TOKEN ~/.railway/config.json'), 'deny');
+  assert.equal(sh('cat README.md'), 'none');
+  assert.equal(read('/p/.env', false), 'none', 'humans may read their own .env');
+  assert.equal(sh('railway run --environment production node x.js', false), 'deny', 'dangerous-action blocks apply to humans too');
 });
 
 test('agents can only fetch allowlisted domains', () => {

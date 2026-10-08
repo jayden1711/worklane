@@ -18,9 +18,22 @@ export function templatesDir(): string {
   return fileURLToPath(new URL('../../templates/project/', import.meta.url));
 }
 
-/** Hook command. `|| exit 2` makes a missing or crashing engine block, not allow. */
+export const MISSING_ENGINE_WARNING = `${BRAND.name} guardrails are off in this checkout: run npm install to enable them.`;
+
+/**
+ * Hook command (POSIX sh; Claude Code runs hooks through bash on every OS).
+ * A crashing engine always blocks (`|| exit 2`). A missing engine blocks
+ * agent sessions; a human session gets a one-line warning at session start
+ * and is otherwise unaffected.
+ */
 export function hookCommand(enginePath: string, event: string): string {
-  return `${HOOK_MARKER} node "${enginePath}" hook ${event} || exit 2`;
+  const agentVar = `$${BRAND.envPrefix}_AGENT`;
+  const run = `${HOOK_MARKER} node "$E" hook ${event} || exit 2`;
+  const human =
+    event === 'session-start'
+      ? `echo '{"systemMessage": "${MISSING_ENGINE_WARNING}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${MISSING_ENGINE_WARNING} Mention this to the user once."}}'`
+      : ':';
+  return `E="${enginePath}"; if [ -f "$E" ]; then ${run}; elif [ "${agentVar}" = 1 ]; then echo "${BRAND.cli}: engine missing at $E, agent sessions are blocked" >&2; exit 2; else ${human}; fi`;
 }
 
 /** Engine entry as Claude Code should call it: relative to $CLAUDE_PROJECT_DIR when inside the project. */
@@ -42,8 +55,9 @@ export function mergeSettings(existing: Settings, enginePath: string, preApprove
   const s: Settings = structuredClone(existing);
   const hooks = { ...(s.hooks ?? {}) };
   const ours: Record<string, HookEntry> = {
-    PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30 }] },
+    PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30 }] },
     Stop: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'stop'), timeout: stopTimeoutS + 60 }] },
+    SessionStart: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-start'), timeout: 30 }] },
     SessionEnd: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-end'), timeout: 300 }] },
   };
   for (const [event, entry] of Object.entries(ours)) {
@@ -116,7 +130,7 @@ export function install(opts: InstallOptions): InstallReport {
   const engineCli = resolve(opts.engineCli ?? projectLocalEngine(root) ?? fileURLToPath(new URL('./cli.js', import.meta.url)));
   const settingsPath = join(root, '.claude', 'settings.json');
   mkdirSync(dirname(settingsPath), { recursive: true });
-  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.tests.stop_gate.timeout_s, cfg.guardrails.secret_paths);
+  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.tests.stop_gate.timeout_s, cfg.guardrails.credential_stores);
   writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
   const report: InstallReport = { scaffolded, settingsPath, notes };
   if (opts.gitHooks) report.gitHook = installGitHook(root);

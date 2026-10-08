@@ -23,6 +23,8 @@ export interface EvalContext {
   env: Record<string, string | undefined>;
   /** Fingerprint set name -> hashes. A missing set means "unknown", not "empty". */
   fingerprints: Record<string, Set<string> | undefined>;
+  /** Home directory, for "~/" secret paths. */
+  home?: string;
   /** Linked environment for a CLI in a directory, or null if unknown. */
   linkedEnvironment(resolver: string, cwd: string): string | null;
 }
@@ -34,9 +36,33 @@ export interface Verdict {
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'NotebookRead']);
+
+/**
+ * Secret globs: "~/" is the home directory, "./" or a bare path the project
+ * root, "/" absolute. A leading "!" excludes (e.g. "!./.env.example").
+ */
+function matchesSecret(globs: string[], target: string, cwd: string, ctx: EvalContext): boolean {
+  const expanded = target.startsWith('~/') && ctx.home ? resolve(ctx.home, target.slice(2)) : target;
+  const abs = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+  const one = (g: string) => matchesSecretGlob(g, abs, cwd, ctx);
+  return globs.some((g) => !g.startsWith('!') && one(g)) && !globs.some((g) => g.startsWith('!') && one(g.slice(1)));
+}
+
+function matchesSecretGlob(g: string, abs: string, cwd: string, ctx: EvalContext): boolean {
+  {
+    if (g.startsWith('~/')) {
+      if (!ctx.home) return false;
+      const rel = relative(ctx.home, abs).split('\\').join('/');
+      return !rel.startsWith('..') && globToRegExp(g.slice(2)).test(rel);
+    }
+    if (isAbsolute(g)) return globToRegExp(g.slice(1)).test(abs.split('\\').join('/').replace(/^\//, ''));
+    return globToRegExp(g).test(relToRoot(ctx.projectRoot, cwd, abs));
+  }
+}
 
 function filePathOf(call: ToolCall): string | null {
-  const p = call.input.file_path ?? call.input.notebook_path ?? call.input.path;
+  const p = call.input.file_path ?? call.input.notebook_path ?? call.input.path ?? call.input.pattern_path;
   return typeof p === 'string' ? p : null;
 }
 
@@ -122,7 +148,12 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     ask ??= { decision: 'ask', rule: rule.id, reason: rule.reason };
   }
 
-  // Harness files: agents may not write them; humans are asked.
+  // Everything below is agent-only. Human sessions get only the rules above
+  // (the dangerous-action blocks and asks); no harness-edit block, no secret
+  // file block, no domain allowlist.
+  if (!ctx.agent) return ask ?? { decision: 'none' };
+
+  // Harness files: agents may not write them.
   if (cfg.protected_paths.length) {
     const res = cfg.protected_paths.map((g) => globToRegExp(g));
     const targets: string[] = [];
@@ -132,15 +163,21 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     }
     for (const c of commands) targets.push(...c.writes);
     const hit = targets.find((t) => res.some((re) => re.test(relToRoot(ctx.projectRoot, call.cwd, t))));
-    if (hit) {
-      const reason = `${hit} is harness config; change it through a reviewed proposal`;
-      if (ctx.agent) return { decision: 'deny', rule: 'protected-path', reason };
-      ask ??= { decision: 'ask', rule: 'protected-path', reason };
-    }
+    if (hit) return { decision: 'deny', rule: 'protected-path', reason: `${hit} is harness config; change it through a reviewed proposal` };
+  }
+
+  // Secret files: agents may not read or write them, by tool or by shell argument.
+  if (cfg.secret_paths.length) {
+    const candidates: string[] = [];
+    const p = filePathOf(call);
+    if (p && (READ_TOOLS.has(call.tool) || EDIT_TOOLS.has(call.tool))) candidates.push(p);
+    for (const c of commands) candidates.push(...c.argv.slice(1).filter((a) => !a.startsWith('-')), ...c.writes);
+    const hit = candidates.find((t) => matchesSecret(cfg.secret_paths, t, call.cwd, ctx));
+    if (hit) return { decision: 'deny', rule: 'secret-path', reason: `${hit} holds credentials; agents never read them` };
   }
 
   // Network: agents may only fetch allowlisted domains; new ones need approval.
-  if (ctx.agent && call.tool === 'WebFetch' && typeof call.input.url === 'string') {
+  if (call.tool === 'WebFetch' && typeof call.input.url === 'string') {
     let host = '';
     try {
       host = new URL(call.input.url).hostname;

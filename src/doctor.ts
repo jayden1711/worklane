@@ -52,15 +52,15 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean } = {}): D
   else {
     try {
       const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as { hooks?: Record<string, { hooks?: { command: string }[] }[]> };
-      for (const event of ['PreToolUse', 'Stop', 'SessionEnd']) {
+      for (const event of ['PreToolUse', 'Stop', 'SessionStart', 'SessionEnd']) {
         const cmds = (s.hooks?.[event] ?? []).flatMap((e) => e.hooks ?? []).map((h) => h.command).filter((c) => c.includes(HOOK_MARKER));
         if (cmds.length !== 1) {
           add(`hook ${event}`, 'fail', cmds.length ? `${cmds.length} ${BRAND.cli} entries (expected 1)` : 'not installed');
           continue;
         }
         const cmd = cmds[0]!;
-        const path = cmd.match(/node "([^"]+)"/)?.[1]?.replace('$CLAUDE_PROJECT_DIR', root);
-        if (!cmd.endsWith('|| exit 2')) add(`hook ${event}`, 'fail', 'does not fail closed (missing `|| exit 2`)');
+        const path = cmd.match(/E="([^"]+)"/)?.[1]?.replace('$CLAUDE_PROJECT_DIR', root);
+        if (!cmd.includes('|| exit 2') || !/_AGENT" = 1 \]; then [^;]*>&2; exit 2/.test(cmd)) add(`hook ${event}`, 'fail', 'does not fail closed for agents');
         else if (!path || !existsSync(path)) add(`hook ${event}`, 'fail', `engine not found at ${path ?? '(unparsed)'}`);
         else add(`hook ${event}`, 'ok', 'installed, fails closed');
       }
