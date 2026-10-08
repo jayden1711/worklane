@@ -1,0 +1,21 @@
+[package]
+name = "worklane-desktop"
+version = "0.4.0"
+description = "Desktop window for the local Worklane dashboard"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+# Newest v2 release at least two weeks old when added; Cargo.lock pins the rest.
+tauri = { version = "=2.11.6", features = [] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

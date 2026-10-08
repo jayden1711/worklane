@@ -30,7 +30,8 @@
     "rename": "node scripts/rename.mjs",
     "check:dco": "node scripts/check-dco.mjs",
     "check:denylist": "node scripts/check-denylist.mjs",
-    "build:web": "vite build --config web/vite.config.ts --logLevel warn && node scripts/web-licenses.mjs"
+    "build:web": "vite build --config web/vite.config.ts --logLevel warn && node scripts/web-licenses.mjs",
+    "build:desktop": "cargo build --release --locked --manifest-path desktop/Cargo.toml"
   },
   "devDependencies": {
     "@radix-ui/react-dialog": "1.1.23",

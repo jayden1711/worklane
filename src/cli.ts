@@ -23,6 +23,7 @@ import { queueBaselineRun } from './nightly.js';
 import { buildReport } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
+import { desktopBinary, runDesktop } from './desktop.js';
 import { openUrl } from './os/index.js';
 import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
 import { EventLog } from './events/log.js';
@@ -60,7 +61,7 @@ usage: ${BRAND.cli} <command> [options]
   coordinator run [--once]         run the coordinator in the foreground (the service runs this)
   up | down                        install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
-  dashboard [--port n] [--user login] [--no-open]
+  dashboard [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log)
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
@@ -345,6 +346,7 @@ async function main(argv: string[]): Promise<number> {
       const portOpt = option(opts, '--port');
       const userOpt = option(opts, '--user');
       const noOpen = flag(opts, '--no-open');
+      const app = flag(opts, '--app');
       let user = userOpt ?? process.env[`${BRAND.envPrefix}_USER`];
       if (!user) {
         try {
@@ -355,6 +357,16 @@ async function main(argv: string[]): Promise<number> {
       }
       const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: user || cfg.project.owners.default, port: portOpt ? Number(portOpt) : 4317 });
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}, as @${user}\n  ${d.url}\n(local only; Ctrl+C to stop)`);
+      if (app) {
+        const bin = desktopBinary();
+        if (bin) {
+          // The window owns the session: closing it stops the server.
+          const code = await runDesktop(bin, d.url, `${cfg.project.project.name} · ${BRAND.name}`);
+          await d.close();
+          return code === 0 ? 0 : 1;
+        }
+        console.error(`desktop window not built (npm run build:desktop, or set ${BRAND.envPrefix}_DESKTOP); opening the browser instead`);
+      }
       if (!noOpen) openUrl(d.url);
       await new Promise(() => {});
       return 0;
