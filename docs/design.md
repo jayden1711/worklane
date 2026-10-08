@@ -379,7 +379,7 @@ Enforcement is layered, so no single layer is trusted:
 
 **Production database writes.**
 - **Detection can't rely on the host name.** Some platforms give every environment's database the same private host name, so staging and production look identical by host.
-  - Detection uses a **fingerprint of the full connection string**: SHA-256 of host, port, database and user.
+  - Detection uses a **fingerprint of the full connection string**: SHA-256 over protocol, user, password, host, port and database. Platforms often use the same user and database name in every environment, so the password is frequently the only difference. Only the hash is stored.
   - The coordinator fetches the production connection string read-only at startup, through a project-configured command, and stores only the hash.
 - **Architecture first.** Agents never receive a prod DB credential: the environment is scrubbed and there's no `.env` in worktrees.
   - Production reads that must stay allowed go through a dedicated **read-only database role**: SELECT only, a connection limit and a statement timeout. The project owner creates it.
@@ -557,7 +557,7 @@ These ship in step 1 or step 2, whichever step introduces the code they guard. S
    - **Default runner:** the locally installed Claude Code CLI (`claude -p`, stream-json) with whatever auth the user already configured.
    - **Option:** the Agent SDK with `ANTHROPIC_API_KEY`.
    - Both runners sit behind one `AgentRunner` interface.
-   - Anthropic's docs and terms on unattended subscription use are reviewed and cited in [auth.md](auth.md) before step 2.
+  - [auth.md](auth.md) cites Anthropic's docs and terms. The CLI runner checks `claude auth status` before each run and strips API keys from the agent environment, so a subscription is never silently swapped for per-token billing. It uses conservative concurrency and optional run windows.
 5. **Production DB:** agents get no production DB access until the project owner creates a read-only role (§12.1).
 6. **Deploy CLIs:** the hook resolves the linked environment. Project release scripts should target production explicitly, so a checkout can stay linked to staging.
 7. **Code of Conduct contact** is set. Security reports use GitHub private vulnerability reporting.

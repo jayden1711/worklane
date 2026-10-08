@@ -4,7 +4,7 @@
 
 Open-source harness for running a crew of Claude agents on a real codebase: parallel workers, an independent evaluator, a shared GitHub Issues backlog, and a live dashboard showing who owns every task.
 
-> **Status: pre-alpha (step 0 of 7).** Design and scaffolding only; nothing runs yet.
+> **Status: pre-alpha (step 1 of 7).** Config, `install`/`doctor`, guardrail hooks, secret scanning, the vacuity check and the Stop gate work. The coordinator arrives in step 2.
 
 ## What it is
 
@@ -26,6 +26,10 @@ npx worklane install   # scaffolds .worklane/, hooks and settings
 npx worklane doctor    # verifies the install
 npx worklane up        # starts the coordinator and dashboard
 ```
+
+## Using it responsibly
+
+Worklane runs the Claude Code CLI you already have, with your own login or API key, on your own machine and repositories. It has no sign-in flow and never touches credentials. You're responsible for using it within your Anthropic plan's terms; see [docs/auth.md](docs/auth.md).
 
 ## License
 
