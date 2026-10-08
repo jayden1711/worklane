@@ -22,5 +22,7 @@ try {
   console.log(`tagged v${version} at ${git('rev-parse', 'HEAD')} (on top of ${head.slice(0, 7)})`);
 } finally {
   git('checkout', '-q', '-');
+  // Leaving the release commit deletes its tracked dist/ from the working tree.
+  execFileSync('npm', ['run', 'build'], { stdio: 'ignore' });
 }
 console.log(`push with: git push origin v${version}`);
