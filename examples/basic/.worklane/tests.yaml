@@ -2,9 +2,9 @@
 version: 1
 runner:
   kind: command
-  changed: "npm test"       # impact-selected run (e.g. `jest --changedSince=origin/main`)
-  full: "npm test"
-  one: "node --test {file}" # run a single test file
+  changed: "node --test --test-reporter=spec"       # impact-selected run (e.g. `jest --changedSince=origin/main`)
+  full: "node --test --test-reporter=spec"
+  one: "node --test --test-reporter=spec {file}" # run a single test file
 vacuity:
   test_globs: ["test/**/*.test.js"]
   assertion_pattern: '\b(assert|expect)\b'
@@ -20,6 +20,6 @@ worktree:
   est_size_gb: 1
 land:
   pre: []
-failures: { section: '^✖ failing tests:', item: '^✖ (.+?) \(\d' }   # node --test spec reporter
+failures: { section: '^✖ failing tests:', item: '^✖ (.+?) \(\d' }   # pin --test-reporter=spec: without a TTY, Node 22 defaults to TAP
 checks: []                  # project lints for the PR gate, e.g. node .worklane/checks/my-lint.mjs
 tiers: []

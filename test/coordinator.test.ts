@@ -36,7 +36,7 @@ function fixture(opts: { redMain?: boolean } = {}) {
   for (const [k, v] of [['user.email', 'coordinator@example.com'], ['user.name', 'coordinator'], ['commit.gpgsign', 'false']]) git(repo, 'config', k!, v!);
   const cfg = loadConfig(repo);
   cfg.project.land_mode = 'direct';
-  cfg.tests.runner.changed = 'node --test';
+  cfg.tests.runner.changed = 'node --test --test-reporter=spec';
   const backlog = new FileBacklog(join(base, 'backlog.json'), 'coordinator');
   const log = new EventLog(join(base, 'events.db'));
   const slotsDir = join(base, 'slots');
@@ -230,7 +230,7 @@ test('main is red: a fix lands when its only failures were already on main (base
   // Record main's baseline from a real run of the red main.
   const { recordBaseline } = await import('../src/baseline.js');
   const { spawnSync } = await import('node:child_process');
-  const run = spawnSync('node', ['--test'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
+  const run = spawnSync('node', ['--test', '--test-reporter=spec'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
   const main = git(f.repo, 'rev-parse', 'HEAD');
   assert.deepEqual(recordBaseline(f.log, 'test', main, run.status, run.stdout + run.stderr, f.cfg.tests.failures), { ok: true, failing: ['legacy flake'] });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir });
@@ -249,7 +249,7 @@ test('main is red: a change that adds a new failure does not land', { skip }, as
   f.backlog.open({ title: 'Refactor totals', body: 'Refactor.\n\n```done_when\n- test: test/price.test.js\n```\n', author: 'example-owner', labels: ['ready'] });
   const { recordBaseline } = await import('../src/baseline.js');
   const { spawnSync } = await import('node:child_process');
-  const run = spawnSync('node', ['--test'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
+  const run = spawnSync('node', ['--test', '--test-reporter=spec'], { cwd: f.repo, encoding: 'utf8', env: childEnv() });
   recordBaseline(f.log, 'test', git(f.repo, 'rev-parse', 'HEAD'), run.status, run.stdout + run.stderr, f.cfg.tests.failures);
   const runner = agents({
     worker: (req) => {
