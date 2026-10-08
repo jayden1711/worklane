@@ -79,3 +79,18 @@ test('a queued full run waits while another run is live, then starts by itself',
     delete process.env.AGENT_SLOTS_DIR;
   }
 });
+
+test('a queued run waits while the machine is too loaded', { skip: !posix && 'load average is not reported on Windows' }, async () => {
+  const base = mkdtempSync(join(tmpdir(), 'q-'));
+  const stateDir = join(base, 'state');
+  const { queueJob } = await import('../src/queue.js');
+  process.env.AGENT_SLOTS_DIR = join(base, 'slots');
+  try {
+    const job = queueJob({ stateDir, cwd: base, cliPath: engineCli, maxLoad: -1, command: 'echo ran > ran' });
+    assert.ok(await until(() => /machine load .* > -1/.test(readJob(stateDir, job.id).waitingFor ?? ''), 60_000), 'reports waiting on load');
+    assert.equal(existsSync(join(base, 'ran')), false);
+    process.kill(readJob(stateDir, job.id).runnerPid!, 'SIGKILL');
+  } finally {
+    delete process.env.AGENT_SLOTS_DIR;
+  }
+});

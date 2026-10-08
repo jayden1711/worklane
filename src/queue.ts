@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { childEnv, pidAlive } from './os/index.js';
+import { childEnv, machineLoad, pidAlive } from './os/index.js';
 import { fullRunLock } from './slots.js';
 import { EventLog } from './events/log.js';
 import { recordBaseline } from './baseline.js';
@@ -19,6 +19,8 @@ export interface Job {
   cwd: string;
   command: string;
   idleProbe?: string | undefined;
+  /** Wait while sustained machine load (max of 5- and 15-minute averages) is above this. */
+  maxLoad?: number | undefined;
   createdAt: string;
   status: 'queued' | 'waiting' | 'running' | 'passed' | 'failed' | 'error';
   runnerPid?: number;
@@ -63,10 +65,10 @@ export function listJobs(stateDir: string): Job[] {
 }
 
 /** Queue a job and start its detached runner. Returns immediately. */
-export function queueJob(opts: { stateDir: string; cwd: string; command: string; idleProbe?: string | undefined; cliPath: string; after?: Job['after'] }): Job {
+export function queueJob(opts: { stateDir: string; cwd: string; command: string; idleProbe?: string | undefined; maxLoad?: number | undefined; cliPath: string; after?: Job['after'] }): Job {
   mkdirSync(jobsDir(opts.stateDir), { recursive: true });
   const id = `${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}-${randomBytes(3).toString('hex')}`;
-  const job: Job = { id, kind: 'full-run', cwd: opts.cwd, command: opts.command, idleProbe: opts.idleProbe, createdAt: new Date().toISOString(), status: 'queued', log: join(jobsDir(opts.stateDir), `${id}.log`), ...(opts.after ? { after: opts.after } : {}) };
+  const job: Job = { id, kind: 'full-run', cwd: opts.cwd, command: opts.command, idleProbe: opts.idleProbe, maxLoad: opts.maxLoad, createdAt: new Date().toISOString(), status: 'queued', log: join(jobsDir(opts.stateDir), `${id}.log`), ...(opts.after ? { after: opts.after } : {}) };
   writeJob(opts.stateDir, job);
   const out = openSync(job.log, 'a');
   const child = spawn(process.execPath, [opts.cliPath, '_run-job', opts.stateDir, id], { detached: true, stdio: ['ignore', out, out], env: childEnv() });
@@ -97,6 +99,13 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
     const got = await fullRunLock(`${job.kind} job ${id} (pid ${process.pid})`, 24 * 3600_000);
     if (!('lock' in got)) continue;
     try {
+      const load = machineLoad();
+      if (job.maxLoad !== undefined && load !== null && load > job.maxLoad) {
+        update({ waitingFor: `machine load ${load.toFixed(0)} > ${job.maxLoad} (5/15-min average)` });
+        got.lock.release();
+        await new Promise((r) => setTimeout(r, pollMs));
+        continue;
+      }
       if (job.idleProbe) {
         const idle = await sh(job.idleProbe, job.cwd, 'ignore');
         if (idle !== 0) {

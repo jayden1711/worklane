@@ -48,7 +48,8 @@ usage: ${BRAND.cli} <command> [options]
   skill eval <skill-dir> [--model m] [--judge m] [--samples k]
                                    run a skill's evals (evals/cases.md); writes evals/results.json
   skill status                     each project skill: evaluated, failing, stale or draft
-  queue full-run [-- <command>]    queue the full test run; starts by itself when the machine-wide
+  queue full-run [--max-load n] [-- <command>]
+                                   queue the full test run; starts by itself when the machine-wide
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
@@ -213,7 +214,8 @@ async function main(argv: string[]): Promise<number> {
       const cfg = loadConfig(root);
       const dash = rest.indexOf('--');
       const command = dash >= 0 ? rest.slice(dash + 1).join(' ') : cfg.tests.runner.full;
-      const job = queueJob({ stateDir: projectStateDir(root), cwd: process.cwd(), command, idleProbe: cfg.tests.idle_probe, cliPath: fileURLToPath(import.meta.url) });
+      const maxLoadOpt = option(rest, '--max-load');
+      const job = queueJob({ stateDir: projectStateDir(root), cwd: process.cwd(), command, idleProbe: cfg.tests.idle_probe, maxLoad: maxLoadOpt ? Number(maxLoadOpt) : undefined, cliPath: fileURLToPath(import.meta.url) });
       console.log(`queued ${job.id}: ${command}\n  in ${job.cwd}\n  runner pid ${job.runnerPid} (detached; survives this session)\n  log ${job.log}\n  status: ${BRAND.cli} jobs`);
       return 0;
     }

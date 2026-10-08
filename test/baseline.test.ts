@@ -48,3 +48,19 @@ test('recording: a red run records its failing set; an unparsable red run record
   assert.deepEqual(readBaseline(join(dir, 'events.db'))!.failing, [], 'hooks read it read-only');
   assert.equal(readBaseline(join(dir, 'missing.db')), null);
 });
+
+test('regression: suite names with spaces, and a pattern that truncates them, is caught by the count', () => {
+  const run = `\x1b[31m3 suite(s) failed:\x1b[0m\n  - A drop at a 3+ seat table is held\n  - A persistent table on screen (persistent-tables-v1)\n  - Money UI (m13 formatter)\n`;
+  // The first-word pattern collapsed distinct suites ("A", "A") into one: the count no longer matches.
+  const firstWord = { section: 'suite\\(s\\) failed:', item: '^\\s+- (\\S+)' };
+  const whole = { section: 'suite\\(s\\) failed:', item: '^\\s+- (.+?)\\s*$' };
+  const dir = mkdtempSync(join(tmpdir(), 'bl-'));
+  const log = new EventLog(join(dir, 'events.db'));
+  const bad = recordBaseline(log, 'me', 'abc1234def', 1, run, firstWord);
+  assert.equal(bad.ok, false);
+  assert.match(!bad.ok ? bad.why : '', /reported 3 failure\(s\) but 2 distinct name\(s\) parsed/);
+  assert.equal(baselineGate(1, run, firstWord, base).outcome, 'fail', 'the gate never trusts a miscounted list');
+  const good = recordBaseline(log, 'me', 'abc1234def', 1, run, whole);
+  assert.deepEqual(good.ok && good.failing, ['A drop at a 3+ seat table is held', 'A persistent table on screen (persistent-tables-v1)', 'Money UI (m13 formatter)']);
+  log.close();
+});

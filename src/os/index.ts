@@ -2,7 +2,7 @@
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, loadavg } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 
@@ -216,4 +216,15 @@ export function uninstallService(label: string): string {
     return path;
   }
   return '';
+}
+
+/**
+ * Sustained load: the higher of the 5- and 15-minute averages, or null where
+ * the OS doesn't report load (Windows). The 15-minute average alone reads
+ * low for a while after a reboot or a burst, so it isn't enough.
+ */
+export function machineLoad(): number | null {
+  if (process.platform === 'win32') return null;
+  const [, five = 0, fifteen = 0] = loadavg();
+  return Math.max(five, fifteen);
 }

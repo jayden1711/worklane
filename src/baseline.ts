@@ -16,19 +16,39 @@ export interface FailureFormat {
 
 const ANSI = /\x1b\[[0-9;]*m/g;
 
+export interface ParsedFailures {
+  names: string[];
+  /** The count the runner itself reported on the section line, when it does. */
+  reported: number | null;
+}
+
 /** Failing names in a run's output, or null when the output has no failure section. */
-export function parseFailures(output: string, fmt: FailureFormat): string[] | null {
+export function parseFailureList(output: string, fmt: FailureFormat): ParsedFailures | null {
   const lines = output.replace(ANSI, '').split(/\r?\n/);
   const section = new RegExp(fmt.section);
   const item = new RegExp(fmt.item);
   const start = lines.findIndex((l) => section.test(l));
   if (start < 0) return null;
+  const n = lines[start]!.match(/\b(\d+)\b/);
   const names = new Set<string>();
   for (const l of lines.slice(start + 1)) {
     const m = l.match(item);
     if (m?.[1]) names.add(m[1].trim());
   }
-  return [...names].sort();
+  return { names: [...names].sort(), reported: n ? Number(n[1]) : null };
+}
+
+/** Why a parsed list can't be trusted, or null. A count mismatch means the item pattern is wrong. */
+export function listProblem(p: ParsedFailures | null): string | null {
+  if (!p || !p.names.length) return 'no parsable failure list';
+  if (p.reported !== null && p.reported !== p.names.length) {
+    return `the runner reported ${p.reported} failure(s) but ${p.names.length} distinct name(s) parsed; tests.yaml failures.item is probably wrong`;
+  }
+  return null;
+}
+
+export function parseFailures(output: string, fmt: FailureFormat): string[] | null {
+  return parseFailureList(output, fmt)?.names ?? null;
 }
 
 export interface Baseline {
@@ -52,8 +72,10 @@ export function baselineGate(exitCode: number | null, output: string, fmt: Failu
   if (exitCode === 0) return { outcome: 'pass', preexisting: [], note: 'all green' };
   if (exitCode === null) return { outcome: 'fail', newFailures: [], note: 'the test run did not finish (timeout or could not start)' };
   if (!fmt) return { outcome: 'fail', newFailures: [], note: `exit ${exitCode}; tests.yaml has no failures format, so failures can't be compared with the baseline` };
-  const failing = parseFailures(output, fmt);
-  if (!failing?.length) return { outcome: 'fail', newFailures: [], note: `exit ${exitCode} with no parsable failure list; unknown red is red` };
+  const parsed = parseFailureList(output, fmt);
+  const problem = listProblem(parsed);
+  if (problem) return { outcome: 'fail', newFailures: [], note: `exit ${exitCode} with ${problem}; unknown red is red` };
+  const failing = parsed!.names;
   if (!baseline) return { outcome: 'fail', newFailures: failing, note: `no baseline recorded; ${failing.length} failure(s) can't be compared` };
   const known = new Set(baseline.failing);
   const fresh = failing.filter((f) => !known.has(f));
@@ -66,9 +88,10 @@ export function recordBaseline(log: EventLog, actor: string, sha: string, exitCo
   let failing: string[] = [];
   if (exitCode !== 0) {
     if (!fmt) return { ok: false, why: 'tests.yaml has no failures format' };
-    const parsed = parseFailures(output, fmt);
-    if (!parsed?.length) return { ok: false, why: `exit ${exitCode} with no parsable failure list; not recording an unknown baseline` };
-    failing = parsed;
+    const parsed = parseFailureList(output, fmt);
+    const problem = listProblem(parsed);
+    if (problem) return { ok: false, why: `exit ${exitCode} with ${problem}; not recording an unknown baseline` };
+    failing = parsed!.names;
   }
   log.append('baseline.recorded', { sha, failing }, actor);
   return { ok: true, failing };
