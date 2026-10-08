@@ -4,7 +4,7 @@
 // machine-wide full-run lock AND for the project's idle probe (e.g. "no
 // other full run is live") before starting, and records the result.
 import { spawn } from 'node:child_process';
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { childEnv, pidAlive } from './os/index.js';
@@ -33,8 +33,12 @@ const jobFile = (stateDir: string, id: string) => join(jobsDir(stateDir), `${id}
 export function readJob(stateDir: string, id: string): Job {
   return JSON.parse(readFileSync(jobFile(stateDir, id), 'utf8')) as Job;
 }
+/** Atomic: readers never see a half-written job (write a temp file, then rename over). */
 function writeJob(stateDir: string, job: Job) {
-  writeFileSync(jobFile(stateDir, job.id), JSON.stringify(job, null, 2));
+  const target = jobFile(stateDir, job.id);
+  const tmp = `${target}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(job, null, 2));
+  renameSync(tmp, target);
 }
 
 export function listJobs(stateDir: string): Job[] {
