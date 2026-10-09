@@ -119,6 +119,11 @@ export class GitHubBacklog implements Backlog {
     return (await this.req<{ html_url: string }>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body })).html_url;
   }
 
+  async prsAwaitingReview(login: string) {
+    const q = encodeURIComponent(`is:pr is:open repo:${this.repo} review-requested:${login}`);
+    return (await this.req<{ total_count: number }>('GET', `/search/issues?q=${q}&per_page=1`)).total_count;
+  }
+
   async ciStatus(sha: string) {
     const r = await this.req<{ check_runs: { name: string; status: string; conclusion: string | null; html_url: string }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?per_page=100`);
     const runs = r.check_runs;

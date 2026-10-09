@@ -10,6 +10,7 @@ interface FileState {
   labels: string[];
   prs?: { head: string; base: string; title: string; body: string; url: string }[];
   ci?: Record<string, CiStatus>;
+  prsAwaitingReview?: number;
 }
 
 export class FileBacklog implements Backlog {
@@ -99,6 +100,9 @@ export class FileBacklog implements Backlog {
     (s.prs ??= []).push({ head, base, title, body, url });
     this.save(s);
     return url;
+  }
+  async prsAwaitingReview(_login: string) {
+    return this.load().prsAwaitingReview ?? 0;
   }
   async ciStatus(sha: string): Promise<CiStatus> {
     return this.load().ci?.[sha] ?? { state: 'none', failing: [] };

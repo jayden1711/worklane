@@ -14,7 +14,7 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv, cpuCount, diskFree, killTree, machineLoad, shellCommand, spawnDetached } from './os/index.js';
+import { childEnv, cpuCount, diskFree, killTree, machineLoad, memAvailableGb, shellCommand, slotsDir, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, maxLevel, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
@@ -26,6 +26,7 @@ import { buildReport, dueSlot } from './reports.js';
 import { lessonsMarkdown, pendingLessons, skillCandidates } from './lessons.js';
 import type { Scorecard } from './scorecard.js';
 import { runExtras, securityReview, type ExtraCtx } from './extras.js';
+import { evaluateCap, publishSignals } from './cap.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -47,7 +48,7 @@ export interface CoordinatorDeps {
   /** Nightly queuing (tests inject this). */
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string) => { id: string }[];
   /** Machine readings (tests inject these). */
-  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
+  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number }; mem?: () => number | null };
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
@@ -142,6 +143,7 @@ export class Coordinator {
     await step('extras', () => runExtras(this.extraCtx(), (b, f, c, t, body) => this.openDocPr(b, f, c, t, body)), undefined);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
+    await step('cap', () => this.shareCap(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled, active: this.active.size, ready: this.readyCount });
   }
@@ -237,6 +239,28 @@ export class Coordinator {
     const body = `Lessons agents proposed after their tasks. Approve to keep them; edit or drop any that are wrong.\n\n${lessons.map((l) => `- #${l.issue} ${l.title}`).join('\n')}`;
     const url = await this.openDocPr(branch, `${BRAND.configDir}/lessons/${day}.md`, lessonsMarkdown(day, lessons, skillCandidates(events)) + '\n', title, body);
     this.emit('lessons.pr', { day, branch, count: lessons.length, url });
+  }
+
+  /** Report this instance's signals for the shared adaptive cap, and evaluate it if due. */
+  private async shareCap(now = new Date()) {
+    const runs = this.d.log.read(0, ['run.finished']);
+    const limit = [...runs].reverse().find((e) => (e.payload as { reason: string }).reason === 'rate_limited');
+    const owner = this.d.cfg.project.owners.default;
+    const landWaiting = this.d.log
+      .read(0, ['decision.asked'])
+      .filter((q) => (q.payload as { kind: string; owner: string }).kind === 'land' && (q.payload as { owner: string }).owner === owner)
+      .filter((q) => !this.d.log.read(q.id, ['decision.answered']).some((a) => (a.payload as { id: string }).id === (q.payload as { id: string }).id)).length;
+    let prs: number | null = null;
+    try {
+      prs = (await this.d.backlog.prsAwaitingReview(owner)) + landWaiting;
+    } catch {
+      prs = null; // unknown: the cap holds rather than guessing
+    }
+    const verdicts = this.d.log.read(0, ['eval.verdict']).slice(-20).map((e) => ({ at: e.ts, pass: (e.payload as { patch_correct: boolean }).patch_correct }));
+    const name = this.d.cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-');
+    publishSignals(this.d.slotsDir ?? slotsDir(), { instance: name, at: now.toISOString(), lastUsageLimitAt: limit?.ts ?? null, prsWaiting: prs, verdicts });
+    const change = evaluateCap(this.d.slotsDir ?? slotsDir(), (this.d.machine?.mem ?? memAvailableGb)(), now);
+    if (change) this.emit('cap.changed', change);
   }
 
   private extraCtx(): ExtraCtx {

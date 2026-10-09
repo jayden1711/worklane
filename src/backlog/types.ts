@@ -27,6 +27,8 @@ export interface Backlog {
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
   /** Open a pull request from a pushed branch; returns its URL. */
   openPr(head: string, base: string, title: string, body: string): Promise<string>;
+  /** Open pull requests waiting on this person's review. */
+  prsAwaitingReview(login: string): Promise<number>;
   /** CI on a commit: the overall state and the checks that failed. */
   ciStatus(sha: string): Promise<CiStatus>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;

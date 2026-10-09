@@ -69,6 +69,7 @@ export const EventSchemas = {
   /** An optional role ran on a trigger; key de-duplicates (one run per trigger). */
   'extra.run': z.strictObject({ role: z.string(), key: z.string(), reason: z.string(), summary: z.string(), actions: z.array(z.string()) }),
   'security.review': z.strictObject({ issue, head: sha, verdict: z.enum(['clear', 'concerns', 'block']), findings: z.array(z.strictObject({ severity: z.enum(['low', 'medium', 'high', 'critical']), file: z.string(), issue: z.string(), evidence: z.string() })) }),
+  'cap.changed': z.strictObject({ from: z.number().int(), to: z.number().int(), reason: z.string() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
