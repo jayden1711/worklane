@@ -6,9 +6,9 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
-import { killTree, spawnDetached } from './os/index.js';
+import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch';
 
@@ -74,9 +74,34 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra:
   return env;
 }
 
+/** An unprivileged OS user agents run as, separate from the coordinator's (which holds the credentials). */
+export interface RunAs {
+  user: string;
+  /** The agent user's home; its own Claude login lives here. */
+  home: string;
+  /** Defaults to <home>/.claude. */
+  claudeConfigDir?: string;
+}
+
+/** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */
+export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    HOME: r.home,
+    USER: r.user,
+    LOGNAME: r.user,
+    CLAUDE_CONFIG_DIR: r.claudeConfigDir ?? posix.join(r.home, '.claude'), // agent users exist on POSIX systems only
+    // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
+    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_1: 'safe.directory',
+    GIT_CONFIG_VALUE_1: '*',
+  };
+}
+
 /** Which auth `claude` would use. The cli runtime refuses API-key billing it wasn't asked for. */
-export function claudeAuthMethod(env: NodeJS.ProcessEnv): string {
-  const r = spawnSync('claude', ['auth', 'status', '--json'], { encoding: 'utf8', env, timeout: 30_000 });
+export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): string {
+  const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
+  const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string };
     return j.loggedIn ? (j.authMethod ?? 'unknown') : 'none';
@@ -112,6 +137,7 @@ export class CliRunner implements AgentRunner {
     private runtime: 'cli' | 'sdk' = 'cli',
     private base: NodeJS.ProcessEnv = process.env,
     private bin = 'claude',
+    private runAs?: RunAs,
   ) {}
 
   async run(req: RunRequest): Promise<RunResult> {
@@ -120,13 +146,16 @@ export class CliRunner implements AgentRunner {
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),
     });
-    const auth = claudeAuthMethod(env);
+    const runEnv = this.runAs ? runAsEnv(env, this.runAs) : env;
+    const auth = claudeAuthMethod(runEnv, this.runAs, this.bin);
     const want = this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
     return new Promise((resolve) => {
-      const child = spawn(this.bin, cliArgs(req), { cwd: req.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+      const [file, args] = this.runAs ? asUser(this.runAs.user, this.bin, cliArgs(req), runEnv) : [this.bin, cliArgs(req)];
+      // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
+      const child = spawn(file, args, { cwd: req.cwd, env: this.runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
       let rateLimited = false;
@@ -135,7 +164,8 @@ export class CliRunner implements AgentRunner {
       let stderr = '';
       const kill = (why: TerminalReason) => {
         ended ??= why;
-        killTree(child.pid, () => child.kill('SIGKILL'));
+        if (this.runAs) killTreeAs(this.runAs.user, child.pid);
+        else killTree(child.pid, () => child.kill('SIGKILL'));
       };
       let stall = setTimeout(() => kill('stalled'), req.stallMs);
       const overall = setTimeout(() => kill('timed_out'), req.timeoutMs);

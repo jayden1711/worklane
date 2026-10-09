@@ -20,6 +20,14 @@ export const InstanceFile = z.strictObject({
   name,
   // One repo per instance until multi-repo instances exist.
   repos: z.array(z.strictObject({ path: z.string().min(1), repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'must be owner/repo') })).length(1),
+  /** The unprivileged OS user agents run as. The coordinator's user holds the credentials; this one holds nothing. */
+  run_as: z
+    .strictObject({
+      agent_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name'),
+      agent_home: z.string().min(1),
+      claude_config_dir: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 
 export const PolicyFile = z.strictObject({
@@ -32,6 +40,12 @@ export const PolicyFile = z.strictObject({
     })
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
+  /**
+   * Agents run as a separate OS user by default (instance.yaml run_as).
+   * Setting this lets them run as the coordinator's own user, which can read
+   * every credential the coordinator holds: for trying things out only.
+   */
+  allow_same_user: z.boolean().default(false),
   /** When set, the repo's network allowlist and pre-approved tools must be subsets of these. */
   network_allow: z.array(z.string()).optional(),
   pre_approved: z.array(z.string()).optional(),
@@ -54,6 +68,7 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 
 export interface Instance {
   name: string;
+  runAs: { user: string; home: string; claudeConfigDir?: string } | null;
   home: string;
   stateDir: string;
   repo: { path: string; repo: string };
@@ -112,7 +127,11 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (config.project.project.repo !== repo.repo) errors.push({ file: `${BRAND.configDir}/config.yaml`, path: 'project.repo', message: `${config.project.project.repo} is not the instance's repo ${repo.repo}` });
   errors.push(...policyViolations(config, policy));
   if (errors.length) throw new ConfigInvalid(errors);
-  return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config };
+  if (!inst.run_as && !policy.allow_same_user) {
+    throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as', message: `agents must run as their own OS user: set run_as (agent_user, agent_home), or allow_same_user: true in policy.yaml to accept agents reading the coordinator's credentials` }]);
+  }
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
+  return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs };
 }
 
 /**
@@ -144,7 +163,10 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
   mkdirSync(join(home, 'state'), { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
   const write = (file: string, text: string) => writeFileSync(join(home, file), text, { mode: 0o600 });
-  write('instance.yaml', `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n`);
+  write(
+    'instance.yaml',
+    `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${instanceName}-agent\n  agent_home: /home/${instanceName}-agent\n`,
+  );
   write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2, max_stage: 1 }\nland_mode: pr\n`);
   write(
     'credentials.yaml',
