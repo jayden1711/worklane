@@ -52,7 +52,7 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
   if (i.credentials.github.kind !== 'gh-config-dir') throw new Error('GitHub App credentials are not supported yet; use kind: gh-config-dir');
   env.GH_CONFIG_DIR = i.credentials.github.path;
-  env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
+  if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
   return env;
 }

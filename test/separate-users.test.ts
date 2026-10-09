@@ -28,6 +28,8 @@ test('safe default: an instance without a separate agent user is refused unless 
     (e: unknown) => e instanceof ConfigInvalid && /agents must run as their own OS user/.test(e.message),
   );
   const allowed = instance('', 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nallow_same_user: true\n');
+  assert.throws(() => loadInstance('shop', allowed.dir), /set claude\.config_dir/, 'same-user agents need the Claude login named');
+  writeFileSync(join(allowed.home, 'credentials.yaml'), `version: 1\ngithub: { kind: gh-config-dir, path: ${join(allowed.home, 'gh')} }\nclaude: { config_dir: ${join(allowed.home, 'claude')} }\n`);
   assert.equal(loadInstance('shop', allowed.dir).runAs, null);
   const separate = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n');
   assert.deepEqual(loadInstance('shop', separate.dir).runAs, { user: 'shop-agent', home: '/home/shop-agent' });

@@ -74,8 +74,9 @@ export const CredentialsFile = z.strictObject({
     z.strictObject({ kind: z.literal('gh-config-dir'), path }),
     z.strictObject({ kind: z.literal('app'), app_id: z.number().int().positive(), installation_id: z.number().int().positive(), key_path: path }),
   ]),
-  // The Claude Code config dir holding this instance's login (CLAUDE_CONFIG_DIR).
-  claude: z.strictObject({ config_dir: path }),
+  // The Claude Code config dir holding the agents' login (CLAUDE_CONFIG_DIR), when agents run as the
+  // coordinator's own user. With run_as, each agent user signs in to Claude in its own home instead.
+  claude: z.strictObject({ config_dir: path }).optional(),
   /** An API key file for eval lanes: owned by the eval user, unreadable to every other. */
   eval_key: path.optional(),
 });
@@ -148,6 +149,9 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (!inst.run_as && !policy.allow_same_user) {
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as', message: `agents must run as their own OS user: set run_as (agent_user, agent_home), or allow_same_user: true in policy.yaml to accept agents reading the coordinator's credentials` }]);
   }
+  if (!inst.run_as && !credentials.claude) {
+    throw new ConfigInvalid([{ file: join(home, 'credentials.yaml'), path: 'claude', message: 'agents run as the coordinator user, so set claude.config_dir to the Claude login they use' }]);
+  }
   if (Object.values(policy.lanes).some((l) => l.run_as === 'eval') && !inst.run_as?.eval_user) {
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_user', message: 'a lane runs as eval, so set eval_user and eval_home' }]);
   }
@@ -165,7 +169,7 @@ export function credentialProblems(c: CredentialsFile): string[] {
   const need = (p: string, what: string) => !existsSync(p) && out.push(`${what} not found at ${p}`);
   if (c.github.kind === 'gh-config-dir') need(c.github.path, 'GitHub: gh config dir');
   else need(c.github.key_path, 'GitHub: App private key');
-  need(c.claude.config_dir, 'Claude: config dir');
+  if (c.claude) need(c.claude.config_dir, 'Claude: config dir');
   return out;
 }
 
@@ -192,7 +196,7 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
   write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2, max_stage: 1 }\nland_mode: pr\n`);
   write(
     'credentials.yaml',
-    `# References only. Point these at credentials made for this instance; never your own login.\nversion: 1\ngithub: { kind: gh-config-dir, path: ${JSON.stringify(join(home, 'gh'))} }\nclaude: { config_dir: ${JSON.stringify(join(home, 'claude'))} }\n`,
+    `# References only. Point these at credentials made for this instance; never your own login.\nversion: 1\ngithub: { kind: gh-config-dir, path: ${JSON.stringify(join(home, 'gh'))} }\n# claude: { config_dir: ... }   only when agents run as this user (no run_as)\n`,
   );
   return home;
 }
@@ -209,7 +213,7 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
     const who = lane.run_as === 'eval' ? i.evalAs : i.runAs;
     const runAs: RunAs | undefined = who ? { ...who } : undefined;
     const home = runAs?.home ?? process.env.HOME ?? '';
-    const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude.config_dir);
+    const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude!.config_dir);
     const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key])];
     out[name] = { ...(runAs ? { runAs } : {}), ...(i.policy.sandbox ? { settings: sandboxSettings({ lane: { allowedDomains: lane.allowed_domains }, denyRead }) } : {}) };
   }
