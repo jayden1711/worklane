@@ -138,3 +138,33 @@ test('gitleaks is installed at a pinned version only when its download matches a
   assert.ok(at('sha256sum -c') > at('curl -fsSL') && at('sha256sum -c') < at('tar -xzf') && at('tar -xzf') < at('install -o root'), 'download, verify, then unpack and install');
   assert.match(tools, /install -o root -g root -m 0755 "\$work\/gitleaks" \/usr\/local\/bin\/gitleaks/);
 });
+
+// Creates OS users and runs systemd units: only on disposable CI runners (GitHub's Linux runners have systemd and passwordless sudo).
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
+
+test('acceptance: two instances\' agent users each get their own /tmp, so a fixed path like /tmp/cc-socks locks neither out', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
+  const sudo = (...a: string[]) => spawnSync('sudo', ['-n', ...a], { encoding: 'utf8' });
+  const unit = spawnSync('bash', [join(dir, 'service.sh'), 'site', '--print'], { encoding: 'utf8' }).stdout;
+  const props = unit.split('\n').filter((l) => /^PrivateTmp=/.test(l));
+  assert.deepEqual(props, ['PrivateTmp=yes'], 'each coordinator service, and the agents it starts, get a private /tmp');
+  // What Claude Code does at start: make /tmp/cc-socks (0700) if it isn't there, and bind its socket inside.
+  const claudeLike = 'import os,socket\nd="/tmp/cc-socks"\ntry: os.mkdir(d,0o700)\nexcept FileExistsError: pass\ns=socket.socket(socket.AF_UNIX)\ns.bind(f"{d}/{os.getpid()}.sock")\nprint("socket ok")';
+  const agents = ['wl-tmpa-agent', 'wl-tmpb-agent'];
+  for (const u of agents) if (spawnSync('id', ['-u', u]).status !== 0) assert.equal(sudo('useradd', '--create-home', u).status, 0);
+  const start = (user: string, extra: string[]) => sudo('systemd-run', '--quiet', '--wait', '--pipe', '--collect', '-p', `User=${user}`, ...extra, 'python3', '-c', claudeLike);
+  sudo('rm', '-rf', '/tmp/cc-socks');
+  try {
+    for (const u of agents) {
+      const r = start(u, props.flatMap((p) => ['-p', p]));
+      assert.equal(r.stdout.trim(), 'socket ok', `${u}: ${r.stderr}`);
+    }
+    // Control: with a shared /tmp, the second agent user is locked out by the first one's directory.
+    const first = start(agents[0]!, []);
+    assert.equal(first.stdout.trim(), 'socket ok', first.stderr);
+    const second = start(agents[1]!, []);
+    assert.notEqual(second.status, 0);
+    assert.match(second.stderr, /PermissionError/);
+  } finally {
+    sudo('rm', '-rf', '/tmp/cc-socks');
+  }
+});

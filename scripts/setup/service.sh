@@ -100,6 +100,10 @@ TimeoutStopSec=60
 # /usr, /boot and /etc read-only for the coordinator and its agents. Not
 # NoNewPrivileges: the coordinator starts agents through sudo as their own user.
 ProtectSystem=full
+# A /tmp of its own, shared with its agents and no other instance: tools keep
+# fixed per-machine paths there (Claude Code's /tmp/cc-socks, a 0700 directory
+# owned by whichever user made it first), which would lock out other instances' agents.
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -129,6 +133,10 @@ put() {
 }
 say "install worklane.slice (CPU weight $slice_cpu, IO weight $slice_io) and $unit_name (memory $memory_high/$memory_max, CPU weight $cpu_weight, tasks $tasks_max)"
 put worklane.slice slice
+# Limits apply to a running service; any other change (e.g. PrivateTmp) needs a restart.
+without_limits() { grep -vE '^(MemoryHigh|MemoryMax|CPUWeight|TasksMax)=' "$@" || true; }
+restart=
+if [ -f "/etc/systemd/system/$unit_name" ] && [ "$(without_limits "/etc/systemd/system/$unit_name")" != "$(unit | without_limits)" ]; then restart=1; fi
 put "$unit_name" unit
 systemctl daemon-reload
 
@@ -138,7 +146,10 @@ probe="$(systemd-run --quiet --wait --pipe --collect -p Slice=worklane.slice -p 
 echo "$probe"
 grep -q '/worklane.slice/' <<<"$probe" || { echo "an agent started through sudo left the service's cgroup (a pam_systemd session?); limits would not apply to agents" >&2; exit 1; }
 
-if systemctl is-active -q "$unit_name"; then
+if systemctl is-active -q "$unit_name" && [ -n "$restart" ]; then
+  echo "restarting $unit_name: its unit changed beyond the limits (agent runs in flight stop; the coordinator recovers them on start)"
+  systemctl restart "$unit_name"
+elif systemctl is-active -q "$unit_name"; then
   # Running already: apply the new limits now, without restarting it (and its agents).
   systemctl set-property --runtime "$unit_name" MemoryHigh="$memory_high" MemoryMax="$memory_max" CPUWeight="$cpu_weight" TasksMax="$tasks_max"
   systemctl set-property --runtime worklane.slice CPUWeight="$slice_cpu" IOWeight="$slice_io"
