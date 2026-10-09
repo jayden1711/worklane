@@ -183,7 +183,7 @@ test('acceptance: a coordinator refuses a GitHub token that can see repos outsid
   }
 });
 
-test('an instance coordinator refuses to start without its own credentials, or with ones not supported yet', () => {
+test('an instance coordinator refuses to start without its own credentials', () => {
   const { dir, made } = two();
   const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
   rmSync(join(made[0]!.home, 'gh'), { recursive: true });
@@ -191,8 +191,6 @@ test('an instance coordinator refuses to start without its own credentials, or w
   assert.equal(r.status, 1);
   assert.match(r.stderr, /credentials missing:[\s\S]*GitHub: gh config dir/);
   assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
-  writeFileSync(join(made[1]!.home, 'credentials.yaml'), 'version: 1\ngithub: { kind: app, app_id: 1, installation_id: 2, key_path: /dev/null }\nclaude: { config_dir: /tmp }\n');
-  assert.throws(() => instanceEnv(loadInstance('beta', dir)), /GitHub App credentials are not supported yet/);
 });
 
 test('agents get the instance\'s Claude config dir, and still no tokens', () => {

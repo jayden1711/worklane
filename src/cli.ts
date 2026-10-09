@@ -26,7 +26,7 @@ import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
 import { openUrl } from './os/index.js';
-import { backlogFor, instanceEnv, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -454,6 +454,21 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
+    case 'git-credential': {
+      // git's credential helper protocol, for an App instance's coordinator: hand git a fresh installation token.
+      if (sub !== 'get') return 0;
+      const input = await readStdin();
+      const host = /^host=(.*)$/m.exec(input)?.[1] ?? '';
+      const api = new URL(process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com');
+      if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
+      const name = process.env[`${BRAND.envPrefix}_INSTANCE`];
+      if (!name) return 0;
+      const i = loadInstance(name);
+      if (i.credentials.github.kind !== 'app') return 0;
+      process.stdout.write(`username=x-access-token\npassword=${await instanceTokens(i, process.env)()}\n`);
+      return 0;
+    }
+
     case 'stop-all': {
       const reason = [sub, ...rest].filter(Boolean).join(' ') || 'emergency stop';
       stopAll(instanceId(), reason);
@@ -490,20 +505,21 @@ async function main(argv: string[]): Promise<number> {
         console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, land ${i.policy.land_mode}`);
         console.log(`  repo config: within policy`);
         const gh = i.credentials.github;
-        console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, key ${gh.key_path}` : `gh config ${gh.path}`}`);
+        console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, installation ${gh.installation_id}, key ${gh.key_path}` : `gh config ${gh.path} (fallback: a personal access token)`}`);
         console.log(`  claude: ${i.runAs ? `${i.runAs.user}'s own login, in its home` : `config ${i.credentials.claude!.config_dir}`}`);
         for (const m of missing) console.log(`  MISSING ${m}`);
         if (missing.length) return 1;
         // The same repo-scope check the coordinator makes at start, without printing the token.
         let token = '';
+        let failure = '';
         try {
-          token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', env: instanceEnv(i), stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim();
-        } catch {
-          // no login in the instance's gh config dir
+          token = await instanceTokens(i, instanceEnv(i))();
+        } catch (e) {
+          failure = (e as Error).message.split('\n')[0]!;
         }
-        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: 'no GitHub login in the instance gh config dir' };
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
         console.log(scope.ok ? `  github token: ${scope.kind}${scope.login ? ` of ${scope.login}` : ''}, reaches only ${i.repo.repo}, not an admin; expires ${scope.expiresAt ?? 'never (set an expiry)'}` : `  github token REFUSED: ${scope.why}`);
-        const warn = scope.ok ? tokenWarning(scope.expiresAt) : null;
+        const warn = scope.ok && gh.kind !== 'app' ? tokenWarning(scope.expiresAt) : null;
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
