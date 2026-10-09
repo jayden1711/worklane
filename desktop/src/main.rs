@@ -54,7 +54,7 @@ mod tests {
     #[test]
     fn accepts_only_the_local_dashboard() {
         assert!(local_url(Some("http://127.0.0.1:4317/?t=abc")).is_ok());
-        for bad in ["https://127.0.0.1:4317/", "http://example.com:4317/", "http://127.0.0.1/", "file:///etc/hosts", "http://10.0.0.5:4317/", "nonsense"] {
+        for bad in ["https://127.0.0.1:4317/", "http://example.com:4317/", "http://127.0.0.1/", "file:///etc/hosts", "http://192.0.2.5:4317/", "nonsense"] {
             assert!(local_url(Some(bad)).is_err(), "{bad} should be refused");
         }
         assert!(local_url(None).is_err());
