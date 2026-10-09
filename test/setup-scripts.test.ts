@@ -76,6 +76,7 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.match(r.stdout, /^git -c credential.helper= -c credential.helper=!\/usr\/local\/bin\/worklane git-credential clone -q https:\/\/github.com\/example-org\/example shop.git /m);
     assert.match(r.stdout, /^git config core.sharedRepository group$/m);
     assert.match(r.stdout, /^git -c core.hooksPath=\/dev\/null pull -q --ff-only$/m);
+    assert.match(r.stdout, /^worklane install --root \. --git-hooks-only$/m);
     r = runAs(checkout[1]!, ['site', dest, repo]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^worklane install --root \. --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m);
@@ -100,4 +101,14 @@ test('the coordinator service unit runs as the coordinator user, can still sudo 
   assert.doesNotMatch(unit, /NoNewPrivileges=(yes|true)/, 'agents are started through sudo');
   const install = readFileSync(join(dir, 'service.sh'), 'utf8');
   assert.ok(install.indexOf('systemd-analyze verify') < install.indexOf('mv -f'), 'validated before it is moved into place');
+});
+
+test('gitleaks is installed at a pinned version only when its download matches a pinned sha256', () => {
+  const tools = readFileSync(join(dir, 'tools.sh'), 'utf8');
+  assert.match(tools, /^gitleaks_version=\d+\.\d+\.\d+$/m);
+  for (const arch of ['x64', 'arm64']) assert.match(tools, new RegExp(`^gitleaks_sha256_${arch}=[0-9a-f]{64}$`, 'm'));
+  // Verified before it is unpacked or installed, and installed root-owned where agents' PATH finds it.
+  const at = (s: string) => tools.indexOf(s);
+  assert.ok(at('sha256sum -c') > at('curl -fsSL') && at('sha256sum -c') < at('tar -xzf') && at('tar -xzf') < at('install -o root'), 'download, verify, then unpack and install');
+  assert.match(tools, /install -o root -g root -m 0755 "\$work\/gitleaks" \/usr\/local\/bin\/gitleaks/);
 });

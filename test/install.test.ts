@@ -177,3 +177,13 @@ test('install --engine points the hooks at a machine-wide engine path', () => {
   assert.doesNotMatch(out.stdout, /npm install/);
   assert.match(settings, process.platform === 'win32' ? /:(\\\\)+opt(\\\\)+engine(\\\\)+current(\\\\)+dist(\\\\)+src(\\\\)+cli\.js/ : /\/opt\/engine\/current\/dist\/src\/cli\.js/);
 });
+
+test('install --git-hooks-only adds the pre-commit secret scan and leaves committed settings alone', () => {
+  const { dir } = exampleProject();
+  const settings = join(dir, '.claude', 'settings.json');
+  const before = existsSync(settings) ? readFileSync(settings, 'utf8') : null;
+  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--git-hooks-only'], { encoding: 'utf8', env: childEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(readFileSync(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'), /gitleaks git --pre-commit --staged/);
+  assert.equal(existsSync(settings) ? readFileSync(settings, 'utf8') : null, before);
+});

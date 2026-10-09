@@ -10,7 +10,7 @@ import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
-import { install } from './install.js';
+import { install, installGitHook } from './install.js';
 import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
@@ -41,7 +41,7 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
-  install [--git-hooks] [--engine path]
+  install [--git-hooks] [--engine path] | install --git-hooks-only
                                    scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
   doctor [--agentshield] [--json]  verify the install
   guardrails check                 run rules against their must-block/ask/allow examples
@@ -140,6 +140,11 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'install': {
+      // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.
+      if (flag(args, '--git-hooks-only')) {
+        console.log(`pre-commit secret scan: ${installGitHook(root)}`);
+        return 0;
+      }
       const gitHooks = flag(args, '--git-hooks');
       // A machine-wide engine (e.g. /opt/<cli>/current/...): hooks call that stable path, not this run's versioned one.
       const engineCli = option(args, '--engine');

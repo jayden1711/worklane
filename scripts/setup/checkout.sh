@@ -27,6 +27,8 @@ run_as "$coord" '
   git config core.sharedRepository group
   # Re-run after a config PR merges: fast-forward to it, running no hooks (the checkout is agent-writable).
   git -c core.hooksPath=/dev/null pull -q --ff-only
+  # Every agent commit, in any worktree of this checkout, is secret-scanned first (gitleaks from tools.sh).
+  worklane install --root . --git-hooks-only
   git log -1 --format="checkout at %h (%s)"
 ' "$name" "$dest" "$repo"
 
