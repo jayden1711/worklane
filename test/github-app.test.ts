@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createVerify, generateKeyPairSync } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -152,6 +152,27 @@ test('git credential helper: hands git an installation token for GitHub, and not
     const other = await run(['git-credential', 'get'], env, 'protocol=https\nhost=gitlab.example\n\n');
     assert.equal(other.stdout, '');
     assert.equal((await run(['git-credential', 'store'], env, 'host=github.com\n\n')).stdout, '');
+  } finally {
+    await gh.close();
+  }
+});
+
+test('instance show: an App instance reports a short-lived token and its key age, never "expires never"', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
+  const { dir, home } = appInstance();
+  const gh = await fakeGitHub(['example-org/example-shop']);
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  try {
+    let r = await run(['instance', 'show', 'site'], env);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /github token: app-installation, reaches only example-org\/example-shop, not an admin; short-lived \(about an hour\), renewed automatically/);
+    assert.match(r.stdout, /App key: installed 0 day\(s\) ago \(App keys don't expire; rotate them after 90 days\)/);
+    assert.doesNotMatch(r.stdout, /expires never|set an expiry/);
+    const key = (readFileSync(join(home, 'credentials.yaml'), 'utf8').match(/key_path: "([^"]+)"/) ?? [])[1]!;
+    const old = new Date(Date.now() - 100 * 86_400_000);
+    utimesSync(key, old, old);
+    r = await run(['instance', 'show', 'site'], env);
+    assert.match(r.stdout, /App key: installed 100 day\(s\) ago/);
+    assert.match(r.stdout, /GitHub App key installed 100 days ago\. Rotate it/);
   } finally {
     await gh.close();
   }

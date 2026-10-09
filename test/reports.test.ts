@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
-import { buildReport, dueSlot } from '../src/reports.js';
+import { appKeyAge, appKeyWarning, buildReport, dueSlot } from '../src/reports.js';
 import { repoRoot } from './helpers.js';
 
 let id = 0;
@@ -40,3 +42,21 @@ test('report slots: the latest configured time already passed today', () => {
   assert.equal(dueSlot(['18:00', '08:00'], at(23, 0)), '18:00');
 });
 
+
+test('an App key is watched by its age, not an expiry: reports ask for rotation after 90 days', () => {
+  const key = join(mkdtempSync(join(tmpdir(), 'key-')), 'private-key.pem');
+  writeFileSync(key, 'pem');
+  const now = new Date('2026-10-09T12:00:00Z');
+  const at = (days: number) => utimesSync(key, new Date(now.getTime() - days * 86_400_000), new Date(now.getTime() - days * 86_400_000));
+  at(30);
+  assert.equal(appKeyAge(key, now), 30);
+  assert.equal(appKeyWarning(30), null);
+  assert.equal(appKeyAge(join(tmpdir(), 'no-such-key.pem'), now), null);
+  const cfg = loadConfig(join(repoRoot, 'examples', 'basic'));
+  assert.doesNotMatch(buildReport([], cfg, { since: new Date(now.getTime() - 86_400_000), now, appKeyPath: key }).markdown, /App key/);
+  at(120);
+  assert.match(appKeyWarning(appKeyAge(key, now))!, /^\*\*GitHub App key installed 120 days ago\.\*\* Rotate it/);
+  const { markdown } = buildReport([], cfg, { since: new Date(now.getTime() - 86_400_000), now, appKeyPath: key });
+  assert.match(markdown, /GitHub App key installed 120 days ago/);
+  assert.doesNotMatch(markdown, /no expiry/, 'an App never gets the token-expiry warning');
+});

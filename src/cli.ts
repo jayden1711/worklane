@@ -20,7 +20,7 @@ import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
-import { buildReport, tokenWarning } from './reports.js';
+import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
@@ -531,8 +531,14 @@ async function main(argv: string[]): Promise<number> {
           failure = (e as Error).message.split('\n')[0]!;
         }
         const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
-        console.log(scope.ok ? `  github token: ${scope.kind}${scope.login ? ` of ${scope.login}` : ''}, reaches only ${i.repo.repo}, not an admin; expires ${scope.expiresAt ?? 'never (set an expiry)'}` : `  github token REFUSED: ${scope.why}`);
-        const warn = scope.ok && gh.kind !== 'app' ? tokenWarning(scope.expiresAt) : null;
+        if (!scope.ok) console.log(`  github token REFUSED: ${scope.why}`);
+        else if (gh.kind === 'app') {
+          // Installation tokens last about an hour and are minted again before they run out; the key is what ages.
+          console.log(`  github token: ${scope.kind}, reaches only ${i.repo.repo}, not an admin; short-lived (about an hour), renewed automatically`);
+          const age = appKeyAge(gh.key_path);
+          console.log(`  App key: ${age === null ? 'age unknown' : `installed ${age} day(s) ago`} (App keys don't expire; rotate them after ${APP_KEY_ROTATE_DAYS} days)`);
+        } else console.log(`  github token: ${scope.kind}${scope.login ? ` of ${scope.login}` : ''}, reaches only ${i.repo.repo}, not an admin; expires ${scope.expiresAt ?? 'never (set an expiry)'}`);
+        const warn = !scope.ok ? null : gh.kind === 'app' ? appKeyWarning(appKeyAge(gh.key_path)) : tokenWarning(scope.expiresAt);
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
