@@ -181,6 +181,33 @@ export function instanceProblems(i: Instance): string[] {
   return out;
 }
 
+/** A policy file on its own, e.g. a copy of an instance's, to check a repo config against. */
+export function readPolicy(file: string): { policy: PolicyFile | undefined; errors: ConfigError[] } {
+  const errors: ConfigError[] = [];
+  return { policy: readYaml(PolicyFile, file, errors), errors };
+}
+
+/**
+ * The policies of the instances on this machine that run a repo (owner/name),
+ * so a change to its config can be checked against them before it merges.
+ * Instances this user can't read are skipped.
+ */
+export function policiesForRepo(repo: string, dir = instancesDir()): { name: string; policy: PolicyFile | undefined; errors: ConfigError[] }[] {
+  let names: string[];
+  try {
+    names = listInstances(dir);
+  } catch {
+    return [];
+  }
+  const out: { name: string; policy: PolicyFile | undefined; errors: ConfigError[] }[] = [];
+  for (const n of names) {
+    const inst = readYaml(InstanceFile, join(dir, n, 'instance.yaml'), []);
+    if (!inst?.repos.some((r) => r.repo.toLowerCase() === repo.toLowerCase())) continue;
+    out.push({ name: n, ...readPolicy(join(dir, n, 'policy.yaml')) });
+  }
+  return out;
+}
+
 export function listInstances(dir = instancesDir()): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })

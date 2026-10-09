@@ -215,3 +215,40 @@ test('regression: an instance whose agent user does not exist on this machine is
   assert.deepEqual(problems({ user: userInfo().username, home: join(tmpdir(), 'no-such-home') }), [`agent user ${userInfo().username}'s home ${join(tmpdir(), 'no-such-home')} not found`]);
   assert.deepEqual(problems({ user: userInfo().username, home: homedir() }), []);
 });
+
+const cliRun = (args: string[], env: NodeJS.ProcessEnv) => spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), ...args], { encoding: 'utf8', env });
+
+test('regression: doctor checks a repo config against the instance policy that will run it, before it merges', () => {
+  // The repo config allows 4 workers; the instance policy allows 2: the coordinator would refuse to start.
+  const { dir, repo, home } = setup('version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 2 }\nland_mode: pr\n');
+  const agents = join(repo, BRAND.configDir, 'agents.yaml');
+  writeFileSync(agents, readFileSync(agents, 'utf8').replace(/count: \d+, max: \d+/, 'count: 1, max: 4'));
+  const local = cliRun(['doctor', '--root', repo], { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir });
+  assert.equal(local.status, 1);
+  assert.match(local.stdout, /FAIL {2}policy shop: \.\w+\/agents\.yaml at roles\.workers\.max: 4 exceeds the policy's max_workers 2/);
+  // On another machine (no instance there), against a copy of the policy.
+  const none = mkdtempSync(join(tmpdir(), 'no-instances-'));
+  const elsewhere = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: none };
+  const copy = cliRun(['doctor', '--root', repo, '--policy', join(home, 'policy.yaml')], elsewhere);
+  assert.match(copy.stdout, /FAIL {2}policy \S+policy\.yaml: [\s\S]*roles\.workers\.max: 4 exceeds/);
+  const unchecked = cliRun(['doctor', '--root', repo], elsewhere);
+  assert.match(unchecked.stdout, /ok {4}policy: no instance on this machine runs example-org\/example-shop; to check against one, pass --policy/);
+  writeFileSync(agents, readFileSync(agents, 'utf8').replace(/count: 1, max: 4/, 'count: 1, max: 1'));
+  assert.match(cliRun(['doctor', '--root', repo], { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir }).stdout, /ok {4}policy shop: within the policy/);
+});
+
+test('install scaffolds a repo that a local instance runs within that instance policy, not at the template defaults', () => {
+  const { dir } = setup('version: 1\nbudget: { daily_usd: 15 }\nagents: { max_workers: 2 }\nland_mode: pr\n');
+  // A fresh checkout of the same repo, with no config yet.
+  const fresh = mkdtempSync(join(tmpdir(), 'fresh-'));
+  spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: fresh });
+  spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git'], { cwd: fresh });
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
+  const r = cliRun(['install', '--root', fresh], env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /starts within this machine's instance policy for example-org\/example-shop \(budget \$15\/day, at most 2 workers\)/);
+  const agents = readFileSync(join(fresh, BRAND.configDir, 'agents.yaml'), 'utf8');
+  assert.match(agents, /^daily_budget_usd: 15\b/m);
+  assert.match(agents, /workers:.*count: 1, max: 2,/);
+  assert.match(cliRun(['doctor', '--root', fresh], env).stdout, /ok {4}policy shop: within the policy/);
+});

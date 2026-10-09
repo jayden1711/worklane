@@ -8,6 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
+import { policiesForRepo } from './instance.js';
 
 /** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
 export const HOOK_MARKER = `${BRAND.envPrefix}_HOOK=1`;
@@ -101,6 +102,25 @@ export function projectLocalEngine(root: string): string | null {
   return existsSync(p) ? p : null;
 }
 
+/**
+ * When an instance on this machine runs the repo, start its scaffolded config
+ * within that instance's policy (budget, worker counts), not at the template's
+ * defaults, which the coordinator would refuse.
+ */
+function scaffoldWithinPolicies(cfgDir: string, repo: string): string[] {
+  const policies = policiesForRepo(repo).flatMap((p) => (p.policy ? [p.policy] : []));
+  if (!policies.length) return [];
+  const budget = Math.min(...policies.map((p) => p.budget.daily_usd));
+  const workers = Math.min(...policies.map((p) => p.agents.max_workers));
+  const file = join(cfgDir, 'agents.yaml');
+  const text = readFileSync(file, 'utf8')
+    .replace(/^(daily_budget_usd:\s*)(\d+(?:\.\d+)?)/m, (_m, k: string, v: string) => `${k}${Math.min(Number(v), budget)}`)
+    .replace(/^(\s*workers:.*?\bcount:\s*)(\d+)/m, (_m, k: string, v: string) => `${k}${Math.min(Number(v), workers)}`)
+    .replace(/^(\s*workers:.*?\bmax:\s*)(\d+)/m, (_m, k: string, v: string) => `${k}${Math.min(Number(v), workers)}`);
+  writeFileSync(file, text);
+  return [`agents.yaml starts within this machine's instance policy for ${repo} (budget $${budget}/day, at most ${workers} workers)`];
+}
+
 export interface InstallOptions {
   root: string;
   /** Path to the engine's cli.js (defaults to this running engine). */
@@ -125,6 +145,7 @@ export function install(opts: InstallOptions): InstallReport {
     const config = join(cfgDir, 'config.yaml');
     const repo = gitRemoteRepo(root) ?? 'owner/repo';
     writeFileSync(config, readFileSync(config, 'utf8').replaceAll('{{name}}', basename(root)).replaceAll('{{repo}}', repo));
+    notes.push(...scaffoldWithinPolicies(cfgDir, repo));
     scaffolded = true;
     notes.push(`created ${BRAND.configDir}/ from templates; edit owners, guardrails and tests, then run \`${BRAND.cli} doctor\``);
   }
