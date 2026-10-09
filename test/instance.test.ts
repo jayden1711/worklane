@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
 import { EventLog } from '../src/events/log.js';
@@ -99,18 +100,50 @@ function two() {
   return { dir, made };
 }
 
-test('acceptance: two instances keep separate logs, budgets and environments', () => {
+/** A stand-in gh that prints the token kept in its config dir, and a local GitHub API listing what each token reaches. */
+async function fakeGitHub(reach: Record<string, string[]>) {
+  const bin = mkdtempSync(join(tmpdir(), 'fake-gh-'));
+  writeFileSync(join(bin, 'gh'), '#!/bin/sh\n[ "$1 $2" = "auth token" ] && cat "$GH_CONFIG_DIR/token"\n');
+  chmodSync(join(bin, 'gh'), 0o755);
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+    seen.push(token);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify((reach[token] ?? []).map((full_name) => ({ full_name }))));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const api = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  return { bin, api, seen, close: () => new Promise((r) => server.close(r)) };
+}
+
+const run = (args: string[], env: NodeJS.ProcessEnv) =>
+  new Promise<{ status: number | null; stderr: string }>((res) => {
+    const p = spawn(process.execPath, [cli, ...args], { env, cwd: tmpdir() });
+    let stderr = '';
+    p.stderr.on('data', (d) => (stderr += String(d)));
+    p.on('exit', (status) => res({ status, stderr }));
+  });
+
+test('acceptance: two instances keep separate logs, budgets and environments', { skip: process.platform === 'win32' && 'POSIX stand-in gh' }, async () => {
   const { dir, made } = two();
-  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, GH_TOKEN: 'inherited-token-must-not-be-used', ANTHROPIC_API_KEY: 'inherited-key' };
-  for (const m of made) {
-    const r = spawnSync(process.execPath, [cli, 'coordinator', 'run', '--instance', m.name, '--once'], { encoding: 'utf8', env, cwd: tmpdir(), timeout: 120_000 });
-    assert.equal(r.status, 0, r.stderr);
-    const log = new EventLog(join(m.home, 'state', 'events.db'));
-    try {
-      assert.ok(log.read(0, ['coordinator.started']).length === 1, `${m.name} logged to its own state`);
-    } finally {
-      log.close();
+  const gh = await fakeGitHub({ github_pat_alpha: ['example-org/example-shop'], github_pat_beta: ['example-org/example-shop'] });
+  for (const m of made) writeFileSync(join(m.home, 'gh', 'token'), `github_pat_${m.name}\n`);
+  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api, GH_TOKEN: 'inherited-token-must-not-be-used', ANTHROPIC_API_KEY: 'inherited-key' };
+  try {
+    for (const m of made) {
+      const r = await run(['coordinator', 'run', '--instance', m.name, '--once'], env);
+      assert.equal(r.status, 0, r.stderr);
+      const log = new EventLog(join(m.home, 'state', 'events.db'));
+      try {
+        assert.ok(log.read(0, ['coordinator.started']).length === 1, `${m.name} logged to its own state`);
+      } finally {
+        log.close();
+      }
     }
+    assert.deepEqual([...new Set(gh.seen)].sort(), ['github_pat_alpha', 'github_pat_beta'], 'each coordinator used its own login, never the inherited token');
+  } finally {
+    await gh.close();
   }
   const [a, b] = made.map((m) => loadInstance(m.name, dir));
   assert.equal(a!.config.agents.daily_budget_usd, 40);
@@ -124,6 +157,27 @@ test('acceptance: two instances keep separate logs, budgets and environments', (
   for (const e of [ea, eb]) {
     assert.equal(e.GH_TOKEN, undefined, 'an inherited token never stands in for the instance login');
     assert.equal(e.ANTHROPIC_API_KEY, undefined);
+  }
+});
+
+test('acceptance: a coordinator refuses a GitHub token that can see repos outside its instance', { skip: process.platform === 'win32' && 'POSIX stand-in gh' }, async () => {
+  const { dir, made } = two();
+  const gh = await fakeGitHub({ github_pat_wide: ['example-org/example-shop', 'example-org/payroll'] });
+  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  try {
+    for (const [token, why] of [
+      ['github_pat_wide', /can reach 1 repo\(s\) outside this instance/],
+      ['gho_personal_login', /personal login or classic token/],
+    ] as const) {
+      writeFileSync(join(made[0]!.home, 'gh', 'token'), `${token}\n`);
+      const r = await run(['coordinator', 'run', '--instance', 'alpha', '--once'], env);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, why);
+      assert.doesNotMatch(r.stderr, /payroll|gho_personal/, 'never names other repos or prints the token');
+    }
+    assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
+  } finally {
+    await gh.close();
   }
 });
 

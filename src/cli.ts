@@ -11,7 +11,7 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
 import { install } from './install.js';
-import { homeDir, slotsDir } from './os/index.js';
+import { homeDir, slotsConfigPath, slotsDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
@@ -462,7 +462,7 @@ async function main(argv: string[]): Promise<number> {
       if (sub === 'show') {
         const st = readCapState(dir);
         if (!adaptiveConfig(dir)) {
-          console.log(`fixed cap ${currentCap(dir)} (no "adaptive" in ${join(dir, 'config.json')})`);
+          console.log(`fixed cap ${currentCap(dir)} (no "adaptive" in ${slotsConfigPath(dir)})`);
           return 0;
         }
         if (!st) {

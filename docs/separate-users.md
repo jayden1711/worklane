@@ -17,7 +17,7 @@ Replace `<name>` with the instance name throughout. Every command marked **root*
 | Group | Members | For |
 |---|---|---|
 | `wl-<name>-work` | all of the instance's users | the repo checkout and worktrees |
-| `agent-slots` | every coordinator user on the machine | the shared slot directory and agent cap |
+| `agent-slots` | every coordinator user on the machine | the shared slot directory (`/var/lib/worklane/agent-slots`) and its config (`/etc/worklane/slots.json`) |
 
 ## Setup (root)
 
@@ -34,11 +34,18 @@ usermod -aG wl-<name>-work wl-<name>-agent
 groupadd -f agent-slots
 usermod -aG agent-slots wl-<name>
 
+# Instance checkouts live under one root of their own (leave other services' directories alone).
+install -d -o root -g root -m 0755 /srv/worklane
 # The repo checkout: owned by the coordinator, group-writable, new files inherit the group.
-install -d -o wl-<name> -g wl-<name>-work -m 2770 /srv/<name>
+install -d -o wl-<name> -g wl-<name>-work -m 2770 /srv/worklane/<name>
 
-# The shared slot directory (once per machine).
-install -d -o root -g agent-slots -m 2770 /var/tmp/agent-slots
+# The shared slot directory and its config (once per machine), outside /var/tmp,
+# which tmp cleaners empty of old files.
+install -d -o root -g root -m 0755 /var/lib/worklane
+install -d -o root -g agent-slots -m 2770 /var/lib/worklane/agent-slots
+install -d -o root -g root -m 0755 /etc/worklane
+printf '{"max_agents":4,"adaptive":{"start":2,"floor":2,"ceiling":8}}\n' > /etc/worklane/slots.json
+chown root:agent-slots /etc/worklane/slots.json && chmod 0664 /etc/worklane/slots.json
 
 # The coordinator may switch to its agent user, without a password, and to nothing else.
 cat > /etc/sudoers.d/worklane-<name> <<'EOF'
@@ -58,7 +65,19 @@ apt-get install -y bubblewrap socat
 
 - **`!use_pty`:** without it, some distributions run the agent behind a pseudo-terminal, which breaks its JSON output stream.
 - **`umask=0002`:** makes files agents write group-writable, so the coordinator can clean up their worktrees.
-- **Ubuntu 24.04 and later:** if `sysctl kernel.apparmor_restrict_unprivileged_userns` prints `1`, bubblewrap needs an AppArmor profile; see Claude Code's sandboxing docs.
+- **Ubuntu 24.04 and later:** if `sysctl kernel.apparmor_restrict_unprivileged_userns` prints `1`, don't turn that setting off machine-wide. Give bubblewrap alone the right to create user namespaces with a profile scoped to its binary, `/etc/apparmor.d/bwrap`:
+
+  ```
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  ```
+
+  Load it with `apparmor_parser -r /etc/apparmor.d/bwrap`. Then check, as an ordinary user, that `bwrap --ro-bind / / --unshare-user true` exits 0.
 
 For an eval lane, add `wl-<name>-eval` the same way:
 - Add it to `wl-<name>-work`.
@@ -69,7 +88,10 @@ For an eval lane, add `wl-<name>-eval` the same way:
 
 Each user signs in to its own accounts. Worklane never creates, reads or copies credentials.
 
-- **Coordinator's GitHub login:** as `wl-<name>`, run `GH_CONFIG_DIR=~/.config/<name>-gh gh auth login`. Use a dedicated account or token, never your own. Point `credentials.yaml` `github.path` at that directory.
+- **Coordinator's GitHub credential: repo-scoped only.** Use a GitHub App installed on only this instance's repo, or a fine-grained personal access token limited to that repo. Never use a personal `gh auth login` session or a classic token, which reach every repo the account can.
+  - For a fine-grained token: as `wl-<name>`, run `GH_CONFIG_DIR=~/.config/<name>-gh gh auth login --with-token < token-file`, then delete the file. Point `credentials.yaml` `github.path` at that directory.
+  - **Enforced at start.** The coordinator lists the repos its token can reach and refuses to start unless that is exactly the instance's repo. It refuses personal logins (`gho_`), classic tokens (`ghp_`) and App user tokens (`ghu_`) without asking GitHub. The token is never printed, and refusals give counts, not other repos' names. For GitHub Enterprise, set `WORKLANE_GITHUB_API` to the API base URL.
+  - GitHub App credentials (`kind: app`) are not supported yet; use a fine-grained token for now.
 - **Agent's Claude login:** as `wl-<name>-agent`, run `claude` and sign in, or set up a token with `claude setup-token`. See [auth.md](auth.md) for the options and Anthropic's terms for automated use.
 - **Eval key (eval lanes only):** a file owned by `wl-<name>-eval`, mode 0400, named in `credentials.yaml` `eval_key`.
 

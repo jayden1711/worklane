@@ -2,7 +2,9 @@
 // (a pid lock), started by the OS service manager so it never depends on a
 // Claude session. It recovers on start, ticks, and backs up the log hourly
 // with verified read-back.
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { checkRepoScope } from './github-scope.js';
 import { hostname, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
@@ -64,6 +66,18 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   const env = instanceEnv(i);
+  // The GitHub credential must reach this instance's repo and nothing else.
+  let token = '';
+  try {
+    token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim();
+  } catch {
+    // no login in the instance's gh config dir
+  }
+  const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub login in ${i.credentials.github.kind === 'gh-config-dir' ? i.credentials.github.path : 'the instance credentials'}` };
+  if (!scope.ok) {
+    console.error(`instance ${name} not started: ${scope.why}`);
+    return 1;
+  }
   // Agents run as another user in the same group: worktrees and slot files must be group-writable both ways.
   if (i.runAs) process.umask(0o002);
   for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
