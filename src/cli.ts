@@ -26,7 +26,8 @@ import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
 import { openUrl } from './os/index.js';
-import { backlogFor, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { backlogFor, instanceEnv, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { installService, uninstallService } from './os/index.js';
@@ -492,7 +493,17 @@ async function main(argv: string[]): Promise<number> {
         console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, key ${gh.key_path}` : `gh config ${gh.path}`}`);
         console.log(`  claude: ${i.runAs ? `${i.runAs.user}'s own login, in its home` : `config ${i.credentials.claude!.config_dir}`}`);
         for (const m of missing) console.log(`  MISSING ${m}`);
-        return missing.length ? 1 : 0;
+        if (missing.length) return 1;
+        // The same repo-scope check the coordinator makes at start, without printing the token.
+        let token = '';
+        try {
+          token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', env: instanceEnv(i), stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim();
+        } catch {
+          // no login in the instance's gh config dir
+        }
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: 'no GitHub login in the instance gh config dir' };
+        console.log(scope.ok ? `  github token: ${scope.kind}, reaches only ${i.repo.repo}` : `  github token REFUSED: ${scope.why}`);
+        return scope.ok ? 0 : 1;
       }
       console.error('usage: instance init <name> --repo <path> --github <owner/repo> | instance list | instance show <name>');
       return 2;
