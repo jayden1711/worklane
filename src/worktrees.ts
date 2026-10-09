@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { childEnv } from './os/index.js';
+import { childEnv, shellCommand } from './os/index.js';
 
 export interface WorktreeOptions {
   repo: string;
@@ -42,7 +42,8 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
   git(o.repo, 'worktree', 'add', '-q', '-B', branch, path, base);
   const setupErrors: string[] = [];
   for (const step of o.setup) {
-    const r = spawnSync(step, { cwd: path, shell: true, encoding: 'utf8', env: childEnv(), timeout: 900_000 });
+    const [file, args] = shellCommand(step);
+    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env: childEnv(), timeout: 900_000 });
     if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }
   return { path, setupErrors };

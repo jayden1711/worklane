@@ -7,7 +7,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { acquireLock } from './locks.js';
-import { childEnv, killTree, spawnDetached } from './os/index.js';
+import { childEnv, killTree, shellCommand, spawnDetached } from './os/index.js';
 import { baselineGate, type Baseline, type FailureFormat } from './baseline.js';
 
 export const DoneWhen = z.array(
@@ -77,7 +77,8 @@ function runCheck(command: string, cwd: string, timeoutMs: number, busy: RegExp[
       clearTimeout(timer);
       resolveRun({ check: command, durationMs: Date.now() - started, ...r });
     };
-    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached, env: childEnv() });
+    const [file, args] = shellCommand(command);
+    const child = spawn(file, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached, env: childEnv() });
     const timer = setTimeout(() => {
       killTree(child.pid, () => child.kill('SIGKILL'));
       done({ status: 'unavailable', exitCode: null, detail: `timed out after ${Math.round(timeoutMs / 1000)}s` });
