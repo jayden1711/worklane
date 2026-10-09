@@ -20,3 +20,6 @@ test/push-gate.test.ts bob@corp.dev
 # Fixture homes in the separate-user tests.
 test/separate-users.test.ts /home/shop-agent
 test/separate-users.test.ts /home/coord
+test/separate-users.test.ts /home/shop-eval
+# Placeholder homes in the separate-users guide.
+docs/separate-users.md /home/wl-

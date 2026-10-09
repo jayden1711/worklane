@@ -655,3 +655,15 @@ test('a coordinator reports its signals for the shared cap and logs each change 
   assert.equal(changed[0]!.from, 3);
   assert.match(changed[0]!.reason, /dropped: usage limit/);
 });
+
+test('a worker runs in the lane its issue names with a lane:<name> label', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready', 'lane:eval'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  const worker = runner.calls.find((r) => r.role === 'worker')!;
+  assert.equal(worker.lane, 'eval');
+  assert.equal(runner.calls.find((r) => r.role === 'evaluator-repro')!.lane, undefined, 'evaluators stay in the default lane');
+});

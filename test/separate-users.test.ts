@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
-import { initInstance, loadInstance } from '../src/instance.js';
+import { initInstance, laneRuns, loadInstance } from '../src/instance.js';
 import { asUser } from '../src/os/index.js';
-import { agentEnv, runAsEnv } from '../src/runner.js';
+import { agentEnv, cliArgs, CliRunner, runAsEnv } from '../src/runner.js';
+import { sandboxSettings } from '../src/sandbox.js';
 import { exampleProject } from './helpers.js';
 
 function instance(extraInstance = '', policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n') {
@@ -76,4 +77,47 @@ test('a separate agent user cannot reach an instance home on this machine (0700)
   const env = runAsEnv(agentEnv({ PATH: '/usr/local/bin:/usr/bin:/bin' }, 'cli'), { user: agentUser!, home: `/home/${agentUser}` });
   const [f, a] = asUser(agentUser!, 'ls', [join(home, 'gh')], env);
   assert.notEqual(spawnSync(f, a, { encoding: 'utf8', env: { PATH: env.PATH! } }).status, 0);
+});
+
+test('sandbox settings fail closed and deny the same paths to commands and to the Read tool', () => {
+  const s = sandboxSettings({ lane: { allowedDomains: ['registry.npmjs.org', 'registry.npmjs.org'] }, denyRead: ['/srv/inst/shop', '/home/shop-agent/.ssh'] });
+  assert.equal(s.sandbox.enabled, true);
+  assert.equal(s.sandbox.failIfUnavailable, true, 'no sandbox, no run');
+  assert.equal(s.sandbox.allowUnsandboxedCommands, false, 'no retry outside the sandbox');
+  assert.deepEqual(s.sandbox.network.allowedDomains, ['registry.npmjs.org']);
+  assert.deepEqual(s.sandbox.filesystem.denyRead, ['/srv/inst/shop', '/home/shop-agent/.ssh']);
+  assert.deepEqual(s.permissions.deny, ['Read(//srv/inst/shop/**)', 'Read(//home/shop-agent/.ssh/**)']);
+  assert.match(cliArgs({ prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker' }, s).slice(0, 2).join(' '), /^--settings \{"sandbox":/);
+});
+
+test('lanes: each runs as its user in its own sandbox; only the eval user\'s lane can read the eval key', () => {
+  const { dir, home } = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n  eval_user: shop-eval\n  eval_home: /home/shop-eval\n', 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nlanes:\n  default: { allowed_domains: [registry.npmjs.org] }\n  eval: { allowed_domains: [api.anthropic.com], run_as: eval }\n');
+  writeFileSync(join(home, 'credentials.yaml'), `version: 1\ngithub: { kind: gh-config-dir, path: ${join(home, 'gh')} }\nclaude: { config_dir: ${join(home, 'claude')} }\neval_key: /home/shop-eval/key\n`);
+  const lanes = laneRuns(loadInstance('shop', dir));
+  assert.equal(lanes.default!.runAs!.user, 'shop-agent');
+  assert.equal(lanes.eval!.runAs!.user, 'shop-eval');
+  const d = lanes.default!.settings!.sandbox;
+  const e = lanes.eval!.settings!.sandbox;
+  assert.deepEqual(d.network.allowedDomains, ['registry.npmjs.org']);
+  assert.deepEqual(e.network.allowedDomains, ['api.anthropic.com']);
+  for (const p of [home, '/home/shop-agent/.ssh', '/home/shop-agent/.config/gh', '/home/shop-agent/.claude/.credentials.json', '/home/shop-eval/key']) assert.ok(d.filesystem.denyRead.includes(p), `default lane denies ${p}`);
+  assert.ok(!e.filesystem.denyRead.includes('/home/shop-eval/key'), 'the eval lane may read its key');
+  assert.ok(e.filesystem.denyRead.includes(home), 'but never the coordinator\'s home');
+});
+
+test('lane policy: eval lanes need an eval user, lanes need a default, and the sandbox is off only when said', () => {
+  const noEvalUser = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n', 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nlanes:\n  default: {}\n  eval: { run_as: eval }\n');
+  assert.throws(() => loadInstance('shop', noEvalUser.dir), /a lane runs as eval, so set eval_user/);
+  const noDefault = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n', 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nlanes:\n  build: {}\n');
+  assert.throws(() => loadInstance('shop', noDefault.dir), /lanes must include default/);
+  const off = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n', 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nsandbox: false\n');
+  assert.equal(laneRuns(loadInstance('shop', off.dir)).default!.settings, undefined);
+  const on = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n');
+  assert.ok(laneRuns(loadInstance('shop', on.dir)).default!.settings, 'on by default');
+});
+
+test('a run in a lane the instance does not define is refused', async () => {
+  const r = await new CliRunner('cli', { PATH: '' }, 'claude', undefined, { default: {} }).run({ prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker', lane: 'nope' });
+  assert.equal(r.reason, 'failed');
+  assert.match(r.detail, /unknown lane "nope"/);
 });

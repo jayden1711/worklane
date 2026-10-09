@@ -31,6 +31,8 @@ export interface RunRequest {
   onStart?: (pid: number) => void;
   onActivity?: (note: string) => void;
   signal?: AbortSignal;
+  /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
+  lane?: string;
 }
 
 export interface RunResult {
@@ -110,8 +112,8 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
   }
 }
 
-export function cliArgs(req: RunRequest): string[] {
-  const args = ['-p', req.prompt, '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+export function cliArgs(req: RunRequest, settings?: object): string[] {
+  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', req.prompt, '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (req.appendSystemPrompt) args.push('--append-system-prompt', req.appendSystemPrompt);
@@ -138,6 +140,8 @@ export class CliRunner implements AgentRunner {
     private base: NodeJS.ProcessEnv = process.env,
     private bin = 'claude',
     private runAs?: RunAs,
+    /** Per lane: the user and sandbox settings. When set, a run in an unknown lane is refused. */
+    private lanes?: Record<string, { runAs?: RunAs; settings?: object }>,
   ) {}
 
   async run(req: RunRequest): Promise<RunResult> {
@@ -146,16 +150,21 @@ export class CliRunner implements AgentRunner {
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),
     });
-    const runEnv = this.runAs ? runAsEnv(env, this.runAs) : env;
-    const auth = claudeAuthMethod(runEnv, this.runAs, this.bin);
+    const laneName = req.lane ?? 'default';
+    const lane = this.lanes?.[laneName];
+    if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
+    const runAs = lane ? lane.runAs : this.runAs;
+    const runEnv = runAs ? runAsEnv(env, runAs) : env;
+    const auth = claudeAuthMethod(runEnv, runAs, this.bin);
     const want = this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
     return new Promise((resolve) => {
-      const [file, args] = this.runAs ? asUser(this.runAs.user, this.bin, cliArgs(req), runEnv) : [this.bin, cliArgs(req)];
+      const argv = cliArgs(req, lane?.settings);
+      const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
-      const child = spawn(file, args, { cwd: req.cwd, env: this.runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
       let rateLimited = false;
@@ -164,7 +173,7 @@ export class CliRunner implements AgentRunner {
       let stderr = '';
       const kill = (why: TerminalReason) => {
         ended ??= why;
-        if (this.runAs) killTreeAs(this.runAs.user, child.pid);
+        if (runAs) killTreeAs(runAs.user, child.pid);
         else killTree(child.pid, () => child.kill('SIGKILL'));
       };
       let stall = setTimeout(() => kill('stalled'), req.stallMs);

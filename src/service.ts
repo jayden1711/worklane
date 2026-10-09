@@ -16,9 +16,9 @@ import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
-import { CliRunner, type RunAs } from './runner.js';
+import { CliRunner } from './runner.js';
 import { latestBaseline } from './baseline.js';
-import { credentialProblems, loadInstance, type Instance } from './instance.js';
+import { credentialProblems, laneRuns, loadInstance, type Instance } from './instance.js';
 
 export const instanceId = () => `${userInfo().username}@${hostname().split('.')[0]}`;
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
@@ -64,16 +64,18 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   const env = instanceEnv(i);
+  // Agents run as another user in the same group: worktrees and slot files must be group-writable both ways.
+  if (i.runAs) process.umask(0o002);
   for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
   Object.assign(process.env, env);
-  return runSite(siteForInstance(i), opts, i.runAs ?? undefined);
+  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i)));
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runAs?: RunAs): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -81,7 +83,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     return 1;
   }
   const log = new EventLog(site.logPath);
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state), runner: new CliRunner(cfg.project.agent_runtime.kind, process.env, 'claude', runAs), repo: root, instance: instanceId(), stateDir: state });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   const requeued = await coordinator.recover();
