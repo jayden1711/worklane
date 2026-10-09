@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import { BRAND } from '../src/brand.js';
 import { claimRef } from '../src/claims.js';
-import { slotStatus } from '../src/slots.js';
+import { currentCap, slotStatus } from '../src/slots.js';
+import { noteLimit } from '../src/cap.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
@@ -634,4 +635,23 @@ test('acceptance: two instances, each set to 4 workers, never run more than the 
     await Promise.all(coords.map((c) => c.idle()));
   }
   assert.ok(seen.max <= 4);
+});
+
+test('a coordinator reports its signals for the shared cap and logs each change it makes, with the reason', { skip }, async () => {
+  const f = fixture();
+  writeFileSync(join(f.slotsDir, 'config.json'), JSON.stringify({ max_agents: 4, adaptive: { start: 3, interval_min: 1 } }));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { ...f.machine, mem: () => 12 } });
+  const share = (now: Date) => (c as unknown as { shareCap(now: Date): Promise<void> }).shareCap(now);
+  const t0 = new Date();
+  await share(t0);
+  const signals = JSON.parse(readFileSync(join(f.slotsDir, 'signals', `${f.cfg.project.project.name}.json`), 'utf8')) as { prsWaiting: number };
+  assert.equal(signals.prsWaiting, 0);
+  assert.equal(currentCap(f.slotsDir), 3, 'started at 3');
+  noteLimit(f.slotsDir, new Date(t0.getTime() + 30_000));
+  await share(new Date(t0.getTime() + 120_000));
+  assert.equal(currentCap(f.slotsDir), 2);
+  const changed = f.log.read(0, ['cap.changed']).map((e) => e.payload as { from: number; to: number; reason: string });
+  assert.equal(changed.length, 1);
+  assert.equal(changed[0]!.from, 3);
+  assert.match(changed[0]!.reason, /dropped: usage limit/);
 });
