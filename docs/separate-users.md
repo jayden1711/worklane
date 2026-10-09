@@ -19,70 +19,21 @@ Replace `<name>` with the instance name throughout. Every command marked **root*
 | `wl-<name>-work` | all of the instance's users | the repo checkout and worktrees |
 | `agent-slots` | every coordinator user on the machine | the shared slot directory (`/var/lib/worklane/agent-slots`) and its config (`/etc/worklane/slots.json`) |
 
-## Setup (root)
+## Setup
 
-```sh
-# Users: no password logins, homes private.
-useradd --create-home --shell /bin/bash wl-<name>
-useradd --create-home --shell /bin/bash wl-<name>-agent
-chmod 0700 /home/wl-<name> /home/wl-<name>-agent
+Setup ships as scripts in `scripts/setup/`, reviewed like any other change. Run them from a checkout of this repo as an admin user; they use `sudo` themselves. Don't paste setup commands from a page or a chat: copying out of a terminal can add trailing spaces and invisible characters, which break heredocs and line continuations. Every script is safe to run again and stops at the first error.
 
-# Groups.
-groupadd -f wl-<name>-work
-usermod -aG wl-<name>-work wl-<name>
-usermod -aG wl-<name>-work wl-<name>-agent
-groupadd -f agent-slots
-usermod -aG agent-slots wl-<name>
+| Script | Run | What it does |
+|---|---|---|
+| `node.sh <version>` | once per machine | Downloads Node.js and that release's `SHASUMS256.txt` from nodejs.org, verifies the tarball, installs it to `/opt`, links it from `/usr/local/bin`. Refuses if another `node` is already on PATH. |
+| `machine.sh [--cap N]` | once per machine | Creates `/srv/worklane`, `/var/lib/worklane`, `/etc/worklane`; the `agent-slots` group, the slot directory and `/etc/worklane/slots.json` (a fixed cap, default 2; an existing file is kept). Installs `bubblewrap` and `socat`. If user namespaces are restricted, loads the distribution's `bwrap-userns-restrict` profile, or else a profile that lets only `/usr/bin/bwrap` create them; the machine-wide restriction stays on. |
+| `instance.sh <name> [--eval]` | per instance | Creates `wl-<name>` (coordinator), `wl-<name>-agent` and optionally `wl-<name>-eval`, with private homes; the `wl-<name>-work` group; `/srv/worklane/<name>` (group-writable, setgid); lingering for the coordinator's service; and the sudoers rule. The rule is written to a dotted temp name (which sudo ignores), checked with `visudo -cf`, and only then moved into place. |
+| `check.sh <name> [<other>]` | after setup | Read-only checks: the coordinator can run as its agent user and not as another instance's; the agent can't list the coordinator's home; bwrap works for the agent; the slots are writable; the sudoers file is valid. |
 
-# Instance checkouts live under one root of their own (leave other services' directories alone).
-install -d -o root -g root -m 0755 /srv/worklane
-# The repo checkout: owned by the coordinator, group-writable, new files inherit the group.
-install -d -o wl-<name> -g wl-<name>-work -m 2770 /srv/worklane/<name>
-
-# The shared slot directory and its config (once per machine), outside /var/tmp,
-# which tmp cleaners empty of old files.
-install -d -o root -g root -m 0755 /var/lib/worklane
-install -d -o root -g agent-slots -m 2770 /var/lib/worklane/agent-slots
-install -d -o root -g root -m 0755 /etc/worklane
-printf '{"max_agents":4,"adaptive":{"start":2,"floor":2,"ceiling":8}}\n' > /etc/worklane/slots.json
-chown root:agent-slots /etc/worklane/slots.json && chmod 0664 /etc/worklane/slots.json
-
-# The coordinator may switch to its agent user, without a password, and to nothing else.
-cat > /etc/sudoers.d/worklane-<name> <<'EOF'
-Defaults:wl-<name> !use_pty
-Defaults>wl-<name>-agent umask=0002, umask_override
-wl-<name> ALL=(wl-<name>-agent) NOPASSWD: ALL
-EOF
-chmod 0440 /etc/sudoers.d/worklane-<name>
-visudo -cf /etc/sudoers.d/worklane-<name>
-
-# The coordinator's service keeps running without a login session.
-loginctl enable-linger wl-<name>
-
-# Claude Code's sandbox on Linux.
-apt-get install -y bubblewrap socat
-```
-
-- **`!use_pty`:** without it, some distributions run the agent behind a pseudo-terminal, which breaks its JSON output stream.
-- **`umask=0002`:** makes files agents write group-writable, so the coordinator can clean up their worktrees.
-- **Ubuntu 24.04 and later:** if `sysctl kernel.apparmor_restrict_unprivileged_userns` prints `1`, don't turn that setting off machine-wide. Give bubblewrap alone the right to create user namespaces with a profile scoped to its binary, `/etc/apparmor.d/bwrap`:
-
-  ```
-  abi <abi/4.0>,
-  include <tunables/global>
-
-  profile bwrap /usr/bin/bwrap flags=(unconfined) {
-    userns,
-    include if exists <local/bwrap>
-  }
-  ```
-
-  Load it with `apparmor_parser -r /etc/apparmor.d/bwrap`. Then check, as an ordinary user, that `bwrap --ro-bind / / --unshare-user true` exits 0.
-
-For an eval lane, add `wl-<name>-eval` the same way:
-- Add it to `wl-<name>-work`.
-- Add it to the sudoers rule's runas list: `(wl-<name>-agent, wl-<name>-eval)`.
-- Add the same `umask` line for it.
+What the sudoers rule says:
+- `Defaults:wl-<name> !use_pty`: without it, some distributions run the agent behind a pseudo-terminal, which breaks its JSON output.
+- `Defaults>wl-<name>-agent umask=0002, umask_override`: files agents write stay group-writable, so the coordinator can clean up their worktrees.
+- `wl-<name> ALL=(wl-<name>-agent) NOPASSWD: ALL`: the coordinator may switch to its own agent user (and eval user), and to nothing else.
 
 ## Credentials (the operator, not Worklane)
 
