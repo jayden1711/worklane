@@ -18,25 +18,70 @@ import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { CliRunner } from './runner.js';
 import { latestBaseline } from './baseline.js';
+import { credentialProblems, loadInstance, type Instance } from './instance.js';
 
 export const instanceId = () => `${userInfo().username}@${hostname().split('.')[0]}`;
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
-export function backlogFor(cfg: Config, root: string): Backlog {
-  return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo) : new FileBacklog(join(projectStateDir(root), 'backlog.json'));
+export function backlogFor(cfg: Config, root: string, state = projectStateDir(root)): Backlog {
+  return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo) : new FileBacklog(join(state, 'backlog.json'));
 }
 
-export async function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
-  const cfg = loadConfig(root);
-  const state = projectStateDir(root);
+/** Where a coordinator keeps its state: per repo (no instance), or in an instance's home. */
+export interface Site {
+  cfg: Config;
+  root: string;
+  stateDir: string;
+  logPath: string;
+}
+
+export const siteForRoot = (root: string): Site => ({ cfg: loadConfig(root), root, stateDir: projectStateDir(root), logPath: logPath(root) });
+export const siteForInstance = (i: Instance): Site => ({ cfg: i.config, root: i.repo.path, stateDir: i.stateDir, logPath: join(i.stateDir, 'events.db') });
+export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance.${name}`;
+
+/**
+ * The coordinator's environment for an instance: its own logins and nothing
+ * inherited that could stand in for them. gh prefers GH_TOKEN/GITHUB_TOKEN
+ * over its config dir, so those are dropped rather than silently used.
+ */
+export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
+  if (i.credentials.github.kind !== 'gh-config-dir') throw new Error('GitHub App credentials are not supported yet; use kind: gh-config-dir');
+  env.GH_CONFIG_DIR = i.credentials.github.path;
+  env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
+  env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
+  return env;
+}
+
+/** Run an instance's coordinator. Refuses to start without the instance's own credentials. */
+export async function runInstanceCoordinator(name: string, opts: { once?: boolean; intervalMs?: number } = {}): Promise<number> {
+  const i = loadInstance(name);
+  const missing = credentialProblems(i.credentials);
+  if (missing.length) {
+    console.error(`instance ${name} not started; credentials missing:\n${missing.map((m) => `  ${m}`).join('\n')}`);
+    return 1;
+  }
+  const env = instanceEnv(i);
+  for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
+  Object.assign(process.env, env);
+  return runSite(siteForInstance(i), opts);
+}
+
+export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
+  return runSite(siteForRoot(root), opts);
+}
+
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }): Promise<number> {
+  const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
     console.error(`another coordinator is running for this project (pid ${lock.holder?.pid})`);
     return 1;
   }
-  const log = new EventLog(logPath(root));
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root), runner: new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state });
+  const log = new EventLog(site.logPath);
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state), runner: new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   const requeued = await coordinator.recover();
