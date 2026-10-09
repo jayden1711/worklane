@@ -1,8 +1,8 @@
 // Crash-safe file locks: a lock is a file, created atomically, holding the
 // owner's pid. A lock whose owner is dead is stale and can be taken over.
 // Liveness, not a timeout, decides staleness (precedent: claude-code-merge-queue).
-import { randomBytes } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pidAlive } from './os/index.js';
 
@@ -26,16 +26,44 @@ function readLock(path: string): LockInfo | null {
 }
 
 /**
+ * A takeover's claim counts as abandoned when its owner is dead or it is
+ * older than this. A takeover takes microseconds; this bounds how long a
+ * crashed one can block the lock.
+ */
+export const CLAIM_ABANDONED_MS = 60_000;
+
+/**
  * Try once. Returns the lock, or the current holder if it's busy.
  *
  * The lock's contents are written to a private temp file and hard-linked
  * into place, so the lock appears whole or not at all (link fails if the
  * lock exists). A competitor never reads a half-written lock and mistakes
- * it for a stale one. Taking over a stale lock renames it aside first:
- * only one process can win that rename, and if what it moved isn't the
- * stale lock it inspected, it puts it back.
+ * it for a stale one.
+ *
+ * Taking over a stale lock (its owner is dead) never removes a lock this
+ * process didn't inspect. It first claims that exact stale lock: a claim
+ * file named after a hash of its contents, which only one process can
+ * create. Holding the claim, it re-reads the lock and removes it only if it
+ * is still that stale lock. No one else may remove that one while the claim
+ * stands, so it can't be replaced in between; a fresh lock is never removed.
+ * Then it competes for the free lock like anyone else.
+ *
+ * Residual: a claim is cleared as abandoned when its owner is dead or it is
+ * older than CLAIM_ABANDONED_MS. Two holders remain possible only if a
+ * takeover stalls for longer than that between claiming and removing, or if
+ * its owner dies in that step and two others then clear its claim at once.
+ * (Established libraries accept a wider gap: proper-lockfile removes a stale
+ * lock without such a check and detects a doubly taken lock afterwards.)
  */
-export function tryLock(path: string, owner: string): { lock: Lock } | { holder: LockInfo | null } {
+/** Points inside a takeover where tests interleave other processes' steps. */
+export interface TakeoverHooks {
+  /** A stale lock was read and judged stale. */
+  inspected?(): void;
+  /** The takeover's exclusive step is done, before it is acted on. */
+  taking?(): void;
+}
+
+export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}): { lock: Lock } | { holder: LockInfo | null } {
   mkdirSync(dirname(path), { recursive: true });
   const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString() };
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
@@ -60,26 +88,44 @@ export function tryLock(path: string, owner: string): { lock: Lock } | { holder:
       if (seen === null) continue; // released in between: try again
       const holder = parseLock(seen);
       if (holder && pidAlive(holder.pid)) return { holder };
-      // Stale (dead owner, or unreadable): move it aside, then make sure it was the one we inspected.
-      const aside = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
+      // Stale (dead owner, or unreadable): claim this exact stale lock before touching it.
+      hooks.inspected?.();
+      const claim = `${path}.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`;
+      const mine = `${tmp}.claim`;
+      writeFileSync(mine, JSON.stringify({ pid: process.pid, at: Date.now() }));
       try {
-        renameSync(path, aside);
-      } catch {
-        continue; // someone else moved or released it
+        linkSync(mine, claim);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+        if (claimAbandoned(claim)) unlinkQuiet(claim); // its taker died or stalled; the next try claims it afresh
+        continue; // another process is taking over this same stale lock
+      } finally {
+        unlinkQuiet(mine);
       }
-      if (readFileSafe(aside) !== seen) {
-        // We moved a fresh lock that replaced the stale one: put it back if the slot is still free.
-        try {
-          linkSync(aside, path);
-        } catch {
-          // someone took the lock meanwhile; theirs stands
-        }
+      hooks.taking?.();
+      try {
+        // Ours alone to remove now: if the lock is still the stale one we read, nothing can replace it before this.
+        if (readFileSafe(path) === seen) unlinkQuiet(path);
+      } finally {
+        unlinkQuiet(claim);
       }
-      unlinkSync(aside);
     }
     return { holder: readLock(path) };
   } finally {
     unlinkSync(tmp);
+  }
+}
+
+function claimAbandoned(claim: string): boolean {
+  const c = parseLock(readFileSafe(claim) ?? '') as { pid?: number; at?: number } | null;
+  return !c || typeof c.pid !== 'number' || !pidAlive(c.pid) || Date.now() - (c.at ?? 0) > CLAIM_ABANDONED_MS;
+}
+
+function unlinkQuiet(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // already gone
   }
 }
 
