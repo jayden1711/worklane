@@ -84,9 +84,7 @@ export interface Projection {
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
-  trust: { stage: number | null; evaluations: { day: string; stage: number; healthy: boolean; why: string[] }[]; changes: { from: number; to: number; by: string; reason: string; at: string }[] };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
-  lessonPrs: { day: string; count: number; url: string; at: string }[];
 }
 
 export interface Run {
@@ -153,8 +151,6 @@ export function summarize(e: StoredEvent): string {
       return `blocked: ${p.why}`;
     case 'baseline.recorded':
       return `baseline: ${(p.failing as string[]).length} failing at ${String(p.sha).slice(0, 8)}`;
-    case 'lesson.proposed':
-      return `lesson proposed`;
     case 'issue.seen':
       return p.actionable ? 'seen: actionable' : `seen: ${p.why}`;
     case 'contract.missing':
@@ -165,14 +161,8 @@ export function summarize(e: StoredEvent): string {
       return `dispatch held: ${p.reason}`;
     case 'governor.release':
       return 'dispatch resumed';
-    case 'trust.evaluated':
-      return `trust: stage ${p.stage} ${p.healthy ? 'healthy' : `not healthy (${(p.why as string[]).join('; ')})`}`;
-    case 'stage.changed':
-      return `trust stage ${p.from} -> ${p.to} (${p.by})`;
     case 'report.posted':
       return `report posted (${p.slot})`;
-    case 'lessons.pr':
-      return `lessons PR opened (${p.count})`;
     case 'nightly.queued':
       return 'nightly runs queued';
     default:
@@ -195,9 +185,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
   const queue = new Map<number, Projection['landQueue'][number]>();
   const batches = new Map<string, Projection['batches'][number]>();
   let governor: Projection['governor'] = null;
-  const trust: Projection['trust'] = { stage: null, evaluations: [], changes: [] };
   const reports: Projection['reports'] = [];
-  const lessonPrs: Projection['lessonPrs'] = [];
 
   const task = (n: number, ts: string): Task => {
     let t = tasks.get(n);
@@ -395,18 +383,8 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       case 'governor.release':
         governor = { held: false, reason: null, load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts };
         break;
-      case 'trust.evaluated':
-        trust.evaluations.push({ day: String(p.day), stage: Number(p.stage), healthy: Boolean(p.healthy), why: p.why as string[] });
-        break;
-      case 'stage.changed':
-        trust.stage = Number(p.to);
-        trust.changes.push({ from: Number(p.from), to: Number(p.to), by: String(p.by), reason: String(p.reason), at: e.ts });
-        break;
       case 'report.posted':
         reports.push({ day: String(p.day), slot: String(p.slot), issue: (p.issue as number | null) ?? null, at: e.ts });
-        break;
-      case 'lessons.pr':
-        lessonPrs.push({ day: String(p.day), count: Number(p.count), url: String(p.url), at: e.ts });
         break;
     }
   }
@@ -433,9 +411,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
     landQueue: [...queue.values()].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt)),
     batches: [...batches.values()].slice(-30).reverse(),
     governor,
-    trust: { stage: trust.stage, evaluations: trust.evaluations.slice(-30).reverse(), changes: trust.changes.reverse() },
     reports: reports.slice(-30).reverse(),
-    lessonPrs: lessonPrs.slice(-30).reverse(),
   };
 }
 

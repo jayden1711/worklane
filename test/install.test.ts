@@ -45,7 +45,7 @@ test('install merges hooks into existing settings, keeps the project entries, an
   const s = settingsOf(dir) as Settings & { model: string };
   assert.equal(s.model, 'opus');
   assert.equal(s.hooks.PostToolUse![0]!.hooks[0]!.command, 'prettier --write');
-  for (const event of ['PreToolUse', 'Stop', 'SessionStart', 'SessionEnd']) {
+  for (const event of ['PreToolUse', 'SessionStart', 'SessionEnd']) {
     const ours = s.hooks[event]!.filter((e) => e.hooks.some((h) => h.command.includes(HOOK_MARKER)));
     assert.equal(ours.length, 1, `${event} installed once`);
     assert.match(ours[0]!.hooks[0]!.command, /\|\| exit 2;/);
@@ -80,7 +80,7 @@ test('doctor passes on a fresh install of the example, after a fingerprint refre
     const checks = doctor(dir);
     const fails = checks.filter((c) => c.level === 'fail' && !['gitleaks', 'claude'].includes(c.name));
     assert.deepEqual(fails, []);
-    for (const name of ['config', 'guardrails', 'hook PreToolUse', 'hook Stop', 'hook SessionStart', 'hook SessionEnd', 'fingerprints prod-db']) {
+    for (const name of ['config', 'guardrails', 'hook PreToolUse', 'hook SessionStart', 'hook SessionEnd', 'fingerprints prod-db']) {
       assert.equal(checks.find((c) => c.name === name)?.level, 'ok', name);
     }
   } finally {
@@ -122,7 +122,7 @@ test('missing engine: agent sessions block; human sessions get a one-line warnin
   const { dir, stateDir } = exampleProject();
   install({ root: dir, engineCli: join(dir, 'node_modules', 'gone', 'cli.js') });
   const agent = { [`${BRAND.envPrefix}_AGENT`]: '1' };
-  for (const event of ['PreToolUse', 'Stop', 'SessionStart']) {
+  for (const event of ['PreToolUse', 'SessionStart']) {
     const cmd = hookCmd(dir, event);
     assert.match(cmd, /\$CLAUDE_PROJECT_DIR\/node_modules\/gone\/cli\.js/);
     const input = { cwd: dir, tool_name: 'Bash', tool_input: { command: 'ls' } };
@@ -152,30 +152,6 @@ test('agent commits are secret-scanned before they happen', { skip: !which('gitl
   assert.match(r.stdout, /"permissionDecision":"deny"/);
   assert.match(r.stdout, /gitleaks found a secret/);
   assert.equal(commit(false).stdout, '', 'humans opt in to commit scanning with a git hook instead');
-});
-
-test('installed Stop hook blocks an agent until done_when passes', () => {
-  const { dir, stateDir } = exampleProject();
-  install({ root: dir, engineCli });
-  const cmd = hookCmd(dir, 'Stop');
-  const task = join(stateDir, 'task.json');
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(task, JSON.stringify({ id: 'issue-1', done_when: [{ test: 'test/price.test.js' }] }));
-  const agent = { [`${BRAND.envPrefix}_AGENT`]: '1', [`${BRAND.envPrefix}_TASK_FILE`]: task };
-  const pass = runHookCommand(cmd, dir, stateDir, { cwd: dir, stop_hook_active: false }, agent);
-  assert.equal(pass.status, 0);
-  assert.equal(pass.stdout, '');
-
-  writeFileSync(join(dir, 'src', 'price.js'), readFileSync(join(dir, 'src', 'price.js'), 'utf8').replace('cents * qty', 'cents + qty'));
-  const fail = runHookCommand(cmd, dir, stateDir, { cwd: dir }, agent);
-  assert.equal(fail.status, 0);
-  const out = JSON.parse(fail.stdout) as { decision: string; reason: string };
-  assert.equal(out.decision, 'block');
-  assert.match(out.reason, /done_when not met/);
-  // Human sessions have no Stop gate, even with a failing task around.
-  assert.equal(runHookCommand(cmd, dir, stateDir, { cwd: dir }, { [`${BRAND.envPrefix}_TASK_FILE`]: task }).stdout, '');
-  // An agent without a task file is blocked, not waved through.
-  assert.match(runHookCommand(cmd, dir, stateDir, { cwd: dir }, { [`${BRAND.envPrefix}_AGENT`]: '1' }).stdout, /without a task file/);
 });
 
 test('install references the project-local engine even when it is a symlink', { skip: isWindows && 'symlinks need privileges on Windows' }, () => {

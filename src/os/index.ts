@@ -2,7 +2,7 @@
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
-import { availableParallelism, freemem, homedir, loadavg } from 'node:os';
+import { availableParallelism, homedir, loadavg } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 
@@ -185,7 +185,7 @@ export function slotsDir(system = SYSTEM_SLOTS): string {
 }
 
 /**
- * The machine's slot config (max_agents, adaptive): AGENT_SLOTS_CONFIG if
+ * The machine's slot config (max_agents): AGENT_SLOTS_CONFIG if
  * set; else the system config file when the system slot directory is in
  * use and the file exists; else config.json in the slot directory.
  */
@@ -321,23 +321,6 @@ export function openUrl(url: string): void {
 /** A native executable's file name on this OS. */
 export function executableName(base: string): string {
   return process.platform === 'win32' ? `${base}.exe` : base;
-}
-
-/**
- * Memory available for new work, in GB: Linux's MemAvailable (free memory
- * alone understates it, since the page cache is reclaimable). Elsewhere,
- * free memory, which is a lower bound. Null if unreadable.
- */
-export function memAvailableGb(): number | null {
-  if (process.platform === 'linux') {
-    try {
-      const kb = Number(/^MemAvailable:\s+(\d+) kB/m.exec(readFileSync('/proc/meminfo', 'utf8'))?.[1]);
-      return Number.isFinite(kb) && kb > 0 ? kb / 1024 / 1024 : null;
-    } catch {
-      return null;
-    }
-  }
-  return freemem() / 1024 ** 3;
 }
 
 /** Free disk on the volume holding `path`: percent and GB. */

@@ -5,7 +5,6 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv, shellCommand } from '../src/os/index.js';
-import { runStopGate } from '../src/stopgate.js';
 import { createWorktree } from '../src/worktrees.js';
 import { repoRoot } from './helpers.js';
 
@@ -19,15 +18,6 @@ test('regression: a pipeline fails when any stage fails (`false | tail` is red)'
   assert.notEqual(run('node -e "process.exit(3)" | cat'), 0);
   assert.equal(run('true | tail -1'), 0);
   assert.equal(run('echo ok | grep -q ok'), 0);
-});
-
-test('regression: a Stop gate check piped into tail fails when the check does', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'pipefail-gate-'));
-  const taskFile = join(dir, 'task.json');
-  writeFileSync(taskFile, JSON.stringify({ id: 'issue-1', done_when: [{ command: 'node -e "process.exit(1)" | tail -1' }] }));
-  const r = await runStopGate({ cwd: dir, stateDir: join(dir, 'state'), taskFile, timeoutS: 60, lockWaitS: 0, busyPatterns: [] });
-  assert.equal(r.outcome, 'block');
-  assert.equal(r.checks[0]!.status, 'fail');
 });
 
 test('regression: a worktree setup step piped into cat reports its failure', () => {

@@ -16,12 +16,23 @@ export function tokenKind(token: string): TokenKind {
 
 type Fetch = typeof fetch;
 
-async function listRepos(token: string, path: string, pick: (j: unknown) => { full_name: string }[], fetchImpl: Fetch, api: string): Promise<string[]> {
+/** GitHub sends a token's expiry with every response (`GitHub-Authentication-Token-Expiration`, e.g. "2026-11-07 00:00:00 UTC"). */
+export function parseExpiry(header: string | null): string | null {
+  if (!header) return null;
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (UTC|[+-]\d{4})$/.exec(header.trim());
+  if (!m) return null;
+  const tz = m[3] === 'UTC' ? 'Z' : `${m[3]!.slice(0, 3)}:${m[3]!.slice(3)}`;
+  const t = Date.parse(`${m[1]}T${m[2]}${tz}`);
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
+async function listRepos(token: string, path: string, pick: (j: unknown) => { full_name: string }[], fetchImpl: Fetch, api: string, seenExpiry: { at: string | null }): Promise<string[]> {
   const out: string[] = [];
   let url: string | null = `${api}${path}${path.includes('?') ? '&' : '?'}per_page=100`;
   for (let page = 0; url && page < 20; page++) {
     const res: Response = await fetchImpl(url, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' } });
     if (!res.ok) throw new Error(`GitHub ${res.status} listing the token's repositories`);
+    seenExpiry.at ??= parseExpiry(res.headers.get('github-authentication-token-expiration'));
     out.push(...pick(await res.json()).map((r) => r.full_name.toLowerCase()));
     url = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1] ?? null;
   }
@@ -32,18 +43,19 @@ async function listRepos(token: string, path: string, pick: (j: unknown) => { fu
  * Check that a token sees exactly the instance's repos: all of them, and no
  * others. Refusals name the problem and counts, never other repos' names.
  */
-export async function checkRepoScope(token: string, allowed: string[], fetchImpl: Fetch = fetch, api = 'https://api.github.com'): Promise<{ ok: true; kind: TokenKind } | { ok: false; why: string }> {
+export async function checkRepoScope(token: string, allowed: string[], fetchImpl: Fetch = fetch, api = 'https://api.github.com'): Promise<{ ok: true; kind: TokenKind; expiresAt: string | null } | { ok: false; why: string }> {
   const kind = tokenKind(token);
   const want = new Set(allowed.map((r) => r.toLowerCase()));
   const advice = `use a fine-grained token limited to ${allowed.join(', ')}, or a GitHub App installed on only ${allowed.length > 1 ? 'those repos' : 'that repo'}`;
   if (kind === 'personal') return { ok: false, why: `this is a personal login or classic token, which reaches every repo its user can; ${advice}` };
   if (kind === 'unknown') return { ok: false, why: `unrecognized token type; ${advice}` };
   let seen: string[];
+  const expiry = { at: null as string | null };
   try {
     seen =
       kind === 'app-installation'
-        ? await listRepos(token, '/installation/repositories', (j) => (j as { repositories: { full_name: string }[] }).repositories, fetchImpl, api)
-        : await listRepos(token, '/user/repos?affiliation=owner,collaborator,organization_member', (j) => j as { full_name: string }[], fetchImpl, api);
+        ? await listRepos(token, '/installation/repositories', (j) => (j as { repositories: { full_name: string }[] }).repositories, fetchImpl, api, expiry)
+        : await listRepos(token, '/user/repos?affiliation=owner,collaborator,organization_member', (j) => j as { full_name: string }[], fetchImpl, api, expiry);
   } catch (e) {
     return { ok: false, why: `could not check what the token can reach (${(e as Error).message}); not starting` };
   }
@@ -51,5 +63,8 @@ export async function checkRepoScope(token: string, allowed: string[], fetchImpl
   const missing = [...want].filter((r) => !seen.includes(r));
   if (extra.length) return { ok: false, why: `the token can reach ${extra.length} repo(s) outside this instance; ${advice}` };
   if (missing.length) return { ok: false, why: `the token cannot reach ${missing.join(', ')}` };
-  return { ok: true, kind };
+  return { ok: true, kind, expiresAt: expiry.at };
 }
+
+/** Days until a token expires (rounded down), or null if it has no expiry. */
+export const daysLeft = (expiresAt: string | null, now = new Date()) => (expiresAt ? Math.floor((Date.parse(expiresAt) - now.getTime()) / 86_400_000) : null);

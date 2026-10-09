@@ -39,12 +39,18 @@ What the sudoers rule says:
 
 Each user signs in to its own accounts. Worklane never creates, reads or copies credentials.
 
-- **Coordinator's GitHub credential: repo-scoped only.** Use a GitHub App installed on only this instance's repo, or a fine-grained personal access token limited to that repo. Never use a personal `gh auth login` session or a classic token, which reach every repo the account can.
-  - For a fine-grained token: as `wl-<name>`, run `GH_CONFIG_DIR=~/.config/<name>-gh gh auth login --with-token < token-file`, then delete the file. Point `credentials.yaml` `github.path` at that directory.
+- **Coordinator's GitHub credential: repo-scoped only.** Use a fine-grained personal access token limited to this instance's repo, or a GitHub App installed on only that repo. Never use a personal `gh auth login` session or a classic token, which reach every repo the account can. Run `bash scripts/setup/credentials.sh <name> github`; it stores the token with `gh` in the coordinator's own config dir and makes `gh` git's credential helper there. Point `credentials.yaml` `github.path` at that directory.
+  - **Permissions, exactly what the coordinator uses:**
+    - Contents: read and write. It fetches, lands changes on the default branch, and pushes lease refs under `refs/worklane/claims/`.
+    - Issues: read and write. It lists, reads, creates and closes issues; adds and removes labels (and creates the backlog labels); sets assignees; comments; and reads label history.
+    - Metadata: read. GitHub requires it, and the start-up scope check lists the token's repos.
+  - **Nothing else.** The coordinator reads no check runs, commit statuses or Actions results today. Real PR landing will add Pull requests: read and write, plus Checks: read and Commit statuses: read, when it ships.
+  - **Workflows is deliberately excluded.** GitHub refuses a push that changes `.github/workflows` without it, so an agent's change touching workflow files can't land through the coordinator. Those land by hand, through review.
+  - **Set an expiry.** `instance show` prints it, and the coordinator's reports warn from 7 days before it expires, and on every report when the token has no expiry.
   - **Enforced at start.** The coordinator lists the repos its token can reach and refuses to start unless that is exactly the instance's repo. It refuses personal logins (`gho_`), classic tokens (`ghp_`) and App user tokens (`ghu_`) without asking GitHub. The token is never printed, and refusals give counts, not other repos' names. For GitHub Enterprise, set `WORKLANE_GITHUB_API` to the API base URL.
   - GitHub App credentials (`kind: app`) are not supported yet; use a fine-grained token for now.
 - **Agent's Claude login:** as `wl-<name>-agent`, run `claude` and sign in, or set up a token with `claude setup-token`. See [auth.md](auth.md) for the options and Anthropic's terms for automated use.
-- **Eval key (eval lanes only):** a file owned by `wl-<name>-eval`, mode 0400, named in `credentials.yaml` `eval_key`.
+- **Eval key (eval lanes only, off by default):** with evals off, there is no key, no eval lane, and the eval user needs no Claude login. When you turn evals on: `bash scripts/setup/credentials.sh <name> eval-key --evals-on` writes the key as `wl-<name>-eval`, mode 0400, and you name it in `credentials.yaml` `eval_key`.
 
 ## Instance config
 

@@ -11,23 +11,23 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
 import { install } from './install.js';
-import { homeDir, slotsConfigPath, slotsDir } from './os/index.js';
+import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
-import { currentCap, slotStatus } from './slots.js';
+import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
-import { buildReport } from './reports.js';
+import { buildReport, tokenWarning } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
-import { adaptiveConfig, noteLimit, readCapState } from './cap.js';
 import { openUrl } from './os/index.js';
-import { backlogFor, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { backlogFor, instanceEnv, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { installService, uninstallService } from './os/index.js';
@@ -60,8 +60,8 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
-  cap show                         the shared agent cap, why it is where it is, and each condition
-  cap note-limit                   record that you hit a Claude usage limit outside the harness
+  stop-all [reason]                emergency stop: halt every agent on this machine, across
+                                   instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]
                                    run the coordinator in the foreground (the service runs this)
   up | down [--instance name]      install or remove the coordinator as a per-user service
@@ -316,6 +316,8 @@ async function main(argv: string[]): Promise<number> {
 
     case 'slots': {
       const st = slotStatus();
+      const halt = emergencyStop();
+      if (halt) console.log(`EMERGENCY STOP in force since ${halt.at} by ${halt.by}: ${halt.reason}`);
       console.log(`agents running on this machine: ${st.agents.length} of ${st.cap}`);
       for (const a of st.agents) console.log(`  ${a.slot}: ${a.owner} (pid ${a.pid}, since ${a.acquiredAt})`);
       console.log(`full test run: ${st.fullRun ? `${st.fullRun.owner} (pid ${st.fullRun.pid}, since ${st.fullRun.acquiredAt})` : 'none'}`);
@@ -415,7 +417,7 @@ async function main(argv: string[]): Promise<number> {
       const log = new EventLog(logPath(root));
       try {
         const last = log.read(0, ['report.posted']).at(-1);
-        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), previous: (last?.payload as { card?: never } | undefined)?.card ?? null }).markdown);
+        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000) }).markdown);
       } finally {
         log.close();
       }
@@ -452,30 +454,16 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
-    case 'cap': {
-      const dir = slotsDir();
-      if (sub === 'note-limit') {
-        noteLimit(dir);
-        console.log('noted: the cap will not rise for the usage window, and drops at its next check');
-        return 0;
-      }
-      if (sub === 'show') {
-        const st = readCapState(dir);
-        if (!adaptiveConfig(dir)) {
-          console.log(`fixed cap ${currentCap(dir)} (no "adaptive" in ${slotsConfigPath(dir)})`);
-          return 0;
-        }
-        if (!st) {
-          console.log('adaptive cap not evaluated yet (a coordinator evaluates it on its next tick)');
-          return 0;
-        }
-        console.log(`cap ${st.cap} (floor ${st.floor}, ceiling ${st.ceiling}); changed ${st.changedAt}: ${st.reason}`);
-        for (const c of st.conditions) console.log(`  ${c.state.padEnd(7)} ${c.name}: ${c.detail}`);
-        console.log(`  checked ${st.checkedAt}`);
-        return 0;
-      }
-      console.error('usage: cap show | cap note-limit');
-      return 2;
+    case 'stop-all': {
+      const reason = [sub, ...rest].filter(Boolean).join(' ') || 'emergency stop';
+      stopAll(instanceId(), reason);
+      console.log(`stop in force (${reason}): every coordinator halts its agents within seconds and starts none. Lift it with \`${BRAND.cli} resume-all\`.`);
+      return 0;
+    }
+
+    case 'resume-all': {
+      console.log(resumeAll() ? 'stop lifted: coordinators resume at their next check' : 'no stop was in force');
+      return 0;
     }
 
     case 'instance': {
@@ -499,13 +487,25 @@ async function main(argv: string[]): Promise<number> {
         const i = loadInstance(target);
         const missing = credentialProblems(i.credentials);
         console.log(`${i.name}: ${i.repo.repo} at ${i.repo.path}`);
-        console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, stage <= ${i.policy.agents.max_stage}, land ${i.policy.land_mode}`);
+        console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, land ${i.policy.land_mode}`);
         console.log(`  repo config: within policy`);
         const gh = i.credentials.github;
         console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, key ${gh.key_path}` : `gh config ${gh.path}`}`);
         console.log(`  claude: ${i.runAs ? `${i.runAs.user}'s own login, in its home` : `config ${i.credentials.claude!.config_dir}`}`);
         for (const m of missing) console.log(`  MISSING ${m}`);
-        return missing.length ? 1 : 0;
+        if (missing.length) return 1;
+        // The same repo-scope check the coordinator makes at start, without printing the token.
+        let token = '';
+        try {
+          token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', env: instanceEnv(i), stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim();
+        } catch {
+          // no login in the instance's gh config dir
+        }
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: 'no GitHub login in the instance gh config dir' };
+        console.log(scope.ok ? `  github token: ${scope.kind}, reaches only ${i.repo.repo}; expires ${scope.expiresAt ?? 'never (set an expiry)'}` : `  github token REFUSED: ${scope.why}`);
+        const warn = scope.ok ? tokenWarning(scope.expiresAt) : null;
+        if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
+        return scope.ok ? 0 : 1;
       }
       console.error('usage: instance init <name> --repo <path> --github <owner/repo> | instance list | instance show <name>');
       return 2;

@@ -52,7 +52,6 @@ export function SettingsPage() {
         </Section>
 
         <Section title="Agents">
-          <Row k="Configured stage">{s.agents.stage}</Row>
           <Row k="Daily budget">${s.agents.budget}</Row>
           <Row k="Roles">
             <ul className="space-y-1">
@@ -67,11 +66,6 @@ export function SettingsPage() {
                 </li>
               ))}
             </ul>
-          </Row>
-          <Row k="Promotion rules">
-            <span className="text-xs">
-              {s.agents.trust.promote_after_days} healthy days · ≥{s.agents.trust.min_tasks} tasks per {s.agents.trust.window_days} days · pass rate ≥{s.agents.trust.min_evaluator_pass_rate} · unverified ≤{s.agents.trust.max_unverified_claim_rate} · reverts ≤{s.agents.trust.max_reverts}
-            </span>
           </Row>
         </Section>
 
@@ -95,11 +89,6 @@ export function SettingsPage() {
                 {list(v)}
               </Row>
             ))}
-          {s.review?.stages.map((st) => (
-            <Row key={st.stage} k={`Stage ${st.stage} relaxes`}>
-              {list(st.relax.map((r) => `${r.category} → ${r.to}`))}
-            </Row>
-          ))}
           <Row k="Guardrail rules">{s.guardrails.rules}</Row>
           <Row k="Protected paths">{list(s.guardrails.protectedPaths)}</Row>
           <Row k="Network">{s.guardrails.network}</Row>

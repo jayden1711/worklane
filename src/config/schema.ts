@@ -79,10 +79,6 @@ const role = z.strictObject({
   max_fixes_per_pr: z.number().int().min(0).optional(),
   applies_to: z.array(z.string()).optional(),
   budget_usd: z.number().positive().optional(),
-  /** Scheduled roles (monitor): minutes between runs. */
-  every_minutes: z.number().int().min(5).max(1440).optional(),
-  /** Extra tools this role may use beyond its read-only defaults (e.g. a project's browser driver for qa_playtester). */
-  tools: z.array(z.string()).optional(),
 });
 
 export const RoleNames = [
@@ -101,22 +97,11 @@ export const RoleNames = [
 
 export const AgentsConfig = z
   .strictObject({
-    stage: z.number().int().min(1).max(3),
+    /** No longer used (trust stages were removed); accepted so existing configs still load. */
+    stage: z.number().int().min(1).max(3).optional(),
     daily_budget_usd: z.number().positive(),
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
-    /** Trust stages: when the scorecard is healthy this many days in a row, the owner is asked to promote. */
-    trust: z
-      .strictObject({
-        window_days: z.number().int().min(1).max(90).default(7),
-        promote_after_days: z.number().int().min(1).max(90).default(7),
-        min_tasks: z.number().int().min(1).default(10),
-        min_evaluator_pass_rate: z.number().min(0).max(1).default(0.8),
-        max_unverified_claim_rate: z.number().min(0).max(1).default(0.1),
-        max_reverts: z.number().int().min(0).default(0),
-        max_baseline_growth: z.number().int().min(0).default(0),
-      })
-      .prefault({}),
   })
   .superRefine((c, ctx) => {
     const w = c.roles.workers;
@@ -269,27 +254,8 @@ export const TestsConfig = z.strictObject({
 
 // ---------- review.yaml ----------
 
-/** Categories no trust stage may relax: they always need their configured review. */
-export const NEVER_RELAXED = ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'];
-
-const level = z.enum(['L0', 'L1', 'L2', 'L3']);
-
 export const ReviewConfig = z.strictObject({
   version: z.literal(1),
-  /** What each trust stage relaxes: a category's changes land at a lower level from that stage on. */
-  stages: z
-    .array(
-      z.strictObject({
-        stage: z.number().int().min(2).max(9),
-        relax: z.array(
-          z.strictObject({
-            category: z.string().refine((c) => !NEVER_RELAXED.includes(c), { message: `this category can never be relaxed by a trust stage (${NEVER_RELAXED.join(', ')})` }),
-            to: level,
-          }),
-        ),
-      }),
-    )
-    .default([]),
   money_path_source: z.strictObject({ file: z.string().min(1), pattern: regex.optional() }).optional(),
   levels: z.strictObject({
     L0_auto: z.strictObject({ when: z.array(z.string()), max_lines: z.number().int().positive().optional() }),

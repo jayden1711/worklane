@@ -14,7 +14,7 @@ import { agentEnv } from '../src/runner.js';
 import { instanceEnv } from '../src/service.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
-function setup(policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4, max_stage: 1 }\nland_mode: pr\n') {
+function setup(policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: pr\n') {
   const dir = mkdtempSync(join(tmpdir(), 'instances-'));
   const { dir: repo } = exampleProject();
   const home = initInstance('shop', repo, 'example-org/example-shop', dir);
@@ -42,12 +42,11 @@ test('an instance loads with its repo config when the repo stays within policy',
 });
 
 test('acceptance: a repo config that loosens the instance policy is rejected, every violation listed', () => {
-  const { dir, repo } = setup('version: 1\nbudget: { daily_usd: 10 }\nagents: { max_workers: 0, max_stage: 1 }\nland_mode: pr\nnetwork_allow: [docs.github.com]\npre_approved: []\n');
+  const { dir, repo } = setup('version: 1\nbudget: { daily_usd: 10 }\nagents: { max_workers: 0 }\nland_mode: pr\nnetwork_allow: [docs.github.com]\npre_approved: []\n');
   const cfg = join(repo, BRAND.configDir);
   writeFileSync(join(cfg, 'config.yaml'), readFileSync(join(cfg, 'config.yaml'), 'utf8').replace(/^land_mode: pr/m, 'land_mode: direct'));
-  writeFileSync(join(cfg, 'agents.yaml'), readFileSync(join(cfg, 'agents.yaml'), 'utf8').replace(/^stage: 1/m, 'stage: 2'));
   const errs = errorsOf(() => loadInstance('shop', dir)).join('\n');
-  for (const want of [/daily_budget_usd: 40 exceeds the policy budget 10/, /roles\.workers\.count: 1 exceeds the policy's max_workers 0/, /stage: stage 2 exceeds the policy's max_stage 1/, /land_mode: direct landing, but the policy requires pr/, /network\.allow: nodejs\.org is not in the policy's network_allow/, /pre_approved: .* is not in the policy's pre_approved/]) {
+  for (const want of [/daily_budget_usd: 40 exceeds the policy budget 10/, /roles\.workers\.count: 1 exceeds the policy's max_workers 0/, /land_mode: direct landing, but the policy requires pr/, /network\.allow: nodejs\.org is not in the policy's network_allow/, /pre_approved: .* is not in the policy's pre_approved/]) {
     assert.match(errs, want);
   }
   assert.match(errs, /a repo can only tighten the instance policy/);

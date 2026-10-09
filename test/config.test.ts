@@ -48,6 +48,6 @@ test('cross-file checks: owners must be writers, rule ids unique, fingerprint se
 test('duplicate YAML keys are errors', () => {
   const { dir } = exampleProject();
   const p = join(dir, '.worklane', 'agents.yaml');
-  writeFileSync(p, readFileSync(p, 'utf8') + '\nstage: 2\n');
+  writeFileSync(p, readFileSync(p, 'utf8') + '\ndaily_budget_usd: 2\n');
   assert.throws(() => loadConfig(dir), ConfigInvalid);
 });

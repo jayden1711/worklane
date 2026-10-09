@@ -5,61 +5,6 @@ import { Header } from './Overview';
 
 const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
 
-const COND_TONE = { pass: 'ok', fail: 'danger', unknown: 'neutral' } as const;
-
-/** The shared cap across every instance on this machine, and why it is where it is. */
-function CapCard({ state }: { state: State }) {
-  const c = state.capInfo;
-  if (!c.adaptive) {
-    return (
-      <Card className="p-4 text-sm">
-        <span className="text-muted-foreground">Shared agent cap:</span> fixed at {state.slots.cap}
-      </Card>
-    );
-  }
-  if (!c.state) return <Card className="p-4 text-sm text-muted-foreground">Shared agent cap: adaptive, not evaluated yet.</Card>;
-  const s = c.state;
-  return (
-    <Card>
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b px-4 py-2.5">
-        <span className="text-sm font-medium">Shared agent cap</span>
-        <span className="text-2xl font-semibold tabular-nums">{s.cap}</span>
-        <span className="text-xs text-muted-foreground">
-          floor {s.floor} · ceiling {s.ceiling} · checked {ago(s.checkedAt)}
-        </span>
-      </div>
-      <div className="space-y-3 p-4">
-        <div className="text-sm">
-          {s.reason} <span className="text-xs text-muted-foreground">({ago(s.changedAt)})</span>
-        </div>
-        <ul className="grid gap-1.5 sm:grid-cols-2">
-          {s.conditions.map((x) => (
-            <li key={x.name} className="flex items-start gap-2 text-xs">
-              <Badge tone={COND_TONE[x.state]}>{x.state}</Badge>
-              <span>
-                <span className="font-medium">{x.name}</span> <span className="text-muted-foreground">{x.detail}</span>
-              </span>
-            </li>
-          ))}
-        </ul>
-        {!!c.changes.length && (
-          <ul className="space-y-1 border-t pt-2 text-xs">
-            {c.changes.map((ch, i) => (
-              <li key={i} className="flex gap-2">
-                <span className="w-16 shrink-0 text-muted-foreground">{ago(ch.at)}</span>
-                <span className="shrink-0 whitespace-nowrap tabular-nums">{ch.from === ch.to ? `start ${ch.to}` : `${ch.from} → ${ch.to}`}</span>
-                <span className="min-w-0 truncate text-muted-foreground" title={ch.reason}>
-                  {ch.reason}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </Card>
-  );
-}
-
 export function Agents({ state }: { state: State }) {
   const g = state.governor;
   return (
@@ -108,8 +53,6 @@ export function Agents({ state }: { state: State }) {
             </div>
           </Card>
         </div>
-
-        <CapCard state={state} />
 
         <Card>
           <div className="border-b px-4 py-2.5 text-sm font-medium">Running now ({state.runs.active.length})</div>

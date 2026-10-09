@@ -14,11 +14,7 @@ import { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
 import { inbox, project } from './projection.js';
 import { slotStatus } from './slots.js';
-import { adaptiveConfig, readCapState } from './cap.js';
-import { slotsDir } from './os/index.js';
 import { buildReport } from './reports.js';
-import { scorecard } from './scorecard.js';
-import { health } from './trust.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -33,13 +29,11 @@ export function settingsView(cfg: Config) {
     reports: cfg.project.reports,
     governor: cfg.project.governor,
     agents: {
-      stage: cfg.agents.stage,
       budget: cfg.agents.daily_budget_usd,
-      trust: cfg.agents.trust,
       roles: Object.entries(cfg.agents.roles).map(([name, r]) => ({ name, enabled: r!.enabled, model: r!.model, count: r!.count ?? null })),
     },
     tests: { gates: cfg.tests.gates, batchMax: cfg.tests.land.batch_max, nightlyAt: cfg.tests.nightly_at ?? null, tiers: Object.keys(cfg.tests.tiers ?? {}), baselineParser: !!cfg.tests.failures },
-    review: cfg.review ? { levels: Object.fromEntries(Object.entries(cfg.review.levels).map(([k, v]) => [k, (v as { when: string[] }).when])), stages: cfg.review.stages } : null,
+    review: cfg.review ? { levels: Object.fromEntries(Object.entries(cfg.review.levels).map(([k, v]) => [k, (v as { when: string[] }).when]))} : null,
     guardrails: { rules: cfg.guardrails.rules.length, protectedPaths: cfg.guardrails.protected_paths, secretPaths: cfg.guardrails.secret_paths.length, network: cfg.guardrails.network ? 'restricted' : 'open', preApproved: cfg.guardrails.pre_approved },
     deploy: cfg.deploy ? { environments: cfg.deploy.environments.map((e) => ({ name: e.name, production: e.production })), prodRead: !!cfg.deploy.prod_read } : null,
   };
@@ -94,19 +88,6 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
 
-/** The shared cap: fixed, or adaptive with its reason, conditions and recent changes. */
-function capInfo() {
-  const dir = slotsDir();
-  if (!adaptiveConfig(dir)) return { adaptive: false as const };
-  let changes: { at: string; from: number; to: number; reason: string }[] = [];
-  try {
-    changes = readFileSync(join(dir, 'cap-log.jsonl'), 'utf8').trim().split('\n').filter(Boolean).slice(-10).reverse().map((l) => JSON.parse(l));
-  } catch {
-    // no changes yet
-  }
-  return { adaptive: true as const, state: readCapState(dir), changes };
-}
-
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; token: string; close: () => Promise<void> }> {
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? fileURLToPath(new URL('../web/', import.meta.url));
@@ -127,12 +108,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const slots = slotStatus();
     return {
       brand: { name: BRAND.name, cli: BRAND.cli },
-      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode, stage: p.trust.stage ?? opts.cfg.agents.stage },
+      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
       user: opts.user,
       owners: opts.cfg.project.owners,
       budget: opts.cfg.agents.daily_budget_usd,
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
-      capInfo: capInfo(),
       ...p,
       inbox: inbox(p, opts.user),
     };
@@ -144,17 +124,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         if (!authed(req, url)) return json(res, 401, { error: 'missing or wrong token; open the URL printed by `dashboard`' });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state());
-        if (url.pathname === '/api/scorecard' && req.method === 'GET') {
+        if (url.pathname === '/api/report' && req.method === 'GET') {
           const events = readEvents(opts.eventsDb);
-          const now = new Date();
-          const week = 7 * 86_400_000;
           const last = [...events].reverse().find((e) => e.type === 'report.posted');
-          return json(res, 200, {
-            current: scorecard(events, { from: new Date(now.getTime() - week), to: now }),
-            previous: scorecard(events, { from: new Date(now.getTime() - 2 * week), to: new Date(now.getTime() - week) }),
-            health: (({ healthy, why }) => ({ healthy, why }))(health(events, opts.cfg.agents.trust, now)),
-            report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000), now }).markdown,
-          });
+          return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000) }).markdown });
         }
         if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, settingsView(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {

@@ -7,15 +7,9 @@ import type { DoneWhenList, Issue } from './backlog/types.js';
 export const WORKER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'lesson'],
+  required: ['summary'],
   properties: {
     summary: { type: 'string', description: 'What you changed and how you verified it, in 2-5 sentences.' },
-    lesson: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['worked', 'failed', 'fix'],
-      properties: { worked: { type: 'string' }, failed: { type: 'string' }, fix: { type: 'string' } },
-    },
     blocked: { type: 'string', description: 'Set only if you could not finish: what blocks you.' },
     ask: {
       type: 'object',
@@ -42,8 +36,9 @@ export const REPRO_SCHEMA = {
 export const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['patch_correct', 'test_correct', 'confidence', 'advice'],
+  required: ['patch_correct', 'test_correct', 'confidence', 'advice', 'files_reviewed'],
   properties: {
+    files_reviewed: { type: 'array', items: { type: 'string' }, description: 'Every changed file whose diff you read in full (repo-relative paths).' },
     patch_correct: { type: 'boolean', description: 'The change does what the issue and done_when ask, without breaking anything else you can see.' },
     test_correct: { type: 'boolean', description: 'The reproduction test checks the right behavior (false if the test itself is wrong).' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -97,6 +92,7 @@ const DEFAULTS: Record<string, string> = {
 - Inspect the diff from the base commit (git diff BASE..HEAD), the reproduction test, and the check results below.
 - patch_correct: does the change actually do what the issue asks, without regressions you can see?
 - test_correct: does the reproduction test check the right behavior? You may conclude the TEST is wrong rather than the patch.
+- List in files_reviewed every changed file whose diff you read in full. A review that leaves a changed file unread does not pass.
 - Be specific in advice. Do not edit anything.`,
 };
 
