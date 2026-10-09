@@ -24,7 +24,7 @@ import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot } from './reports.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
-import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { createWorktree, removeSandboxPlaceholders, removeWorktree, type WorktreeOptions } from './worktrees.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -383,6 +383,7 @@ export class Coordinator {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt);
         if (out.stop) return;
+        removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
         const change = await this.inspect(n, path, base, head, repro);
         if ('rejected' in change) {
