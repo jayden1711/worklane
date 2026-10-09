@@ -43,7 +43,8 @@ usage: ${BRAND.cli} <command> [options]
 
   install [--git-hooks] [--engine path] | install --git-hooks-only
                                    scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
-  doctor [--agentshield] [--json]  verify the install
+  doctor [--agentshield] [--json] [--policy file]
+                                   verify the install, and the config against any local instance's policy
   guardrails check                 run rules against their must-block/ask/allow examples
   guardrails refresh               fetch production fingerprints (stores hashes only)
   guardrails eval '<command>'      show what the rules decide for a shell command
@@ -158,7 +159,8 @@ async function main(argv: string[]): Promise<number> {
 
     case 'doctor': {
       const json = flag(args, '--json');
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield') });
+      const policy = option(args, '--policy');
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}) });
       if (json) console.log(JSON.stringify(checks, null, 2));
       else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;

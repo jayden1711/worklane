@@ -103,6 +103,32 @@ test('the coordinator service unit runs as the coordinator user, can still sudo 
   assert.ok(install.indexOf('systemd-analyze verify') < install.indexOf('mv -f'), 'validated before it is moved into place');
 });
 
+test('the service yields to other work: a low-weight top-level slice, a hard memory cap without swap, per-instance limits', { skip: process.platform === 'win32' && 'bash scripts' }, () => {
+  const print = (...opts: string[]) => spawnSync('bash', [join(dir, 'service.sh'), 'site', ...opts, '--print'], { encoding: 'utf8' });
+  const d = print().stdout;
+  // Beside system.slice and user.slice (where rootless containers run), not inside system.slice.
+  assert.match(d, /# \/etc\/systemd\/system\/worklane\.slice\n\[Unit\][\s\S]*\[Slice\]\nCPUWeight=20\nIOWeight=20\n/);
+  for (const line of ['Slice=worklane.slice', 'MemoryHigh=infinity', 'MemoryMax=35%', 'MemorySwapMax=0', 'CPUWeight=100', 'TasksMax=2048', 'OOMPolicy=continue']) assert.match(d, new RegExp(`^${line}$`, 'm'), line);
+  const custom = print('--memory-max', '16G', '--memory-high', '12G', '--cpu-weight', '50', '--tasks-max', '512', '--slice-cpu-weight', '10', '--slice-io-weight', '5');
+  assert.equal(custom.status, 0, custom.stderr);
+  for (const line of ['MemoryMax=16G', 'MemoryHigh=12G', 'CPUWeight=50', 'TasksMax=512', 'CPUWeight=10', 'IOWeight=5']) assert.match(custom.stdout, new RegExp(`^${line}$`, 'm'), line);
+  for (const [opts, err] of [
+    [['--memory-max', '150%'], /--memory-max: a size/],
+    [['--memory-max', '8 G'], /unknown option|a size/],
+    [['--memory-high', '20G', '--memory-max', '16G'], /must not exceed/],
+    [['--memory-high', '40%', '--memory-max', '30%'], /must not exceed/],
+    [['--cpu-weight', '0'], /a weight from 1 to 10000/],
+    [['--tasks-max', 'x'], /a positive number/],
+    [['--bogus'], /unknown option --bogus/],
+  ] as const) {
+    const r = print(...opts);
+    assert.equal(r.status, 2, `${opts.join(' ')}: ${r.stdout}`);
+    assert.match(r.stderr, err);
+  }
+  // Options survive the re-run as root.
+  assert.match(readFileSync(join(dir, 'service.sh'), 'utf8'), /all_args=\("\$@"\)[\s\S]*as_root "\$\{all_args\[@\]\}"/);
+});
+
 test('gitleaks is installed at a pinned version only when its download matches a pinned sha256', () => {
   const tools = readFileSync(join(dir, 'tools.sh'), 'utf8');
   assert.match(tools, /^gitleaks_version=\d+\.\d+\.\d+$/m);
