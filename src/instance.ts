@@ -22,6 +22,8 @@ export const InstanceFile = z.strictObject({
   name,
   // One repo per instance until multi-repo instances exist.
   repos: z.array(z.strictObject({ path: z.string().min(1), repo: z.string().regex(/^[^/\s]+\/[^/\s]+$/, 'must be owner/repo') })).length(1),
+  /** The identity on every commit agents and the coordinator make. Default: the GitHub App's bot identity. */
+  commit_identity: z.strictObject({ name: z.string().min(1), email: z.string().regex(/^[^@\s]+@[^@\s]+$/, 'an email address') }).optional(),
   /** The unprivileged OS user agents run as. The coordinator's user holds the credentials; this one holds nothing. */
   run_as: z
     .strictObject({
@@ -86,6 +88,8 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 export interface Instance {
   name: string;
   runAs: { user: string; home: string; claudeConfigDir?: string } | null;
+  /** Set in instance.yaml; otherwise resolved at start (the App's bot identity). */
+  commitIdentity?: { name: string; email: string };
   evalAs: { user: string; home: string } | null;
   home: string;
   stateDir: string;
@@ -155,7 +159,7 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   }
   const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
   const evalAs = inst.run_as?.eval_user ? { user: inst.run_as.eval_user, home: inst.run_as.eval_home ?? `/home/${inst.run_as.eval_user}` } : null;
-  return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs };
+  return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs, ...(inst.commit_identity ? { commitIdentity: inst.commit_identity } : {}) };
 }
 
 /**

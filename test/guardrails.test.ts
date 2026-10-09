@@ -139,3 +139,20 @@ test('guardrails check flags a rule no example exercises', () => {
   });
   assert.ok(checkGuardrails(untested, '/p').some((p) => p.kind === 'untested_rule' && p.rule === 'never-fires'));
 });
+
+test('regression: an agent may not pick its own commit identity; reading one, or a plain commit, is fine', () => {
+  // The live case: an agent committed as a person by setting these in front of git commit.
+  for (const c of [
+    'GIT_AUTHOR_NAME="Ada Example" GIT_AUTHOR_EMAIL=ada@example.com GIT_COMMITTER_NAME="Ada Example" GIT_COMMITTER_EMAIL=ada@example.com git commit -m fix',
+    'env GIT_AUTHOR_EMAIL=ada@example.com git commit -m fix',
+    'export GIT_COMMITTER_EMAIL=ada@example.com && git commit -m fix',
+    'git -c user.name=Ada -c user.email=ada@example.com commit -m fix',
+    'git -C . -c user.email=ada@example.com commit -m fix',
+    'git commit --author="Ada <ada@example.com>" -m fix',
+    'git config user.email ada@example.com',
+    'git config --global user.name Ada',
+    "bash -c 'GIT_AUTHOR_NAME=Ada git commit -m fix'",
+  ]) assert.equal(bash(c), 'deny', c);
+  for (const c of ['git commit -m "Shorten five descriptions"', 'git add -A && git commit -q -m fix', 'git log --author=ada -1', 'git config --get user.name', 'git config --list']) assert.equal(bash(c), 'none', c);
+  assert.equal(bash('git -c user.email=ada@example.com commit -m fix', '/p', false), 'none', 'a human session commits as the human');
+});

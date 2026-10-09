@@ -28,14 +28,15 @@ const args = process.argv.slice(2);
 if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
 const file = args[args.indexOf('--append-system-prompt-file') + 1];
 const stdin = fs.readFileSync(0, 'utf8');
-fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ args, stdin, file, system: fs.readFileSync(file, 'utf8'), mode: (fs.statSync(file).mode & 0o777).toString(8) }));
+fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ args, stdin, file, system: fs.readFileSync(file, 'utf8'), mode: (fs.statSync(file).mode & 0o777).toString(8), identity: ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'].map((k) => process.env[k]) }));
 console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }));
 `,
   );
   chmodSync(bin, 0o755);
-  const r = await new CliRunner('cli', process.env, bin).run(req);
+  const r = await new CliRunner('cli', process.env, bin, undefined, undefined, { name: 'site-app[bot]', email: '42+site-app[bot]@users.noreply.github.com' }).run(req);
   assert.equal(r.reason, 'succeeded', r.detail);
-  const seen = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; stdin: string; file: string; system: string; mode: string };
+  const seen = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; stdin: string; file: string; system: string; mode: string; identity: string[] };
+  assert.deepEqual(seen.identity, ['site-app[bot]', '42+site-app[bot]@users.noreply.github.com', 'site-app[bot]', '42+site-app[bot]@users.noreply.github.com'], 'the agent commits as the harness identity');
   assert.equal(seen.stdin, req.prompt);
   assert.ok(!seen.args.join(' ').includes('secret plan'));
   assert.equal(seen.system, req.appendSystemPrompt);

@@ -128,6 +128,33 @@ function ruleMatches(rule: Rule, call: ToolCall, commands: SimpleCommand[], ctx:
   return false;
 }
 
+const IDENTITY_VAR = /^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)$/;
+const IDENTITY_KEY = /^(user|author|committer)\.(name|email)$/i;
+
+/** Does this command pick a commit identity: env vars, git -c, git config, or --author? */
+function setsCommitIdentity(c: SimpleCommand): boolean {
+  if (Object.keys(c.assignments).some((k) => IDENTITY_VAR.test(k))) return true;
+  const a = c.argv;
+  // export/env/declare GIT_AUTHOR_NAME=...
+  if (a.some((t) => IDENTITY_VAR.test(t.split('=')[0]!) && t.includes('='))) return true;
+  if (basename(a[0] ?? '') !== 'git') return false;
+  // Global options first: -c key=value (an identity key is enough), -C dir, and the like.
+  let i = 1;
+  for (; i < a.length && a[i]!.startsWith('-'); i++) {
+    const opt = a[i]!;
+    if (opt === '-c' || opt === '-C') {
+      if (opt === '-c' && IDENTITY_KEY.test((a[i + 1] ?? '').split('=')[0]!)) return true;
+      i++;
+    } else if (/^-c(user|author|committer)\./i.test(opt)) return true;
+  }
+  const sub = a[i];
+  const rest = a.slice(i + 1);
+  if (sub === 'commit' && rest.some((t) => /^--author(=|$)/.test(t))) return true;
+  // git config user.name X (a write); reading it (--get, --list) is fine.
+  if (sub === 'config' && rest.some((t) => IDENTITY_KEY.test(t)) && !rest.some((t) => /^(--get|--get-all|--get-regexp|--list|-l)$/.test(t))) return true;
+  return false;
+}
+
 function hostAllowed(host: string, allow: string[]): boolean {
   const h = host.toLowerCase();
   return allow.some((d) => {
@@ -164,6 +191,11 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     for (const c of commands) targets.push(...c.writes);
     const hit = targets.find((t) => res.some((re) => re.test(relToRoot(ctx.projectRoot, call.cwd, t))));
     if (hit) return { decision: 'deny', rule: 'protected-path', reason: `${hit} is harness config; change it through a reviewed proposal` };
+  }
+
+  // Commit identity: the harness sets it; an agent never commits as anyone it chooses.
+  if (commands.some(setsCommitIdentity)) {
+    return { decision: 'deny', rule: 'commit-identity', reason: 'commits carry the harness identity, already set in your environment; commit without setting an author, committer or user.name/user.email' };
   }
 
   // Secret files: agents may not read or write them, by tool or by shell argument.

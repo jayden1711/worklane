@@ -17,7 +17,7 @@ import { globToRegExp } from './guardrails/glob.js';
 import { cpuCount, diskFree, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
-import type { AgentRunner, RunAs, RunResult } from './runner.js';
+import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -42,6 +42,8 @@ export interface CoordinatorDeps {
   commandsAs?: RunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
   tokenExpiresAt?: string | null;
+  /** The identity on every commit; agents' commits with any other are rejected. */
+  commitIdentity?: CommitIdentity;
   /** The instance's GitHub App key, whose age the reports watch. */
   appKeyPath?: string;
   maxAttempts?: number;
@@ -522,7 +524,7 @@ export class Coordinator {
       mkdirSync(dirname(join(workerPath, s.test_path)), { recursive: true });
       cpSync(join(path, s.test_path), join(workerPath, s.test_path));
       this.git(workerPath, 'add', s.test_path);
-      this.git(workerPath, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Add reproduction test for #${n} (frozen)`);
+      this.git(workerPath, '-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'commit', '-q', '-m', `Add reproduction test for #${n} (frozen)`);
       // Git's blob id of the committed test: line-ending normalized, and exactly what would land.
       const hash = this.git(workerPath, 'rev-parse', `HEAD:${s.test_path}`);
       this.emit('repro.frozen', { issue: n, path: s.test_path, hash, fails_on_base: true });
@@ -608,6 +610,10 @@ export class Coordinator {
     return { confirmed: true };
   }
 
+  private get identity(): CommitIdentity {
+    return this.d.commitIdentity ?? DEFAULT_COMMIT_IDENTITY;
+  }
+
   /** Mechanical checks on what the worker produced, before anyone trusts it. */
   private async inspect(n: number, path: string, base: string, head: string, repro: { path: string; hash: string } | null) {
     if (repro?.path) {
@@ -620,6 +626,10 @@ export class Coordinator {
       if (blob !== repro.hash) return { rejected: `modified the frozen reproduction test ${repro.path}` };
     }
     if (this.git(path, 'status', '--porcelain')) return { rejected: 'uncommitted changes left in the worktree; commit your work' };
+    // Every commit carries the harness identity: an agent never commits as a person (or anyone else).
+    const id = this.identity;
+    const strangers = this.git(path, 'log', '--format=%h %an <%ae> / %cn <%ce>', `${base}..${head}`).split('\n').filter(Boolean).filter((l) => !l.endsWith(` ${id.name} <${id.email}> / ${id.name} <${id.email}>`));
+    if (strangers.length) return { rejected: `commits must carry the harness identity ${id.name} <${id.email}>, which your environment already sets; never set GIT_AUTHOR_*/GIT_COMMITTER_*, user.name/user.email or --author. Recommit these without an identity of your own: ${strangers.slice(0, 5).join('; ')}` };
     const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
@@ -962,7 +972,7 @@ export class Coordinator {
       }
       if (this.git(path, 'status', '--porcelain')) {
         this.git(path, 'add', '-A');
-        this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', `Pre-land steps for ${applied.map((a) => `#${a.issue}`).join(', ')}`);
+        this.git(path, '-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'commit', '-q', '-m', `Pre-land steps for ${applied.map((a) => `#${a.issue}`).join(', ')}`);
       }
       const gates = await this.runGates(path, this.gateTiers(applied));
       if (!gates.ok) {

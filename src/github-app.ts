@@ -65,3 +65,21 @@ export function installationTokens(c: AppCredentials, repos: string[], stateDir:
     return t.token;
   };
 }
+
+/**
+ * The App's bot identity, as GitHub attributes commits to it:
+ * "<slug>[bot]" <"<bot user id>+<slug>[bot]@users.noreply.github.com">.
+ */
+export async function appBotIdentity(c: AppCredentials, fetchImpl: Fetch = fetch, api = 'https://api.github.com'): Promise<{ name: string; email: string }> {
+  const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' };
+  const app = await fetchImpl(`${api}/app`, { headers: { ...headers, authorization: `Bearer ${appJwt(c.appId, readFileSync(c.keyPath, 'utf8'))}` } });
+  if (!app.ok) throw new Error(`GitHub ${app.status} reading App ${c.appId}`);
+  const { slug } = (await app.json()) as { slug?: unknown };
+  if (typeof slug !== 'string' || !/^[a-z0-9-]+$/.test(slug)) throw new Error(`App ${c.appId}: GitHub returned no usable slug`);
+  const bot = `${slug}[bot]`;
+  const user = await fetchImpl(`${api}/users/${encodeURIComponent(bot)}`, { headers });
+  if (!user.ok) throw new Error(`GitHub ${user.status} reading the App's bot user ${bot}`);
+  const { id } = (await user.json()) as { id?: unknown };
+  if (typeof id !== 'number') throw new Error(`the App's bot user ${bot}: GitHub returned no id`);
+  return { name: bot, email: `${id}+${bot}@users.noreply.github.com` };
+}
