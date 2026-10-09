@@ -20,7 +20,7 @@ import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
-import { buildReport } from './reports.js';
+import { buildReport, tokenWarning } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
@@ -502,7 +502,9 @@ async function main(argv: string[]): Promise<number> {
           // no login in the instance's gh config dir
         }
         const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: 'no GitHub login in the instance gh config dir' };
-        console.log(scope.ok ? `  github token: ${scope.kind}, reaches only ${i.repo.repo}` : `  github token REFUSED: ${scope.why}`);
+        console.log(scope.ok ? `  github token: ${scope.kind}, reaches only ${i.repo.repo}; expires ${scope.expiresAt ?? 'never (set an expiry)'}` : `  github token REFUSED: ${scope.why}`);
+        const warn = scope.ok ? tokenWarning(scope.expiresAt) : null;
+        if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
       console.error('usage: instance init <name> --repo <path> --github <owner/repo> | instance list | instance show <name>');

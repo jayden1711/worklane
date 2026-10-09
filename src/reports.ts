@@ -13,7 +13,16 @@ export interface Report {
   markdown: string;
 }
 
-export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: Date; now?: Date; slot?: string }): Report {
+/** A warning line for the coordinator's GitHub token: 7 days before it expires, or always if it never does. */
+export function tokenWarning(expiresAt: string | null | undefined, now = new Date()): string | null {
+  if (expiresAt === undefined) return null; // not known (no instance, or not checked)
+  if (expiresAt === null) return '**GitHub token has no expiry.** Set one: replace it with a token that expires.';
+  const days = Math.floor((Date.parse(expiresAt) - now.getTime()) / 86_400_000);
+  if (days > 7) return null;
+  return days < 0 ? `**GitHub token expired** on ${expiresAt.slice(0, 10)}. Replace it now.` : `**GitHub token expires in ${days} day(s)**, on ${expiresAt.slice(0, 10)}. Replace it before then.`;
+}
+
+export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: Date; now?: Date; slot?: string; tokenExpiresAt?: string | null }): Report {
   const now = opts.now ?? new Date();
   const since = opts.since.getTime();
   const after = (e: StoredEvent) => Date.parse(e.ts) > since;
@@ -23,6 +32,8 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   const lines: string[] = [];
   const day = now.toLocaleDateString('en-CA');
   lines.push(`## ${BRAND.name} report: ${cfg.project.project.name}, ${day}${opts.slot ? ` ${opts.slot}` : ''}`);
+  const warn = tokenWarning(opts.tokenExpiresAt, now);
+  if (warn) lines.push('', warn);
 
   const landed = events.filter((e) => after(e) && e.type === 'land.result' && (e.payload as { outcome: string }).outcome === 'landed');
   const deployed = new Map(events.filter((e) => e.type === 'deploy.verified').map((e) => [(e.payload as { sha: string }).sha, (e.payload as { env: string }).env]));
