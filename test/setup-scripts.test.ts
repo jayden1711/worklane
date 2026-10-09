@@ -75,6 +75,7 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^git -c credential.helper= -c credential.helper=!\/usr\/local\/bin\/worklane git-credential clone -q https:\/\/github.com\/example-org\/example shop.git /m);
     assert.match(r.stdout, /^git config core.sharedRepository group$/m);
+    assert.match(r.stdout, /^git -c core.hooksPath=\/dev\/null pull -q --ff-only$/m);
     r = runAs(checkout[1]!, ['site', dest, repo]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^worklane install --root \. --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m);

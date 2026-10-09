@@ -4,6 +4,7 @@
 # or hooks. If the repo has no Worklane config yet, scaffold it on a
 # worklane/setup branch and push only that branch, for a PR you review and
 # merge. Never pushes the default branch.
+# Re-running it fast-forwards an existing checkout (e.g. after that PR merges).
 #   bash scripts/setup/checkout.sh <name> <owner/repo>
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
@@ -24,7 +25,9 @@ run_as "$coord" '
   git config --replace-all credential.helper ""
   git config --add credential.helper "$helper"
   git config core.sharedRepository group
-  git log -1 --format="cloned at %h (%s)"
+  # Re-run after a config PR merges: fast-forward to it, running no hooks (the checkout is agent-writable).
+  git -c core.hooksPath=/dev/null pull -q --ff-only
+  git log -1 --format="checkout at %h (%s)"
 ' "$name" "$dest" "$repo"
 
 say "permissions: the code is group-writable for agents; the repo's git config and hooks are not"
