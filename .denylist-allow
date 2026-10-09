@@ -11,3 +11,9 @@ CODE_OF_CONDUCT.md jaydenvasquez1711@gmail.com
 # Fixtures in the denylist's own tests.
 test/denylist.test.ts d792
 test/denylist.test.ts bob@corp.dev
+# Fixtures in the push gate's own tests (fake values it must refuse).
+test/push-gate.test.ts /users/ada
+test/push-gate.test.ts 100.101.102.103
+test/push-gate.test.ts box.tail1234.ts.net
+test/push-gate.test.ts ntfy.sh/my-alerts-x
+test/push-gate.test.ts bob@corp.dev
