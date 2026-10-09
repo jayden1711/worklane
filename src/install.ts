@@ -18,7 +18,11 @@ export function templatesDir(): string {
   return fileURLToPath(new URL('../../templates/project/', import.meta.url));
 }
 
-export const MISSING_ENGINE_WARNING = `${BRAND.name} guardrails are off in this checkout: run npm install to enable them.`;
+/** What a human session is told when the engine the hooks point at is missing. */
+export function missingEngineWarning(enginePath: string): string {
+  const fix = enginePath.startsWith('$CLAUDE_PROJECT_DIR/node_modules/') ? 'run npm install to enable them' : `install the ${BRAND.cli} engine on this machine to enable them`;
+  return `${BRAND.name} guardrails are off in this checkout: ${fix}.`;
+}
 
 /**
  * Hook command (POSIX sh; Claude Code runs hooks through bash on every OS).
@@ -31,7 +35,7 @@ export function hookCommand(enginePath: string, event: string): string {
   const run = `${HOOK_MARKER} node "$E" hook ${event} || exit 2`;
   const human =
     event === 'session-start'
-      ? `echo '{"systemMessage": "${MISSING_ENGINE_WARNING}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${MISSING_ENGINE_WARNING} Mention this to the user once."}}'`
+      ? `echo '{"systemMessage": "${missingEngineWarning(enginePath)}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${missingEngineWarning(enginePath)} Mention this to the user once."}}'`
       : ':';
   return `E="${enginePath}"; if [ -f "$E" ]; then ${run}; elif [ "${agentVar}" = 1 ]; then echo "${BRAND.cli}: engine missing at $E, agent sessions are blocked" >&2; exit 2; else ${human}; fi`;
 }

@@ -164,10 +164,16 @@ test('install references the project-local engine even when it is a symlink', { 
 });
 
 test('install --engine points the hooks at a machine-wide engine path', () => {
-  const { dir } = exampleProject();
+  const { dir, stateDir } = exampleProject();
   const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--engine', '/opt/engine/current/dist/src/cli.js'], { encoding: 'utf8', env: childEnv() });
   assert.equal(r.status, 0, r.stderr);
   const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8');
   // On Windows the path resolves onto the current drive (D:\\opt\\...), escaped for the shell and JSON.
+  // A human session without that engine is told to install it, not to run npm install (the repo may not be a Node project).
+  const start = (JSON.parse(settings) as { hooks: Record<string, { hooks: { command: string }[] }[]> }).hooks.SessionStart!.at(-1)!.hooks[0]!.command;
+  const out = runHookCommand(start, dir, stateDir, { cwd: dir });
+  assert.equal(out.status, 0);
+  assert.match((JSON.parse(out.stdout) as { systemMessage: string }).systemMessage, /install the \S+ engine on this machine/);
+  assert.doesNotMatch(out.stdout, /npm install/);
   assert.match(settings, process.platform === 'win32' ? /:(\\\\)+opt(\\\\)+engine(\\\\)+current(\\\\)+dist(\\\\)+src(\\\\)+cli\.js/ : /\/opt\/engine\/current\/dist\/src\/cli\.js/);
 });

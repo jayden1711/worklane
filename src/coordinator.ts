@@ -1076,7 +1076,7 @@ class Halted extends Error {
 
 const DEFAULT_REVIEW = {
   version: 1 as const,
-  stages: [],
+  categories: {},
   levels: {
     L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 },
     L1_evaluator: { when: ['ui', 'app-non-money'], max_lines: 400, max_files: 10 },

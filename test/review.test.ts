@@ -67,3 +67,28 @@ test('money paths load from the project source of truth (regex literals in a JS 
   assert.ok(res[0]!.test('server/sweep/x.js') && !res[0]!.test('server/games/x.js'));
   assert.ok(!res.some((r) => r.test('nope/x')), 'only the MONEY list');
 });
+
+test('review.yaml categories: a site can send all docs to the evaluator and name its own pages for a human', () => {
+  const site = ReviewConfig.parse({
+    version: 1,
+    categories: { 'privacy-terms': ['privacy/**', 'terms/**'], 'pilot-form': ['pilot/**', 'assets/pilot.js'] },
+    levels: {
+      L0_auto: { when: [], max_lines: 200 },
+      L1_evaluator: { when: ['docs', 'app-non-money'], max_lines: 400, max_files: 10 },
+      L2_notify: { when: ['dependency'] },
+      L3_human: { when: ['privacy-terms', 'pilot-form', 'harness-config'], over_lines: 800 },
+    },
+  });
+  const lvl = (...paths: string[]) => computeLevel({ files: paths.map((p) => f(p)), labels: [], moneyPaths: [] }, site);
+  const docs = lvl('docs-src/quickstart.md');
+  assert.equal(docs.level, 'L1', 'a one-line docs change still gets the evaluator');
+  assert.ok(docs.reasons.includes('docs: docs-src/quickstart.md'), docs.reasons.join('; '));
+  assert.equal(lvl('test/a.test.js').level, 'L0', 'only the categories listed for L1 are raised');
+  const privacy = lvl('privacy/index.html');
+  assert.equal(privacy.level, 'L3');
+  assert.ok(privacy.reasons.includes('privacy-terms: privacy/index.html'));
+  // assets/** is a built-in docs path; a configured category still catches the form's script.
+  assert.equal(lvl('assets/pilot.js').level, 'L3');
+  // The template's defaults are unchanged without categories.
+  assert.equal(level([f('docs/a.md')]).level, 'L0');
+});
