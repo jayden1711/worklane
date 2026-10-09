@@ -65,6 +65,27 @@ jobs:
           node dist/src/cli.js doctor --root "$RUNNER_TEMP/example" --agentshield --json > doctor.json || true
           node -e 'const c=require("./doctor.json").find(x=>x.name==="agentshield");console.log(c.level, c.detail);process.exit(c.level==="fail"?1:0)'
 
+  push-gate:
+    # The same gate the pre-push hook runs, over exactly the commits this event brings.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
+          tar -xzf "$f" gitleaks && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: gate the commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/push-gate.mjs --range "${BASE}..${GITHUB_SHA}"
+
   denylist:
     # No project-specific details in the engine repo (see scripts/check-denylist.mjs).
     runs-on: ubuntu-latest

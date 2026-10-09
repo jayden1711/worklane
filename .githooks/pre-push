@@ -1,0 +1,3 @@
+#!/bin/sh
+# Push gate: nothing private leaves the machine (scripts/push-gate.mjs). Enable with: npm run setup:hooks
+exec node scripts/push-gate.mjs "$@"

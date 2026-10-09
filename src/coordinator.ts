@@ -14,7 +14,7 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv, cpuCount, diskFree, killTree, machineLoad, spawnDetached } from './os/index.js';
+import { childEnv, cpuCount, diskFree, killTree, machineLoad, shellCommand, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, maxLevel, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
@@ -59,7 +59,8 @@ const COMMAND_TIMEOUT_MS = 2 * 3600_000;
  */
 function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
-    const child = spawn(command, { cwd, shell: true, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+    const [file, args] = shellCommand(command);
+    const child = spawn(file, args, { cwd, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
     let out = '';
     const take = (d: Buffer) => {
       out += d.toString();

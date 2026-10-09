@@ -93,6 +93,42 @@ export function killTree(pid: number | undefined, fallback: () => void): void {
 /** Windows needs a shell to run npm's .cmd shims. */
 export const shimsNeedShell = process.platform === 'win32';
 
+let bashPath: string | undefined;
+
+/**
+ * The shell project commands run in: bash, never plain sh or cmd.exe, so
+ * pipefail is available. On Windows that is Git for Windows' bash (the one
+ * Claude Code uses for hooks); PATH's bash.exe may be the WSL launcher.
+ */
+export function commandBash(): string {
+  if (bashPath) return bashPath;
+  let found: string | null = null;
+  if (process.platform === 'win32') {
+    const git = which('git');
+    const candidates = [
+      process.env.CLAUDE_CODE_GIT_BASH_PATH,
+      join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
+      // ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
+      git ? join(dirname(dirname(git)), 'bin', 'bash.exe') : undefined,
+    ];
+    found = candidates.find((c): c is string => !!c && existsSync(c)) ?? null;
+  } else {
+    found = which('bash');
+  }
+  if (!found) throw new Error(process.platform === 'win32' ? 'Git for Windows (its bash) is required to run project commands' : 'bash is required to run project commands');
+  bashPath = found;
+  return found;
+}
+
+/**
+ * How to spawn a project command: `bash -o pipefail -c <command>`, so a
+ * pipeline fails when any stage fails (`npm test | tail` is red when the
+ * tests are). Use with shell: false.
+ */
+export function shellCommand(command: string): [file: string, args: string[]] {
+  return [commandBash(), ['-o', 'pipefail', '-c', command]];
+}
+
 /**
  * Environment for project commands the engine runs (checks, tests). Drops
  * variables that change how a nested runner behaves when the engine itself

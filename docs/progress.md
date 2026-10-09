@@ -8,7 +8,7 @@ One short note per step: what shipped, how it was verified, what's still unprove
 - **Step 1 (v0.1.0, v0.1.1):** config schemas, `install`/`doctor`, guardrail hooks (agent and human modes), secret scanning on commits and transcripts, vacuity check, Stop gate, rule-conflict check, production read path, machine-wide slots and run queue. CI on macOS, Linux and Windows.
 - **Step 2 (v0.2.0):** event log, verified backups, compare-and-swap claims, GitHub backlog, review levels, coordinator (repro-first evaluator, independent verify, serial land queue, staging verification), baseline gate, investigations, skill evals.
   - Verified live with the real `claude` CLI on a local demo repo.
-  - Unproven until the NUC: a coordinator running for days; real GitHub issues end to end.
+  - Unproven until the always-on machine: a coordinator running for days; real GitHub issues end to end.
 
 ## Step 3: dashboard v0 (2026-10-08)
 
@@ -34,7 +34,7 @@ One short note per step: what shipped, how it was verified, what's still unprove
 - **Nightly** (`tests.yaml nightly_at`): queues a full run on the tip of main that re-records the baseline, plus extra nightly tiers such as mutation testing, all behind the full-run lock, the idle probe and the load gate.
 - **Also fixed:** secret scans cover exactly the change's commits, not the worktree (which includes dependencies).
 - **Verified:** tests for three concurrent workers landing, the cross-harness cap, governor holds on load and disk, one-commit batches, split-to-culprit, overlap separation, deferral on a held full-run slot, and the nightly schedule.
-- **Unproven until the NUC:** real parallel Claude runs at the target cap; batch sizes against a project whose full suite takes hours (a split costs another gate run).
+- **Unproven until the always-on machine:** real parallel Claude runs at the target cap; batch sizes against a project whose full suite takes hours (a split costs another gate run).
 
 ## Step 5: reports, scorecard, trust stages, learning loop (2026-10-08)
 
@@ -49,7 +49,7 @@ One short note per step: what shipped, how it was verified, what's still unprove
   - release.mjs returns to the starting commit when run detached.
   - Each fix has a regression test.
 - **Released:** v0.3.0 (steps 3 and 4), from a clean worktree after CI was green on all six OS x Node jobs.
-- **Unproven until the NUC:** promotion and demotion thresholds against real work (defaults: 10 tasks in 7 days, pass rate 0.8, unverified claims 0.1, zero reverts); report posting with real GitHub permissions; lessons PRs opened by the coordinator's token.
+- **Unproven until the always-on machine:** promotion and demotion thresholds against real work (defaults: 10 tasks in 7 days, pass rate 0.8, unverified claims 0.1, zero reverts); report posting with real GitHub permissions; lessons PRs opened by the coordinator's token.
 
 ## Step 6: the remaining dashboard pages and a desktop window (2026-10-08)
 
@@ -76,4 +76,4 @@ One short note per step: what shipped, how it was verified, what's still unprove
 - **Monitor:** every `every_minutes`, re-runs each environment's verify check. A pass-to-fail change opens an incident with a diagnosis (production incidents say a human must act); a recovery is noted.
 - **Release prep:** once a day, release notes for changes since the last tag, opened as a PR.
 - **Verified:** a test per role with a scripted runner and a real git remote; a pipeline test where a blocking security review sends the change to the owner as L3 with the finding; a test that every role defaults off and a pass runs no agent.
-- **Unproven until the NUC:** every role against a real model; the QA role needs a browser tool the project chooses; the monitor's schedule against real verify checks.
+- **Unproven until the always-on machine:** every role against a real model; the QA role needs a browser tool the project chooses; the monitor's schedule against real verify checks.

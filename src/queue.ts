@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { childEnv, machineLoad, pidAlive } from './os/index.js';
+import { childEnv, machineLoad, pidAlive, shellCommand } from './os/index.js';
 import { fullRunLock } from './slots.js';
 import { EventLog } from './events/log.js';
 import { recordBaseline } from './baseline.js';
@@ -81,7 +81,8 @@ export function queueJob(opts: { stateDir: string; cwd: string; command: string;
 
 function sh(command: string, cwd: string, logFd: number | 'ignore'): Promise<number | null> {
   return new Promise((res) => {
-    const c = spawn(command, { cwd, shell: true, stdio: ['ignore', logFd, logFd], env: childEnv() });
+    const [file, args] = shellCommand(command);
+    const c = spawn(file, args, { cwd, stdio: ['ignore', logFd, logFd], env: childEnv() });
     c.on('error', () => res(null));
     c.on('close', (code) => res(code));
   });

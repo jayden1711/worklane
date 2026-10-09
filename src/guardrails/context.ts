@@ -1,12 +1,12 @@
 // Runtime inputs for guardrail evaluation: stored fingerprint sets and CLI
 // link resolvers. Fingerprints are stored machine-locally, hashes only.
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { GuardrailsConfig } from '../config/schema.js';
-import { homeDir, stateDir } from '../os/index.js';
+import { homeDir, shellCommand, stateDir } from '../os/index.js';
 import { railwayLinkedEnvironment } from '../adapters/railway.js';
 import type { EvalContext } from './engine.js';
 import { findConnections, fingerprint } from './fingerprint.js';
@@ -57,7 +57,8 @@ export function refreshFingerprints(projectRoot: string, cfg: GuardrailsConfig):
   }
   for (const [name, spec] of Object.entries(cfg.fingerprints)) {
     try {
-      const out = execSync(spec.command, { cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60_000 });
+      const [file, args] = shellCommand(spec.command);
+      const out = execFileSync(file, args, { cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60_000 });
       const value = (JSON.parse(out) as Record<string, unknown>)[spec.key];
       const hashes = typeof value === 'string' ? findConnections(value).map((c) => fingerprint(c)).filter((h): h is string => !!h) : [];
       if (!hashes.length) throw new Error(`no connection string at key ${spec.key}`);
