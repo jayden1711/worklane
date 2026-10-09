@@ -738,7 +738,9 @@ test('a worker that claims no change is needed when the checks fail on the base 
 test('regression: a retry that finds the work already committed is judged as a change against the base; failing checks keep their output', { skip }, async () => {
   const f = fixture();
   const flag = join(f.base, 'flag');
-  f.backlog.open({ title: 'Ignore non-positive quantities', body: `Totals count negative quantities.\n\n\`\`\`done_when\n- command: grep -q "qty > 0" src/price.js\n- command: test -f ${flag} || { echo "flag missing here"; exit 3; }\n\`\`\`\n`, author: 'example-owner', labels: ['ready'] });
+  // The check runs in bash, which reads backslashes as escapes: give it the path with forward slashes (Windows too).
+  const flagForShell = flag.split('\\').join('/');
+  f.backlog.open({ title: 'Ignore non-positive quantities', body: `Totals count negative quantities.\n\n\`\`\`done_when\n- command: grep -q "qty > 0" src/price.js\n- command: test -f ${flagForShell} || { echo "flag missing here"; exit 3; }\n\`\`\`\n`, author: 'example-owner', labels: ['ready'] });
   let attempt = 0;
   const runner = agents({
     worker: (req) => {
