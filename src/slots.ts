@@ -5,8 +5,9 @@
 //   <dir>/slots.lock         held briefly while counting and taking a slot
 //   <dir>/agent-<i>.lock     one per running agent; the count, not the index, is capped
 //   <dir>/full-run.lock      at most one full test run on the machine
+//   <dir>/STOP               emergency stop: while it exists, every agent halts and no new one starts
 // A lock file holds {pid, owner, acquiredAt}; a dead pid means the slot is free.
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquireLock, tryLock, type Lock, type LockInfo } from './locks.js';
 import { pidAlive, slotsConfigPath, slotsDir } from './os/index.js';
@@ -33,6 +34,7 @@ const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
  * lock, so two processes can't both see room for the last slot.
  */
 export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
+  if (emergencyStop(dir)) return null;
   let guard: Lock | null = null;
   for (let i = 0; i < 200 && !guard; i++) {
     const r = tryLock(join(dir, 'slots.lock'), owner);
@@ -84,4 +86,37 @@ export function slotStatus(dir = slotsDir()): SlotStatus {
     .filter((x): x is { f: string; info: LockInfo } => !!x.info)
     .map(({ f, info }) => ({ ...info, slot: f.replace('.lock', '') }));
   return { cap: machineCap(dir), agents, fullRun: files.includes('full-run.lock') ? read('full-run.lock') : null };
+}
+
+export interface EmergencyStop {
+  by: string;
+  at: string;
+  reason: string;
+}
+
+/** The emergency stop in force on this machine, if any. */
+export function emergencyStop(dir = slotsDir()): EmergencyStop | null {
+  try {
+    return JSON.parse(readFileSync(join(dir, 'STOP'), 'utf8')) as EmergencyStop;
+  } catch (e) {
+    // Present but unreadable still means stop.
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? null : { by: '?', at: '', reason: 'unreadable STOP file' };
+  }
+}
+
+/** Halt every agent on the machine, across instances and harnesses, until resumed. */
+export function stopAll(by: string, reason: string, dir = slotsDir()): void {
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `.STOP.${process.pid}.tmp`);
+  writeFileSync(tmp, JSON.stringify({ by, at: new Date().toISOString(), reason }));
+  renameSync(tmp, join(dir, 'STOP'));
+}
+
+export function resumeAll(dir = slotsDir()): boolean {
+  try {
+    rmSync(join(dir, 'STOP'));
+    return true;
+  } catch {
+    return false;
+  }
 }

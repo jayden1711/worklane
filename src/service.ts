@@ -110,6 +110,9 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
   const backupDir = opts.backupDir ?? process.env[`${BRAND.envPrefix}_BACKUP_DIR`] ?? join(state, 'backups');
+  // An emergency stop takes effect within seconds, not at the next tick.
+  const watch = setInterval(() => coordinator.checkEmergency(), 5_000);
+  watch.unref();
   let lastBackup = 0;
   try {
     do {
@@ -124,6 +127,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     } while (!stopping);
     await coordinator.idle();
   } finally {
+    clearInterval(watch);
     log.close();
     lock.lock.release();
   }

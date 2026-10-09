@@ -46,7 +46,9 @@ function agents() {
       return { structured: { summary: 'No: refunds go through a separate path and are never added to totals.', findings: [{ claim: 'totalCents only sums line items', evidence: 'src/price.js:3' }], recommendation: 'No fix needed; add a test that pins this.', confidence: 'high' }, costUsd: 0.34 };
     }
     if (req.role === 'evaluator-verdict') {
-      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' }, costUsd: 0.18 };
+      const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
+      const files_reviewed = base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
+      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed }, costUsd: 0.18 };
     }
     // workers
     if (/negative quantities/.test(brief)) {

@@ -19,7 +19,7 @@ import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './rev
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
-import { fullRunLock, tryAgentSlot } from './slots.js';
+import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot } from './reports.js';
 import { baselineGate, latestBaseline } from './baseline.js';
@@ -84,8 +84,23 @@ export class Coordinator {
   private active = new Map<number, Promise<void>>();
   private landing = false;
   private stopped = false;
+  /** Aborted by an emergency stop: every agent run gets this signal. */
+  private halt = new AbortController();
 
   constructor(private d: CoordinatorDeps) {
+    // Every agent run carries the halt signal; a run after a halt never starts.
+    const runner = d.runner;
+    this.d = {
+      ...d,
+      runner: {
+        run: async (req) => {
+          if (this.halt.signal.aborted) throw new Halted();
+          const r = await runner.run({ ...req, signal: req.signal ?? this.halt.signal });
+          if (this.halt.signal.aborted) throw new Halted();
+          return r;
+        },
+      },
+    };
     this.remote = d.remote ?? 'origin';
     this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup };
   }
@@ -130,6 +145,7 @@ export class Coordinator {
         return fallback;
       }
     };
+    this.checkEmergency();
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
@@ -165,6 +181,22 @@ export class Coordinator {
   /** Wait for in-flight task pipelines (tests and graceful shutdown). */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
+  }
+
+  /**
+   * Honor the machine-wide emergency stop: abort every running agent (their
+   * tasks release their claims and requeue) and start nothing new until it
+   * is lifted. Called every tick and on a short timer by the service.
+   */
+  checkEmergency(): void {
+    const stop = emergencyStop(this.d.slotsDir);
+    if (stop && !this.halt.signal.aborted) {
+      this.emit('emergency.stop', { by: stop.by, reason: stop.reason, running: this.active.size });
+      this.halt.abort();
+    } else if (!stop && this.halt.signal.aborted) {
+      this.emit('emergency.resume', { instance: this.d.instance });
+      this.halt = new AbortController();
+    }
   }
 
   stop() {
@@ -246,7 +278,7 @@ export class Coordinator {
   }
 
   private async dispatch(): Promise<number> {
-    if (this.stopped) return 0;
+    if (this.stopped || this.halt.signal.aborted) return 0;
     const workers = this.d.cfg.agents.roles.workers;
     if (!workers?.enabled) return 0;
     let started = 0;
@@ -351,14 +383,14 @@ export class Coordinator {
           feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
           continue;
         }
-        const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered);
+        const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path));
         if (!verdict.patch_correct && attempt < maxAttempts) {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
-        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
+        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
         const lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
-        this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
+        this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${verdict.unread.slice(0, 10).join(', ')}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
         if (lvl.level === 'L3') {
@@ -369,6 +401,13 @@ export class Coordinator {
         return;
       }
       await this.block(n, owner, `no passing change after ${maxAttempts} attempts`);
+    } catch (e) {
+      if (!(e instanceof Halted)) throw e;
+      // Requeued: the task starts over once the stop is lifted.
+      this.releaseClaim(n, 'emergency stop');
+      await this.d.backlog.removeLabel(n, 'agent:working');
+      await this.d.backlog.addLabels(n, ['ready']);
+      await this.d.backlog.comment(n, `[${BRAND.cli}] Stopped by an emergency stop; requeued from the start once it is lifted.`);
     } finally {
       clearInterval(heartbeat);
     }
@@ -595,7 +634,7 @@ export class Coordinator {
     return checks;
   }
 
-  private async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[]) {
+  private async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[]) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.evaluator!;
     const extra = [
@@ -620,7 +659,10 @@ export class Coordinator {
       timeoutMs: COMMAND_TIMEOUT_MS,
     });
     this.cost(n, 'evaluator-verdict', r);
-    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string } | undefined;
+    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[] } | undefined;
+    // A review that didn't read every changed file can't pass on its own: those files go to a human.
+    const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
+    const unread = changed.filter((f) => !reviewed.has(f));
     // No verdict is a failed verdict, never a pass.
     const v = {
       patch_correct: r.reason === 'succeeded' && s?.patch_correct === true,
@@ -629,8 +671,8 @@ export class Coordinator {
       advice: r.reason === 'succeeded' ? (s?.advice ?? '') : `evaluator run ${r.reason}: ${r.detail}`,
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v });
-    return v;
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}) });
+    return { ...v, unread };
   }
 
   private cost(issue: number, role: string, r: RunResult) {
@@ -968,6 +1010,13 @@ const laneOf = (issue: Issue): { lane?: string } => {
   const l = issue.labels.find((x) => x.startsWith('lane:'));
   return l ? { lane: l.slice(5) } : {};
 };
+
+/** An emergency stop interrupted this task. */
+class Halted extends Error {
+  constructor() {
+    super('emergency stop');
+  }
+}
 
 const DEFAULT_REVIEW = {
   version: 1 as const,

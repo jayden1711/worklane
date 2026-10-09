@@ -16,7 +16,7 @@ import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
-import { slotStatus } from './slots.js';
+import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
@@ -59,6 +59,8 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
+  stop-all [reason]                emergency stop: halt every agent on this machine, across
+                                   instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]
                                    run the coordinator in the foreground (the service runs this)
   up | down [--instance name]      install or remove the coordinator as a per-user service
@@ -313,6 +315,8 @@ async function main(argv: string[]): Promise<number> {
 
     case 'slots': {
       const st = slotStatus();
+      const halt = emergencyStop();
+      if (halt) console.log(`EMERGENCY STOP in force since ${halt.at} by ${halt.by}: ${halt.reason}`);
       console.log(`agents running on this machine: ${st.agents.length} of ${st.cap}`);
       for (const a of st.agents) console.log(`  ${a.slot}: ${a.owner} (pid ${a.pid}, since ${a.acquiredAt})`);
       console.log(`full test run: ${st.fullRun ? `${st.fullRun.owner} (pid ${st.fullRun.pid}, since ${st.fullRun.acquiredAt})` : 'none'}`);
@@ -447,6 +451,18 @@ async function main(argv: string[]): Promise<number> {
       } finally {
         log.close();
       }
+    }
+
+    case 'stop-all': {
+      const reason = [sub, ...rest].filter(Boolean).join(' ') || 'emergency stop';
+      stopAll(instanceId(), reason);
+      console.log(`stop in force (${reason}): every coordinator halts its agents within seconds and starts none. Lift it with \`${BRAND.cli} resume-all\`.`);
+      return 0;
+    }
+
+    case 'resume-all': {
+      console.log(resumeAll() ? 'stop lifted: coordinators resume at their next check' : 'no stop was in force');
+      return 0;
     }
 
     case 'instance': {

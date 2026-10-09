@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import { BRAND } from '../src/brand.js';
 import { claimRef } from '../src/claims.js';
-import { slotStatus } from '../src/slots.js';
+import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
@@ -57,6 +57,12 @@ function commitAll(cwd: string, msg: string) {
   git(cwd, '-c', 'user.email=agent@example.com', '-c', 'user.name=agent', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
 }
 
+/** What a diligent evaluator reports: every file changed since the base named in its prompt. */
+function readAll(req: RunRequest): string[] {
+  const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
+  return base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
+}
+
 /** Scripted agents: the evaluator writes a failing repro; the worker fixes the bug; the verdict approves. */
 function agents(over: Partial<Record<string, (r: RunRequest) => object>> = {}) {
   return new FakeRunner((req) => {
@@ -73,7 +79,7 @@ function agents(over: Partial<Record<string, (r: RunRequest) => object>> = {}) {
       commitAll(req.cwd, 'Ignore non-positive quantities in totals');
       return { structured: { summary: 'fixed' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
   });
 }
 
@@ -341,7 +347,7 @@ function parallelAgents(gate: Promise<void>, seen: { now: number; max: number })
       commitAll(req.cwd, `add ${name}`);
       return { structured: { summary: 's' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
   });
 }
 
@@ -410,7 +416,7 @@ test('the governor holds dispatch on high load or low disk, and records it once,
 /** Workers that write a given file; optionally one that also adds a failing test. */
 function fileAgents(redFor?: string) {
   return new FakeRunner(async (req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
     const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
     writeFileSync(join(req.cwd, 'src', name), `export const x = '${name}';\n`);
     if (name === redFor) writeFileSync(join(req.cwd, 'test', 'new-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('brand new failure', () => { assert.equal(1, 2); });\n");
@@ -464,7 +470,7 @@ test('batched landing: changes to the same files go in separate batches', { skip
   const f = fixture();
   // Two workers editing the same file conflict-free in sequence, but must not share a batch.
   const runner = new FakeRunner(async (req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
     const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
     writeFileSync(join(req.cwd, 'src', 'shared.js'), `export const who = '${name}';\n`);
     commitAll(req.cwd, `touch shared for ${name}`);
@@ -581,4 +587,68 @@ test('a worker runs in the lane its issue names with a lane:<name> label', { ski
   const worker = runner.calls.find((r) => r.role === 'worker')!;
   assert.equal(worker.lane, 'eval');
   assert.equal(runner.calls.find((r) => r.role === 'evaluator-repro')!.lane, undefined, 'evaluators stay in the default lane');
+});
+
+test('regression: an approving review that did not read every changed file does not pass; the change waits for a human', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  // The evaluator approves but reports reading only the test, not the source change.
+  const runner = agents({ 'evaluator-verdict': () => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: ['test/repro-qty.test.js'] }) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const verdict = f.log.read(0, ['eval.verdict']).at(-1)!.payload as { unread?: string[] };
+  assert.deepEqual(verdict.unread, ['src/price.js']);
+  const lvl = f.log.read(0, ['review.level_set']).at(-1)!.payload as { level: string; reasons: string[] };
+  assert.equal(lvl.level, 'L3');
+  assert.ok(lvl.reasons.some((r) => /evaluator did not read: src\/price\.js/.test(r)), lvl.reasons.join(' | '));
+  assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands on a partial review');
+});
+
+test('emergency stop: one command halts every agent across instances; their tasks requeue; nothing starts until resumed', { skip }, async () => {
+  const a = fixture();
+  const b = fixture();
+  writeFileSync(join(a.slotsDir, 'config.json'), JSON.stringify({ max_agents: 4 }));
+  const running = { now: 0, aborted: 0 };
+  // Workers that run until they're aborted, like a real agent mid-task.
+  const longRunning = () =>
+    new FakeRunner(async (req) => {
+      if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+      running.now++;
+      await new Promise<void>((res) => req.signal?.addEventListener('abort', () => res()));
+      running.now--;
+      running.aborted++;
+      return { reason: 'canceled_by_reconciliation' };
+    });
+  const coords = [a, b].map((f, k) => {
+    for (const name of ['a.js', 'b.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
+    f.cfg.agents.roles.workers!.count = 2;
+    return new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: longRunning(), repo: f.repo, instance: k ? 'beta' : 'alpha', stateDir: f.stateDir, slotsDir: a.slotsDir, machine: f.machine });
+  });
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(running.now, 4, 'four agents running across two instances');
+  stopAll('operator', 'testing the stop', a.slotsDir);
+  for (const c of coords) c.checkEmergency();
+  await Promise.all(coords.map((c) => c.idle()));
+  assert.equal(running.now, 0, 'every agent halted');
+  assert.equal(running.aborted, 4);
+  assert.equal(slotStatus(a.slotsDir).agents.length, 0, 'their slots are free');
+  for (const f of [a, b]) {
+    assert.equal(f.log.read(0, ['emergency.stop']).length, 1);
+    const released = f.log.read(0, ['issue.released']).map((e) => (e.payload as { why: string }).why);
+    assert.deepEqual(released, ['emergency stop', 'emergency stop'], 'tasks requeue rather than fail');
+    assert.equal(f.log.read(0, ['issue.blocked']).length, 0);
+  }
+  await Promise.all(coords.map((c) => c.tick()));
+  assert.equal(running.now, 0, 'nothing starts while the stop is in force');
+  assert.equal(tryAgentSlot('another harness', a.slotsDir), null, 'other harnesses on the slot protocol are held too');
+  assert.ok(resumeAll(a.slotsDir));
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(running.now, 4, 'resumed: the requeued tasks start again');
+  stopAll('operator', 'cleanup', a.slotsDir);
+  for (const c of coords) c.checkEmergency();
+  await Promise.all(coords.map((c) => c.idle()));
 });

@@ -17,6 +17,7 @@ On a machine that runs agents for weeks, use the `/var/lib` and `/etc` locations
 | `slots.lock` | Held for a moment while a harness counts running agents and takes a slot. |
 | `agent-<i>.lock` | One running agent. The **number** of live files is capped, not the index: files may be numbered past the cap, so lowering it never strands an agent that is still running. |
 | `full-run.lock` | A full test run is in progress. At most one per machine. |
+| `STOP` | Emergency stop, `{"by", "at", "reason"}`. While it exists, every harness halts its running agents and takes no new slot. |
 
 Each lock file holds JSON: `{"pid": 1234, "owner": "free text: harness, project, task", "acquiredAt": "ISO-8601"}`.
 
@@ -28,4 +29,6 @@ Each lock file holds JSON: `{"pid": 1234, "owner": "free text: harness, project,
 4. **Full runs:** take `full-run.lock` before starting a full suite. Projects can also declare an `idle_probe` command for runs started outside any harness. For example, a script that exits 0 only when no full run is live.
 5. **Release:** delete your own file, only if its `pid` and `acquiredAt` are yours.
 
-`worklane slots` shows what's held. `worklane queue full-run` queues a full run behind both checks, in a detached runner that survives the session that queued it.
+**Emergency stop:** `worklane stop-all [reason]` writes `STOP`; every Worklane coordinator on the machine aborts its agents within about 5 seconds (their tasks requeue) and starts none until `worklane resume-all` removes it. Writing it needs write access to the slot directory: run it as a coordinator user, or as root.
+
+`worklane slots` shows what's held, and any stop in force. `worklane queue full-run` queues a full run behind both checks, in a detached runner that survives the session that queued it.

@@ -44,6 +44,8 @@ export const EventSchemas = {
     test_correct: z.boolean(),
     confidence: z.enum(['high', 'medium', 'low']),
     advice: z.string(),
+    /** Changed files the evaluator didn't read; any means the change goes to a human. */
+    unread: z.array(z.string()).optional(),
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
@@ -63,6 +65,8 @@ export const EventSchemas = {
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
   'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable() }),
+  'emergency.stop': z.strictObject({ by: z.string(), reason: z.string(), running: z.number().int() }),
+  'emergency.resume': z.strictObject({ instance: z.string() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
