@@ -4,7 +4,7 @@
 // git credential helper, no SSH agent, so an agent can't push or write to
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
@@ -112,11 +112,16 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
   }
 }
 
-export function cliArgs(req: RunRequest, settings?: object): string[] {
-  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', req.prompt, '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+/**
+ * The claude command line. The prompt is not on it: command lines are public
+ * on the machine and sudo logs them to the journal, so the prompt goes on
+ * stdin and the role's system prompt in a file (`systemPromptFile`).
+ */
+export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string): string[] {
+  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
-  if (req.appendSystemPrompt) args.push('--append-system-prompt', req.appendSystemPrompt);
+  if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
   if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
   return args;
 }
@@ -160,11 +165,23 @@ export class CliRunner implements AgentRunner {
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
+    // The role's system prompt, in a file the agent user can read (this process's /tmp, private to the
+    // instance's service and its agents), removed when the run ends.
+    const promptDir = req.appendSystemPrompt ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-run-`)) : null;
+    const systemPromptFile = promptDir ? join(promptDir, 'system-prompt.md') : undefined;
+    if (promptDir && systemPromptFile) {
+      writeFileSync(systemPromptFile, req.appendSystemPrompt!, { mode: 0o644 });
+      chmodSync(promptDir, 0o755);
+    }
+    const cleanup = () => promptDir && rmSync(promptDir, { recursive: true, force: true });
     return new Promise((resolve) => {
-      const argv = cliArgs(req, lane?.settings);
+      const argv = cliArgs(req, lane?.settings, systemPromptFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
-      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
+      child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
+      child.on('error', cleanup);
+      child.stdin.end(req.prompt);
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
       let rateLimited = false;
@@ -202,6 +219,7 @@ export class CliRunner implements AgentRunner {
         stderr = (stderr + d.toString()).slice(-4000);
       });
       child.on('close', (code) => {
+        cleanup();
         clearTimeout(stall);
         clearTimeout(overall);
         const r = result as ResultLine | null;
