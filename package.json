@@ -1,6 +1,6 @@
 {
   "name": "@worklane/cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Open-source harness for running a crew of Claude agents on a real codebase: parallel workers, an independent evaluator, a shared GitHub Issues backlog, and a live dashboard showing who owns every task.",
   "license": "Apache-2.0",
   "type": "module",
