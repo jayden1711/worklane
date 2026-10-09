@@ -733,3 +733,38 @@ test('a worker that claims no change is needed when the checks fail on the base 
   assert.equal(f.log.read(0, ['issue.no_change']).length, 0);
   assert.equal(f.log.read(0, ['land.queued']).length, 1);
 });
+
+test('regression: a retry that finds the work already committed is judged as a change against the base; failing checks keep their output', { skip }, async () => {
+  const f = fixture();
+  const flag = join(f.base, 'flag');
+  // The check runs in bash, which reads backslashes as escapes: give it the path with forward slashes (Windows too).
+  const flagForShell = flag.split('\\').join('/');
+  f.backlog.open({ title: 'Ignore non-positive quantities', body: `Totals count negative quantities.\n\n\`\`\`done_when\n- command: grep -q "qty > 0" src/price.js\n- command: test -f ${flagForShell} || { echo "flag missing here"; exit 3; }\n\`\`\`\n`, author: 'example-owner', labels: ['ready'] });
+  let attempt = 0;
+  const runner = agents({
+    worker: (req) => {
+      attempt++;
+      if (attempt === 1) {
+        const p = join(req.cwd, 'src', 'price.js');
+        writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+        commitAll(req.cwd, 'Ignore non-positive quantities');
+        return { summary: 'fixed' };
+      }
+      // The second attempt finds its predecessor's work on the branch and nothing left to change.
+      writeFileSync(flag, '');
+      return { summary: 'already done', no_change_needed: 'the fix is already committed on this branch' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(attempt, 2);
+  const first = f.log.read(0, ['check.result']).at(0)!.payload as { checks: { check: string; status: string; exitCode: number | null; tail?: string }[] };
+  const failed = first.checks.find((x) => x.status === 'fail')!;
+  assert.equal(failed.exitCode, 3);
+  assert.match(failed.tail ?? '', /flag missing here/, 'the event says why the check failed');
+  assert.equal(first.checks.find((x) => x.status === 'pass')?.tail, undefined, 'passing checks keep no output');
+  assert.ok(!f.log.read(0, ['change.rejected']).some((e) => /committed 1 commit/.test((e.payload as { why: string }).why)), 'not rejected for its predecessor\'s commit');
+  assert.equal(f.log.read(0, ['issue.no_change']).length, 0);
+  assert.equal(f.log.read(0, ['land.queued']).length, 1);
+});

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -160,7 +160,32 @@ test('project commands (checks, gates, setup, full runs) run as the agent user w
   assert.equal(file, 'sudo');
   assert.deepEqual(args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
   assert.ok(args.includes('HOME=/home/shop-agent') && args.includes('USER=shop-agent'));
-  assert.ok(!args.some((a) => /GH_|GITHUB|TOKEN|GIT_CONFIG/.test(a)), 'no credentials or git helpers reach project code');
+  assert.ok(!args.some((a) => /GH_|GITHUB|TOKEN/.test(a)), 'no credentials reach project code');
+  // Git settings: exactly no credential helper, and trust in the coordinator's checkout (nothing else).
+  assert.deepEqual(args.filter((a) => a.startsWith('GIT_CONFIG')), ['GIT_CONFIG_COUNT=2', 'GIT_CONFIG_KEY_0=credential.helper', 'GIT_CONFIG_VALUE_0=', 'GIT_CONFIG_KEY_1=safe.directory', 'GIT_CONFIG_VALUE_1=*']);
   assert.deepEqual(args.slice(-4), ['-o', 'pipefail', '-c', 'npm test | tail -5']);
   assert.deepEqual(Object.keys(env), ['PATH'], 'sudo itself gets only PATH');
+});
+
+// A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password).
+const canSudoNobody = process.platform !== 'win32' && spawnSync('sudo', ['-n', '-u', 'nobody', 'true']).status === 0;
+
+test('regression: a check that runs git, run as the agent user in the coordinator\'s checkout, gets git\'s answer (not "dubious ownership")', { skip: !canSudoNobody && 'needs passwordless sudo to another user' }, () => {
+  // The checkout belongs to the coordinator user; checks run as the agent user. Git refuses a repository owned by
+  // someone else unless it is trusted, so `git diff --exit-code` failed with 128 on a clean tree and failed the check.
+  const repo = mkdtempSync('/tmp/wl-check-git-');
+  chmodSync(repo, 0o755);
+  const g = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
+  g('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'a.txt'), 'a\n');
+  g('add', 'a.txt');
+  g('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'a');
+  spawnSync('chmod', ['-R', 'a+rX', repo]);
+  try {
+    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home: '/' });
+    const r = spawnSync(file, args, { cwd: repo, env, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

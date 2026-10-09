@@ -385,7 +385,9 @@ export class Coordinator {
         if (out.stop) return;
         removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
-        if (out.noChange) {
+        // A finding of "no change" counts only for a branch with nothing on it: work an earlier attempt committed is
+        // judged as a change against the base, like any other.
+        if (out.noChange && this.git(path, 'rev-list', '--count', `${base}..${head}`) === '0') {
           const done = await this.confirmNoChange(n, owner, path, base, head, doneWhen, repro, out.noChange);
           if (done.confirmed) return;
           this.emit('change.rejected', { issue: n, why: done.why });
@@ -679,7 +681,7 @@ export class Coordinator {
     }
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
     for (const c of this.d.cfg.tests.checks) await run(c);
-    this.emit('check.result', { issue: n, head, stage: 'verify', checks: checks.map(({ tail: _t, ...c }) => c) });
+    this.emit('check.result', { issue: n, head, stage: 'verify', checks: checks.map(({ tail, ...c }) => ({ ...c, ...(c.status !== 'pass' && tail ? { tail: tail.slice(-1500) } : {}) })) });
     return checks;
   }
 

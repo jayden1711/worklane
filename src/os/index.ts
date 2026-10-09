@@ -114,7 +114,21 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
 export function projectCommand(command: string, runAs?: { user: string; home: string }): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   if (!runAs) return { file, args, env: childEnv() };
-  const env = { HOME: runAs.home, USER: runAs.user, LOGNAME: runAs.user, PATH: '/usr/local/bin:/usr/bin:/bin', LANG: process.env.LANG ?? 'C.UTF-8', CI: '1' };
+  const env = {
+    HOME: runAs.home,
+    USER: runAs.user,
+    LOGNAME: runAs.user,
+    PATH: '/usr/local/bin:/usr/bin:/bin',
+    LANG: process.env.LANG ?? 'C.UTF-8',
+    CI: '1',
+    // The checkout belongs to the coordinator user: without trusting it, git refuses it as "dubious ownership" and
+    // any check that runs git fails. No credential helper: project code never authenticates as the instance.
+    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '',
+    GIT_CONFIG_KEY_1: 'safe.directory',
+    GIT_CONFIG_VALUE_1: '*',
+  };
   const [f, a] = asUser(runAs.user, file, args, env);
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
