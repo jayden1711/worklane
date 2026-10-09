@@ -1,12 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
+import { EventLog } from '../src/events/log.js';
 import { credentialProblems, initInstance, listInstances, loadInstance } from '../src/instance.js';
-import { exampleProject } from './helpers.js';
+import { childEnv } from '../src/os/index.js';
+import { agentEnv } from '../src/runner.js';
+import { instanceEnv } from '../src/service.js';
+import { exampleProject, repoRoot } from './helpers.js';
 
 function setup(policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4, max_stage: 1 }\nland_mode: pr\n') {
   const dir = mkdtempSync(join(tmpdir(), 'instances-'));
@@ -73,4 +78,70 @@ test('an instance home is private to its owner', { skip: process.platform === 'w
   for (const f of ['instance.yaml', 'policy.yaml', 'credentials.yaml']) assert.equal(statSync(join(home, f)).mode & 0o777, 0o600, f);
   assert.throws(() => initInstance('shop', '.', 'a/b', join(home, '..')), /already exists/);
   assert.throws(() => initInstance('Bad Name', '.', 'a/b', join(home, '..')), /lowercase/);
+});
+
+const cli = join(repoRoot, 'dist', 'src', 'cli.js');
+
+/** Two instances over two copies of the example project, each with a file backlog and its own (empty) login dirs. */
+function two() {
+  const dir = mkdtempSync(join(tmpdir(), 'instances-'));
+  const made = ['alpha', 'beta'].map((n, k) => {
+    const { dir: repo } = exampleProject();
+    const cfg = join(repo, BRAND.configDir);
+    writeFileSync(join(cfg, 'config.yaml'), readFileSync(join(cfg, 'config.yaml'), 'utf8').replace(/^backlog: github/m, 'backlog: file'));
+    writeFileSync(join(cfg, 'agents.yaml'), readFileSync(join(cfg, 'agents.yaml'), 'utf8').replace(/^daily_budget_usd: 40/m, `daily_budget_usd: ${k ? 10 : 40}`));
+    const home = initInstance(n, repo, 'example-org/example-shop', dir);
+    writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n');
+    mkdirSync(join(home, 'gh'));
+    mkdirSync(join(home, 'claude'));
+    return { name: n, home };
+  });
+  return { dir, made };
+}
+
+test('acceptance: two instances keep separate logs, budgets and environments', () => {
+  const { dir, made } = two();
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, GH_TOKEN: 'inherited-token-must-not-be-used', ANTHROPIC_API_KEY: 'inherited-key' };
+  for (const m of made) {
+    const r = spawnSync(process.execPath, [cli, 'coordinator', 'run', '--instance', m.name, '--once'], { encoding: 'utf8', env, cwd: tmpdir(), timeout: 120_000 });
+    assert.equal(r.status, 0, r.stderr);
+    const log = new EventLog(join(m.home, 'state', 'events.db'));
+    try {
+      assert.ok(log.read(0, ['coordinator.started']).length === 1, `${m.name} logged to its own state`);
+    } finally {
+      log.close();
+    }
+  }
+  const [a, b] = made.map((m) => loadInstance(m.name, dir));
+  assert.equal(a!.config.agents.daily_budget_usd, 40);
+  assert.equal(b!.config.agents.daily_budget_usd, 10);
+  const ea = instanceEnv(a!, env);
+  const eb = instanceEnv(b!, env);
+  assert.equal(ea.GH_CONFIG_DIR, join(made[0]!.home, 'gh'));
+  assert.equal(eb.GH_CONFIG_DIR, join(made[1]!.home, 'gh'));
+  assert.equal(ea.CLAUDE_CONFIG_DIR, join(made[0]!.home, 'claude'));
+  assert.equal(eb.CLAUDE_CONFIG_DIR, join(made[1]!.home, 'claude'));
+  for (const e of [ea, eb]) {
+    assert.equal(e.GH_TOKEN, undefined, 'an inherited token never stands in for the instance login');
+    assert.equal(e.ANTHROPIC_API_KEY, undefined);
+  }
+});
+
+test('an instance coordinator refuses to start without its own credentials, or with ones not supported yet', () => {
+  const { dir, made } = two();
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
+  rmSync(join(made[0]!.home, 'claude'), { recursive: true });
+  const r = spawnSync(process.execPath, [cli, 'coordinator', 'run', '--instance', 'alpha', '--once'], { encoding: 'utf8', env, timeout: 120_000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /credentials missing:[\s\S]*Claude: config dir/);
+  assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
+  writeFileSync(join(made[1]!.home, 'credentials.yaml'), 'version: 1\ngithub: { kind: app, app_id: 1, installation_id: 2, key_path: /dev/null }\nclaude: { config_dir: /tmp }\n');
+  assert.throws(() => instanceEnv(loadInstance('beta', dir)), /GitHub App credentials are not supported yet/);
+});
+
+test('agents get the instance\'s Claude config dir, and still no tokens', () => {
+  const env = agentEnv({ PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/inst/claude', GH_TOKEN: 't', GH_CONFIG_DIR: '/inst/gh' }, 'cli');
+  assert.equal(env.CLAUDE_CONFIG_DIR, '/inst/claude');
+  assert.equal(env.GH_TOKEN, undefined);
+  assert.notEqual(env.GH_CONFIG_DIR, '/inst/gh', 'agents never see the coordinator\'s gh login');
 });

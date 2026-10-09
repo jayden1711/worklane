@@ -26,7 +26,7 @@ import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
 import { openUrl } from './os/index.js';
-import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
+import { backlogFor, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { installService, uninstallService } from './os/index.js';
@@ -59,8 +59,9 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
-  coordinator run [--once]         run the coordinator in the foreground (the service runs this)
-  up | down                        install or remove the coordinator as a per-user service
+  coordinator run [--once] [--instance name]
+                                   run the coordinator in the foreground (the service runs this)
+  up | down [--instance name]      install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
   dashboard [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log)
@@ -102,6 +103,7 @@ function changedTestFiles(root: string, globs: string[], branch: string): string
 async function main(argv: string[]): Promise<number> {
   const args = [...argv];
   const rootOpt = option(args, '--root');
+  const instanceOpt = option(args, '--instance');
   const root = resolve(rootOpt ?? findProjectRoot(process.cwd()) ?? process.cwd());
   const [cmd, sub, ...rest] = args;
 
@@ -322,10 +324,29 @@ async function main(argv: string[]): Promise<number> {
         console.error('usage: coordinator run [--once]');
         return 2;
       }
+      if (instanceOpt) return runInstanceCoordinator(instanceOpt, { once: rest.includes('--once') });
       return runCoordinator(root, { once: rest.includes('--once') });
     }
 
     case 'up': {
+      if (instanceOpt) {
+        const i = loadInstance(instanceOpt);
+        const missing = credentialProblems(i.credentials);
+        if (missing.length) {
+          console.error(`instance ${i.name} not started; credentials missing:\n${missing.map((m) => `  ${m}`).join('\n')}`);
+          return 1;
+        }
+        const r = installService({
+          label: instanceServiceLabel(i.name),
+          program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
+          workingDir: i.home,
+          logFile: join(i.stateDir, 'coordinator.log'),
+          // Only what's needed to find tools and the instance; its credentials come from the instance itself.
+          env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
+        });
+        console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
+        return r.started ? 0 : 1;
+      }
       const cfg = loadConfig(root);
       const r = installService({
         label: serviceLabel(cfg),
@@ -339,7 +360,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'down': {
-      console.log(`removed ${uninstallService(serviceLabel(loadConfig(root)))}`);
+      console.log(`removed ${uninstallService(instanceOpt ? instanceServiceLabel(instanceOpt) : serviceLabel(loadConfig(root)))}`);
       return 0;
     }
 
