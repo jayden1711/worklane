@@ -80,6 +80,30 @@ export function homeDir(): string {
 /** Spawn children in their own process group where the OS supports it, so a timeout kills the whole tree. */
 export const spawnDetached = process.platform !== 'win32';
 
+/**
+ * Run a program as another (unprivileged) OS user, with exactly this
+ * environment: `sudo -n -u <user> -- env -i K=V... <file> <args>`. The
+ * operator's sudoers rule lets the coordinator user switch to the agent
+ * user without a password, and nothing else. POSIX only.
+ */
+export function asUser(user: string, file: string, args: string[], env: NodeJS.ProcessEnv): [file: string, args: string[]] {
+  if (process.platform === 'win32') throw new Error('running agents as a separate user needs macOS or Linux');
+  const vars = Object.entries(env)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => `${k}=${v}`);
+  return ['sudo', ['-n', '-u', user, '--', '/usr/bin/env', '-i', ...vars, file, ...args]];
+}
+
+/** Kill a process group that runs as another user: only that user (or root) may signal it. */
+export function killTreeAs(user: string, pgid: number | undefined): void {
+  if (!pgid || process.platform === 'win32') return;
+  try {
+    execFileSync('sudo', ['-n', '-u', user, '--', '/bin/kill', '-KILL', '--', `-${pgid}`], { stdio: 'ignore', timeout: 10_000 });
+  } catch {
+    // already gone
+  }
+}
+
 export function killTree(pid: number | undefined, fallback: () => void): void {
   try {
     if (pid && process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
