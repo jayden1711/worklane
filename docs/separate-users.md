@@ -34,8 +34,10 @@ usermod -aG wl-<name>-work wl-<name>-agent
 groupadd -f agent-slots
 usermod -aG agent-slots wl-<name>
 
+# Instance checkouts live under one root of their own (leave other services' directories alone).
+install -d -o root -g root -m 0755 /srv/worklane
 # The repo checkout: owned by the coordinator, group-writable, new files inherit the group.
-install -d -o wl-<name> -g wl-<name>-work -m 2770 /srv/<name>
+install -d -o wl-<name> -g wl-<name>-work -m 2770 /srv/worklane/<name>
 
 # The shared slot directory (once per machine).
 install -d -o root -g agent-slots -m 2770 /var/tmp/agent-slots
@@ -58,7 +60,19 @@ apt-get install -y bubblewrap socat
 
 - **`!use_pty`:** without it, some distributions run the agent behind a pseudo-terminal, which breaks its JSON output stream.
 - **`umask=0002`:** makes files agents write group-writable, so the coordinator can clean up their worktrees.
-- **Ubuntu 24.04 and later:** if `sysctl kernel.apparmor_restrict_unprivileged_userns` prints `1`, bubblewrap needs an AppArmor profile; see Claude Code's sandboxing docs.
+- **Ubuntu 24.04 and later:** if `sysctl kernel.apparmor_restrict_unprivileged_userns` prints `1`, don't turn that setting off machine-wide. Give bubblewrap alone the right to create user namespaces with a profile scoped to its binary, `/etc/apparmor.d/bwrap`:
+
+  ```
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  ```
+
+  Load it with `apparmor_parser -r /etc/apparmor.d/bwrap`. Then check, as an ordinary user, that `bwrap --ro-bind / / --unshare-user true` exits 0.
 
 For an eval lane, add `wl-<name>-eval` the same way:
 - Add it to `wl-<name>-work`.
