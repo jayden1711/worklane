@@ -92,7 +92,7 @@ JS
     # git pushes from the coordinator authenticate through gh, using the same dir (GH_CONFIG_DIR is set by the coordinator).
     sudo -u "$coord" env GH_CONFIG_DIR="$dir" gh auth setup-git --hostname github.com
     echo "set credentials.yaml github: { kind: gh-config-dir, path: $dir }"
-    echo "then check it: sudo -iu $coord npx worklane instance show $name   (refuses a token that reaches other repos)"
+    echo "then check it: sudo -H -u $coord worklane instance show $name   (refuses a token that reaches other repos)"
     ;;
   claude)
     # Only the agent user signs in. An eval user needs a Claude login only once evals are on.

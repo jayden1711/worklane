@@ -13,7 +13,7 @@ coord="wl-$name" work="wl-$name-work"
 dest="/srv/worklane/$name/${repo#*/}"
 
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
-sudo -iu "$coord" bash -euo pipefail -c '
+run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
   helper="!/usr/local/bin/worklane git-credential"
   if [ ! -d "$2/.git" ]; then
@@ -25,7 +25,7 @@ sudo -iu "$coord" bash -euo pipefail -c '
   git config --add credential.helper "$helper"
   git config core.sharedRepository group
   git log -1 --format="cloned at %h (%s)"
-' _ "$name" "$dest" "$repo"
+' "$name" "$dest" "$repo"
 
 say "permissions: the code is group-writable for agents; the repo's git config and hooks are not"
 chgrp -R "$work" "$dest"
@@ -36,7 +36,7 @@ chmod 0755 "$dest/.git/hooks"
 find "$dest/.git/hooks" -type f -exec chmod 0755 {} +
 
 say "Worklane config in the repo"
-sudo -iu "$coord" bash -euo pipefail -c '
+run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
   cd "$2"
   if [ -d .worklane ]; then echo ".worklane/ present on $(git rev-parse --abbrev-ref HEAD)"; exit 0; fi
@@ -48,4 +48,4 @@ sudo -iu "$coord" bash -euo pipefail -c '
   git switch -q -
   echo "pushed branch worklane/setup. Open its PR, review and adjust the config, and merge it yourself:"
   echo "  https://github.com/$3/compare/worklane/setup?expand=1"
-' _ "$name" "$dest" "$repo"
+' "$name" "$dest" "$repo"

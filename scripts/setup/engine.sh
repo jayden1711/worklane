@@ -35,9 +35,9 @@ if [ -n "$name" ]; then
   coord="wl-$name"
   id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
   say "instance home for $name, as $coord"
-  sudo -iu "$coord" bash -euo pipefail -c '
+  run_as "$coord" '
     if worklane instance list | grep -qx "$1"; then echo "instance $1 exists"; exit 0; fi
     worklane instance init "$1" --repo "$2" --github "$3"
-  ' _ "$name" "/srv/worklane/$name/${repo#*/}" "$repo"
+  ' "$name" "/srv/worklane/$name/${repo#*/}" "$repo"
   echo "next: credentials.sh $name github-app ..., then checkout.sh $name $repo"
 fi
