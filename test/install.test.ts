@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
 import { HOOK_MARKER, install } from '../src/install.js';
-import { engineCli, exampleProject } from './helpers.js';
-import { which } from '../src/os/index.js';
+import { engineCli, exampleProject, repoRoot } from './helpers.js';
+import { childEnv, which } from '../src/os/index.js';
 
 const isWindows = process.platform === 'win32';
 /**
@@ -161,4 +161,12 @@ test('install references the project-local engine even when it is a symlink', { 
   install({ root: dir });
   const cmd = hookCmd(dir, 'PreToolUse');
   assert.match(cmd, /"\$CLAUDE_PROJECT_DIR\/node_modules\/@worklane\/cli\/dist\/src\/cli\.js"/);
+});
+
+test('install --engine points the hooks at a machine-wide engine path', () => {
+  const { dir } = exampleProject();
+  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--engine', '/opt/engine/current/dist/src/cli.js'], { encoding: 'utf8', env: childEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8');
+  assert.match(settings, /\/opt\/engine\/current\/dist\/src\/cli\.js/);
 });

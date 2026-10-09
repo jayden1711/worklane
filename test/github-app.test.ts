@@ -143,6 +143,11 @@ test('git credential helper: hands git an installation token for GitHub, and not
     const r = await run(['git-credential', 'get'], env, 'protocol=https\nhost=github.com\n\n');
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, 'username=x-access-token\npassword=ghs_installation\n');
+    // Before the repo is cloned (no checkout, no repo config), the helper still works: it's how the clone authenticates.
+    const instanceYaml = join(dir, 'site', 'instance.yaml');
+    writeFileSync(instanceYaml, readFileSync(instanceYaml, 'utf8').replace(/path: ".*"/, 'path: "/nonexistent/checkout"'));
+    const early = await run(['git-credential', 'get'], env, 'protocol=https\nhost=github.com\n\n');
+    assert.equal(early.stdout, 'username=x-access-token\npassword=ghs_installation\n', early.stderr);
     const other = await run(['git-credential', 'get'], env, 'protocol=https\nhost=gitlab.example\n\n');
     assert.equal(other.stdout, '');
     assert.equal((await run(['git-credential', 'store'], env, 'host=github.com\n\n')).stdout, '');

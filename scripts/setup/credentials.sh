@@ -69,7 +69,13 @@ const h = (auth) => ({ authorization: `Bearer ${auth}`, accept: 'application/vnd
 })().catch((e) => { console.error(`FAILED: ${e.message}`); process.exit(1); });
 JS
     echo
-    echo "set credentials.yaml github: { kind: app, app_id: $app_id, installation_id: $inst_id, key_path: $key }"
+    creds="/home/$coord/.local/state/worklane/instances/$name/credentials.yaml"
+    if [ -f "$creds" ]; then
+      sudo -u "$coord" sh -c 'umask 077; printf "%s\n" "version: 1" "github: { kind: app, app_id: $1, installation_id: $2, key_path: $3 }" > "$4"' _ "$app_id" "$inst_id" "$key" "$creds"
+      echo "wrote $creds (the App; agents sign in to Claude as their own user)"
+    else
+      echo "no instance home yet (run engine.sh first); then set in credentials.yaml: github: { kind: app, app_id: $app_id, installation_id: $inst_id, key_path: $key }"
+    fi
     read -rp "Delete the copy you brought to this machine ($src) now with shred? [y/N] " yn
     if [ "$yn" = y ]; then shred -u "$src" && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
     echo "Now delete the key on your other machine (the downloaded .pem). If it's ever lost, generate a new one in the App's settings."
