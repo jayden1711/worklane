@@ -46,8 +46,10 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     spawnSync('bash', ['-c', `source "${join(dir, 'lib.sh')}"; run_as ${other} "$@"`, '_', stubs + body, ...args], { encoding: 'utf8' });
   const engine = sections('engine.sh');
   const checkout = sections('checkout.sh');
+  const service = sections('service.sh');
   assert.equal(engine.length, 1);
   assert.equal(checkout.length, 2);
+  assert.equal(service.length, 1);
   const dest = mkdtempSync('/tmp/wl-setup-');
   chmodSync(dest, 0o777);
   try {
@@ -69,7 +71,23 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.match(r.stdout, /^worklane install --root \. --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m);
     assert.match(r.stdout, /^git push -q origin HEAD:refs\/heads\/worklane\/setup$/m);
     assert.match(r.stdout, /compare\/worklane\/setup/);
+    r = runAs(service[0]!, ['site']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'worklane instance show site\n');
   } finally {
     rmSync(dest, { recursive: true, force: true });
   }
+});
+
+test('the coordinator service unit runs as the coordinator user, can still sudo to agents, and stops them with it', { skip: process.platform === 'win32' && 'bash scripts' }, () => {
+  const r = spawnSync('bash', [join(dir, 'service.sh'), 'site', '--print'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const unit = r.stdout;
+  assert.match(unit, /^User=wl-site$/m);
+  assert.match(unit, /^ExecStart=\/usr\/local\/bin\/worklane coordinator run --instance site$/m);
+  assert.match(unit, /^Restart=on-failure$/m);
+  assert.match(unit, /^KillMode=control-group$/m);
+  assert.doesNotMatch(unit, /NoNewPrivileges=(yes|true)/, 'agents are started through sudo');
+  const install = readFileSync(join(dir, 'service.sh'), 'utf8');
+  assert.ok(install.indexOf('systemd-analyze verify') < install.indexOf('mv -f'), 'validated before it is moved into place');
 });
