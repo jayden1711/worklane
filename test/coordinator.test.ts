@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import { BRAND } from '../src/brand.js';
 import { claimRef } from '../src/claims.js';
+import { slotStatus } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
@@ -601,4 +602,36 @@ test('security role in the pipeline: a change in its category that it blocks goe
   assert.equal(asked.kind, 'land');
   assert.ok(asked.receipts.some((r) => /trusts a client-supplied price/.test(r)));
   assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands without the owner');
+});
+
+test('acceptance: two instances, each set to 4 workers, never run more than the shared cap together, even when it drops', { skip }, async () => {
+  const a = fixture();
+  const b = fixture();
+  // Two separate instances (own repos, logs and backlogs) on one machine, sharing the slot directory.
+  writeFileSync(join(a.slotsDir, 'config.json'), JSON.stringify({ max_agents: 4 }));
+  const seen = { now: 0, max: 0 };
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const coords = [a, b].map((f, k) => {
+    for (const name of ['a.js', 'b.js', 'c.js', 'd.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
+    f.cfg.agents.roles.workers!.count = 4;
+    return new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: parallelAgents(gate, seen), repo: f.repo, instance: k ? 'beta' : 'alpha', stateDir: f.stateDir, slotsDir: a.slotsDir, machine: f.machine });
+  });
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.max, 4, 'four running in total, not eight');
+  assert.equal(slotStatus(a.slotsDir).agents.length, 4);
+  // The adaptive cap drops to 3 while 4 run: nobody is killed, and nobody new starts until below 3.
+  writeFileSync(join(a.slotsDir, 'cap.json'), JSON.stringify({ cap: 3 }));
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(seen.max, 4);
+  assert.equal(slotStatus(a.slotsDir).agents.length, 4, 'running agents are never stopped by a lower cap');
+  open();
+  await Promise.all(coords.map((c) => c.idle()));
+  for (let i = 0; i < 6; i++) {
+    await Promise.all(coords.map((c) => c.tick()));
+    await Promise.all(coords.map((c) => c.idle()));
+  }
+  assert.ok(seen.max <= 4);
 });
