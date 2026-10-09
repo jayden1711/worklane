@@ -652,3 +652,31 @@ test('emergency stop: one command halts every agent across instances; their task
   for (const c of coords) c.checkEmergency();
   await Promise.all(coords.map((c) => c.idle()));
 });
+
+test('land_mode pr: an approved change goes out as a PR on its own branch; the default branch is never pushed and nothing merges', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  const mainBefore = git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const r = f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string; detail: string; landed: string | null };
+  assert.equal(r.outcome, 'pr_opened');
+  assert.equal(r.landed, null);
+  assert.equal(git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], mainBefore, 'main untouched');
+  const branchHead = git(f.repo, 'ls-remote', 'origin', `refs/heads/${BRAND.cli}/issue-${n}`).split('\t')[0];
+  assert.ok(branchHead, 'the task branch is pushed');
+  assert.match(git(f.repo, 'show', `${branchHead}:src/price.js`), /qty > 0/);
+  const prs = f.backlog.prs();
+  assert.equal(prs.length, 1);
+  assert.equal(prs[0]!.base, 'main');
+  assert.match(prs[0]!.body, new RegExp(`^Closes #${n}`));
+  assert.match(prs[0]!.body, /Independent evaluator:\*\* approves/);
+  assert.equal((await f.backlog.get(n)).state, 'open', 'the issue closes when a human merges the PR');
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
+  // A second tick doesn't open another PR.
+  await c.tick();
+  assert.equal(f.backlog.prs().length, 1);
+});

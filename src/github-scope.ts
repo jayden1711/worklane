@@ -43,7 +43,7 @@ async function listRepos(token: string, path: string, pick: (j: unknown) => { fu
  * Check that a token sees exactly the instance's repos: all of them, and no
  * others. Refusals name the problem and counts, never other repos' names.
  */
-export async function checkRepoScope(token: string, allowed: string[], fetchImpl: Fetch = fetch, api = 'https://api.github.com'): Promise<{ ok: true; kind: TokenKind; expiresAt: string | null } | { ok: false; why: string }> {
+export async function checkRepoScope(token: string, allowed: string[], fetchImpl: Fetch = fetch, api = 'https://api.github.com'): Promise<{ ok: true; kind: TokenKind; expiresAt: string | null; login: string | null } | { ok: false; why: string }> {
   const kind = tokenKind(token);
   const want = new Set(allowed.map((r) => r.toLowerCase()));
   const advice = `use a fine-grained token limited to ${allowed.join(', ')}, or a GitHub App installed on only ${allowed.length > 1 ? 'those repos' : 'that repo'}`;
@@ -63,7 +63,25 @@ export async function checkRepoScope(token: string, allowed: string[], fetchImpl
   const missing = [...want].filter((r) => !seen.includes(r));
   if (extra.length) return { ok: false, why: `the token can reach ${extra.length} repo(s) outside this instance; ${advice}` };
   if (missing.length) return { ok: false, why: `the token cannot reach ${missing.join(', ')}` };
-  return { ok: true, kind, expiresAt: expiry.at };
+  // A token whose user is an admin on the repo could bypass branch protection: a machine account with Write only.
+  let login: string | null = null;
+  if (kind === 'fine-grained') {
+    try {
+      const get = async <T>(path: string): Promise<T> => {
+        const res = await fetchImpl(`${api}${path}`, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' } });
+        if (!res.ok) throw new Error(`GitHub ${res.status} reading ${path.split('?')[0]}`);
+        return (await res.json()) as T;
+      };
+      login = (await get<{ login: string }>('/user')).login;
+      for (const repo of allowed) {
+        const r = await get<{ permissions?: { admin?: boolean } }>(`/repos/${repo}`);
+        if (r.permissions?.admin) return { ok: false, why: `the token's user (${login}) is an admin on ${repo}, and admins can bypass branch protection; use a dedicated machine account with Write access only` };
+      }
+    } catch (e) {
+      return { ok: false, why: `could not check the token's user and permissions (${(e as Error).message}); not starting` };
+    }
+  }
+  return { ok: true, kind, expiresAt: expiry.at, login };
 }
 
 /** Days until a token expires (rounded down), or null if it has no expiry. */

@@ -4,10 +4,12 @@ import { checkRepoScope, parseExpiry, tokenKind } from '../src/github-scope.js';
 import { tokenWarning } from '../src/reports.js';
 
 /** A fake GitHub API: pages of repos per path, with Link headers between pages. */
-const fakeFetch = (pages: Record<string, { full_name: string }[][]>, status = 200) =>
+const fakeFetch = (pages: Record<string, { full_name: string }[][]>, status = 200, admin = false) =>
   (async (url: string) => {
     const u = new URL(url);
     const key = u.pathname;
+    if (key === '/user') return new Response(JSON.stringify({ login: 'repo-bot' }), { status });
+    if (key.startsWith('/repos/')) return new Response(JSON.stringify({ permissions: { admin, push: true } }), { status });
     const page = Number(u.searchParams.get('page') ?? '1');
     const body = key === '/installation/repositories' ? { repositories: pages[key]![page - 1] } : pages[key]![page - 1];
     const next = pages[key]![page] ? `<https://api.test${key}?per_page=100&page=${page + 1}>; rel="next"` : '';
@@ -25,7 +27,7 @@ test('token kinds by prefix: personal logins and classic tokens are told apart f
 
 test('a fine-grained token seeing exactly the instance repo is accepted (names compared case-insensitively)', async () => {
   const r = await checkRepoScope('github_pat_ok', ['example-org/example-shop'], fakeFetch({ '/user/repos': [[shop]] }), 'https://api.test');
-  assert.deepEqual(r, { ok: true, kind: 'fine-grained', expiresAt: null });
+  assert.deepEqual(r, { ok: true, kind: 'fine-grained', expiresAt: null, login: 'repo-bot' });
 });
 
 test('extra repos on a later page are found; refusals give counts, not names', async () => {
@@ -58,13 +60,23 @@ test('token expiry: read from GitHub\'s response header; reports warn 7 days ahe
   assert.equal(parseExpiry('2026-11-07 00:00:00 UTC'), '2026-11-07T00:00:00.000Z');
   assert.equal(parseExpiry('2026-11-07 09:30:00 +0200'), '2026-11-07T07:30:00.000Z');
   assert.equal(parseExpiry(null), null);
-  const withExpiry = (async () => new Response(JSON.stringify([{ full_name: 'a/b' }]), { headers: { 'github-authentication-token-expiration': '2026-10-15 12:00:00 UTC' } })) as unknown as typeof fetch;
+  const withExpiry = (async (url: string) => {
+    const path = new URL(url).pathname;
+    const body = path === '/user' ? { login: 'repo-bot' } : path.startsWith('/repos/') ? { permissions: { admin: false } } : [{ full_name: 'a/b' }];
+    return new Response(JSON.stringify(body), { headers: { 'github-authentication-token-expiration': '2026-10-15 12:00:00 UTC' } });
+  }) as unknown as typeof fetch;
   const r = await checkRepoScope('github_pat_x', ['a/b'], withExpiry, 'https://api.test');
-  assert.deepEqual(r, { ok: true, kind: 'fine-grained', expiresAt: '2026-10-15T12:00:00.000Z' });
+  assert.deepEqual(r, { ok: true, kind: 'fine-grained', expiresAt: '2026-10-15T12:00:00.000Z', login: 'repo-bot' });
   const now = new Date('2026-10-09T12:00:00Z');
   assert.equal(tokenWarning('2026-10-30T00:00:00Z', now), null, '3 weeks out: quiet');
   assert.match(tokenWarning('2026-10-15T12:00:00Z', now)!, /expires in 6 day\(s\)\*\*, on 2026-10-15/);
   assert.match(tokenWarning('2026-10-01T00:00:00Z', now)!, /expired\*\* on 2026-10-01/);
   assert.match(tokenWarning(null, now)!, /no expiry/);
   assert.equal(tokenWarning(undefined, now), null, 'unknown (not an instance): nothing to say');
+});
+
+test('a token whose user is an admin on the repo is refused: admins can bypass branch protection', async () => {
+  const r = await checkRepoScope('github_pat_admin', ['example-org/example-shop'], fakeFetch({ '/user/repos': [[shop]] }, 200, true), 'https://api.test');
+  assert.equal(r.ok, false);
+  assert.match((r as { why: string }).why, /repo-bot\) is an admin on example-org\/example-shop, and admins can bypass branch protection; use a dedicated machine account/);
 });

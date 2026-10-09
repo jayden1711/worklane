@@ -25,6 +25,8 @@ export interface Backlog {
   comments(n: number): Promise<{ author: string; body: string }[]>;
   close(n: number): Promise<void>;
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
+  /** Open a pull request from a pushed branch, or return the open one for that branch. Returns its URL. */
+  openPr(head: string, base: string, title: string, body: string): Promise<string>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
 }
 

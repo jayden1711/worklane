@@ -819,7 +819,8 @@ export class Coordinator {
     if (!queue.length) return;
     this.landing = true;
     try {
-      await this.landBatch(this.buildBatch(queue));
+      if (this.d.cfg.project.land_mode === 'pr') for (const q of queue) await this.proposePr(q);
+      else await this.landBatch(this.buildBatch(queue));
     } finally {
       this.landing = false;
     }
@@ -879,10 +880,6 @@ export class Coordinator {
     const issues = batch.map((q) => q.issue);
     const result = (n: number, outcome: EventPayload<'land.result'>['outcome'], landed: string | null, detail: string) => this.emit('land.result', { issue: n, outcome, landed, detail: `[batch ${id}] ${detail}`.slice(0, 2000) });
     const ownerOf = (n: number) => (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).owner;
-    if (this.d.cfg.project.land_mode === 'pr') {
-      for (const n of issues) result(n, 'rejected', null, 'land_mode pr: PRs are opened and merged from the dashboard; land manually for now');
-      return;
-    }
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
     this.emit('land.batch', { id, issues, tip, outcome: 'started', detail: '' });
@@ -962,6 +959,55 @@ export class Coordinator {
       }
       applied = [];
     }
+  }
+
+  /**
+   * land_mode pr: push the task's own branch and open a pull request for a
+   * human to merge. The coordinator never merges and never pushes the
+   * default branch; the PR closes the issue when it's merged.
+   */
+  private async proposePr(q: EventPayload<'land.queued'>) {
+    const n = q.issue;
+    const branch = this.paths(n).branch;
+    if (branch === this.branch) throw new Error(`refusing to push the default branch ${this.branch} in pr mode`);
+    const push = spawnSync('git', ['push', this.remote, `+${q.head}:refs/heads/${branch}`], { cwd: this.d.repo, encoding: 'utf8' });
+    if (push.status !== 0) {
+      this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `pushing ${branch} failed: ${(push.stderr || '').trim().slice(-500)}` });
+      await this.block(n, this.ownerOf(n), `could not push the task branch ${branch}`);
+      return;
+    }
+    const last = <T>(type: Parameters<EventLog['read']>[1] extends (infer U)[] | undefined ? U : never) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
+    const lvl = last<{ level: string; reasons: string[] }>('review.level_set');
+    const verdict = last<{ patch_correct: boolean; confidence: string; advice: string }>('eval.verdict');
+    const checks = last<{ checks: { check: string; status: string }[] }>('check.result');
+    const issue = await this.d.backlog.get(n);
+    const body = [
+      `Closes #${n}`,
+      '',
+      `Opened by ${BRAND.name}. It never merges this; a human does.`,
+      '',
+      `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
+      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
+      `**Checks run by the harness:** ${checks?.checks.map((c) => `${c.check} ${c.status}`).join(', ') || 'none'}`,
+    ].join('\n');
+    let url: string;
+    try {
+      url = await this.d.backlog.openPr(branch, this.branch, `${issue.title} (#${n})`, body);
+    } catch (e) {
+      this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `opening the PR failed: ${(e as Error).message.slice(0, 500)}` });
+      await this.block(n, this.ownerOf(n), `could not open a PR for ${branch}`);
+      return;
+    }
+    this.emit('land.result', { issue: n, outcome: 'pr_opened', landed: null, detail: url });
+    const claimed = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>;
+    release(n, claimed.lease, { repo: this.d.repo, remote: this.remote });
+    try {
+      removeWorktree(this.wt, this.paths(n).name);
+    } catch {
+      // already gone
+    }
+    await this.d.backlog.comment(n, `[${BRAND.cli}] Opened ${url} for review. Merging it closes this issue.`);
+    this.emit('issue.released', { issue: n, instance: this.d.instance, why: 'pr opened' });
   }
 
   private async afterLand(n: number, sha: string, owner: string) {
