@@ -502,7 +502,7 @@ async function main(argv: string[]): Promise<number> {
           // no login in the instance's gh config dir
         }
         const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: 'no GitHub login in the instance gh config dir' };
-        console.log(scope.ok ? `  github token: ${scope.kind}, reaches only ${i.repo.repo}; expires ${scope.expiresAt ?? 'never (set an expiry)'}` : `  github token REFUSED: ${scope.why}`);
+        console.log(scope.ok ? `  github token: ${scope.kind}${scope.login ? ` of ${scope.login}` : ''}, reaches only ${i.repo.repo}, not an admin; expires ${scope.expiresAt ?? 'never (set an expiry)'}` : `  github token REFUSED: ${scope.why}`);
         const warn = scope.ok ? tokenWarning(scope.expiresAt) : null;
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;

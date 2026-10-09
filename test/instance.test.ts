@@ -109,6 +109,9 @@ async function fakeGitHub(reach: Record<string, string[]>) {
     const token = (req.headers.authorization ?? '').replace(/^Bearer /, '');
     seen.push(token);
     res.writeHead(200, { 'content-type': 'application/json' });
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    if (path === '/user') return res.end(JSON.stringify({ login: 'repo-bot' }));
+    if (path.startsWith('/repos/')) return res.end(JSON.stringify({ permissions: { admin: false, push: true } }));
     res.end(JSON.stringify((reach[token] ?? []).map((full_name) => ({ full_name }))));
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
