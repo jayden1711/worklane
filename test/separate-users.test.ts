@@ -42,6 +42,10 @@ test('an agent run as its own user gets its home and login, git trusts its workt
   assert.equal(env.GIT_CONFIG_KEY_0, 'credential.helper');
   assert.equal(env.GIT_CONFIG_VALUE_0, '');
   assert.equal(env.GIT_CONFIG_KEY_1, 'safe.directory');
+  if (process.platform === 'win32') {
+    assert.throws(() => asUser('shop-agent', 'claude', [], {}), /needs macOS or Linux/, 'refused, never run as the coordinator instead');
+    return;
+  }
   const [file, args] = asUser('shop-agent', 'claude', ['-p', 'hi'], { HOME: '/home/shop-agent', X: undefined });
   assert.equal(file, 'sudo');
   assert.deepEqual(args, ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i', 'HOME=/home/shop-agent', 'claude', '-p', 'hi'], 'a clean environment: only what is passed');
