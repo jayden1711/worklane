@@ -9,6 +9,8 @@ const CheckRunSchema = z.strictObject({
   check: z.string(),
   status: z.enum(['pass', 'fail', 'unavailable']),
   exitCode: z.number().nullable(),
+  /** The end of a failing check's output: why it failed. */
+  tail: z.string().max(2000).optional(),
 });
 
 export const EventSchemas = {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Read-only: what an instance's agents did for one issue. Prints the
-# coordinator's events for the issue, then, for each agent session in the
+# coordinator's events for the issue (check results in full), then, for each agent session in the
 # issue's worktrees (oldest first), every shell command with its exit status
 # and the first lines of its output, every file written, and the session's
 # final message. Reads the agent user's Claude session files and the
@@ -23,6 +23,15 @@ const d = new DatabaseSync(db, { readOnly: true });
 for (const e of d.prepare("SELECT ts, type, payload FROM events WHERE json_extract(payload, '$.issue') = ? ORDER BY id").all(Number(issue))) {
   const p = JSON.parse(e.payload);
   delete p.issue;
+  if (e.type === 'check.result') {
+    // In full: each check's status, exit code and, for a failure, the end of its output.
+    console.log(`${e.ts}  check.result  stage ${p.stage}, head ${String(p.head).slice(0, 8)}`);
+    for (const c of p.checks) {
+      console.log(`    ${c.status} (exit ${c.exitCode})  ${c.check}`);
+      if (c.tail) console.log(c.tail.split('\n').map((l) => `        ${l}`).join('\n'));
+    }
+    continue;
+  }
   console.log(`${e.ts}  ${e.type}  ${JSON.stringify(p).slice(0, 400)}`);
 }
 JS
