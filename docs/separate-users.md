@@ -88,7 +88,10 @@ For an eval lane, add `wl-<name>-eval` the same way:
 
 Each user signs in to its own accounts. Worklane never creates, reads or copies credentials.
 
-- **Coordinator's GitHub login:** as `wl-<name>`, run `GH_CONFIG_DIR=~/.config/<name>-gh gh auth login`. Use a dedicated account or token, never your own. Point `credentials.yaml` `github.path` at that directory.
+- **Coordinator's GitHub credential: repo-scoped only.** Use a GitHub App installed on only this instance's repo, or a fine-grained personal access token limited to that repo. Never use a personal `gh auth login` session or a classic token, which reach every repo the account can.
+  - For a fine-grained token: as `wl-<name>`, run `GH_CONFIG_DIR=~/.config/<name>-gh gh auth login --with-token < token-file`, then delete the file. Point `credentials.yaml` `github.path` at that directory.
+  - **Enforced at start.** The coordinator lists the repos its token can reach and refuses to start unless that is exactly the instance's repo. It refuses personal logins (`gho_`), classic tokens (`ghp_`) and App user tokens (`ghu_`) without asking GitHub. The token is never printed, and refusals give counts, not other repos' names. For GitHub Enterprise, set `WORKLANE_GITHUB_API` to the API base URL.
+  - GitHub App credentials (`kind: app`) are not supported yet; use a fine-grained token for now.
 - **Agent's Claude login:** as `wl-<name>-agent`, run `claude` and sign in, or set up a token with `claude setup-token`. See [auth.md](auth.md) for the options and Anthropic's terms for automated use.
 - **Eval key (eval lanes only):** a file owned by `wl-<name>-eval`, mode 0400, named in `credentials.yaml` `eval_key`.
 
