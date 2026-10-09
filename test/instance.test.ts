@@ -65,9 +65,9 @@ test('an instance must point at the repo its config names, and its directory mus
 test('credentials are references that must exist; there is no fallback login', () => {
   const { dir, home } = setup();
   const i = loadInstance('shop', dir);
-  assert.deepEqual(credentialProblems(i.credentials).map((p) => p.split(' not found')[0]), ['GitHub: gh config dir', 'Claude: config dir']);
+  // Agents run as their own user (the default), so only the coordinator's GitHub login is referenced.
+  assert.deepEqual(credentialProblems(i.credentials).map((p) => p.split(' not found')[0]), ['GitHub: gh config dir']);
   mkdirSync(join(home, 'gh'));
-  mkdirSync(join(home, 'claude'));
   assert.deepEqual(credentialProblems(i.credentials), []);
   writeFileSync(join(home, 'credentials.yaml'), 'version: 1\ngithub: { kind: gh-config-dir }\nclaude: { config_dir: x }\n');
   assert.match(errorsOf(() => loadInstance('shop', dir)).join('\n'), /github/);
@@ -152,8 +152,8 @@ test('acceptance: two instances keep separate logs, budgets and environments', {
   const eb = instanceEnv(b!, env);
   assert.equal(ea.GH_CONFIG_DIR, join(made[0]!.home, 'gh'));
   assert.equal(eb.GH_CONFIG_DIR, join(made[1]!.home, 'gh'));
-  assert.equal(ea.CLAUDE_CONFIG_DIR, join(made[0]!.home, 'claude'));
-  assert.equal(eb.CLAUDE_CONFIG_DIR, join(made[1]!.home, 'claude'));
+  assert.equal(ea.CLAUDE_CONFIG_DIR, undefined, 'agents sign in as their own users; the coordinator holds no Claude login');
+  assert.equal(eb.CLAUDE_CONFIG_DIR, undefined);
   for (const e of [ea, eb]) {
     assert.equal(e.GH_TOKEN, undefined, 'an inherited token never stands in for the instance login');
     assert.equal(e.ANTHROPIC_API_KEY, undefined);
@@ -184,10 +184,10 @@ test('acceptance: a coordinator refuses a GitHub token that can see repos outsid
 test('an instance coordinator refuses to start without its own credentials, or with ones not supported yet', () => {
   const { dir, made } = two();
   const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
-  rmSync(join(made[0]!.home, 'claude'), { recursive: true });
+  rmSync(join(made[0]!.home, 'gh'), { recursive: true });
   const r = spawnSync(process.execPath, [cli, 'coordinator', 'run', '--instance', 'alpha', '--once'], { encoding: 'utf8', env, timeout: 120_000 });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /credentials missing:[\s\S]*Claude: config dir/);
+  assert.match(r.stderr, /credentials missing:[\s\S]*GitHub: gh config dir/);
   assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
   writeFileSync(join(made[1]!.home, 'credentials.yaml'), 'version: 1\ngithub: { kind: app, app_id: 1, installation_id: 2, key_path: /dev/null }\nclaude: { config_dir: /tmp }\n');
   assert.throws(() => instanceEnv(loadInstance('beta', dir)), /GitHub App credentials are not supported yet/);

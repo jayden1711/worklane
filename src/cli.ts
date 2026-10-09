@@ -503,7 +503,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(`  repo config: within policy`);
         const gh = i.credentials.github;
         console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, key ${gh.key_path}` : `gh config ${gh.path}`}`);
-        console.log(`  claude: config ${i.credentials.claude.config_dir}`);
+        console.log(`  claude: ${i.runAs ? `${i.runAs.user}'s own login, in its home` : `config ${i.credentials.claude!.config_dir}`}`);
         for (const m of missing) console.log(`  MISSING ${m}`);
         return missing.length ? 1 : 0;
       }
