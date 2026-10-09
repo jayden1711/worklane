@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv } from './os/index.js';
+import { childEnv, shellCommand } from './os/index.js';
 
 export function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
@@ -71,9 +71,9 @@ export function checkVacuity(
     } else {
       const cov = mkdtempSync(join(tmpdir(), 'v8cov-'));
       try {
-        const r = spawnSync(opts.runOne.replaceAll('{file}', file), {
+        const [shFile, shArgs] = shellCommand(opts.runOne.replaceAll('{file}', file));
+        const r = spawnSync(shFile, shArgs, {
           cwd: root,
-          shell: true,
           encoding: 'utf8',
           env: childEnv({ NODE_V8_COVERAGE: cov }),
           timeout: 600_000,
