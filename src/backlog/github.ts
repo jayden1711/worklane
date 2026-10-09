@@ -25,7 +25,7 @@ type Fetch = typeof fetch;
 export class GitHubBacklog implements Backlog {
   constructor(
     readonly repo: string,
-    private token: () => string = ghToken,
+    private token: () => string | Promise<string> = ghToken,
     private fetchImpl: Fetch = fetch,
     private api = 'https://api.github.com',
   ) {}
@@ -34,7 +34,7 @@ export class GitHubBacklog implements Backlog {
     const res = await this.fetchImpl(`${this.api}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${this.token()}`,
+        authorization: `Bearer ${await this.token()}`,
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
         ...(body ? { 'content-type': 'application/json' } : {}),

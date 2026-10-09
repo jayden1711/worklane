@@ -5,6 +5,8 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { checkRepoScope } from './github-scope.js';
+import { installationTokens } from './github-app.js';
+import { fileURLToPath } from 'node:url';
 import { tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -27,8 +29,17 @@ export const instanceId = () => `${userInfo().username}@${hostname().split('.')[
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
-export function backlogFor(cfg: Config, root: string, state = projectStateDir(root)): Backlog {
-  return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo) : new FileBacklog(join(state, 'backlog.json'));
+export function backlogFor(cfg: Config, root: string, state = projectStateDir(root), token?: () => Promise<string>): Backlog {
+  return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo, token) : new FileBacklog(join(state, 'backlog.json'));
+}
+
+const githubApi = () => process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com';
+
+/** Where an instance's GitHub tokens come from: its App (minted, short-lived) or, as a fallback, its own gh login. */
+export function instanceTokens(i: Instance, env: NodeJS.ProcessEnv): () => Promise<string> {
+  const g = i.credentials.github;
+  if (g.kind === 'app') return installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, [i.repo.repo], i.stateDir, fetch, githubApi());
+  return async () => execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim();
 }
 
 /** Where a coordinator keeps its state: per repo (no instance), or in an instance's home. */
@@ -51,8 +62,20 @@ export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance
 export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
-  if (i.credentials.github.kind !== 'gh-config-dir') throw new Error('GitHub App credentials are not supported yet; use kind: gh-config-dir');
-  env.GH_CONFIG_DIR = i.credentials.github.path;
+  if (i.credentials.github.kind === 'gh-config-dir') {
+    env.GH_CONFIG_DIR = i.credentials.github.path;
+  } else {
+    // App mode: gh has no login to fall back on, and git gets each token from the App through a credential helper.
+    env.GH_CONFIG_DIR = join(i.stateDir, 'no-gh-login');
+    const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+    Object.assign(env, {
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'credential.helper',
+      GIT_CONFIG_VALUE_0: '',
+      GIT_CONFIG_KEY_1: 'credential.helper',
+      GIT_CONFIG_VALUE_1: `!"${process.execPath}" "${cli}" git-credential`,
+    });
+  }
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
   return env;
@@ -68,13 +91,15 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   }
   const env = instanceEnv(i);
   // The GitHub credential must reach this instance's repo and nothing else.
+  const tokens = instanceTokens(i, env);
   let token = '';
+  let failure = '';
   try {
-    token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim();
-  } catch {
-    // no login in the instance's gh config dir
+    token = await tokens();
+  } catch (e) {
+    failure = (e as Error).message.split('\n')[0]!;
   }
-  const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub login in ${i.credentials.github.kind === 'gh-config-dir' ? i.credentials.github.path : 'the instance credentials'}` };
+  const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, githubApi()) : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
   if (!scope.ok) {
     console.error(`instance ${name} not started: ${scope.why}`);
     return 1;
@@ -83,16 +108,18 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (i.runAs) process.umask(0o002);
   for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
   Object.assign(process.env, env);
-  const warn = tokenWarning(scope.expiresAt);
+  const warn = i.credentials.github.kind === 'app' ? null : tokenWarning(scope.expiresAt);
   if (warn) console.error(warn.replaceAll('**', ''));
-  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i)), scope.expiresAt);
+  // App tokens renew themselves every hour; only a personal access token can expire on its owner.
+  const expiry = i.credentials.github.kind === 'app' ? undefined : scope.expiresAt;
+  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i)), expiry, tokens);
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -100,7 +127,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     return 1;
   }
   const log = new EventLog(site.logPath);
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   const requeued = await coordinator.recover();
