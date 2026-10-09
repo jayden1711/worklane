@@ -12,6 +12,8 @@ import { z } from 'zod';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
 import { stateDir } from './os/index.js';
+import type { RunAs } from './runner.js';
+import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 
 const name = z.string().regex(/^[a-z][a-z0-9-]{0,40}$/, 'lowercase letters, digits and dashes');
 
@@ -26,6 +28,9 @@ export const InstanceFile = z.strictObject({
       agent_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name'),
       agent_home: z.string().min(1),
       claude_config_dir: z.string().min(1).optional(),
+      /** A second unprivileged user for lanes that run as `eval`: the only one able to read the eval key. */
+      eval_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name').optional(),
+      eval_home: z.string().min(1).optional(),
     })
     .optional(),
 });
@@ -46,6 +51,16 @@ export const PolicyFile = z.strictObject({
    * every credential the coordinator holds: for trying things out only.
    */
   allow_same_user: z.boolean().default(false),
+  /** Claude Code's sandbox for agent commands. On unless turned off here, explicitly. */
+  sandbox: z.boolean().default(true),
+  /**
+   * Lanes: the hosts agent commands may reach, and which user runs them. An
+   * issue picks a lane with a lane:<name> label; without one it runs in default.
+   */
+  lanes: z
+    .record(z.string().regex(/^[a-z][a-z0-9-]{0,30}$/), z.strictObject({ allowed_domains: z.array(z.string()).default([]), run_as: z.enum(['agent', 'eval']).default('agent') }))
+    .default({ default: { allowed_domains: [], run_as: 'agent' } })
+    .refine((l) => 'default' in l, 'lanes must include default'),
   /** When set, the repo's network allowlist and pre-approved tools must be subsets of these. */
   network_allow: z.array(z.string()).optional(),
   pre_approved: z.array(z.string()).optional(),
@@ -61,6 +76,8 @@ export const CredentialsFile = z.strictObject({
   ]),
   // The Claude Code config dir holding this instance's login (CLAUDE_CONFIG_DIR).
   claude: z.strictObject({ config_dir: path }),
+  /** An API key file for eval lanes: owned by the eval user, unreadable to every other. */
+  eval_key: path.optional(),
 });
 
 export type PolicyFile = z.infer<typeof PolicyFile>;
@@ -69,6 +86,7 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 export interface Instance {
   name: string;
   runAs: { user: string; home: string; claudeConfigDir?: string } | null;
+  evalAs: { user: string; home: string } | null;
   home: string;
   stateDir: string;
   repo: { path: string; repo: string };
@@ -130,8 +148,12 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (!inst.run_as && !policy.allow_same_user) {
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as', message: `agents must run as their own OS user: set run_as (agent_user, agent_home), or allow_same_user: true in policy.yaml to accept agents reading the coordinator's credentials` }]);
   }
+  if (Object.values(policy.lanes).some((l) => l.run_as === 'eval') && !inst.run_as?.eval_user) {
+    throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_user', message: 'a lane runs as eval, so set eval_user and eval_home' }]);
+  }
   const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
-  return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs };
+  const evalAs = inst.run_as?.eval_user ? { user: inst.run_as.eval_user, home: inst.run_as.eval_home ?? `/home/${inst.run_as.eval_user}` } : null;
+  return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs };
 }
 
 /**
@@ -173,4 +195,23 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
     `# References only. Point these at credentials made for this instance; never your own login.\nversion: 1\ngithub: { kind: gh-config-dir, path: ${JSON.stringify(join(home, 'gh'))} }\nclaude: { config_dir: ${JSON.stringify(join(home, 'claude'))} }\n`,
   );
   return home;
+}
+
+/**
+ * How each lane runs: as which user, and inside which sandbox. Agent commands
+ * may never read the coordinator's instance home, credential stores in the
+ * running user's home, or that user's Claude login file; lanes other than
+ * the eval user's may not read the eval key either.
+ */
+export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?: ReturnType<typeof sandboxSettings> }> {
+  const out: Record<string, { runAs?: RunAs; settings?: ReturnType<typeof sandboxSettings> }> = {};
+  for (const [name, lane] of Object.entries(i.policy.lanes)) {
+    const who = lane.run_as === 'eval' ? i.evalAs : i.runAs;
+    const runAs: RunAs | undefined = who ? { ...who } : undefined;
+    const home = runAs?.home ?? process.env.HOME ?? '';
+    const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude.config_dir);
+    const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key])];
+    out[name] = { ...(runAs ? { runAs } : {}), ...(i.policy.sandbox ? { settings: sandboxSettings({ lane: { allowedDomains: lane.allowed_domains }, denyRead }) } : {}) };
+  }
+  return out;
 }

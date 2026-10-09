@@ -506,6 +506,7 @@ export class Coordinator {
     const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
     const r = await this.d.runner.run({
       role: 'investigator',
+      ...laneOf(issue),
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, this.answers(n)),
       appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'investigator'),
@@ -604,6 +605,7 @@ export class Coordinator {
     let pid = -1;
     const r: RunResult = await this.d.runner.run({
       role: 'worker',
+      ...laneOf(issue),
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, extra),
       appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
@@ -1094,6 +1096,12 @@ export class Coordinator {
     return false;
   }
 }
+
+/** An issue's lane: its lane:<name> label, if any (otherwise the runner's default lane). */
+const laneOf = (issue: Issue): { lane?: string } => {
+  const l = issue.labels.find((x) => x.startsWith('lane:'));
+  return l ? { lane: l.slice(5) } : {};
+};
 
 const DEFAULT_REVIEW = {
   version: 1 as const,
