@@ -257,6 +257,8 @@ export const TestsConfig = z.strictObject({
 export const ReviewConfig = z.strictObject({
   version: z.literal(1),
   money_path_source: z.strictObject({ file: z.string().min(1), pattern: regex.optional() }).optional(),
+  /** Path categories (globs) the levels can name; a built-in category of the same name is replaced. */
+  categories: z.record(z.string(), z.array(z.string())).default({}),
   levels: z.strictObject({
     L0_auto: z.strictObject({ when: z.array(z.string()), max_lines: z.number().int().positive().optional() }),
     L1_evaluator: z.strictObject({

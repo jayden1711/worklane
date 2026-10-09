@@ -11,7 +11,7 @@ import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { stateDir } from './os/index.js';
+import { stateDir, userExists } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 
@@ -171,6 +171,16 @@ export function credentialProblems(c: CredentialsFile): string[] {
   return out;
 }
 
+/** Everything an instance needs on this machine before it starts: its credentials, and the agent user it runs agents as. */
+export function instanceProblems(i: Instance): string[] {
+  const out = credentialProblems(i.credentials);
+  for (const r of i.runAs ? [i.runAs, ...(i.evalAs ? [i.evalAs] : [])] : []) {
+    if (!userExists(r.user)) out.push(`agent user ${r.user} (instance.yaml run_as) does not exist on this machine`);
+    else if (!existsSync(r.home)) out.push(`agent user ${r.user}'s home ${r.home} not found`);
+  }
+  return out;
+}
+
 export function listInstances(dir = instancesDir()): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
@@ -180,7 +190,7 @@ export function listInstances(dir = instancesDir()): string[] {
 }
 
 /** Create an instance home with skeleton files, readable only by its owner. Credentials stay placeholders to fill in. */
-export function initInstance(instanceName: string, repoPath: string, repo: string, dir = instancesDir()): string {
+export function initInstance(instanceName: string, repoPath: string, repo: string, dir = instancesDir(), agentUser = `${instanceName}-agent`): string {
   if (!name.safeParse(instanceName).success) throw new Error(`instance name "${instanceName}": lowercase letters, digits and dashes`);
   const home = join(dir, instanceName);
   if (existsSync(home)) throw new Error(`instance "${instanceName}" already exists at ${home}`);
@@ -189,7 +199,7 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
   const write = (file: string, text: string) => writeFileSync(join(home, file), text, { mode: 0o600 });
   write(
     'instance.yaml',
-    `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${instanceName}-agent\n  agent_home: /home/${instanceName}-agent\n`,
+    `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${agentUser}\n  agent_home: /home/${agentUser}\n`,
   );
   write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2 }\nland_mode: pr\n`);
   write(

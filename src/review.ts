@@ -11,7 +11,7 @@ export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
 const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
 
-/** Built-in categories; review.yaml `categories` adds to or overrides them. */
+/** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
 export const DEFAULT_CATEGORIES: Record<string, string[]> = {
   docs: ['**/*.md', 'docs/**', '**/*.txt', 'art/**', 'assets/**'],
   tests: ['test/**', 'tests/**', '**/*.test.*', '**/*.spec.*', '**/__tests__/**'],
@@ -68,7 +68,7 @@ export function loadMoneyPaths(root: string, src: ReviewConfig['money_path_sourc
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
-  const defs = { ...DEFAULT_CATEGORIES, ...extraCategories };
+  const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));
   const categories: Record<string, string[]> = {};
   const add = (cat: string, path: string) => (categories[cat] ??= []).push(path);
@@ -95,6 +95,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const allLow = input.files.length > 0 && input.files.every((f) => isDocOrTest(f.path));
   if (allLow && lines <= (L.L0_auto.max_lines ?? Infinity)) reasons.push(`only docs/tests, ${lines} lines`);
   else raise('L1', allLow ? `docs/tests but ${lines} lines (> ${L.L0_auto.max_lines})` : 'touches app code');
+  // A category listed for L1 (e.g. docs, for a site whose docs are its product) always gets the evaluator.
+  if (level === 'L0') for (const c of L.L1_evaluator.when) if (categories[c]?.length) raise('L1', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
 
   const l1Limits = (L.L1_evaluator.max_lines !== undefined && lines > L.L1_evaluator.max_lines) || (L.L1_evaluator.max_files !== undefined && input.files.length > L.L1_evaluator.max_files);
   if (l1Limits && (categories['app-non-money'] ?? []).length) {

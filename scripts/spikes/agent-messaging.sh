@@ -29,8 +29,40 @@ console.log("assistant DONE-1 at line", i1, "| assistant PING-2 at line", i2, "|
 console.log(i2<0 ? "PING-2 never answered: mid-run messages are not delivered this way" : i2<i1 ? "PING-2 answered before DONE-1: delivered mid-turn" : "PING-2 answered after DONE-1: queued until the first turn ended");
 ' "$out"
 
-say "2. cross-session inbox: can the coordinator user reach the agent session's socket?"
-sudo -u "$agent" /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
-  claude -p "Run this with Bash and reply with its output only: echo \$CLAUDE_CODE_MESSAGING_SOCKET; ls -ld \"\$(dirname \"\$CLAUDE_CODE_MESSAGING_SOCKET\")\" \"\$CLAUDE_CODE_MESSAGING_SOCKET\"" \
-  --allowedTools 'Bash(echo:*)' 'Bash(ls:*)' --permission-mode dontAsk --max-turns 3 2>&1 | tail -5
-echo "(the socket lives under the agent user; if its directory is 0700, the coordinator user can't connect to it)"
+say "2. cross-session inbox: which unix sockets does a live agent session listen on, and can the coordinator user connect?"
+# Checked from outside, as root: the agent needs no tool permissions. Its stdin stays open, so the session stays up.
+out2="$(mktemp)"
+{
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"Reply with exactly READY."}}'
+  sleep 45
+} | sudo -u "$coord" sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
+    claude -p --input-format stream-json --output-format stream-json --verbose --max-turns 2 --permission-mode dontAsk > "$out2" 2>&1 &
+bg=$!
+for _ in $(seq 1 40); do grep -q READY "$out2" 2>/dev/null && break; sleep 1; done
+grep -q READY "$out2" || { echo "the agent session never answered READY:"; tail -5 "$out2"; }
+pids="$(pgrep -u "$agent" | paste -sd'|' - || true)"
+echo "agent processes: ${pids:-none}"
+socks="$( [ -n "$pids" ] && ss -xlpn | grep -E "pid=($pids)," | awk '{print $5}' | sort -u || true)"
+if ! ss -xlpn | grep -q 'users:'; then
+  echo "INCONCLUSIVE: ss shows no process for any socket (needs root with CAP_SYS_PTRACE)"
+elif [ -z "$socks" ]; then
+  echo "RESULT: the agent session listens on no unix socket; nothing for the coordinator to connect to"
+else
+  for s in $socks; do
+    echo "socket: $s"
+    case "$s" in
+      @*) echo "  abstract socket: no file permissions; any process in this network namespace can connect" ;;
+      *) ls -ld "$(dirname "$s")" "$s" ;;
+    esac
+    path="$s"; [ "${s#@}" != "$s" ] && path="\0${s#@}"
+    for u in "$coord" "$agent"; do
+      if sudo -u "$u" python3 -c 'import socket,sys; p=sys.argv[1].replace("\\0","\0",1); s=socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(p)' "$path" 2>/dev/null; then
+        echo "  $u: connect OK"
+      else
+        echo "  $u: connect refused"
+      fi
+    done
+  done
+fi
+wait "$bg" 2>/dev/null || true
+rm -f "$out2"

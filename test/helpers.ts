@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,4 +20,10 @@ export function exampleProject(): { dir: string; stateDir: string } {
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
   return { dir, stateDir: join(base, 'state') };
+}
+
+/** Point a test instance's run_as at the current user, so a coordinator started in a test passes the agent-user check. */
+export function agentIsSelf(instanceHome: string): void {
+  const f = join(instanceHome, 'instance.yaml');
+  writeFileSync(f, readFileSync(f, 'utf8').replace(/^ {2}agent_user: .*$/m, `  agent_user: ${userInfo().username}`).replace(/^ {2}agent_home: .*$/m, `  agent_home: ${JSON.stringify(homedir())}`));
 }

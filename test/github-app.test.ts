@@ -10,7 +10,7 @@ import { BRAND } from '../src/brand.js';
 import { appJwt, installationTokens, mintInstallationToken } from '../src/github-app.js';
 import { initInstance } from '../src/instance.js';
 import { childEnv } from '../src/os/index.js';
-import { exampleProject, repoRoot } from './helpers.js';
+import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const pem = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
@@ -98,6 +98,7 @@ function appInstance() {
   const cfg = join(repo, BRAND.configDir);
   writeFileSync(join(cfg, 'config.yaml'), readFileSync(join(cfg, 'config.yaml'), 'utf8').replace(/^backlog: github/m, 'backlog: file'));
   const home = initInstance('site', repo, 'example-org/example-shop', dir);
+  agentIsSelf(home);
   writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n');
   mkdirSync(join(home, 'app'));
   writeFileSync(join(home, 'credentials.yaml'), `version: 1\ngithub: { kind: app, app_id: 7, installation_id: 42, key_path: ${JSON.stringify(keyFile())} }\n`);
