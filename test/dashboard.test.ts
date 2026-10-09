@@ -228,3 +228,25 @@ test('saved views round-trip; without a built UI the server says how to build it
     await s.d.close();
   }
 });
+
+test('the dashboard shows the shared cap and why: adaptive state, conditions and recent changes', async () => {
+  const slots = mkdtempSync(join(tmpdir(), 'dash-slots-'));
+  writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 4, adaptive: { start: 2 } }));
+  writeFileSync(join(slots, 'cap.json'), JSON.stringify({ cap: 3, floor: 2, ceiling: 8, changedAt: new Date().toISOString(), reason: 'raised: no usage limit, memory free, few PRs waiting, pass rate not falling', checkedAt: new Date().toISOString(), conditions: [{ name: 'free memory', state: 'pass', detail: '12.0 GB available (need > 8)' }] }));
+  writeFileSync(join(slots, 'cap-log.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), from: 2, to: 3, reason: 'raised' })}\n`);
+  const prev = process.env.AGENT_SLOTS_DIR;
+  process.env.AGENT_SLOTS_DIR = slots;
+  const s = await server();
+  try {
+    const st = (await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { slots: { cap: number }; capInfo: { adaptive: boolean; state: { cap: number; reason: string; conditions: unknown[] }; changes: { to: number }[] } };
+    assert.equal(st.slots.cap, 3, 'the cap in force');
+    assert.equal(st.capInfo.adaptive, true);
+    assert.match(st.capInfo.state.reason, /^raised/);
+    assert.equal(st.capInfo.state.conditions.length, 1);
+    assert.deepEqual(st.capInfo.changes.map((c) => c.to), [3]);
+  } finally {
+    await s.d.close();
+    if (prev === undefined) delete process.env.AGENT_SLOTS_DIR;
+    else process.env.AGENT_SLOTS_DIR = prev;
+  }
+});

@@ -72,6 +72,13 @@ export interface State {
   trust: { stage: number | null; evaluations: { day: string; stage: number; healthy: boolean; why: string[] }[]; changes: { from: number; to: number; by: string; reason: string; at: string }[] };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
   lessonPrs: { day: string; count: number; url: string; at: string }[];
+  capInfo:
+    | { adaptive: false }
+    | {
+        adaptive: true;
+        state: { cap: number; floor: number; ceiling: number; changedAt: string; reason: string; checkedAt: string; conditions: { name: string; state: 'pass' | 'fail' | 'unknown'; detail: string }[] } | null;
+        changes: { at: string; from: number; to: number; reason: string }[];
+      };
 }
 
 export interface Run {

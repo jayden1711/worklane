@@ -14,6 +14,8 @@ import { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
 import { inbox, project } from './projection.js';
 import { slotStatus } from './slots.js';
+import { adaptiveConfig, readCapState } from './cap.js';
+import { slotsDir } from './os/index.js';
 import { buildReport } from './reports.js';
 import { scorecard } from './scorecard.js';
 import { health } from './trust.js';
@@ -92,6 +94,19 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
 
+/** The shared cap: fixed, or adaptive with its reason, conditions and recent changes. */
+function capInfo() {
+  const dir = slotsDir();
+  if (!adaptiveConfig(dir)) return { adaptive: false as const };
+  let changes: { at: string; from: number; to: number; reason: string }[] = [];
+  try {
+    changes = readFileSync(join(dir, 'cap-log.jsonl'), 'utf8').trim().split('\n').filter(Boolean).slice(-10).reverse().map((l) => JSON.parse(l));
+  } catch {
+    // no changes yet
+  }
+  return { adaptive: true as const, state: readCapState(dir), changes };
+}
+
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; token: string; close: () => Promise<void> }> {
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? fileURLToPath(new URL('../web/', import.meta.url));
@@ -117,6 +132,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       owners: opts.cfg.project.owners,
       budget: opts.cfg.agents.daily_budget_usd,
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
+      capInfo: capInfo(),
       ...p,
       inbox: inbox(p, opts.user),
     };
