@@ -501,7 +501,11 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
   | Reports & Scorecard | |
   | Settings | |
 
-- **Messaging a running agent** (spike, 2026-10-09): a message sent on a session's stream-json input mid-turn is queued and answered only after the current turn ends. The console shows a sent message as pending until that turn ends. Urgent control (pause, stop) uses interrupt and stop, never a message.
+- **Messaging a running agent** (spike, 2026-10-09, confirmed on the always-on machine):
+  - The console sends messages through the session's stream-json input, which the coordinator holds. A message sent mid-turn is queued and answered only after the current turn ends, so the console shows it as pending until then.
+  - Urgent control (pause, stop) uses interrupt and stop, never a message.
+  - Not the cross-session socket: the agent's socket lives in a 0700 directory its own user owns, so the coordinator user can't connect to it, by design of the user split.
+  - Claude Code keeps that directory at a fixed path in `/tmp` (`/tmp/cc-socks`), so each coordinator service has a private `/tmp` shared only with its own agents. Otherwise one instance's agent user would lock out every other's.
 - Cmd+K, keyboard-first, sidebar badge counts, and owner + delegate avatars on every row.
 - Dark and light themes.
 - **Shared mode (step 6):** each coordinator pushes events to a small relay (a Cloudflare Worker + Durable Object, behind Cloudflare Access) that merges both humans' streams with GitHub webhooks. Local mode never needs it.
