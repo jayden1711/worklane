@@ -24,6 +24,7 @@ import { buildReport } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
+import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
 import { openUrl } from './os/index.js';
 import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
 import { EventLog } from './events/log.js';
@@ -69,6 +70,9 @@ usage: ${BRAND.cli} <command> [options]
   status                           what's running, waiting and spent, from the event log
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
+  instance init <name> --repo <path> --github <owner/repo>
+                                   create an instance home (policy, credential references, state)
+  instance list | show <name>      instances on this machine; show checks policy and credentials
   prod-read '<SQL>'                one read-only query against production, through the
                                    read-only role (deploy.yaml prod_read); prints JSON
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
@@ -422,6 +426,39 @@ async function main(argv: string[]): Promise<number> {
       } finally {
         log.close();
       }
+    }
+
+    case 'instance': {
+      if (sub === 'list') {
+        for (const n of listInstances()) console.log(n);
+        return 0;
+      }
+      const target = rest[0];
+      if (sub === 'init' && target) {
+        const repoPath = option(rest, '--repo');
+        const gh = option(rest, '--github');
+        if (!repoPath || !gh) {
+          console.error('usage: instance init <name> --repo <path> --github <owner/repo>');
+          return 2;
+        }
+        const home = initInstance(target, repoPath, gh);
+        console.log(`created ${home}\n  edit policy.yaml, and point credentials.yaml at credentials made for this instance`);
+        return 0;
+      }
+      if (sub === 'show' && target) {
+        const i = loadInstance(target);
+        const missing = credentialProblems(i.credentials);
+        console.log(`${i.name}: ${i.repo.repo} at ${i.repo.path}`);
+        console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, stage <= ${i.policy.agents.max_stage}, land ${i.policy.land_mode}`);
+        console.log(`  repo config: within policy`);
+        const gh = i.credentials.github;
+        console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, key ${gh.key_path}` : `gh config ${gh.path}`}`);
+        console.log(`  claude: config ${i.credentials.claude.config_dir}`);
+        for (const m of missing) console.log(`  MISSING ${m}`);
+        return missing.length ? 1 : 0;
+      }
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> | instance list | instance show <name>');
+      return 2;
     }
 
     case 'labels': {
