@@ -10,22 +10,25 @@ import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
-import { install } from './install.js';
+import { install, installGitHook } from './install.js';
 import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
-import { slotStatus } from './slots.js';
+import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
-import { buildReport } from './reports.js';
+import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
+import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { installationTokens } from './github-app.js';
 import { openUrl } from './os/index.js';
-import { backlogFor, instanceId, logPath, runCoordinator, serviceLabel, status } from './service.js';
+import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { installService, uninstallService } from './os/index.js';
@@ -38,8 +41,10 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
-  install [--git-hooks]            scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
-  doctor [--agentshield] [--json]  verify the install
+  install [--git-hooks] [--engine path] | install --git-hooks-only
+                                   scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
+  doctor [--agentshield] [--json] [--policy file]
+                                   verify the install, and the config against any local instance's policy
   guardrails check                 run rules against their must-block/ask/allow examples
   guardrails refresh               fetch production fingerprints (stores hashes only)
   guardrails eval '<command>'      show what the rules decide for a shell command
@@ -58,8 +63,11 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
-  coordinator run [--once]         run the coordinator in the foreground (the service runs this)
-  up | down                        install or remove the coordinator as a per-user service
+  stop-all [reason]                emergency stop: halt every agent on this machine, across
+                                   instances; tasks requeue. resume-all lifts it
+  coordinator run [--once] [--instance name]
+                                   run the coordinator in the foreground (the service runs this)
+  up | down [--instance name]      install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
   dashboard [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log)
@@ -69,6 +77,9 @@ usage: ${BRAND.cli} <command> [options]
   status                           what's running, waiting and spent, from the event log
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
+  instance init <name> --repo <path> --github <owner/repo>
+                                   create an instance home (policy, credential references, state)
+  instance list | show <name>      instances on this machine; show checks policy and credentials
   prod-read '<SQL>'                one read-only query against production, through the
                                    read-only role (deploy.yaml prod_read); prints JSON
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
@@ -98,6 +109,7 @@ function changedTestFiles(root: string, globs: string[], branch: string): string
 async function main(argv: string[]): Promise<number> {
   const args = [...argv];
   const rootOpt = option(args, '--root');
+  const instanceOpt = option(args, '--instance');
   const root = resolve(rootOpt ?? findProjectRoot(process.cwd()) ?? process.cwd());
   const [cmd, sub, ...rest] = args;
 
@@ -129,8 +141,15 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'install': {
+      // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.
+      if (flag(args, '--git-hooks-only')) {
+        console.log(`pre-commit secret scan: ${installGitHook(root)}`);
+        return 0;
+      }
       const gitHooks = flag(args, '--git-hooks');
-      const r = install({ root, gitHooks });
+      // A machine-wide engine (e.g. /opt/<cli>/current/...): hooks call that stable path, not this run's versioned one.
+      const engineCli = option(args, '--engine');
+      const r = install({ root, gitHooks, ...(engineCli ? { engineCli } : {}) });
       console.log(`${r.scaffolded ? 'scaffolded' : 'kept'} ${BRAND.configDir}/; hooks merged into ${r.settingsPath}`);
       if (r.gitHook) console.log(`pre-commit secret scan: ${r.gitHook}`);
       for (const n of r.notes) console.log(`note: ${n}`);
@@ -140,7 +159,8 @@ async function main(argv: string[]): Promise<number> {
 
     case 'doctor': {
       const json = flag(args, '--json');
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield') });
+      const policy = option(args, '--policy');
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}) });
       if (json) console.log(JSON.stringify(checks, null, 2));
       else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;
@@ -307,6 +327,8 @@ async function main(argv: string[]): Promise<number> {
 
     case 'slots': {
       const st = slotStatus();
+      const halt = emergencyStop();
+      if (halt) console.log(`EMERGENCY STOP in force since ${halt.at} by ${halt.by}: ${halt.reason}`);
       console.log(`agents running on this machine: ${st.agents.length} of ${st.cap}`);
       for (const a of st.agents) console.log(`  ${a.slot}: ${a.owner} (pid ${a.pid}, since ${a.acquiredAt})`);
       console.log(`full test run: ${st.fullRun ? `${st.fullRun.owner} (pid ${st.fullRun.pid}, since ${st.fullRun.acquiredAt})` : 'none'}`);
@@ -318,10 +340,29 @@ async function main(argv: string[]): Promise<number> {
         console.error('usage: coordinator run [--once]');
         return 2;
       }
+      if (instanceOpt) return runInstanceCoordinator(instanceOpt, { once: rest.includes('--once') });
       return runCoordinator(root, { once: rest.includes('--once') });
     }
 
     case 'up': {
+      if (instanceOpt) {
+        const i = loadInstance(instanceOpt);
+        const missing = credentialProblems(i.credentials);
+        if (missing.length) {
+          console.error(`instance ${i.name} not started; credentials missing:\n${missing.map((m) => `  ${m}`).join('\n')}`);
+          return 1;
+        }
+        const r = installService({
+          label: instanceServiceLabel(i.name),
+          program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
+          workingDir: i.home,
+          logFile: join(i.stateDir, 'coordinator.log'),
+          // Only what's needed to find tools and the instance; its credentials come from the instance itself.
+          env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
+        });
+        console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
+        return r.started ? 0 : 1;
+      }
       const cfg = loadConfig(root);
       const r = installService({
         label: serviceLabel(cfg),
@@ -335,7 +376,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'down': {
-      console.log(`removed ${uninstallService(serviceLabel(loadConfig(root)))}`);
+      console.log(`removed ${uninstallService(instanceOpt ? instanceServiceLabel(instanceOpt) : serviceLabel(loadConfig(root)))}`);
       return 0;
     }
 
@@ -387,7 +428,7 @@ async function main(argv: string[]): Promise<number> {
       const log = new EventLog(logPath(root));
       try {
         const last = log.read(0, ['report.posted']).at(-1);
-        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), previous: (last?.payload as { card?: never } | undefined)?.card ?? null }).markdown);
+        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000) }).markdown);
       } finally {
         log.close();
       }
@@ -422,6 +463,87 @@ async function main(argv: string[]): Promise<number> {
       } finally {
         log.close();
       }
+    }
+
+    case 'git-credential': {
+      // git's credential helper protocol, for an App instance's coordinator: hand git a fresh installation token.
+      if (sub !== 'get') return 0;
+      const input = await readStdin();
+      const host = /^host=(.*)$/m.exec(input)?.[1] ?? '';
+      const api = new URL(process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com');
+      if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
+      const name = process.env[`${BRAND.envPrefix}_INSTANCE`];
+      if (!name) return 0;
+      const i = loadInstanceCredentials(name);
+      const g = i.credentials.github;
+      if (g.kind !== 'app') return 0;
+      const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
+      process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
+      return 0;
+    }
+
+    case 'stop-all': {
+      const reason = [sub, ...rest].filter(Boolean).join(' ') || 'emergency stop';
+      stopAll(instanceId(), reason);
+      console.log(`stop in force (${reason}): every coordinator halts its agents within seconds and starts none. Lift it with \`${BRAND.cli} resume-all\`.`);
+      return 0;
+    }
+
+    case 'resume-all': {
+      console.log(resumeAll() ? 'stop lifted: coordinators resume at their next check' : 'no stop was in force');
+      return 0;
+    }
+
+    case 'instance': {
+      if (sub === 'list') {
+        for (const n of listInstances()) console.log(n);
+        return 0;
+      }
+      const target = rest[0];
+      if (sub === 'init' && target) {
+        const repoPath = option(rest, '--repo');
+        const gh = option(rest, '--github');
+        if (!repoPath || !gh) {
+          console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>]');
+          return 2;
+        }
+        const home = initInstance(target, repoPath, gh, undefined, option(rest, '--agent-user'));
+        console.log(`created ${home}\n  edit policy.yaml, and point credentials.yaml at credentials made for this instance`);
+        return 0;
+      }
+      if (sub === 'show' && target) {
+        const i = loadInstance(target);
+        const missing = instanceProblems(i);
+        console.log(`${i.name}: ${i.repo.repo} at ${i.repo.path}`);
+        console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, land ${i.policy.land_mode}`);
+        console.log(`  repo config: within policy`);
+        const gh = i.credentials.github;
+        console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, installation ${gh.installation_id}, key ${gh.key_path}` : `gh config ${gh.path} (fallback: a personal access token)`}`);
+        console.log(`  claude: ${i.runAs ? `${i.runAs.user}'s own login, in its home` : `config ${i.credentials.claude!.config_dir}`}`);
+        for (const m of missing) console.log(`  MISSING ${m}`);
+        if (missing.length) return 1;
+        // The same repo-scope check the coordinator makes at start, without printing the token.
+        let token = '';
+        let failure = '';
+        try {
+          token = await instanceTokens(i, instanceEnv(i))();
+        } catch (e) {
+          failure = (e as Error).message.split('\n')[0]!;
+        }
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
+        if (!scope.ok) console.log(`  github token REFUSED: ${scope.why}`);
+        else if (gh.kind === 'app') {
+          // Installation tokens last about an hour and are minted again before they run out; the key is what ages.
+          console.log(`  github token: ${scope.kind}, reaches only ${i.repo.repo}, not an admin; short-lived (about an hour), renewed automatically`);
+          const age = appKeyAge(gh.key_path);
+          console.log(`  App key: ${age === null ? 'age unknown' : `installed ${age} day(s) ago`} (App keys don't expire; rotate them after ${APP_KEY_ROTATE_DAYS} days)`);
+        } else console.log(`  github token: ${scope.kind}${scope.login ? ` of ${scope.login}` : ''}, reaches only ${i.repo.repo}, not an admin; expires ${scope.expiresAt ?? 'never (set an expiry)'}`);
+        const warn = !scope.ok ? null : gh.kind === 'app' ? appKeyWarning(appKeyAge(gh.key_path)) : tokenWarning(scope.expiresAt);
+        if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
+        return scope.ok ? 0 : 1;
+      }
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] | instance list | instance show <name>');
+      return 2;
     }
 
     case 'labels': {

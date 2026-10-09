@@ -39,6 +39,17 @@ export function stateDir(): string {
 }
 
 /** Full path of an executable on PATH, or null. */
+/** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
+export function userExists(user: string): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    execFileSync('id', ['-u', '--', user], { stdio: 'ignore', timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function which(cmd: string): string | null {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
@@ -79,6 +90,44 @@ export function homeDir(): string {
 
 /** Spawn children in their own process group where the OS supports it, so a timeout kills the whole tree. */
 export const spawnDetached = process.platform !== 'win32';
+
+/**
+ * Run a program as another (unprivileged) OS user, with exactly this
+ * environment: `sudo -n -u <user> -- env -i K=V... <file> <args>`. The
+ * operator's sudoers rule lets the coordinator user switch to the agent
+ * user without a password, and nothing else. POSIX only.
+ */
+export function asUser(user: string, file: string, args: string[], env: NodeJS.ProcessEnv): [file: string, args: string[]] {
+  if (process.platform === 'win32') throw new Error('running agents as a separate user needs macOS or Linux');
+  const vars = Object.entries(env)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => `${k}=${v}`);
+  return ['sudo', ['-n', '-u', user, '--', '/usr/bin/env', '-i', ...vars, file, ...args]];
+}
+
+/**
+ * How to spawn a project command (a check, a test suite, a setup step):
+ * under bash with pipefail, and as the instance's agent user when there is
+ * one, with a clean environment. Project commands run code agents wrote, so
+ * they never run as the user that holds the instance's credentials.
+ */
+export function projectCommand(command: string, runAs?: { user: string; home: string }): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  const [file, args] = shellCommand(command);
+  if (!runAs) return { file, args, env: childEnv() };
+  const env = { HOME: runAs.home, USER: runAs.user, LOGNAME: runAs.user, PATH: '/usr/local/bin:/usr/bin:/bin', LANG: process.env.LANG ?? 'C.UTF-8', CI: '1' };
+  const [f, a] = asUser(runAs.user, file, args, env);
+  return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+}
+
+/** Kill a process group that runs as another user: only that user (or root) may signal it. */
+export function killTreeAs(user: string, pgid: number | undefined): void {
+  if (!pgid || process.platform === 'win32') return;
+  try {
+    execFileSync('sudo', ['-n', '-u', user, '--', '/bin/kill', '-KILL', '--', `-${pgid}`], { stdio: 'ignore', timeout: 10_000 });
+  } catch {
+    // already gone
+  }
+}
 
 export function killTree(pid: number | undefined, fallback: () => void): void {
   try {
@@ -146,10 +195,29 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  * just this one), so the name is deliberately unbranded. Override with
  * AGENT_SLOTS_DIR. See docs/slots.md.
  */
-export function slotsDir(): string {
+/**
+ * Durable system locations for the slots and their config. /var/tmp is
+ * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
+ * days), which would drop the cap and lock files of a long-running machine.
+ */
+export const SYSTEM_SLOTS = { dir: `/var/lib/${BRAND.cli}/agent-slots`, config: `/etc/${BRAND.cli}/slots.json` };
+
+export function slotsDir(system = SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
-  return '/var/tmp/agent-slots';
+  if (existsSync(system.dir)) return system.dir;
+  return '/var/tmp/agent-slots'; // single-user and development machines
+}
+
+/**
+ * The machine's slot config (max_agents): AGENT_SLOTS_CONFIG if
+ * set; else the system config file when the system slot directory is in
+ * use and the file exists; else config.json in the slot directory.
+ */
+export function slotsConfigPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+  if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
+  if (dir === system.dir && existsSync(system.config)) return system.config;
+  return join(dir, 'config.json');
 }
 
 export interface ServiceSpec {

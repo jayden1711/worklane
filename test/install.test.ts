@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
 import { HOOK_MARKER, install } from '../src/install.js';
-import { engineCli, exampleProject } from './helpers.js';
-import { which } from '../src/os/index.js';
+import { engineCli, exampleProject, repoRoot } from './helpers.js';
+import { childEnv, which } from '../src/os/index.js';
 
 const isWindows = process.platform === 'win32';
 /**
@@ -45,7 +45,7 @@ test('install merges hooks into existing settings, keeps the project entries, an
   const s = settingsOf(dir) as Settings & { model: string };
   assert.equal(s.model, 'opus');
   assert.equal(s.hooks.PostToolUse![0]!.hooks[0]!.command, 'prettier --write');
-  for (const event of ['PreToolUse', 'Stop', 'SessionStart', 'SessionEnd']) {
+  for (const event of ['PreToolUse', 'SessionStart', 'SessionEnd']) {
     const ours = s.hooks[event]!.filter((e) => e.hooks.some((h) => h.command.includes(HOOK_MARKER)));
     assert.equal(ours.length, 1, `${event} installed once`);
     assert.match(ours[0]!.hooks[0]!.command, /\|\| exit 2;/);
@@ -80,7 +80,7 @@ test('doctor passes on a fresh install of the example, after a fingerprint refre
     const checks = doctor(dir);
     const fails = checks.filter((c) => c.level === 'fail' && !['gitleaks', 'claude'].includes(c.name));
     assert.deepEqual(fails, []);
-    for (const name of ['config', 'guardrails', 'hook PreToolUse', 'hook Stop', 'hook SessionStart', 'hook SessionEnd', 'fingerprints prod-db']) {
+    for (const name of ['config', 'guardrails', 'hook PreToolUse', 'hook SessionStart', 'hook SessionEnd', 'fingerprints prod-db']) {
       assert.equal(checks.find((c) => c.name === name)?.level, 'ok', name);
     }
   } finally {
@@ -122,7 +122,7 @@ test('missing engine: agent sessions block; human sessions get a one-line warnin
   const { dir, stateDir } = exampleProject();
   install({ root: dir, engineCli: join(dir, 'node_modules', 'gone', 'cli.js') });
   const agent = { [`${BRAND.envPrefix}_AGENT`]: '1' };
-  for (const event of ['PreToolUse', 'Stop', 'SessionStart']) {
+  for (const event of ['PreToolUse', 'SessionStart']) {
     const cmd = hookCmd(dir, event);
     assert.match(cmd, /\$CLAUDE_PROJECT_DIR\/node_modules\/gone\/cli\.js/);
     const input = { cwd: dir, tool_name: 'Bash', tool_input: { command: 'ls' } };
@@ -154,30 +154,6 @@ test('agent commits are secret-scanned before they happen', { skip: !which('gitl
   assert.equal(commit(false).stdout, '', 'humans opt in to commit scanning with a git hook instead');
 });
 
-test('installed Stop hook blocks an agent until done_when passes', () => {
-  const { dir, stateDir } = exampleProject();
-  install({ root: dir, engineCli });
-  const cmd = hookCmd(dir, 'Stop');
-  const task = join(stateDir, 'task.json');
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(task, JSON.stringify({ id: 'issue-1', done_when: [{ test: 'test/price.test.js' }] }));
-  const agent = { [`${BRAND.envPrefix}_AGENT`]: '1', [`${BRAND.envPrefix}_TASK_FILE`]: task };
-  const pass = runHookCommand(cmd, dir, stateDir, { cwd: dir, stop_hook_active: false }, agent);
-  assert.equal(pass.status, 0);
-  assert.equal(pass.stdout, '');
-
-  writeFileSync(join(dir, 'src', 'price.js'), readFileSync(join(dir, 'src', 'price.js'), 'utf8').replace('cents * qty', 'cents + qty'));
-  const fail = runHookCommand(cmd, dir, stateDir, { cwd: dir }, agent);
-  assert.equal(fail.status, 0);
-  const out = JSON.parse(fail.stdout) as { decision: string; reason: string };
-  assert.equal(out.decision, 'block');
-  assert.match(out.reason, /done_when not met/);
-  // Human sessions have no Stop gate, even with a failing task around.
-  assert.equal(runHookCommand(cmd, dir, stateDir, { cwd: dir }, { [`${BRAND.envPrefix}_TASK_FILE`]: task }).stdout, '');
-  // An agent without a task file is blocked, not waved through.
-  assert.match(runHookCommand(cmd, dir, stateDir, { cwd: dir }, { [`${BRAND.envPrefix}_AGENT`]: '1' }).stdout, /without a task file/);
-});
-
 test('install references the project-local engine even when it is a symlink', { skip: isWindows && 'symlinks need privileges on Windows' }, () => {
   const { dir } = exampleProject();
   mkdirSync(join(dir, 'node_modules', '@worklane'), { recursive: true });
@@ -185,4 +161,29 @@ test('install references the project-local engine even when it is a symlink', { 
   install({ root: dir });
   const cmd = hookCmd(dir, 'PreToolUse');
   assert.match(cmd, /"\$CLAUDE_PROJECT_DIR\/node_modules\/@worklane\/cli\/dist\/src\/cli\.js"/);
+});
+
+test('install --engine points the hooks at a machine-wide engine path', () => {
+  const { dir, stateDir } = exampleProject();
+  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--engine', '/opt/engine/current/dist/src/cli.js'], { encoding: 'utf8', env: childEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8');
+  // On Windows the path resolves onto the current drive (D:\\opt\\...), escaped for the shell and JSON.
+  // A human session without that engine is told to install it, not to run npm install (the repo may not be a Node project).
+  const start = (JSON.parse(settings) as { hooks: Record<string, { hooks: { command: string }[] }[]> }).hooks.SessionStart!.at(-1)!.hooks[0]!.command;
+  const out = runHookCommand(start, dir, stateDir, { cwd: dir });
+  assert.equal(out.status, 0);
+  assert.match((JSON.parse(out.stdout) as { systemMessage: string }).systemMessage, /install the \S+ engine on this machine/);
+  assert.doesNotMatch(out.stdout, /npm install/);
+  assert.match(settings, process.platform === 'win32' ? /:(\\\\)+opt(\\\\)+engine(\\\\)+current(\\\\)+dist(\\\\)+src(\\\\)+cli\.js/ : /\/opt\/engine\/current\/dist\/src\/cli\.js/);
+});
+
+test('install --git-hooks-only adds the pre-commit secret scan and leaves committed settings alone', () => {
+  const { dir } = exampleProject();
+  const settings = join(dir, '.claude', 'settings.json');
+  const before = existsSync(settings) ? readFileSync(settings, 'utf8') : null;
+  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--git-hooks-only'], { encoding: 'utf8', env: childEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(readFileSync(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'), /gitleaks git --pre-commit --staged/);
+  assert.equal(existsSync(settings) ? readFileSync(settings, 'utf8') : null, before);
 });

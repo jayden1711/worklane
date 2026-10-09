@@ -9,6 +9,7 @@ import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER, HOOK_MARKER } from './install.js';
+import { policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
 
 export type Level = 'ok' | 'warn' | 'fail';
@@ -24,7 +25,7 @@ function nodeMajor(): number {
   return Number(process.versions.node.split('.')[0]);
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -42,6 +43,19 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean } = {}): D
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
   }
 
+  // A repo config may only tighten the policy of the instance that runs it; the coordinator refuses to start otherwise.
+  if (cfg) {
+    const repo = cfg.project.project.repo;
+    const policies = [...(opts.policy ? [{ name: opts.policy, ...readPolicy(resolve(opts.policy)) }] : []), ...policiesForRepo(repo)];
+    if (!policies.length) add('policy', 'ok', `no instance on this machine runs ${repo}; to check against one, pass --policy <its policy.yaml>`);
+    for (const p of policies) {
+      const errs = p.policy ? policyViolations(cfg, p.policy) : p.errors;
+      const what = p.policy ? 'within the policy' : 'policy unreadable';
+      if (!errs.length) add(`policy ${p.name}`, 'ok', what);
+      else add(`policy ${p.name}`, 'fail', errs.map((e) => `${e.file}${e.path ? ` at ${e.path}` : ''}: ${e.message}`).join('\n'));
+    }
+  }
+
   const os = detectOs(cfg?.project.os ?? 'auto');
   if (canRunAgents(os)) add('os', 'ok', os);
   else add('os', 'warn', wslAvailable() ? 'native Windows: run agents inside WSL2' : 'native Windows without WSL2: dashboard and Issues only; agents run on another machine');
@@ -52,7 +66,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean } = {}): D
   else {
     try {
       const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as { hooks?: Record<string, { hooks?: { command: string }[] }[]> };
-      for (const event of ['PreToolUse', 'Stop', 'SessionStart', 'SessionEnd']) {
+      for (const event of ['PreToolUse', 'SessionStart', 'SessionEnd']) {
         const cmds = (s.hooks?.[event] ?? []).flatMap((e) => e.hooks ?? []).map((h) => h.command).filter((c) => c.includes(HOOK_MARKER));
         if (cmds.length !== 1) {
           add(`hook ${event}`, 'fail', cmds.length ? `${cmds.length} ${BRAND.cli} entries (expected 1)` : 'not installed');

@@ -25,7 +25,7 @@ type Fetch = typeof fetch;
 export class GitHubBacklog implements Backlog {
   constructor(
     readonly repo: string,
-    private token: () => string = ghToken,
+    private token: () => string | Promise<string> = ghToken,
     private fetchImpl: Fetch = fetch,
     private api = 'https://api.github.com',
   ) {}
@@ -34,7 +34,7 @@ export class GitHubBacklog implements Backlog {
     const res = await this.fetchImpl(`${this.api}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${this.token()}`,
+        authorization: `Bearer ${await this.token()}`,
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
         ...(body ? { 'content-type': 'application/json' } : {}),
@@ -116,16 +116,10 @@ export class GitHubBacklog implements Backlog {
   }
 
   async openPr(head: string, base: string, title: string, body: string) {
+    const owner = this.repo.split('/')[0];
+    const open = await this.req<{ html_url: string }[]>('GET', `/repos/${this.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`);
+    if (open[0]) return open[0].html_url;
     return (await this.req<{ html_url: string }>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body })).html_url;
-  }
-
-  async ciStatus(sha: string) {
-    const r = await this.req<{ check_runs: { name: string; status: string; conclusion: string | null; html_url: string }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?per_page=100`);
-    const runs = r.check_runs;
-    if (!runs.length) return { state: 'none' as const, failing: [] };
-    const failing = runs.filter((c) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(c.conclusion ?? '')).map((c) => ({ name: c.name, url: c.html_url }));
-    const state = failing.length ? ('failure' as const) : runs.some((c) => c.status !== 'completed') ? ('pending' as const) : ('success' as const);
-    return { state, failing };
   }
 
   async ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]> {

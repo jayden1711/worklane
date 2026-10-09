@@ -17,3 +17,11 @@ test/push-gate.test.ts 100.101.102.103
 test/push-gate.test.ts box.tail1234.ts.net
 test/push-gate.test.ts ntfy.sh/my-alerts-x
 test/push-gate.test.ts bob@corp.dev
+# Fixture homes in the separate-user tests.
+test/separate-users.test.ts /home/shop-agent
+test/separate-users.test.ts /home/coord
+test/separate-users.test.ts /home/shop-eval
+test/instance.test.ts /home/wl-no-such-agent-user
+test/setup-scripts.test.ts /home/site-agent
+# Placeholder homes in the separate-users guide.
+docs/separate-users.md /home/wl-

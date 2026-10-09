@@ -74,7 +74,7 @@ test('regression: a task blocked before any claim reaches its owner\'s inbox', (
   assert.equal(inbox(p, 'example-owner').blocked.length, 1);
 });
 
-test('projection: agents in flight, the land queue (deferred stays queued), batches, governor and trust', () => {
+test('projection: agents in flight, the land queue (deferred stays queued), batches and governor', () => {
   const { log } = logWith();
   const sha = 'a'.repeat(40);
   log.append('issue.seen', seen(1, 'One'), 'c');
@@ -89,21 +89,17 @@ test('projection: agents in flight, the land queue (deferred stays queued), batc
   log.append('land.result', { issue: 2, outcome: 'deferred', landed: null, detail: 'full-run slot busy\nmore' }, 'c');
   log.append('land.batch', { id: 'b1', issues: [2], tip: sha, outcome: 'deferred', detail: 'slot busy' }, 'c');
   log.append('governor.hold', { reason: 'load 41 > 40', load: 41, free_disk_pct: 30 }, 'c');
-  log.append('trust.evaluated', { day: '2026-10-08', stage: 1, healthy: false, why: ['only 2 tasks'], card: {} }, 'c');
   const p = project(log.read());
   assert.deepEqual(p.runs.active.map((r) => [r.issue, r.note]), [[1, 'editing src/a.js']]);
   assert.deepEqual(p.runs.recent.map((r) => [r.issue, r.reason, r.costUsd]), [[2, 'succeeded', 0.75]]);
   assert.deepEqual(p.landQueue.map((q) => [q.issue, q.title, q.deferred]), [[2, 'Two', 'full-run slot busy']]);
   assert.deepEqual(p.batches.map((b) => b.outcome), ['deferred'], 'one row per batch, latest outcome');
   assert.equal(p.governor?.held, true);
-  assert.equal(p.trust.evaluations[0]!.healthy, false);
   log.append('land.result', { issue: 2, outcome: 'landed', landed: sha, detail: '' }, 'c');
   log.append('governor.release', { load: 10, free_disk_pct: 30 }, 'c');
-  log.append('stage.changed', { from: 1, to: 2, by: 'example-owner', reason: 'approved' }, 'c');
   const q = project(log.read());
   assert.equal(q.landQueue.length, 0);
   assert.equal(q.governor?.held, false);
-  assert.equal(q.trust.stage, 2);
 });
 
 test('settings show choices, never commands, fingerprints or deploy details', () => {
@@ -140,10 +136,9 @@ test('dashboard API needs the token, binds locally, and serves state from the lo
   try {
     assert.match(s.d.url, /^http:\/\/127\.0\.0\.1:\d+\/\?t=/);
     assert.equal((await fetch(`${s.base}/api/state`)).status, 401);
-    for (const p of ['/api/scorecard', '/api/settings', '/api/events']) assert.equal((await fetch(`${s.base}${p}`)).status, 401, p);
-    const sc = (await (await fetch(`${s.base}/api/scorecard`, { headers: s.h })).json()) as { current: { tasksDone: number }; report: string };
-    assert.equal(sc.current.tasksDone, 0);
-    assert.match(sc.report, /report: /);
+    for (const p of ['/api/report', '/api/settings', '/api/events']) assert.equal((await fetch(`${s.base}${p}`)).status, 401, p);
+    const rep = (await (await fetch(`${s.base}/api/report`, { headers: s.h })).json()) as { report: string };
+    assert.match(rep.report, /report: /);
     assert.equal((await fetch(`${s.base}/api/state`, { headers: { authorization: 'Bearer wrong-token-of-the-wrong-length-x' } })).status, 401);
     s.log.append('issue.seen', seen(5, 'From the log'), 'c');
     const st = (await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { tasks: { title: string }[]; user: string };
@@ -228,3 +223,4 @@ test('saved views round-trip; without a built UI the server says how to build it
     await s.d.close();
   }
 });
+

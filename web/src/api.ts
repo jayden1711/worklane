@@ -48,7 +48,7 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
-  project: { name: string; repo: string; landMode: string; stage: number };
+  project: { name: string; repo: string; landMode: string };
   user: string;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
   budget: number;
@@ -69,9 +69,7 @@ export interface State {
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
-  trust: { stage: number | null; evaluations: { day: string; stage: number; healthy: boolean; why: string[] }[]; changes: { from: number; to: number; by: string; reason: string; at: string }[] };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
-  lessonPrs: { day: string; count: number; url: string; at: string }[];
 }
 
 export interface Run {
@@ -88,40 +86,19 @@ export interface Run {
   costUsd: number;
 }
 
-export interface Scorecard {
-  from: string;
-  to: string;
-  tasksDone: number;
-  evaluatorPassRate: number | null;
-  unverifiedClaimRate: number | null;
-  reverts: number;
-  redCaught: number;
-  baselineGrowth: number;
-  costPerDoneUsd: number | null;
-  readyToDoneHours: number | null;
-  interventionsPerTask: number | null;
-  idleHours: number;
-  decisionWaitHours: number;
-  blockedHours: number;
-  spendUsd: number;
-}
-
-export interface ScorecardResponse { current: Scorecard; previous: Scorecard; health: { healthy: boolean; why: string[] }; report: string }
-
 export interface Settings {
   configDir: string;
   project: { name: string; repo: string; landMode: string; runtime: unknown };
   owners: State['owners'];
   reports: { times: string[]; to: string[] };
   governor: { max_load?: number; min_free_disk_pct: number };
-  agents: { stage: number; budget: number; trust: Record<string, number>; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
+  agents: { budget: number; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
   tests: { gates: Record<string, string[]>; batchMax: number; nightlyAt: string | null; tiers: string[]; baselineParser: boolean };
-  review: { levels: Record<string, string[]>; stages: { stage: number; relax: { category: string; to: string }[] }[] } | null;
+  review: { levels: Record<string, string[]> } | null;
   guardrails: { rules: number; protectedPaths: string[]; secretPaths: number; network: string; preApproved: string[] };
   deploy: { environments: { name: string; production: boolean }[]; prodRead: boolean } | null;
 }
 
-export const getScorecard = () => api<ScorecardResponse>('/api/scorecard');
 export const getSettings = () => api<Settings>('/api/settings');
 
 /** Fetch once, and again whenever `dep` changes (e.g. the live pulse). */

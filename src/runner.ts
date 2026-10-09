@@ -4,11 +4,11 @@
 // git credential helper, no SSH agent, so an agent can't push or write to
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
-import { killTree, spawnDetached } from './os/index.js';
+import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch';
 
@@ -31,6 +31,8 @@ export interface RunRequest {
   onStart?: (pid: number) => void;
   onActivity?: (note: string) => void;
   signal?: AbortSignal;
+  /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
+  lane?: string;
 }
 
 export interface RunResult {
@@ -47,7 +49,8 @@ export interface AgentRunner {
   run(req: RunRequest): Promise<RunResult>;
 }
 
-const PASS_THROUGH = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles', 'NODE_EXTRA_CA_CERTS'];
+// CLAUDE_CONFIG_DIR: an instance's own Claude login (a path, not a secret).
+const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles', 'NODE_EXTRA_CA_CERTS'];
 
 /**
  * The agent's whole environment. Anything not listed is dropped, which
@@ -73,9 +76,34 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra:
   return env;
 }
 
+/** An unprivileged OS user agents run as, separate from the coordinator's (which holds the credentials). */
+export interface RunAs {
+  user: string;
+  /** The agent user's home; its own Claude login lives here. */
+  home: string;
+  /** Defaults to <home>/.claude. */
+  claudeConfigDir?: string;
+}
+
+/** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */
+export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
+  return {
+    ...env,
+    HOME: r.home,
+    USER: r.user,
+    LOGNAME: r.user,
+    CLAUDE_CONFIG_DIR: r.claudeConfigDir ?? posix.join(r.home, '.claude'), // agent users exist on POSIX systems only
+    // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
+    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_1: 'safe.directory',
+    GIT_CONFIG_VALUE_1: '*',
+  };
+}
+
 /** Which auth `claude` would use. The cli runtime refuses API-key billing it wasn't asked for. */
-export function claudeAuthMethod(env: NodeJS.ProcessEnv): string {
-  const r = spawnSync('claude', ['auth', 'status', '--json'], { encoding: 'utf8', env, timeout: 30_000 });
+export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): string {
+  const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
+  const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string };
     return j.loggedIn ? (j.authMethod ?? 'unknown') : 'none';
@@ -84,11 +112,16 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv): string {
   }
 }
 
-export function cliArgs(req: RunRequest): string[] {
-  const args = ['-p', req.prompt, '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+/**
+ * The claude command line. The prompt is not on it: command lines are public
+ * on the machine and sudo logs them to the journal, so the prompt goes on
+ * stdin and the role's system prompt in a file (`systemPromptFile`).
+ */
+export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string): string[] {
+  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
-  if (req.appendSystemPrompt) args.push('--append-system-prompt', req.appendSystemPrompt);
+  if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
   if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
   return args;
 }
@@ -111,6 +144,9 @@ export class CliRunner implements AgentRunner {
     private runtime: 'cli' | 'sdk' = 'cli',
     private base: NodeJS.ProcessEnv = process.env,
     private bin = 'claude',
+    private runAs?: RunAs,
+    /** Per lane: the user and sandbox settings. When set, a run in an unknown lane is refused. */
+    private lanes?: Record<string, { runAs?: RunAs; settings?: object }>,
   ) {}
 
   async run(req: RunRequest): Promise<RunResult> {
@@ -119,13 +155,33 @@ export class CliRunner implements AgentRunner {
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),
     });
-    const auth = claudeAuthMethod(env);
+    const laneName = req.lane ?? 'default';
+    const lane = this.lanes?.[laneName];
+    if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
+    const runAs = lane ? lane.runAs : this.runAs;
+    const runEnv = runAs ? runAsEnv(env, runAs) : env;
+    const auth = claudeAuthMethod(runEnv, runAs, this.bin);
     const want = this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
+    // The role's system prompt, in a file the agent user can read (this process's /tmp, private to the
+    // instance's service and its agents), removed when the run ends.
+    const promptDir = req.appendSystemPrompt ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-run-`)) : null;
+    const systemPromptFile = promptDir ? join(promptDir, 'system-prompt.md') : undefined;
+    if (promptDir && systemPromptFile) {
+      writeFileSync(systemPromptFile, req.appendSystemPrompt!, { mode: 0o644 });
+      chmodSync(promptDir, 0o755);
+    }
+    const cleanup = () => promptDir && rmSync(promptDir, { recursive: true, force: true });
     return new Promise((resolve) => {
-      const child = spawn(this.bin, cliArgs(req), { cwd: req.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+      const argv = cliArgs(req, lane?.settings, systemPromptFile);
+      const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
+      // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
+      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
+      child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
+      child.on('error', cleanup);
+      child.stdin.end(req.prompt);
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
       let rateLimited = false;
@@ -134,7 +190,8 @@ export class CliRunner implements AgentRunner {
       let stderr = '';
       const kill = (why: TerminalReason) => {
         ended ??= why;
-        killTree(child.pid, () => child.kill('SIGKILL'));
+        if (runAs) killTreeAs(runAs.user, child.pid);
+        else killTree(child.pid, () => child.kill('SIGKILL'));
       };
       let stall = setTimeout(() => kill('stalled'), req.stallMs);
       const overall = setTimeout(() => kill('timed_out'), req.timeoutMs);
@@ -162,6 +219,7 @@ export class CliRunner implements AgentRunner {
         stderr = (stderr + d.toString()).slice(-4000);
       });
       child.on('close', (code) => {
+        cleanup();
         clearTimeout(stall);
         clearTimeout(overall);
         const r = result as ResultLine | null;

@@ -1,4 +1,3 @@
-import { ExternalLink } from 'lucide-react';
 import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, Empty, LevelBadge, StatusBadge } from '../components/ui';
@@ -67,7 +66,7 @@ export function Landing({ state }: { state: State }) {
           )}
         </Card>
 
-        <div className="grid gap-6 lg:grid-cols-2">
+        <div className="grid gap-6">
           <Card>
             <div className="border-b px-4 py-2.5 text-sm font-medium">Recent batches</div>
             {state.batches.length ? (
@@ -89,28 +88,6 @@ export function Landing({ state }: { state: State }) {
               </ul>
             ) : (
               <div className="p-4 text-xs text-muted-foreground">No batches yet.</div>
-            )}
-          </Card>
-          <Card>
-            <div className="border-b px-4 py-2.5 text-sm font-medium">Lessons PRs</div>
-            {state.lessonPrs.length ? (
-              <ul className="divide-y">
-                {state.lessonPrs.map((l) => (
-                  <li key={l.url} className="flex items-center gap-2 px-4 py-2 text-sm">
-                    <span>{l.day}</span>
-                    <span className="text-xs text-muted-foreground">{l.count} lesson(s)</span>
-                    {/^https:\/\//.test(l.url) ? (
-                      <a href={l.url} target="_blank" rel="noreferrer noopener" className="ml-auto inline-flex items-center gap-1 text-xs text-info hover:underline">
-                        Open PR <ExternalLink className="size-3" />
-                      </a>
-                    ) : (
-                      <span className="ml-auto font-mono text-xs text-muted-foreground">{l.url}</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="p-4 text-xs text-muted-foreground">Lessons agents propose go out as one PR a day for the owner to approve.</div>
             )}
           </Card>
         </div>

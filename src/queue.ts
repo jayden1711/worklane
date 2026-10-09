@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { childEnv, machineLoad, pidAlive, shellCommand } from './os/index.js';
+import { childEnv, machineLoad, pidAlive, projectCommand } from './os/index.js';
 import { fullRunLock } from './slots.js';
 import { EventLog } from './events/log.js';
 import { recordBaseline } from './baseline.js';
@@ -36,6 +36,8 @@ export interface Job {
     cleanup?: { repo: string; root: string; stateDir: string; name: string };
   };
   result?: string;
+  /** The project's suite runs agent-written code: as the instance's agent user, when there is one. */
+  runAs?: { user: string; home: string };
 }
 
 const jobsDir = (stateDir: string) => join(stateDir, 'jobs');
@@ -65,10 +67,10 @@ export function listJobs(stateDir: string): Job[] {
 }
 
 /** Queue a job and start its detached runner. Returns immediately. */
-export function queueJob(opts: { stateDir: string; cwd: string; command: string; idleProbe?: string | undefined; maxLoad?: number | undefined; cliPath: string; after?: Job['after'] }): Job {
+export function queueJob(opts: { stateDir: string; cwd: string; command: string; idleProbe?: string | undefined; maxLoad?: number | undefined; cliPath: string; after?: Job['after']; runAs?: Job['runAs'] }): Job {
   mkdirSync(jobsDir(opts.stateDir), { recursive: true });
   const id = `${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}-${randomBytes(3).toString('hex')}`;
-  const job: Job = { id, kind: 'full-run', cwd: opts.cwd, command: opts.command, idleProbe: opts.idleProbe, maxLoad: opts.maxLoad, createdAt: new Date().toISOString(), status: 'queued', log: join(jobsDir(opts.stateDir), `${id}.log`), ...(opts.after ? { after: opts.after } : {}) };
+  const job: Job = { id, kind: 'full-run', cwd: opts.cwd, command: opts.command, idleProbe: opts.idleProbe, maxLoad: opts.maxLoad, createdAt: new Date().toISOString(), status: 'queued', log: join(jobsDir(opts.stateDir), `${id}.log`), ...(opts.after ? { after: opts.after } : {}), ...(opts.runAs ? { runAs: opts.runAs } : {}) };
   writeJob(opts.stateDir, job);
   const out = openSync(job.log, 'a');
   const child = spawn(process.execPath, [opts.cliPath, '_run-job', opts.stateDir, id], { detached: true, stdio: ['ignore', out, out], env: childEnv() });
@@ -79,10 +81,10 @@ export function queueJob(opts: { stateDir: string; cwd: string; command: string;
   return job;
 }
 
-function sh(command: string, cwd: string, logFd: number | 'ignore'): Promise<number | null> {
+function sh(command: string, cwd: string, logFd: number | 'ignore', runAs?: Job['runAs']): Promise<number | null> {
   return new Promise((res) => {
-    const [file, args] = shellCommand(command);
-    const c = spawn(file, args, { cwd, stdio: ['ignore', logFd, logFd], env: childEnv() });
+    const { file, args, env } = projectCommand(command, runAs);
+    const c = spawn(file, args, { cwd, stdio: ['ignore', logFd, logFd], env });
     c.on('error', () => res(null));
     c.on('close', (code) => res(code));
   });
@@ -108,7 +110,7 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
         continue;
       }
       if (job.idleProbe) {
-        const idle = await sh(job.idleProbe, job.cwd, 'ignore');
+        const idle = await sh(job.idleProbe, job.cwd, 'ignore', job.runAs);
         if (idle !== 0) {
           update({ waitingFor: `idle probe (${job.idleProbe}) reports another run is live` });
           got.lock.release();
@@ -118,7 +120,7 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
       }
       update({ status: 'running', startedAt: new Date().toISOString(), waitingFor: '' });
       const fd = openSync(job.log, 'a');
-      const code = await sh(job.command, job.cwd, fd);
+      const code = await sh(job.command, job.cwd, fd, job.runAs);
       closeSync(fd);
       update({ status: code === 0 ? 'passed' : code === null ? 'error' : 'failed', exitCode: code, finishedAt: new Date().toISOString() });
       if (job.after?.baseline) {

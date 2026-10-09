@@ -7,16 +7,11 @@ import type { DoneWhenList, Issue } from './backlog/types.js';
 export const WORKER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'lesson'],
+  required: ['summary'],
   properties: {
     summary: { type: 'string', description: 'What you changed and how you verified it, in 2-5 sentences.' },
-    lesson: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['worked', 'failed', 'fix'],
-      properties: { worked: { type: 'string' }, failed: { type: 'string' }, fix: { type: 'string' } },
-    },
     blocked: { type: 'string', description: 'Set only if you could not finish: what blocks you.' },
+    no_change_needed: { type: 'string', description: 'Set only if the issue needs no change: its done_when already passes on the unchanged code. Say what you checked and why nothing should change. Commit nothing.' },
     ask: {
       type: 'object',
       description: 'Set only for a real decision the owner must make.',
@@ -42,8 +37,9 @@ export const REPRO_SCHEMA = {
 export const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['patch_correct', 'test_correct', 'confidence', 'advice'],
+  required: ['patch_correct', 'test_correct', 'confidence', 'advice', 'files_reviewed'],
   properties: {
+    files_reviewed: { type: 'array', items: { type: 'string' }, description: 'Every changed file whose diff you read in full (repo-relative paths).' },
     patch_correct: { type: 'boolean', description: 'The change does what the issue and done_when ask, without breaking anything else you can see.' },
     test_correct: { type: 'boolean', description: 'The reproduction test checks the right behavior (false if the test itself is wrong).' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -88,6 +84,7 @@ const DEFAULTS: Record<string, string> = {
 - Commit your work on the current branch with clear messages (git add, git commit). Never push, never open PRs, never change labels: the coordinator does that after independent review.
 - Never weaken, skip or delete tests to get green. Never edit harness config.
 - If docs disagree with the code, trust the code; treat docs as unverified.
+- If the issue already holds on the unchanged code (its done_when passes and nothing should change), commit nothing and set "no_change_needed" with what you checked; the coordinator re-runs the checks itself. Never make a change just to have one.
 - If you hit a real decision only the owner can make, set "ask". If you're blocked, set "blocked". Otherwise finish the work.`,
   'evaluator-repro': `You are an independent evaluator. You have NOT seen any fix. Write ONE reproduction test for the issue below that FAILS on the current code because of the bug or missing behavior the issue describes (an assertion failure, not an import or setup error), and will pass once it's correctly fixed.
 - Follow the project's test conventions; put the test where the project's runner finds it.
@@ -97,6 +94,7 @@ const DEFAULTS: Record<string, string> = {
 - Inspect the diff from the base commit (git diff BASE..HEAD), the reproduction test, and the check results below.
 - patch_correct: does the change actually do what the issue asks, without regressions you can see?
 - test_correct: does the reproduction test check the right behavior? You may conclude the TEST is wrong rather than the patch.
+- List in files_reviewed every changed file whose diff you read in full. A review that leaves a changed file unread does not pass.
 - Be specific in advice. Do not edit anything.`,
 };
 

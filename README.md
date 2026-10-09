@@ -4,7 +4,7 @@
 
 Open-source harness for running a crew of Claude agents on a real codebase: parallel workers, an independent evaluator, a shared GitHub Issues backlog, and a live dashboard showing who owns every task.
 
-> **Status: pre-alpha (step 1 of 7).** Config, `install`/`doctor`, guardrail hooks, secret scanning, the vacuity check and the Stop gate work. The coordinator arrives in step 2.
+> **Status: pre-alpha.** The coordinator, harness-run checks, the independent evaluator, separate OS users for agents, Claude Code's sandbox and repo-scoped credentials work. Not yet used on a project day to day.
 
 ## What it is
 
@@ -14,7 +14,7 @@ Open-source harness for running a crew of Claude agents on a real codebase: para
 - **Risk-based review levels** computed from what a change touches, so docs fixes land on their own and money-path changes wait for a human.
 - **A land queue** (direct-to-main or PRs) that batches compatible changes and bisects on failure.
 - **Guardrails that block the few truly dangerous things** (signing from a live wallet, writing to the production database) and nothing else.
-- **One append-only event log** that the dashboard, reports, scorecard and decision inbox all read from.
+- **One append-only event log** that the dashboard, reports and decision inbox all read from.
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/prior-art.md](docs/prior-art.md) for what we borrowed and from where.
 

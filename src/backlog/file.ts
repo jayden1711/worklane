@@ -3,13 +3,12 @@
 // their label history.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { CiStatus, Backlog, Issue } from './types.js';
+import type { Backlog, Issue } from './types.js';
 
 interface FileState {
   issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[] })[];
   labels: string[];
   prs?: { head: string; base: string; title: string; body: string; url: string }[];
-  ci?: Record<string, CiStatus>;
 }
 
 export class FileBacklog implements Backlog {
@@ -95,19 +94,12 @@ export class FileBacklog implements Backlog {
   }
   async openPr(head: string, base: string, title: string, body: string) {
     const s = this.load();
+    const existing = s.prs?.find((p) => p.head === head);
+    if (existing) return existing.url;
     const url = `file://pr/${(s.prs?.length ?? 0) + 1}`;
     (s.prs ??= []).push({ head, base, title, body, url });
     this.save(s);
     return url;
-  }
-  async ciStatus(sha: string): Promise<CiStatus> {
-    return this.load().ci?.[sha] ?? { state: 'none', failing: [] };
-  }
-  /** Tests and demos: set CI's result for a commit. */
-  setCi(sha: string, status: CiStatus) {
-    const s = this.load();
-    (s.ci ??= {})[sha] = status;
-    this.save(s);
   }
   prs() {
     return this.load().prs ?? [];

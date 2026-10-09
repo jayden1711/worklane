@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import { BRAND } from '../src/brand.js';
 import { claimRef } from '../src/claims.js';
+import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
@@ -56,6 +57,12 @@ function commitAll(cwd: string, msg: string) {
   git(cwd, '-c', 'user.email=agent@example.com', '-c', 'user.name=agent', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
 }
 
+/** What a diligent evaluator reports: every file changed since the base named in its prompt. */
+function readAll(req: RunRequest): string[] {
+  const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
+  return base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
+}
+
 /** Scripted agents: the evaluator writes a failing repro; the worker fixes the bug; the verdict approves. */
 function agents(over: Partial<Record<string, (r: RunRequest) => object>> = {}) {
   return new FakeRunner((req) => {
@@ -70,9 +77,9 @@ function agents(over: Partial<Record<string, (r: RunRequest) => object>> = {}) {
       const p = join(req.cwd, 'src', 'price.js');
       writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
       commitAll(req.cwd, 'Ignore non-positive quantities in totals');
-      return { structured: { summary: 'fixed', lesson: { worked: 'repro first', failed: '', fix: '' } } };
+      return { structured: { summary: 'fixed' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
   });
 }
 
@@ -126,7 +133,7 @@ test('the worker sees the frozen repro; editing it gets the attempt rejected and
         writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
         commitAll(req.cwd, 'real fix');
       }
-      return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
+      return { summary: 's' };
     },
   });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
@@ -145,7 +152,7 @@ test('a high-risk change waits for the owner; a writer\'s /approve comment relea
       mkdirSync(join(req.cwd, 'migrations'), { recursive: true });
       writeFileSync(join(req.cwd, 'migrations', '001_orders.sql'), 'CREATE TABLE orders (id int);\n');
       commitAll(req.cwd, 'orders migration');
-      return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
+      return { summary: 's' };
     },
   });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
@@ -264,7 +271,7 @@ test('main is red: a change that adds a new failure does not land', { skip }, as
       const p = join(req.cwd, 'src', 'price.js');
       writeFileSync(p, readFileSync(p, 'utf8') + '\n// refactored\n');
       commitAll(req.cwd, 'refactor');
-      return { summary: 's', lesson: { worked: '', failed: '', fix: '' } };
+      return { summary: 's' };
     },
   });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
@@ -338,9 +345,9 @@ function parallelAgents(gate: Promise<void>, seen: { now: number; max: number })
       const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
       writeFileSync(join(req.cwd, 'src', name), `export const x = '${name}';\n`);
       commitAll(req.cwd, `add ${name}`);
-      return { structured: { summary: 's', lesson: { worked: '', failed: '', fix: '' } } };
+      return { structured: { summary: 's' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
   });
 }
 
@@ -409,12 +416,12 @@ test('the governor holds dispatch on high load or low disk, and records it once,
 /** Workers that write a given file; optionally one that also adds a failing test. */
 function fileAgents(redFor?: string) {
   return new FakeRunner(async (req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
     const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
     writeFileSync(join(req.cwd, 'src', name), `export const x = '${name}';\n`);
     if (name === redFor) writeFileSync(join(req.cwd, 'test', 'new-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('brand new failure', () => { assert.equal(1, 2); });\n");
     commitAll(req.cwd, `add ${name}`);
-    return { structured: { summary: 's', lesson: { worked: '', failed: '', fix: '' } } };
+    return { structured: { summary: 's' } };
   });
 }
 
@@ -463,11 +470,11 @@ test('batched landing: changes to the same files go in separate batches', { skip
   const f = fixture();
   // Two workers editing the same file conflict-free in sequence, but must not share a batch.
   const runner = new FakeRunner(async (req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '' } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
     const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
     writeFileSync(join(req.cwd, 'src', 'shared.js'), `export const who = '${name}';\n`);
     commitAll(req.cwd, `touch shared for ${name}`);
-    return { structured: { summary: 's', lesson: { worked: '', failed: '', fix: '' } } };
+    return { structured: { summary: 's' } };
   });
   const c = await queueAll(f, ['a.js', 'b.js'], runner);
   await c.tick();
@@ -526,38 +533,7 @@ test('regression: a failing tick step (GitHub down during reconcile) does not st
   assert.ok(errs.some((e) => e.where === 'reconcile' && e.kind === 'server_error'), JSON.stringify(errs));
 });
 
-test('trust: a healthy streak asks the owner to promote; approval changes stage; a regression demotes on its own', { skip }, async () => {
-  const f = fixture();
-  f.cfg.agents.trust = { window_days: 7, promote_after_days: 2, min_tasks: 1, min_evaluator_pass_rate: 0.8, max_unverified_claim_rate: 0.5, max_reverts: 0, max_baseline_growth: 0 };
-  f.cfg.review = { version: 1, stages: [{ stage: 2, relax: [{ category: 'app-non-money-large', to: 'L1' }] }], levels: { L0_auto: { when: ['docs-only'], max_lines: 200 }, L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 }, L2_notify: { when: ['app-non-money-large'] }, L3_human: { when: ['money-path'], over_lines: 800 } } };
-  // One good finished task and yesterday's healthy evaluation already in the log.
-  const sha = 'd'.repeat(40);
-  f.log.append('issue.seen', { issue: 99, title: 't', labels: [], author: 'example-owner', owner: null, actionable: true, why: '' }, 'c');
-  f.log.append('eval.verdict', { issue: 99, head: sha, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }, 'c');
-  f.log.append('land.result', { issue: 99, outcome: 'landed', landed: sha, detail: '' }, 'c');
-  f.log.append('issue.released', { issue: 99, instance: 'alice', why: 'landed' }, 'c');
-  f.log.append('trust.evaluated', { day: '2000-01-01', stage: 1, healthy: true, why: [], card: {} }, 'c');
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
-  await c.tick();
-  const asked = f.log.read(0, ['decision.asked']).map((e) => e.payload as { id: string; kind: string; question: string });
-  assert.equal(asked.length, 1);
-  assert.equal(asked[0]!.kind, 'stage');
-  assert.match(asked[0]!.question, /Promote to trust stage 2/);
-  assert.equal(c.stage(), 1, 'never promoted without the owner');
-  f.log.append('decision.answered', { id: asked[0]!.id, by: 'example-owner', answer: 'approve' }, 'example-owner', 'human');
-  await c.tick();
-  assert.equal(c.stage(), 2);
-  // Regression: a rejected patch drops the pass rate below the floor; tomorrow's evaluation demotes.
-  f.log.append('eval.verdict', { issue: 98, head: sha, patch_hash: 'h', patch_correct: false, test_correct: true, confidence: 'high', advice: 'wrong' }, 'c');
-  f.log.append('eval.verdict', { issue: 97, head: sha, patch_hash: 'h', patch_correct: false, test_correct: true, confidence: 'high', advice: 'wrong' }, 'c');
-  await (c as unknown as { maybeTrust(now: Date): Promise<void> }).maybeTrust(new Date(Date.now() + 86_400_000));
-  assert.equal(c.stage(), 1);
-  const change = f.log.read(0, ['stage.changed']).at(-1)!.payload as { by: string; reason: string };
-  assert.equal(change.by, 'auto');
-  assert.match(change.reason, /evaluator pass rate/);
-});
-
-test('reports post once per slot to one report issue; lessons go out as a PR branch, once a day', { skip }, async () => {
+test('reports post once per slot to one report issue', { skip }, async () => {
   const f = fixture();
   f.cfg.project.reports = { times: ['08:00', '18:00'], to: ['example-owner'] };
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
@@ -573,32 +549,187 @@ test('reports post once per slot to one report issue; lessons go out as a PR bra
   comments = await f.backlog.comments(reports[0]!.number);
   assert.equal(comments.length, 2, 'evening slot posts to the same issue');
 
-  f.log.append('lesson.proposed', { issue: 5, worked: 'ran one test first', failed: '', fix: 'read the runner config before editing' }, 'c');
-  await c.maybeLessons(morning);
-  await c.maybeLessons(morning);
-  const prs = f.backlog.prs();
-  assert.equal(prs.length, 1);
-  assert.equal(prs[0]!.base, 'main');
-  const file = execFileSync('git', ['show', `${prs[0]!.head}:${BRAND.configDir}/lessons/2026-10-08.md`], { cwd: f.remote, encoding: 'utf8' });
-  assert.match(file, /\*\*Fix:\*\* read the runner config before editing/);
-  assert.ok(!execFileSync('git', ['log', '--format=%s', 'main'], { cwd: f.remote, encoding: 'utf8' }).includes('Lessons'), 'main is untouched: lessons only land when the owner merges the PR');
 });
 
-test('security role in the pipeline: a change in its category that it blocks goes to the owner as L3, with the finding', { skip }, async () => {
+test('acceptance: two instances, each set to 4 workers, never run more than the shared cap together', { skip }, async () => {
+  const a = fixture();
+  const b = fixture();
+  // Two separate instances (own repos, logs and backlogs) on one machine, sharing the slot directory.
+  writeFileSync(join(a.slotsDir, 'config.json'), JSON.stringify({ max_agents: 4 }));
+  const seen = { now: 0, max: 0 };
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const coords = [a, b].map((f, k) => {
+    for (const name of ['a.js', 'b.js', 'c.js', 'd.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
+    f.cfg.agents.roles.workers!.count = 4;
+    return new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: parallelAgents(gate, seen), repo: f.repo, instance: k ? 'beta' : 'alpha', stateDir: f.stateDir, slotsDir: a.slotsDir, machine: f.machine });
+  });
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.max, 4, 'four running in total, not eight');
+  assert.equal(slotStatus(a.slotsDir).agents.length, 4);
+  open();
+  await Promise.all(coords.map((c) => c.idle()));
+  for (let i = 0; i < 6; i++) {
+    await Promise.all(coords.map((c) => c.tick()));
+    await Promise.all(coords.map((c) => c.idle()));
+  }
+  assert.ok(seen.max <= 4);
+});
+
+test('a worker runs in the lane its issue names with a lane:<name> label', { skip }, async () => {
   const f = fixture();
-  f.cfg.agents.roles.security = { enabled: true, model: 'opus', applies_to: ['app-non-money'] };
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready', 'lane:eval'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  const worker = runner.calls.find((r) => r.role === 'worker')!;
+  assert.equal(worker.lane, 'eval');
+  assert.equal(runner.calls.find((r) => r.role === 'evaluator-repro')!.lane, undefined, 'evaluators stay in the default lane');
+});
+
+test('regression: an approving review that did not read every changed file does not pass; the change waits for a human', { skip }, async () => {
+  const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
-  const runner = agents({ security: () => ({ verdict: 'block', findings: [{ severity: 'critical', file: 'src/price.js', issue: 'trusts a client-supplied price', evidence: 'src/price.js:2' }] }) });
+  // The evaluator approves but reports reading only the test, not the source change.
+  const runner = agents({ 'evaluator-verdict': () => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: ['test/repro-qty.test.js'] }) });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
   await c.tick();
-  assert.equal(runner.calls.filter((r) => r.role === 'security').length, 1);
+  const verdict = f.log.read(0, ['eval.verdict']).at(-1)!.payload as { unread?: string[] };
+  assert.deepEqual(verdict.unread, ['src/price.js']);
   const lvl = f.log.read(0, ['review.level_set']).at(-1)!.payload as { level: string; reasons: string[] };
   assert.equal(lvl.level, 'L3');
-  assert.ok(lvl.reasons.some((r) => /security critical: src\/price\.js: trusts a client-supplied price/.test(r)), lvl.reasons.join(' | '));
-  const asked = f.log.read(0, ['decision.asked']).at(-1)!.payload as { kind: string; receipts: string[] };
-  assert.equal(asked.kind, 'land');
-  assert.ok(asked.receipts.some((r) => /trusts a client-supplied price/.test(r)));
-  assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands without the owner');
+  assert.ok(lvl.reasons.some((r) => /evaluator did not read: src\/price\.js/.test(r)), lvl.reasons.join(' | '));
+  assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands on a partial review');
+});
+
+test('emergency stop: one command halts every agent across instances; their tasks requeue; nothing starts until resumed', { skip }, async () => {
+  const a = fixture();
+  const b = fixture();
+  writeFileSync(join(a.slotsDir, 'config.json'), JSON.stringify({ max_agents: 4 }));
+  const running = { now: 0, aborted: 0 };
+  // Workers that run until they're aborted, like a real agent mid-task.
+  const longRunning = () =>
+    new FakeRunner(async (req) => {
+      if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+      running.now++;
+      await new Promise<void>((res) => req.signal?.addEventListener('abort', () => res()));
+      running.now--;
+      running.aborted++;
+      return { reason: 'canceled_by_reconciliation' };
+    });
+  const coords = [a, b].map((f, k) => {
+    for (const name of ['a.js', 'b.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
+    f.cfg.agents.roles.workers!.count = 2;
+    return new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: longRunning(), repo: f.repo, instance: k ? 'beta' : 'alpha', stateDir: f.stateDir, slotsDir: a.slotsDir, machine: f.machine });
+  });
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(running.now, 4, 'four agents running across two instances');
+  stopAll('operator', 'testing the stop', a.slotsDir);
+  for (const c of coords) c.checkEmergency();
+  await Promise.all(coords.map((c) => c.idle()));
+  assert.equal(running.now, 0, 'every agent halted');
+  assert.equal(running.aborted, 4);
+  assert.equal(slotStatus(a.slotsDir).agents.length, 0, 'their slots are free');
+  for (const f of [a, b]) {
+    assert.equal(f.log.read(0, ['emergency.stop']).length, 1);
+    const released = f.log.read(0, ['issue.released']).map((e) => (e.payload as { why: string }).why);
+    assert.deepEqual(released, ['emergency stop', 'emergency stop'], 'tasks requeue rather than fail');
+    assert.equal(f.log.read(0, ['issue.blocked']).length, 0);
+  }
+  await Promise.all(coords.map((c) => c.tick()));
+  assert.equal(running.now, 0, 'nothing starts while the stop is in force');
+  assert.equal(tryAgentSlot('another harness', a.slotsDir), null, 'other harnesses on the slot protocol are held too');
+  assert.ok(resumeAll(a.slotsDir));
+  await Promise.all(coords.map((c) => c.tick()));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(running.now, 4, 'resumed: the requeued tasks start again');
+  stopAll('operator', 'cleanup', a.slotsDir);
+  for (const c of coords) c.checkEmergency();
+  await Promise.all(coords.map((c) => c.idle()));
+});
+
+test('land_mode pr: an approved change goes out as a PR on its own branch; the default branch is never pushed and nothing merges', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  const mainBefore = git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const r = f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string; detail: string; landed: string | null };
+  assert.equal(r.outcome, 'pr_opened');
+  assert.equal(r.landed, null);
+  assert.equal(git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], mainBefore, 'main untouched');
+  const branchHead = git(f.repo, 'ls-remote', 'origin', `refs/heads/${BRAND.cli}/issue-${n}`).split('\t')[0];
+  assert.ok(branchHead, 'the task branch is pushed');
+  assert.match(git(f.repo, 'show', `${branchHead}:src/price.js`), /qty > 0/);
+  const prs = f.backlog.prs();
+  assert.equal(prs.length, 1);
+  assert.equal(prs[0]!.base, 'main');
+  assert.match(prs[0]!.body, new RegExp(`^Closes #${n}`));
+  assert.match(prs[0]!.body, /Independent evaluator:\*\* approves/);
+  assert.equal((await f.backlog.get(n)).state, 'open', 'the issue closes when a human merges the PR');
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
+  // A second tick doesn't open another PR.
+  await c.tick();
+  assert.equal(f.backlog.prs().length, 1);
+});
+
+test('no change needed: confirmed by the coordinator\'s own checks on the clean base, reported with evidence, not retried', async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals use cents', body: 'Make totals use integer cents.\n\n```done_when\n- command: grep -q totalCents src/price.js\n- manual: the dashboard shows cents\n```\n', author: 'example-owner', labels: ['ready'] });
+  const runner = agents({
+    worker: (req) => {
+      // It ran a build that rewrote an output, then found nothing to change (the live case: a regenerated sitemap).
+      writeFileSync(join(req.cwd, 'README.md'), 'rebuilt\n');
+      writeFileSync(join(req.cwd, 'build-output.txt'), 'x\n');
+      return { summary: 'checked', no_change_needed: 'src/price.js already computes totals in cents (totalCents).' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(runner.calls.map((r) => r.role), ['worker'], 'one attempt, no evaluator, no retries');
+  const e = f.log.read(0, ['issue.no_change']).at(-1)?.payload as { why: string; checks: { check: string; status: string }[] } | undefined;
+  assert.ok(e, types(f.log).join(', '));
+  assert.match(e.why, /already computes totals in cents/);
+  assert.deepEqual(e.checks.map((x) => x.status), ['pass']);
+  assert.equal(f.log.read(0, ['change.rejected']).length, 0, 'leftover build output is not "uncommitted changes" here: the checks ran on the clean base');
+  const issue = await f.backlog.get(n);
+  assert.equal(issue.state, 'open', 'the owner decides whether to close');
+  assert.ok(issue.labels.includes('no-change-needed') && !issue.labels.includes('ready') && !issue.labels.includes('agent:working') && !issue.labels.includes('blocked'));
+  const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => /no change needed/.test(b)) ?? '';
+  assert.match(comment, /pass: `grep -q totalCents src\/price\.js`/);
+  assert.match(comment, /Still for you to check by hand: the dashboard shows cents/);
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
+  assert.equal(git(f.repo, 'worktree', 'list').split('\n').length, 1, 'worktree removed');
+});
+
+test('a worker that claims no change is needed when the checks fail on the base is told so and retried', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Ignore non-positive quantities', body: 'Totals count negative quantities.\n\n```done_when\n- command: grep -q "qty > 0" src/price.js\n```\n', author: 'example-owner', labels: ['ready'] });
+  let attempt = 0;
+  const runner = agents({
+    worker: (req) => {
+      attempt++;
+      if (attempt === 1) return { summary: 's', no_change_needed: 'looks fine to me' };
+      assert.match(req.prompt, /no change needed, but on the unchanged base these checks don't pass:[\s\S]*grep -q "qty > 0" src\/price\.js: fail/);
+      const p = join(req.cwd, 'src', 'price.js');
+      writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+      commitAll(req.cwd, 'Ignore non-positive quantities');
+      return { summary: 'fixed' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(attempt, 2);
+  assert.equal(f.log.read(0, ['issue.no_change']).length, 0);
+  assert.equal(f.log.read(0, ['land.queued']).length, 1);
 });

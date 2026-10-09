@@ -8,6 +8,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
+import { policiesForRepo } from './instance.js';
 
 /** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
 export const HOOK_MARKER = `${BRAND.envPrefix}_HOOK=1`;
@@ -18,7 +19,11 @@ export function templatesDir(): string {
   return fileURLToPath(new URL('../../templates/project/', import.meta.url));
 }
 
-export const MISSING_ENGINE_WARNING = `${BRAND.name} guardrails are off in this checkout: run npm install to enable them.`;
+/** What a human session is told when the engine the hooks point at is missing. */
+export function missingEngineWarning(enginePath: string): string {
+  const fix = enginePath.startsWith('$CLAUDE_PROJECT_DIR/node_modules/') ? 'run npm install to enable them' : `install the ${BRAND.cli} engine on this machine to enable them`;
+  return `${BRAND.name} guardrails are off in this checkout: ${fix}.`;
+}
 
 /**
  * Hook command (POSIX sh; Claude Code runs hooks through bash on every OS).
@@ -31,7 +36,7 @@ export function hookCommand(enginePath: string, event: string): string {
   const run = `${HOOK_MARKER} node "$E" hook ${event} || exit 2`;
   const human =
     event === 'session-start'
-      ? `echo '{"systemMessage": "${MISSING_ENGINE_WARNING}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${MISSING_ENGINE_WARNING} Mention this to the user once."}}'`
+      ? `echo '{"systemMessage": "${missingEngineWarning(enginePath)}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${missingEngineWarning(enginePath)} Mention this to the user once."}}'`
       : ':';
   return `E="${enginePath}"; if [ -f "$E" ]; then ${run}; elif [ "${agentVar}" = 1 ]; then echo "${BRAND.cli}: engine missing at $E, agent sessions are blocked" >&2; exit 2; else ${human}; fi`;
 }
@@ -51,12 +56,11 @@ type Settings = Record<string, unknown> & {
   permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } & Record<string, unknown>;
 };
 
-export function mergeSettings(existing: Settings, enginePath: string, preApproved: string[], domains: string[], stopTimeoutS: number, secretPaths: string[] = []): Settings {
+export function mergeSettings(existing: Settings, enginePath: string, preApproved: string[], domains: string[], secretPaths: string[] = []): Settings {
   const s: Settings = structuredClone(existing);
   const hooks = { ...(s.hooks ?? {}) };
   const ours: Record<string, HookEntry> = {
     PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30 }] },
-    Stop: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'stop'), timeout: stopTimeoutS + 60 }] },
     SessionStart: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-start'), timeout: 30 }] },
     SessionEnd: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-end'), timeout: 300 }] },
   };
@@ -98,6 +102,25 @@ export function projectLocalEngine(root: string): string | null {
   return existsSync(p) ? p : null;
 }
 
+/**
+ * When an instance on this machine runs the repo, start its scaffolded config
+ * within that instance's policy (budget, worker counts), not at the template's
+ * defaults, which the coordinator would refuse.
+ */
+function scaffoldWithinPolicies(cfgDir: string, repo: string): string[] {
+  const policies = policiesForRepo(repo).flatMap((p) => (p.policy ? [p.policy] : []));
+  if (!policies.length) return [];
+  const budget = Math.min(...policies.map((p) => p.budget.daily_usd));
+  const workers = Math.min(...policies.map((p) => p.agents.max_workers));
+  const file = join(cfgDir, 'agents.yaml');
+  const text = readFileSync(file, 'utf8')
+    .replace(/^(daily_budget_usd:\s*)(\d+(?:\.\d+)?)/m, (_m, k: string, v: string) => `${k}${Math.min(Number(v), budget)}`)
+    .replace(/^(\s*workers:.*?\bcount:\s*)(\d+)/m, (_m, k: string, v: string) => `${k}${Math.min(Number(v), workers)}`)
+    .replace(/^(\s*workers:.*?\bmax:\s*)(\d+)/m, (_m, k: string, v: string) => `${k}${Math.min(Number(v), workers)}`);
+  writeFileSync(file, text);
+  return [`agents.yaml starts within this machine's instance policy for ${repo} (budget $${budget}/day, at most ${workers} workers)`];
+}
+
 export interface InstallOptions {
   root: string;
   /** Path to the engine's cli.js (defaults to this running engine). */
@@ -122,6 +145,7 @@ export function install(opts: InstallOptions): InstallReport {
     const config = join(cfgDir, 'config.yaml');
     const repo = gitRemoteRepo(root) ?? 'owner/repo';
     writeFileSync(config, readFileSync(config, 'utf8').replaceAll('{{name}}', basename(root)).replaceAll('{{repo}}', repo));
+    notes.push(...scaffoldWithinPolicies(cfgDir, repo));
     scaffolded = true;
     notes.push(`created ${BRAND.configDir}/ from templates; edit owners, guardrails and tests, then run \`${BRAND.cli} doctor\``);
   }
@@ -130,7 +154,7 @@ export function install(opts: InstallOptions): InstallReport {
   const engineCli = resolve(opts.engineCli ?? projectLocalEngine(root) ?? fileURLToPath(new URL('./cli.js', import.meta.url)));
   const settingsPath = join(root, '.claude', 'settings.json');
   mkdirSync(dirname(settingsPath), { recursive: true });
-  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.tests.stop_gate.timeout_s, cfg.guardrails.credential_stores);
+  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.guardrails.credential_stores);
   writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
   const report: InstallReport = { scaffolded, settingsPath, notes };
   if (opts.gitHooks) report.gitHook = installGitHook(root);

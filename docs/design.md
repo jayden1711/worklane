@@ -2,6 +2,8 @@
 
 Status: **accepted at step 0 (2026-10-07)**, with the answers in §19. Name: Worklane (see [names.md](names.md)).
 
+> **Changed since (stage 3, 2026-10-09).** Worklane keeps only what has shown it catches real problems, plus the controls that limit damage whatever the evidence: separate OS users and credential checks, the sandbox, protected categories that need a human, checks the harness runs itself rather than agents' claims, and no push to main. Removed for lack of evidence: the adaptive agent cap (a fixed, configurable cap remains, default 2), the optional roles of step 7, trust stages, the scorecard, the lessons loop and the Stop gate hook (the coordinator re-runs every `done_when` check itself before anything lands). A removed feature comes back only if the same failure happens twice. Sections below that describe these are kept as history.
+
 This document is the contract for steps 1–7. Each section notes the precedent it follows (details and licenses in [prior-art.md](prior-art.md)) and the step that builds it. Examples describe a hypothetical project. Everything specific to a real project lives in that project's `.worklane/` folder (config plus a `NOTES.md`), never in this repo; a CI denylist check enforces this.
 
 ---
@@ -292,6 +294,8 @@ levels:
                          harness-config, guardrail-config, deletes-data], over_lines: 800 }
 ```
 
+- **Categories** are path globs: built-ins (docs, tests, dependency, harness-config, ...) plus any a project names under `categories:` in review.yaml (a same-named one replaces the built-in). Levels list categories in `when`. A category listed for L1 raises a change that would otherwise be L0, e.g. `L1_evaluator: { when: [docs] }` for a site whose docs are its product.
+
 How each level is cleared:
 
 | Level | What it needs |
@@ -497,6 +501,11 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
   | Reports & Scorecard | |
   | Settings | |
 
+- **Messaging a running agent** (spike, 2026-10-09, confirmed on the always-on machine):
+  - The console sends messages through the session's stream-json input, which the coordinator holds. A message sent mid-turn is queued and answered only after the current turn ends, so the console shows it as pending until then.
+  - Urgent control (pause, stop) uses interrupt and stop, never a message.
+  - Not the cross-session socket: the agent's socket lives in a 0700 directory its own user owns, so the coordinator user can't connect to it, by design of the user split.
+  - Claude Code keeps that directory at a fixed path in `/tmp` (`/tmp/cc-socks`), so each coordinator service has a private `/tmp` shared only with its own agents. Otherwise one instance's agent user would lock out every other's.
 - Cmd+K, keyboard-first, sidebar badge counts, and owner + delegate avatars on every row.
 - Dark and light themes.
 - **Shared mode (step 6):** each coordinator pushes events to a small relay (a Cloudflare Worker + Durable Object, behind Cloudflare Access) that merges both humans' streams with GitHub webhooks. Local mode never needs it.
