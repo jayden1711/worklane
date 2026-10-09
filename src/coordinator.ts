@@ -42,6 +42,8 @@ export interface CoordinatorDeps {
   commandsAs?: RunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
   tokenExpiresAt?: string | null;
+  /** The instance's GitHub App key, whose age the reports watch. */
+  appKeyPath?: string;
   maxAttempts?: number;
   leaseMs?: number;
   /** Nightly queuing (tests inject this). */
@@ -247,7 +249,7 @@ export class Coordinator {
     if (posted.some((e) => (e.payload as { day: string; slot: string }).day === day && (e.payload as { slot: string }).slot === slot)) return;
     const last = posted.at(-1);
     const since = last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000);
-    const report = buildReport(this.d.log.read(), this.d.cfg, { since, now, slot, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}) });
+    const report = buildReport(this.d.log.read(), this.d.cfg, { since, now, slot, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}), ...(this.d.appKeyPath ? { appKeyPath: this.d.appKeyPath } : {}) });
     const to = this.d.cfg.project.reports.to.length ? this.d.cfg.project.reports.to : [this.d.cfg.project.owners.default];
     const mention = to.map((u) => `@${u}`).join(' ');
     let issue = (await this.d.backlog.list('report'))[0]?.number ?? null;
