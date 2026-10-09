@@ -94,6 +94,20 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
   return ['sudo', ['-n', '-u', user, '--', '/usr/bin/env', '-i', ...vars, file, ...args]];
 }
 
+/**
+ * How to spawn a project command (a check, a test suite, a setup step):
+ * under bash with pipefail, and as the instance's agent user when there is
+ * one, with a clean environment. Project commands run code agents wrote, so
+ * they never run as the user that holds the instance's credentials.
+ */
+export function projectCommand(command: string, runAs?: { user: string; home: string }): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  const [file, args] = shellCommand(command);
+  if (!runAs) return { file, args, env: childEnv() };
+  const env = { HOME: runAs.home, USER: runAs.user, LOGNAME: runAs.user, PATH: '/usr/local/bin:/usr/bin:/bin', LANG: process.env.LANG ?? 'C.UTF-8', CI: '1' };
+  const [f, a] = asUser(runAs.user, file, args, env);
+  return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+}
+
 /** Kill a process group that runs as another user: only that user (or root) may signal it. */
 export function killTreeAs(user: string, pgid: number | undefined): void {
   if (!pgid || process.platform === 'win32') return;

@@ -5,13 +5,15 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { childEnv, shellCommand } from './os/index.js';
+import { projectCommand } from './os/index.js';
 
 export interface WorktreeOptions {
   repo: string;
   root: string; // relative to repo, e.g. .claude/worktrees
   stateDir: string;
   setup: string[];
+  /** Setup steps (e.g. npm ci) run the project's own scripts, so they run as the agent user when there is one. */
+  runAs?: { user: string; home: string };
 }
 
 const ownedFile = (o: WorktreeOptions) => join(o.stateDir, 'worktrees.json');
@@ -42,8 +44,8 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
   git(o.repo, 'worktree', 'add', '-q', '-B', branch, path, base);
   const setupErrors: string[] = [];
   for (const step of o.setup) {
-    const [file, args] = shellCommand(step);
-    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env: childEnv(), timeout: 900_000 });
+    const { file, args, env } = projectCommand(step, o.runAs);
+    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
     if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }
   return { path, setupErrors };

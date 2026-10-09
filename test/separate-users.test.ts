@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
 import { initInstance, laneRuns, loadInstance } from '../src/instance.js';
-import { asUser } from '../src/os/index.js';
+import { asUser, projectCommand } from '../src/os/index.js';
 import { agentEnv, cliArgs, CliRunner, runAsEnv } from '../src/runner.js';
 import { sandboxSettings } from '../src/sandbox.js';
+import { instanceEnv } from '../src/service.js';
 import { exampleProject } from './helpers.js';
 
 function instance(extraInstance = '', policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n') {
@@ -67,6 +68,10 @@ test('acceptance: an agent running `python -c "open(<token path>)"` fails; the c
     assert.notEqual(r.status, 0, `${file} read the secret as ${agentUser}`);
     assert.match(r.stderr, /Permission denied|PermissionError/, r.stderr);
   }
+  // A project command (a check or test suite, which runs agent-written code) is just as unable to read it.
+  const pc = projectCommand(`cat ${JSON.stringify(secret)}`, { user: agentUser!, home: `/home/${agentUser}` });
+  const pr = spawnSync(pc.file, pc.args, { encoding: 'utf8', env: pc.env, timeout: 30_000 });
+  assert.notEqual(pr.status, 0, 'a project command read the secret');
   // And the agent user really runs: it can read a world-readable file.
   const [f, a] = asUser(agentUser!, 'python3', ['-c', 'import os; print(os.getuid() != 0)'], env);
   const ok = spawnSync(f, a, { encoding: 'utf8', env: { PATH: env.PATH! }, timeout: 30_000 });
@@ -122,4 +127,32 @@ test('a run in a lane the instance does not define is refused', async () => {
   const r = await new CliRunner('cli', { PATH: '' }, 'claude', undefined, { default: {} }).run({ prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker', lane: 'nope' });
   assert.equal(r.reason, 'failed');
   assert.match(r.detail, /unknown lane "nope"/);
+});
+
+test('the coordinator\'s git runs no hooks and no fsmonitor command, whatever a checkout agents can write to says', { skip: process.platform === 'win32' && 'POSIX hooks' }, () => {
+  const { dir, home } = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n');
+  const repo = loadInstance('shop', dir).repo.path;
+  const marker = join(home, 'pwned');
+  // What an agent could plant if it could write the checkout's git config or hooks.
+  writeFileSync(join(repo, '.git', 'hooks', 'post-checkout'), `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o755 });
+  spawnSync('git', ['config', 'core.fsmonitor', `touch ${marker}.fsmonitor; false`], { cwd: repo });
+  const env = instanceEnv(loadInstance('shop', dir), { PATH: process.env.PATH });
+  const r = spawnSync('git', ['checkout', '-q', '-b', 'probe'], { cwd: repo, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  spawnSync('git', ['status', '--porcelain'], { cwd: repo, env });
+  assert.equal(existsSync(marker), false, 'the planted hook did not run');
+  assert.equal(existsSync(`${marker}.fsmonitor`), false, 'the planted fsmonitor command did not run');
+  // Sanity: without the coordinator's environment, the planted hook would have run.
+  spawnSync('git', ['checkout', '-q', '-b', 'probe2'], { cwd: repo, env: { PATH: process.env.PATH } });
+  assert.equal(existsSync(marker), true);
+});
+
+test('project commands (checks, gates, setup, full runs) run as the agent user with a clean environment', () => {
+  const { file, args, env } = projectCommand('npm test | tail -5', { user: 'shop-agent', home: '/home/shop-agent' });
+  assert.equal(file, 'sudo');
+  assert.deepEqual(args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
+  assert.ok(args.includes('HOME=/home/shop-agent') && args.includes('USER=shop-agent'));
+  assert.ok(!args.some((a) => /GH_|GITHUB|TOKEN|GIT_CONFIG/.test(a)), 'no credentials or git helpers reach project code');
+  assert.deepEqual(args.slice(-4), ['-o', 'pipefail', '-c', 'npm test | tail -5']);
+  assert.deepEqual(Object.keys(env), ['PATH'], 'sudo itself gets only PATH');
 });
