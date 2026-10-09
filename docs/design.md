@@ -294,6 +294,8 @@ levels:
                          harness-config, guardrail-config, deletes-data], over_lines: 800 }
 ```
 
+- **Categories** are path globs: built-ins (docs, tests, dependency, harness-config, ...) plus any a project names under `categories:` in review.yaml (a same-named one replaces the built-in). Levels list categories in `when`. A category listed for L1 raises a change that would otherwise be L0, e.g. `L1_evaluator: { when: [docs] }` for a site whose docs are its product.
+
 How each level is cleared:
 
 | Level | What it needs |
@@ -499,6 +501,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
   | Reports & Scorecard | |
   | Settings | |
 
+- **Messaging a running agent** (spike, 2026-10-09): a message sent on a session's stream-json input mid-turn is queued and answered only after the current turn ends. The console shows a sent message as pending until that turn ends. Urgent control (pause, stop) uses interrupt and stop, never a message.
 - Cmd+K, keyboard-first, sidebar badge counts, and owner + delegate avatars on every row.
 - Dark and light themes.
 - **Shared mode (step 6):** each coordinator pushes events to a small relay (a Cloudflare Worker + Durable Object, behind Cloudflare Access) that merges both humans' streams with GitHub webhooks. Local mode never needs it.
