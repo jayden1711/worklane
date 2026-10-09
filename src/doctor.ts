@@ -52,7 +52,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean } = {}): D
   else {
     try {
       const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as { hooks?: Record<string, { hooks?: { command: string }[] }[]> };
-      for (const event of ['PreToolUse', 'Stop', 'SessionStart', 'SessionEnd']) {
+      for (const event of ['PreToolUse', 'SessionStart', 'SessionEnd']) {
         const cmds = (s.hooks?.[event] ?? []).flatMap((e) => e.hooks ?? []).map((h) => h.command).filter((c) => c.includes(HOOK_MARKER));
         if (cmds.length !== 1) {
           add(`hook ${event}`, 'fail', cmds.length ? `${cmds.length} ${BRAND.cli} entries (expected 1)` : 'not installed');

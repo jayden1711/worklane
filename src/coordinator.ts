@@ -14,19 +14,14 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv, cpuCount, diskFree, killTree, machineLoad, memAvailableGb, shellCommand, slotsDir, spawnDetached } from './os/index.js';
-import { computeLevel, loadMoneyPaths, maxLevel, type ChangeFile, type Level } from './review.js';
+import { childEnv, cpuCount, diskFree, killTree, machineLoad, shellCommand, spawnDetached } from './os/index.js';
+import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import type { AgentRunner, RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
 import { fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
-import { effectiveStage, health, healthyStreak, regressed, relaxedFor } from './trust.js';
 import { buildReport, dueSlot } from './reports.js';
-import { lessonsMarkdown, pendingLessons, skillCandidates } from './lessons.js';
-import type { Scorecard } from './scorecard.js';
-import { runExtras, securityReview, type ExtraCtx } from './extras.js';
-import { evaluateCap, publishSignals } from './cap.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -48,7 +43,7 @@ export interface CoordinatorDeps {
   /** Nightly queuing (tests inject this). */
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string) => { id: string }[];
   /** Machine readings (tests inject these). */
-  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number }; mem?: () => number | null };
+  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
@@ -137,15 +132,11 @@ export class Coordinator {
     };
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
-    await step('trust', () => this.maybeTrust(), undefined);
     await step('report', () => this.maybeReport(), undefined);
-    await step('lessons', () => this.maybeLessons(), undefined);
-    await step('extras', () => runExtras(this.extraCtx(), (b, f, c, t, body) => this.openDocPr(b, f, c, t, body)), undefined);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
-    await step('cap', () => this.shareCap(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
-    this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled, active: this.active.size, ready: this.readyCount });
+    this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
 
   /**
@@ -204,8 +195,6 @@ export class Coordinator {
   }
 
   private lastHold: string | null = null;
-  /** Actionable ready issues seen on the last dispatch pass (for idle-hours). */
-  private readyCount = 0;
 
   /** Post the report for the latest configured time already passed today, once. */
   async maybeReport(now = new Date()) {
@@ -216,120 +205,13 @@ export class Coordinator {
     if (posted.some((e) => (e.payload as { day: string; slot: string }).day === day && (e.payload as { slot: string }).slot === slot)) return;
     const last = posted.at(-1);
     const since = last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000);
-    const prev = (last?.payload as { card?: Scorecard } | undefined)?.card ?? null;
-    const report = buildReport(this.d.log.read(), this.d.cfg, { since, now, previous: prev, slot });
+    const report = buildReport(this.d.log.read(), this.d.cfg, { since, now, slot });
     const to = this.d.cfg.project.reports.to.length ? this.d.cfg.project.reports.to : [this.d.cfg.project.owners.default];
     const mention = to.map((u) => `@${u}`).join(' ');
     let issue = (await this.d.backlog.list('report'))[0]?.number ?? null;
     if (issue === null) issue = await this.d.backlog.createIssue(`${BRAND.name} reports`, `Scheduled ${BRAND.name} reports are posted here as comments (${this.d.cfg.project.reports.times.join(' and ')}).`, ['report']);
     await this.d.backlog.comment(issue, `${report.markdown}\n\n${mention}`.trim());
-    const card = Object.fromEntries(Object.entries(report.card).filter(([, v]) => typeof v !== 'object' || v === null)) as Record<string, number | string | null>;
-    this.emit('report.posted', { day, slot, issue, card });
-  }
-
-  /** Once a day: new lessons go to the project's lessons folder on a branch, as a PR for the owner. */
-  async maybeLessons(now = new Date()) {
-    const day = now.toLocaleDateString('en-CA');
-    if (this.d.log.read(0, ['lessons.pr']).some((e) => (e.payload as { day: string }).day === day)) return;
-    const events = this.d.log.read();
-    const lessons = pendingLessons(events);
-    if (!lessons.length) return;
-    const branch = `${BRAND.cli}/lessons-${day}`;
-    const title = `Lessons from ${lessons.length} task(s), ${day}`;
-    const body = `Lessons agents proposed after their tasks. Approve to keep them; edit or drop any that are wrong.\n\n${lessons.map((l) => `- #${l.issue} ${l.title}`).join('\n')}`;
-    const url = await this.openDocPr(branch, `${BRAND.configDir}/lessons/${day}.md`, lessonsMarkdown(day, lessons, skillCandidates(events)) + '\n', title, body);
-    this.emit('lessons.pr', { day, branch, count: lessons.length, url });
-  }
-
-  /** Report this instance's signals for the shared adaptive cap, and evaluate it if due. */
-  private async shareCap(now = new Date()) {
-    const runs = this.d.log.read(0, ['run.finished']);
-    const limit = [...runs].reverse().find((e) => (e.payload as { reason: string }).reason === 'rate_limited');
-    const owner = this.d.cfg.project.owners.default;
-    const landWaiting = this.d.log
-      .read(0, ['decision.asked'])
-      .filter((q) => (q.payload as { kind: string; owner: string }).kind === 'land' && (q.payload as { owner: string }).owner === owner)
-      .filter((q) => !this.d.log.read(q.id, ['decision.answered']).some((a) => (a.payload as { id: string }).id === (q.payload as { id: string }).id)).length;
-    let prs: number | null = null;
-    try {
-      prs = (await this.d.backlog.prsAwaitingReview(owner)) + landWaiting;
-    } catch {
-      prs = null; // unknown: the cap holds rather than guessing
-    }
-    const verdicts = this.d.log.read(0, ['eval.verdict']).slice(-20).map((e) => ({ at: e.ts, pass: (e.payload as { patch_correct: boolean }).patch_correct }));
-    const name = this.d.cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-');
-    publishSignals(this.d.slotsDir ?? slotsDir(), { instance: name, at: now.toISOString(), lastUsageLimitAt: limit?.ts ?? null, prsWaiting: prs, verdicts });
-    const change = evaluateCap(this.d.slotsDir ?? slotsDir(), (this.d.machine?.mem ?? memAvailableGb)(), now);
-    if (change) this.emit('cap.changed', change);
-  }
-
-  private extraCtx(): ExtraCtx {
-    return {
-      cfg: this.d.cfg,
-      log: this.d.log,
-      backlog: this.d.backlog,
-      runner: this.d.runner,
-      repo: this.d.repo,
-      stateDir: this.d.stateDir,
-      branch: this.branch,
-      remote: this.remote,
-      emit: (type, payload) => this.emit(type, payload),
-      git: (cwd, ...args) => this.git(cwd, ...args),
-      sh: (command, cwd) => sh(command, cwd),
-      hold: () => this.governorHold()?.reason ?? null,
-      budgetLeft: () => this.d.cfg.agents.daily_budget_usd - this.spentToday(),
-      now: () => new Date(),
-    };
-  }
-
-  /** Write one file on a fresh branch off main and open a PR for it (lessons, release notes). Main is untouched. */
-  private async openDocPr(branch: string, file: string, content: string, title: string, body: string): Promise<string> {
-    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
-    const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-    const name = branch.replace(/[^a-z0-9-]+/gi, '-');
-    const { path } = createWorktree({ ...this.wt, setup: [] }, name, branch, tip);
-    try {
-      mkdirSync(dirname(join(path, file)), { recursive: true });
-      writeFileSync(join(path, file), content);
-      this.git(path, 'add', file);
-      this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit', '-q', '-m', title);
-      this.git(path, 'push', '-q', this.remote, `HEAD:refs/heads/${branch}`);
-      return await this.d.backlog.openPr(branch, this.branch, title, body);
-    } finally {
-      removeWorktree(this.wt, name);
-    }
-  }
-
-  stage(): number {
-    return effectiveStage(this.d.log.read(0, ['stage.changed']), this.d.cfg.agents.stage);
-  }
-
-  /**
-   * Once a day: score the window. A regression demotes one stage on its own
-   * (never below the configured start); a healthy streak asks the owner to
-   * promote, if review.yaml defines a next stage.
-   */
-  private async maybeTrust(now = new Date()) {
-    const day = now.toLocaleDateString('en-CA');
-    if (this.d.log.read(0, ['trust.evaluated']).some((e) => (e.payload as { day: string }).day === day)) return;
-    const events = this.d.log.read();
-    const stage = this.stage();
-    const h = health(events, this.d.cfg.agents.trust, now);
-    const card = Object.fromEntries(Object.entries(h.card).filter(([, v]) => typeof v !== 'object' || v === null)) as Record<string, number | string | null>;
-    this.emit('trust.evaluated', { day, stage, healthy: h.healthy, why: h.why, card });
-    if (regressed(h) && stage > this.d.cfg.agents.stage) {
-      this.emit('stage.changed', { from: stage, to: stage - 1, by: 'auto', reason: `regression: ${h.why.join('; ')}` });
-      return;
-    }
-    const next = (this.d.cfg.review?.stages ?? []).find((s) => s.stage === stage + 1);
-    const openStage = this.d.log.read(0, ['decision.asked']).some((q) => (q.payload as { kind: string }).kind === 'stage' && !this.d.log.read(q.id, ['decision.answered']).some((a) => (a.payload as { id: string }).id === (q.payload as { id: string }).id));
-    if (h.healthy && next && !openStage && healthyStreak(this.d.log.read()) >= this.d.cfg.agents.trust.promote_after_days) {
-      await this.ask('stage', null, this.d.cfg.project.owners.default, `Promote to trust stage ${next.stage}?`, ['approve', 'reject'], 'approve', [
-        `healthy ${this.d.cfg.agents.trust.promote_after_days} days in a row`,
-        `would relax: ${next.relax.map((r) => `${r.category} -> ${r.to}`).join(', ')}`,
-        `evaluator pass rate ${h.card.evaluatorPassRate}, unverified claims ${h.card.unverifiedClaimRate}, reverts ${h.card.reverts}`,
-      ]);
-    }
+    this.emit('report.posted', { day, slot, issue });
   }
 
   /** Queue the nightly runs once a day, after tests.yaml nightly_at. */
@@ -369,8 +251,6 @@ export class Coordinator {
     if (!workers?.enabled) return 0;
     let started = 0;
     const ready = await this.d.backlog.list('ready');
-    // Real waiting work only: last seen as actionable (writer-approved, with a contract), not running.
-    this.readyCount = ready.filter((i) => !this.active.has(i.number) && this.isTerminal(i.number) && (this.lastSeen(i.number) as { actionable?: boolean } | undefined)?.actionable === true).length;
     // Fill free capacity this tick: one pass over the ready issues, one start per free worker.
     for (const issue of ready) {
       if (this.active.size >= (workers.count ?? 1)) break;
@@ -476,16 +356,11 @@ export class Coordinator {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
-        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, relaxed: relaxedFor(this.stage(), this.d.cfg.review), ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
-        let lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
-        // The optional security reviewer can only raise the level, never lower it.
-        const sec = await securityReview(this.extraCtx(), { issue: n, path, base, head, categories: Object.keys(lvl.categories).filter((c) => lvl.categories[c]!.length) });
-        if (sec.requested) lvl = computeLevel({ ...levelInput, requested: maxLevel(levelInput.requested ?? 'L0', sec.requested) }, this.d.cfg.review ?? DEFAULT_REVIEW);
-        lvl = { ...lvl, reasons: [...lvl.reasons, ...sec.receipts] };
+        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
+        const lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
-        if (out.lesson) this.emit('lesson.proposed', { issue: n, ...out.lesson });
         if (lvl.level === 'L3') {
           await this.ask('land', n, owner, `Approve landing #${n} (${lvl.level})?`, ['approve', 'reject'], verdict.patch_correct ? 'approve' : 'reject', [`head ${head.slice(0, 8)}`, ...lvl.reasons, `evaluator: ${verdict.confidence}; ${verdict.advice || 'no concerns'}`]);
         } else {
@@ -626,7 +501,7 @@ export class Coordinator {
     void pid;
     this.cost(n, 'worker', r);
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; lesson?: { worked: string; failed: string; fix: string }; blocked?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
     const owner = this.ownerOf(n);
     if (r.reason === 'rate_limited' || r.reason === 'budget_exhausted' || r.reason === 'auth_mismatch') {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, false);
@@ -640,7 +515,7 @@ export class Coordinator {
       await this.block(n, owner, s.blocked);
       return { stop: true as const };
     }
-    return { stop: false as const, ...(s.lesson ? { lesson: s.lesson } : {}), ...(s.raise_review ? { raise: s.raise_review } : {}) };
+    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}) };
   }
 
   /** Mechanical checks on what the worker produced, before anyone trusts it. */
@@ -767,7 +642,7 @@ export class Coordinator {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  private async ask(kind: 'land' | 'question' | 'stage', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]) {
+  private async ask(kind: 'land' | 'question', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]) {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
     if (issue === null) return; // not tied to an issue: answered from the dashboard or CLI
@@ -806,15 +681,6 @@ export class Coordinator {
     const cmd = new RegExp(`^/${BRAND.cli}\\s+(\\S+)`, 'm');
     for (const asked of this.d.log.read(0, ['decision.asked'])) {
       const q = asked.payload as EventPayload<'decision.asked'>;
-      if (q.kind === 'stage') {
-        const a = this.d.log.read(asked.id, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
-        const acted = this.d.log.read(asked.id, ['stage.changed']).length > 0;
-        if (a && !acted && a.answer === 'approve') {
-          const to = Number(q.question.match(/stage (\d+)/)?.[1] ?? this.stage() + 1);
-          this.emit('stage.changed', { from: this.stage(), to, by: a.by, reason: `approved by ${a.by}` });
-        }
-        continue;
-      }
       if (q.issue === null) continue;
       const later = this.events(q.issue).filter((e) => e.id > asked.id);
       // Already acted on: something moved the task on since the question.

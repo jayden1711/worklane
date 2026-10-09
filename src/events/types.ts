@@ -1,5 +1,5 @@
 // Every action is a typed event. Projections (task state, dashboard,
-// reports, scorecard) are folds over these; nothing keeps private state.
+// reports) are folds over these; nothing keeps private state.
 import { z } from 'zod';
 
 const issue = z.number().int().positive();
@@ -47,7 +47,7 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'stage']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
@@ -61,20 +61,12 @@ export const EventSchemas = {
   'guardrail.decision': z.strictObject({ decision: z.enum(['deny', 'ask']), rule: z.string(), agent: z.boolean() }),
   'secret.detected': z.strictObject({ source: z.string(), findings: z.number().int().nonnegative() }),
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
-  'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int(), active: z.number().int().optional(), ready: z.number().int().optional() }),
-  'trust.evaluated': z.strictObject({ day: z.string(), stage: z.number().int(), healthy: z.boolean(), why: z.array(z.string()), card: z.record(z.string(), z.union([z.number(), z.string(), z.null()])) }),
-  'stage.changed': z.strictObject({ from: z.number().int(), to: z.number().int(), by: z.string(), reason: z.string() }),
-  'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable(), card: z.record(z.string(), z.union([z.number(), z.string(), z.null()])) }),
-  'lessons.pr': z.strictObject({ day: z.string(), branch: z.string(), count: z.number().int(), url: z.string() }),
-  /** An optional role ran on a trigger; key de-duplicates (one run per trigger). */
-  'extra.run': z.strictObject({ role: z.string(), key: z.string(), reason: z.string(), summary: z.string(), actions: z.array(z.string()) }),
-  'security.review': z.strictObject({ issue, head: sha, verdict: z.enum(['clear', 'concerns', 'block']), findings: z.array(z.strictObject({ severity: z.enum(['low', 'medium', 'high', 'critical']), file: z.string(), issue: z.string(), evidence: z.string() })) }),
-  'cap.changed': z.strictObject({ from: z.number().int(), to: z.number().int(), reason: z.string() }),
+  'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
+  'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
-  'lesson.proposed': z.strictObject({ issue, worked: z.string(), failed: z.string(), fix: z.string() }),
 } as const;
 
 export type EventType = keyof typeof EventSchemas;

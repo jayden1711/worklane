@@ -41,7 +41,6 @@ export const PolicyFile = z.strictObject({
   agents: z
     .strictObject({
       max_workers: z.number().int().min(0).max(32).default(2),
-      max_stage: z.number().int().min(1).max(9).default(1),
     })
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
@@ -124,7 +123,6 @@ export function policyViolations(cfg: Config, policy: PolicyFile): ConfigError[]
   if (cfg.agents.daily_budget_usd > policy.budget.daily_usd) v('agents.yaml', 'daily_budget_usd', `${cfg.agents.daily_budget_usd} exceeds the policy budget ${policy.budget.daily_usd}`);
   const w = cfg.agents.roles.workers;
   for (const k of ['count', 'max'] as const) if (w?.[k] !== undefined && w[k]! > policy.agents.max_workers) v('agents.yaml', `roles.workers.${k}`, `${w[k]} exceeds the policy's max_workers ${policy.agents.max_workers}`);
-  if (cfg.agents.stage > policy.agents.max_stage) v('agents.yaml', 'stage', `stage ${cfg.agents.stage} exceeds the policy's max_stage ${policy.agents.max_stage}`);
   if (policy.land_mode === 'pr' && cfg.project.land_mode === 'direct') v('config.yaml', 'land_mode', 'direct landing, but the policy requires pr');
   if (policy.network_allow) for (const d of cfg.guardrails.network.allow) if (!policy.network_allow.includes(d)) v('guardrails.yaml', 'network.allow', `${d} is not in the policy's network_allow`);
   if (policy.pre_approved) for (const t of cfg.guardrails.pre_approved) if (!policy.pre_approved.includes(t)) v('guardrails.yaml', 'pre_approved', `${t} is not in the policy's pre_approved`);
@@ -193,7 +191,7 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
     'instance.yaml',
     `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${instanceName}-agent\n  agent_home: /home/${instanceName}-agent\n`,
   );
-  write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2, max_stage: 1 }\nland_mode: pr\n`);
+  write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2 }\nland_mode: pr\n`);
   write(
     'credentials.yaml',
     `# References only. Point these at credentials made for this instance; never your own login.\nversion: 1\ngithub: { kind: gh-config-dir, path: ${JSON.stringify(join(home, 'gh'))} }\n# claude: { config_dir: ... }   only when agents run as this user (no run_as)\n`,

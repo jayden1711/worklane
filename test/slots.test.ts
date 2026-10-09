@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { currentCap, machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
+import { machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
 import { slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
 
@@ -38,8 +38,8 @@ test('regression: after the cap drops, a free low-numbered slot does not let a n
   const held = [0, 1, 2, 3].map((k) => tryAgentSlot(`a${k}`, dir)!);
   assert.ok(held.every(Boolean));
   assert.equal(tryAgentSlot('extra', dir), null, 'full at 4');
-  writeFileSync(join(dir, 'cap.json'), JSON.stringify({ cap: 2 }));
-  assert.equal(currentCap(dir), 2, 'the adaptive cap wins over max_agents');
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ max_agents: 2 }));
+  assert.equal(machineCap(dir), 2, 'the operator lowers the cap');
   held[0]!.release();
   assert.equal(slotStatus(dir).agents.length, 3);
   assert.equal(tryAgentSlot('newcomer', dir), null, 'slot 0 is free, but 3 are running against a cap of 2');

@@ -51,12 +51,11 @@ type Settings = Record<string, unknown> & {
   permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } & Record<string, unknown>;
 };
 
-export function mergeSettings(existing: Settings, enginePath: string, preApproved: string[], domains: string[], stopTimeoutS: number, secretPaths: string[] = []): Settings {
+export function mergeSettings(existing: Settings, enginePath: string, preApproved: string[], domains: string[], secretPaths: string[] = []): Settings {
   const s: Settings = structuredClone(existing);
   const hooks = { ...(s.hooks ?? {}) };
   const ours: Record<string, HookEntry> = {
     PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30 }] },
-    Stop: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'stop'), timeout: stopTimeoutS + 60 }] },
     SessionStart: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-start'), timeout: 30 }] },
     SessionEnd: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-end'), timeout: 300 }] },
   };
@@ -130,7 +129,7 @@ export function install(opts: InstallOptions): InstallReport {
   const engineCli = resolve(opts.engineCli ?? projectLocalEngine(root) ?? fileURLToPath(new URL('./cli.js', import.meta.url)));
   const settingsPath = join(root, '.claude', 'settings.json');
   mkdirSync(dirname(settingsPath), { recursive: true });
-  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.tests.stop_gate.timeout_s, cfg.guardrails.credential_stores);
+  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.guardrails.credential_stores);
   writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
   const report: InstallReport = { scaffolded, settingsPath, notes };
   if (opts.gitHooks) report.gitHook = installGitHook(root);

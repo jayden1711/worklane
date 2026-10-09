@@ -7,15 +7,9 @@ import type { DoneWhenList, Issue } from './backlog/types.js';
 export const WORKER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary', 'lesson'],
+  required: ['summary'],
   properties: {
     summary: { type: 'string', description: 'What you changed and how you verified it, in 2-5 sentences.' },
-    lesson: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['worked', 'failed', 'fix'],
-      properties: { worked: { type: 'string' }, failed: { type: 'string' }, fix: { type: 'string' } },
-    },
     blocked: { type: 'string', description: 'Set only if you could not finish: what blocks you.' },
     ask: {
       type: 'object',

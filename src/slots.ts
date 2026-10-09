@@ -1,8 +1,7 @@
 // Machine-wide slots, shared by every agent harness on the machine through
 // a tiny file protocol (docs/slots.md):
-//   <config>                 {"max_agents": N, "adaptive": {...}}  the machine cap, set once per box
+//   <config>                 {"max_agents": N}   the machine cap, set once per box
 //                            (/etc/<cli>/slots.json with the system slot dir, else <dir>/config.json)
-//   <dir>/cap.json           {"cap": N}  the adaptive cap, when the cap evaluator runs
 //   <dir>/slots.lock         held briefly while counting and taking a slot
 //   <dir>/agent-<i>.lock     one per running agent; the count, not the index, is capped
 //   <dir>/full-run.lock      at most one full test run on the machine
@@ -21,20 +20,6 @@ export function machineCap(dir = slotsDir()): number {
   } catch {
     return DEFAULT_MAX_AGENTS;
   }
-}
-
-/**
- * The cap in force now: the adaptive cap (cap.json, written by the cap
- * evaluator) when there is one, else the configured max_agents.
- */
-export function currentCap(dir = slotsDir()): number {
-  try {
-    const n = (JSON.parse(readFileSync(join(dir, 'cap.json'), 'utf8')) as { cap?: unknown }).cap;
-    if (typeof n === 'number' && Number.isInteger(n) && n >= 1) return n;
-  } catch {
-    // no adaptive cap: the configured one applies
-  }
-  return machineCap(dir);
 }
 
 /** Slot files may be numbered past the cap: lowering it must never strand an agent that is still running. */
@@ -56,7 +41,7 @@ export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
   }
   if (!guard) return null; // busy for 2s: treat as full and try again next tick
   try {
-    if (slotStatus(dir).agents.length >= currentCap(dir)) return null;
+    if (slotStatus(dir).agents.length >= machineCap(dir)) return null;
     for (let i = 0; i < SLOT_INDEX_LIMIT; i++) {
       const r = tryLock(join(dir, `agent-${i}.lock`), owner);
       if ('lock' in r) return r.lock;
@@ -98,5 +83,5 @@ export function slotStatus(dir = slotsDir()): SlotStatus {
     .map((f) => ({ f, info: read(f) }))
     .filter((x): x is { f: string; info: LockInfo } => !!x.info)
     .map(({ f, info }) => ({ ...info, slot: f.replace('.lock', '') }));
-  return { cap: currentCap(dir), agents, fullRun: files.includes('full-run.lock') ? read('full-run.lock') : null };
+  return { cap: machineCap(dir), agents, fullRun: files.includes('full-run.lock') ? read('full-run.lock') : null };
 }

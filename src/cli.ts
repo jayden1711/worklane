@@ -11,12 +11,12 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
 import { install } from './install.js';
-import { homeDir, slotsConfigPath, slotsDir } from './os/index.js';
+import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
-import { currentCap, slotStatus } from './slots.js';
+import { slotStatus } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
@@ -25,7 +25,6 @@ import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
-import { adaptiveConfig, noteLimit, readCapState } from './cap.js';
 import { openUrl } from './os/index.js';
 import { backlogFor, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { EventLog } from './events/log.js';
@@ -60,8 +59,6 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
-  cap show                         the shared agent cap, why it is where it is, and each condition
-  cap note-limit                   record that you hit a Claude usage limit outside the harness
   coordinator run [--once] [--instance name]
                                    run the coordinator in the foreground (the service runs this)
   up | down [--instance name]      install or remove the coordinator as a per-user service
@@ -415,7 +412,7 @@ async function main(argv: string[]): Promise<number> {
       const log = new EventLog(logPath(root));
       try {
         const last = log.read(0, ['report.posted']).at(-1);
-        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), previous: (last?.payload as { card?: never } | undefined)?.card ?? null }).markdown);
+        console.log(buildReport(log.read(), cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000) }).markdown);
       } finally {
         log.close();
       }
@@ -452,32 +449,6 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
-    case 'cap': {
-      const dir = slotsDir();
-      if (sub === 'note-limit') {
-        noteLimit(dir);
-        console.log('noted: the cap will not rise for the usage window, and drops at its next check');
-        return 0;
-      }
-      if (sub === 'show') {
-        const st = readCapState(dir);
-        if (!adaptiveConfig(dir)) {
-          console.log(`fixed cap ${currentCap(dir)} (no "adaptive" in ${slotsConfigPath(dir)})`);
-          return 0;
-        }
-        if (!st) {
-          console.log('adaptive cap not evaluated yet (a coordinator evaluates it on its next tick)');
-          return 0;
-        }
-        console.log(`cap ${st.cap} (floor ${st.floor}, ceiling ${st.ceiling}); changed ${st.changedAt}: ${st.reason}`);
-        for (const c of st.conditions) console.log(`  ${c.state.padEnd(7)} ${c.name}: ${c.detail}`);
-        console.log(`  checked ${st.checkedAt}`);
-        return 0;
-      }
-      console.error('usage: cap show | cap note-limit');
-      return 2;
-    }
-
     case 'instance': {
       if (sub === 'list') {
         for (const n of listInstances()) console.log(n);
@@ -499,7 +470,7 @@ async function main(argv: string[]): Promise<number> {
         const i = loadInstance(target);
         const missing = credentialProblems(i.credentials);
         console.log(`${i.name}: ${i.repo.repo} at ${i.repo.path}`);
-        console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, stage <= ${i.policy.agents.max_stage}, land ${i.policy.land_mode}`);
+        console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, land ${i.policy.land_mode}`);
         console.log(`  repo config: within policy`);
         const gh = i.credentials.github;
         console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, key ${gh.key_path}` : `gh config ${gh.path}`}`);

@@ -34,7 +34,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
 
   return (
     <div>
-      <Header title="Overview" sub={`${state.project.repo} · land mode ${state.project.landMode} · stage ${state.project.stage}`} />
+      <Header title="Overview" sub={`${state.project.repo} · land mode ${state.project.landMode}`} />
       <div className="space-y-6 p-6">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           <Stat label="Agents running" value={`${state.slots.running} / ${state.slots.cap}`} hint="machine-wide, all harnesses" />

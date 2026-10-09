@@ -37,7 +37,6 @@ const ISSUES: { title: string; body: string; author: string; labels: string[]; l
 function agents() {
   return new FakeRunner((req: RunRequest) => {
     const brief = req.prompt;
-    const lesson = { worked: 'read the code first', failed: '', fix: '' };
     if (req.role === 'evaluator-repro') {
       writeFileSync(join(req.cwd, 'test', 'repro-qty.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { totalCents } from '../src/price.js';\ntest('ignores non-positive quantities', () => { assert.equal(totalCents([{ cents: 100, qty: -2 }, { cents: 5, qty: 1 }]), 5); });\n");
       commitAll(req.cwd, 'repro');
@@ -54,26 +53,26 @@ function agents() {
       const p = join(req.cwd, 'src', 'price.js');
       writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
       commitAll(req.cwd, 'Ignore non-positive quantities in totals');
-      return { structured: { summary: 'Guarded qty; repro passes.', lesson }, costUsd: 0.42 };
+      return { structured: { summary: 'Guarded qty; repro passes.' }, costUsd: 0.42 };
     }
     if (/rounding rule/.test(brief)) {
       writeFileSync(join(req.cwd, 'README.md'), readFileSync(join(req.cwd, 'README.md'), 'utf8') + '\nDiscounts round to the nearest cent.\n');
       commitAll(req.cwd, 'Document discount rounding');
-      return { structured: { summary: 'Documented.', lesson }, costUsd: 0.09 };
+      return { structured: { summary: 'Documented.' }, costUsd: 0.09 };
     }
     if (/orders table/.test(brief)) {
       mkdirSync(join(req.cwd, 'migrations'), { recursive: true });
       writeFileSync(join(req.cwd, 'migrations', '001_orders.sql'), 'CREATE TABLE orders (id int primary key, cents int not null);\n');
       commitAll(req.cwd, 'Add orders migration');
-      return { structured: { summary: 'Migration added.', lesson }, costUsd: 0.37 };
+      return { structured: { summary: 'Migration added.' }, costUsd: 0.37 };
     }
     if (/Free shipping/.test(brief)) {
-      return { structured: { summary: 'Need the threshold.', lesson, ask: { question: 'What order total should get free shipping?', options: ['$50', '$75', '$100'], recommendation: '$50' } }, costUsd: 0.12 };
+      return { structured: { summary: 'Need the threshold.', ask: { question: 'What order total should get free shipping?', options: ['$50', '$75', '$100'], recommendation: '$50' } }, costUsd: 0.12 };
     }
     if (/Speed up totals/.test(brief)) {
-      return { structured: { summary: 'Tried twice; the benchmark is not in the repo.', lesson }, costUsd: 0.55 }; // commits nothing: rejected until blocked
+      return { structured: { summary: 'Tried twice; the benchmark is not in the repo.' }, costUsd: 0.55 }; // commits nothing: rejected until blocked
     }
-    return { structured: { summary: 'done', lesson }, costUsd: 0.1 };
+    return { structured: { summary: 'done' }, costUsd: 0.1 };
   });
 }
 

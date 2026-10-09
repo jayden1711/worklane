@@ -8,8 +8,7 @@ import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
-import { runStopGate, TaskFile } from './stopgate.js';
-import { readBaseline } from './baseline.js';
+import { TaskFile } from './contract.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
 import { splitCommands } from './guardrails/shell.js';
 
@@ -106,48 +105,6 @@ export function gitCommit(command: string): { all: boolean } | null {
   return null;
 }
 
-async function stop(input: HookInput, env: NodeJS.ProcessEnv): Promise<HookOutput> {
-  const cwd = input.cwd ?? process.cwd();
-  const root = findProjectRoot(cwd);
-  const taskFile = env[`${BRAND.envPrefix}_TASK_FILE`];
-  const block = (reason: string): HookOutput => ({ stdout: JSON.stringify({ decision: 'block', reason: `[${BRAND.cli} stop gate] ${reason}` }), exitCode: 0 });
-  // Human sessions have no Stop gate (recorded, not silent). Agent sessions always do.
-  if (!isAgent(env)) {
-    if (root) log(root, 'stopgate.jsonl', { outcome: 'human_session', session: input.session_id });
-    return { exitCode: 0 };
-  }
-  const role = env[`${BRAND.envPrefix}_ROLE`];
-  if (!taskFile && role && role !== 'worker') {
-    // Evaluators change no code; their output is validated by the coordinator instead.
-    if (root) log(root, 'stopgate.jsonl', { outcome: 'no_gate_for_role', role, session: input.session_id });
-    return { exitCode: 0 };
-  }
-  if (!taskFile) {
-    if (root) log(root, 'stopgate.jsonl', { outcome: 'block', reason: 'agent without a task file', session: input.session_id });
-    return block('agent session without a task file; the coordinator must set one');
-  }
-  if (!root) return taskFile ? block(`no ${BRAND.configDir}/ found; can't verify done_when`) : { exitCode: 0 };
-  let cfg: Config;
-  try {
-    cfg = loadConfig(root);
-  } catch (e) {
-    return taskFile ? block(`config invalid, can't run the gate: ${(e as Error).message}`) : { exitCode: 0 };
-  }
-  const r = await runStopGate({
-    cwd,
-    stateDir: projectStateDir(root),
-    taskFile,
-    timeoutS: cfg.tests.stop_gate.timeout_s,
-    lockWaitS: cfg.tests.stop_gate.lock_wait_s,
-    busyPatterns: cfg.tests.stop_gate.busy_patterns,
-    testCommand: cfg.tests.runner.one,
-    suites: { changed: cfg.tests.runner.changed, full: cfg.tests.runner.full },
-    failures: cfg.tests.failures,
-    baseline: readBaseline(join(projectStateDir(root), 'events.db')),
-  });
-  return r.outcome === 'block' ? block(r.reason) : { exitCode: 0 };
-}
-
 function sessionEnd(input: HookInput): HookOutput {
   const root = findProjectRoot(input.cwd ?? process.cwd());
   if (!input.transcript_path || !existsSync(input.transcript_path)) return { exitCode: 0 };
@@ -167,7 +124,8 @@ function sessionEnd(input: HookInput): HookOutput {
 export async function runHook(event: string, input: HookInput, env: NodeJS.ProcessEnv = process.env): Promise<HookOutput> {
   try {
     if (event === 'pre-tool-use') return preToolUse(input, env);
-    if (event === 'stop') return await stop(input, env);
+    // The Stop gate was removed (the coordinator re-runs every check itself); older installs still call it.
+    if (event === 'stop') return { exitCode: 0 };
     if (event === 'session-end') return sessionEnd(input);
     if (event === 'session-start') return { exitCode: 0 };
     return { stderr: `unknown hook event ${event}\n`, exitCode: 2 };
