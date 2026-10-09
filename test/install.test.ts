@@ -168,5 +168,6 @@ test('install --engine points the hooks at a machine-wide engine path', () => {
   const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--engine', '/opt/engine/current/dist/src/cli.js'], { encoding: 'utf8', env: childEnv() });
   assert.equal(r.status, 0, r.stderr);
   const settings = readFileSync(join(dir, '.claude', 'settings.json'), 'utf8');
-  assert.match(settings, /\/opt\/engine\/current\/dist\/src\/cli\.js/);
+  // On Windows the path resolves onto the current drive (D:\\opt\\...), escaped for the shell and JSON.
+  assert.match(settings, process.platform === 'win32' ? /:(\\\\)+opt(\\\\)+engine(\\\\)+current(\\\\)+dist(\\\\)+src(\\\\)+cli\.js/ : /\/opt\/engine\/current\/dist\/src\/cli\.js/);
 });

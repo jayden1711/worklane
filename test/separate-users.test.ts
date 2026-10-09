@@ -152,6 +152,10 @@ test('the coordinator\'s git runs no hooks and no fsmonitor command, whatever a 
 });
 
 test('project commands (checks, gates, setup, full runs) run as the agent user with a clean environment', () => {
+  if (process.platform === 'win32') {
+    assert.throws(() => projectCommand('npm test', { user: 'shop-agent', home: '/home/shop-agent' }), /needs macOS or Linux/, 'refused, never run as the coordinator instead');
+    return;
+  }
   const { file, args, env } = projectCommand('npm test | tail -5', { user: 'shop-agent', home: '/home/shop-agent' });
   assert.equal(file, 'sudo');
   assert.deepEqual(args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
