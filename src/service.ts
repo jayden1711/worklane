@@ -5,7 +5,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { checkRepoScope } from './github-scope.js';
-import { installationTokens } from './github-app.js';
+import { appBotIdentity, installationTokens } from './github-app.js';
 import { fileURLToPath } from 'node:url';
 import { appKeyAge, appKeyWarning, tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
@@ -21,7 +21,7 @@ import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
-import { CliRunner, type RunAs } from './runner.js';
+import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
 import { instanceProblems, laneRuns, loadInstance, type Instance } from './instance.js';
 
@@ -117,14 +117,23 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (warn) console.error(warn.replaceAll('**', ''));
   // App tokens renew themselves every hour; only a personal access token can expire on its owner.
   const expiry = i.credentials.github.kind === 'app' ? undefined : scope.expiresAt;
-  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i)), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined);
+  // Every commit carries one identity: instance.yaml's, else the App's bot, never one an agent picks.
+  let identity: CommitIdentity;
+  try {
+    identity = i.commitIdentity ?? (gh.kind === 'app' ? await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }, fetch, githubApi()) : { name: `${BRAND.cli}-${i.name}`, email: `${BRAND.cli}-${i.name}@users.noreply.invalid` });
+  } catch (e) {
+    console.error(`instance ${name} not started: no commit identity (${(e as Error).message}); set commit_identity in instance.yaml`);
+    return 1;
+  }
+  console.error(`commits as: ${identity.name} <${identity.email}>`);
+  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i), identity), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity);
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -132,7 +141,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     return 1;
   }
   const log = new EventLog(site.logPath);
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   const requeued = await coordinator.recover();

@@ -76,6 +76,20 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra:
   return env;
 }
 
+/** The one identity every commit an agent or the coordinator makes carries. */
+export interface CommitIdentity {
+  name: string;
+  email: string;
+}
+
+/** Without an instance (a plain repo), and in tests. */
+export const DEFAULT_COMMIT_IDENTITY: CommitIdentity = { name: BRAND.cli, email: `${BRAND.cli}@localhost` };
+
+/** Git reads these before any config, so an agent's commits carry the harness identity whatever its git config says. */
+export function identityEnv(id: CommitIdentity): Record<string, string> {
+  return { GIT_AUTHOR_NAME: id.name, GIT_AUTHOR_EMAIL: id.email, GIT_COMMITTER_NAME: id.name, GIT_COMMITTER_EMAIL: id.email };
+}
+
 /** An unprivileged OS user agents run as, separate from the coordinator's (which holds the credentials). */
 export interface RunAs {
   user: string;
@@ -147,10 +161,13 @@ export class CliRunner implements AgentRunner {
     private runAs?: RunAs,
     /** Per lane: the user and sandbox settings. When set, a run in an unknown lane is refused. */
     private lanes?: Record<string, { runAs?: RunAs; settings?: object }>,
+    /** Agents' commits carry this identity, never one they pick. */
+    private identity: CommitIdentity = DEFAULT_COMMIT_IDENTITY,
   ) {}
 
   async run(req: RunRequest): Promise<RunResult> {
     const env = agentEnv(this.base, this.runtime, {
+      ...identityEnv(this.identity),
       [`${BRAND.envPrefix}_ROLE`]: req.role,
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),

@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { appJwt, installationTokens, mintInstallationToken } from '../src/github-app.js';
+import { appBotIdentity, appJwt, installationTokens, mintInstallationToken } from '../src/github-app.js';
 import { initInstance } from '../src/instance.js';
 import { childEnv } from '../src/os/index.js';
 import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
@@ -73,6 +73,8 @@ async function fakeGitHub(reach: string[]) {
         return res.end(JSON.stringify({ token: 'ghs_installation', expires_at: new Date(Date.now() + 3_600_000).toISOString() }));
       }
       if (path === '/installation/repositories') return res.end(JSON.stringify({ repositories: reach.map((full_name) => ({ full_name })) }));
+      if (path === '/app') return res.end(JSON.stringify({ slug: 'site-app' }));
+      if (path === '/users/site-app%5Bbot%5D' || path === '/users/site-app[bot]') return res.end(JSON.stringify({ id: 4242 }));
       res.end('[]');
     });
   });
@@ -114,6 +116,7 @@ test('acceptance: an App instance starts with a minted installation token that r
     assert.equal(r.status, 0, r.stderr);
     assert.ok(ok.seen.includes('POST /app/installations/42/access_tokens'), ok.seen.join(', '));
     assert.ok(ok.seen.includes('GET /installation/repositories'));
+    assert.match(r.stderr, /commits as: site-app\[bot\] <4242\+site-app\[bot\]@users\.noreply\.github\.com>/, 'the App instance commits as its bot');
   } finally {
     await ok.close();
   }
@@ -176,4 +179,22 @@ test('instance show: an App instance reports a short-lived token and its key age
   } finally {
     await gh.close();
   }
+});
+
+test('the App\'s bot identity: "<slug>[bot]" with the noreply address GitHub attributes to it', async () => {
+  const seen: string[] = [];
+  const fake = (async (url: string, init: RequestInit) => {
+    seen.push(`${url} ${(init.headers as Record<string, string>).authorization ? 'jwt' : 'anon'}`);
+    if (url.endsWith('/app')) return new Response(JSON.stringify({ slug: 'site-app' }), { status: 200 });
+    if (url.endsWith('/users/site-app%5Bbot%5D')) return new Response(JSON.stringify({ id: 4242 }), { status: 200 });
+    return new Response('{}', { status: 404 });
+  }) as unknown as typeof fetch;
+  const id = await appBotIdentity({ appId: 7, installationId: 42, keyPath: keyFile() }, fake, 'https://api.test');
+  assert.deepEqual(id, { name: 'site-app[bot]', email: '4242+site-app[bot]@users.noreply.github.com' });
+  assert.deepEqual(seen, ['https://api.test/app jwt', 'https://api.test/users/site-app%5Bbot%5D anon']);
+});
+
+test('a malformed GitHub answer gives no bot identity (the coordinator then refuses to start)', async () => {
+  const fake = (async () => new Response('[]', { status: 200 })) as unknown as typeof fetch;
+  await assert.rejects(appBotIdentity({ appId: 7, installationId: 42, keyPath: keyFile() }, fake, 'https://api.test'), /no usable slug/);
 });

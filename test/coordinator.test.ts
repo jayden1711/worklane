@@ -11,7 +11,7 @@ import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
-import { FakeRunner, type RunRequest } from '../src/runner.js';
+import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
 
@@ -54,7 +54,8 @@ const REPRO = `import { test } from 'node:test';\nimport assert from 'node:asser
 
 function commitAll(cwd: string, msg: string) {
   git(cwd, 'add', '-A');
-  git(cwd, '-c', 'user.email=agent@example.com', '-c', 'user.name=agent', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
+  // As a real agent session commits: with the harness identity its environment sets.
+  git(cwd, '-c', `user.email=${DEFAULT_COMMIT_IDENTITY.email}`, '-c', `user.name=${DEFAULT_COMMIT_IDENTITY.name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
 }
 
 /** What a diligent evaluator reports: every file changed since the base named in its prompt. */
@@ -767,4 +768,34 @@ test('regression: a retry that finds the work already committed is judged as a c
   assert.ok(!f.log.read(0, ['change.rejected']).some((e) => /committed 1 commit/.test((e.payload as { why: string }).why)), 'not rejected for its predecessor\'s commit');
   assert.equal(f.log.read(0, ['issue.no_change']).length, 0);
   assert.equal(f.log.read(0, ['land.queued']).length, 1);
+});
+
+test('regression: a commit with any identity but the harness\'s is rejected before review, and never lands', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Ignore non-positive quantities', body: 'Totals count negative quantities.\n\n```done_when\n- command: grep -q "qty > 0" src/price.js\n```\n', author: 'example-owner', labels: ['ready'] });
+  let attempt = 0;
+  const runner = agents({
+    worker: (req) => {
+      attempt++;
+      const p = join(req.cwd, 'src', 'price.js');
+      if (attempt === 1) {
+        // The live case: the agent set a person's name and email for its commit.
+        writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+        git(req.cwd, 'add', '-A');
+        git(req.cwd, '-c', 'user.name=Ada Example', '-c', 'user.email=ada@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fix');
+        return { summary: 'fixed' };
+      }
+      assert.match(req.prompt, /commits must carry the harness identity .*Ada Example <ada@example\.com>/s);
+      git(req.cwd, 'reset', '-q', '--soft', 'HEAD~1');
+      commitAll(req.cwd, 'fix');
+      return { summary: 'recommitted' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(attempt, 2);
+  assert.ok(f.log.read(0, ['change.rejected']).some((e) => /harness identity/.test((e.payload as { why: string }).why)));
+  const queued = f.log.read(0, ['land.queued']).at(-1)!.payload as { head: string };
+  assert.equal(git(f.repo, 'log', '-1', '--format=%an <%ae> / %cn <%ce>', queued.head), `${DEFAULT_COMMIT_IDENTITY.name} <${DEFAULT_COMMIT_IDENTITY.email}> / ${DEFAULT_COMMIT_IDENTITY.name} <${DEFAULT_COMMIT_IDENTITY.email}>`);
 });

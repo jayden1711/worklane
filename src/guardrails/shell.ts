@@ -176,7 +176,8 @@ function tokenize(src: string, nested: string[]): Token[] {
 const SEPARATORS = new Set([';', '&&', '||', '|', '|&', '&', '(', ')', '{', '}']);
 const WRITE_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>']);
 
-function stripWrappers(argv: string[]): string[] {
+/** argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment). */
+function stripWrappers(argv: string[], assignments: Record<string, string> = {}): string[] {
   let a = argv;
   for (let guard = 0; guard < 10 && a.length; guard++) {
     const base = basename(a[0]!);
@@ -186,6 +187,7 @@ function stripWrappers(argv: string[]): string[] {
       while (a.length && (a[0]!.startsWith('-') || (base === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0]!)))) {
         const opt = a[0]!;
         a = a.slice(1);
+        if (base === 'env' && !opt.startsWith('-')) assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
         if (base === 'sudo' && ['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U'].includes(opt)) a = a.slice(1);
       }
       continue;
@@ -239,7 +241,7 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
       assignments[w.slice(0, eq)] = w.slice(eq + 1);
       k++;
     }
-    const argv = stripWrappers(words.slice(k));
+    const argv = stripWrappers(words.slice(k), assignments);
     if (argv.length || Object.keys(assignments).length || writes.length) {
       const base = argv.length ? basename(argv[0]!) : '';
       if (base === 'tee') for (const f of argv.slice(1)) if (!f.startsWith('-')) writes.push(f);

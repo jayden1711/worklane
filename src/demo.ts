@@ -13,13 +13,14 @@ import { Coordinator } from './coordinator.js';
 import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { childEnv } from './os/index.js';
-import { FakeRunner, type RunRequest } from './runner.js';
+import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from './runner.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 function commitAll(cwd: string, msg: string) {
   git(cwd, 'add', '-A');
-  git(cwd, '-c', 'user.email=agent@example.com', '-c', 'user.name=agent', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
+  // As a real agent session commits: with the harness identity its environment sets.
+  git(cwd, '-c', `user.email=${DEFAULT_COMMIT_IDENTITY.email}`, '-c', `user.name=${DEFAULT_COMMIT_IDENTITY.name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
 }
 
 const ISSUES: { title: string; body: string; author: string; labels: string[]; labeler?: string }[] = [
