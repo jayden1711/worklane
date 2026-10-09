@@ -4,14 +4,16 @@ Several agent harnesses can share one machine. To keep the total load bounded, t
 
 ## Where
 
-- `$AGENT_SLOTS_DIR` if set.
-- Otherwise `/var/tmp/agent-slots` (macOS, Linux, WSL) or `%ProgramData%\agent-slots` (Windows).
+- **Slot directory:** `$AGENT_SLOTS_DIR` if set. Otherwise `/var/lib/worklane/agent-slots` when it exists. Otherwise `/var/tmp/agent-slots` (macOS, Linux, WSL) or `%ProgramData%\agent-slots` (Windows).
+- **Config:** `$AGENT_SLOTS_CONFIG` if set. Otherwise `/etc/worklane/slots.json` when the `/var/lib` directory is in use and that file exists. Otherwise `config.json` in the slot directory.
+
+On a machine that runs agents for weeks, use the `/var/lib` and `/etc` locations. Tmp cleaners such as systemd-tmpfiles delete files in `/var/tmp` that haven't changed for about 30 days, which would reset the cap and drop its history. `/var/tmp` suits single-user and development machines.
 
 ## Files
 
 | File | Meaning |
 |---|---|
-| `config.json` | `{"max_agents": N}`. The machine's configured cap on concurrent agents across **all** harnesses, set once per machine. Default 2. |
+| config (`slots.json` or `config.json`) | `{"max_agents": N, "adaptive": {...}}`. The machine's configured cap on concurrent agents across **all** harnesses, set once per machine. Default 2. |
 | `cap.json` | `{"cap": N, ...}`. The cap in force now, when an adaptive cap evaluator runs; it overrides `max_agents`. |
 | `slots.lock` | Held for a moment while a harness counts running agents and takes a slot. |
 | `agent-<i>.lock` | One running agent. The **number** of live files is capped, not the index: files may be numbered past the cap, so lowering it never strands an agent that is still running. |

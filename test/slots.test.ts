@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { currentCap, slotStatus, tryAgentSlot } from '../src/slots.js';
+import { currentCap, machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
+import { slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
 
 const slotsDir = (cap: number) => {
@@ -50,4 +51,32 @@ test('regression: after the cap drops, a free low-numbered slot does not let a n
   assert.equal(slotStatus(dir).agents.length, 2);
   got!.release();
   held[3]!.release();
+});
+
+test('slot locations: durable system paths when present, env overrides, the old in-dir config as a fallback', { skip: process.platform === 'win32' && 'POSIX paths' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'sys-'));
+  const system = { dir: join(root, 'var-lib', 'agent-slots'), config: join(root, 'etc', 'slots.json') };
+  const saved = { dir: process.env.AGENT_SLOTS_DIR, config: process.env.AGENT_SLOTS_CONFIG };
+  delete process.env.AGENT_SLOTS_DIR;
+  delete process.env.AGENT_SLOTS_CONFIG;
+  try {
+    assert.equal(machineSlotsDir(system), '/var/tmp/agent-slots', 'no system dir: the development default');
+    mkdirSync(system.dir, { recursive: true });
+    assert.equal(machineSlotsDir(system), system.dir, 'the durable dir when it exists');
+    assert.equal(slotsConfigPath(system.dir, system), join(system.dir, 'config.json'), 'no system config yet');
+    mkdirSync(join(root, 'etc'));
+    writeFileSync(system.config, JSON.stringify({ max_agents: 6 }));
+    assert.equal(slotsConfigPath(system.dir, system), system.config);
+    assert.equal(slotsConfigPath('/some/other/dir', system), '/some/other/dir/config.json', 'a custom slot dir keeps its own config');
+    process.env.AGENT_SLOTS_DIR = '/custom/slots';
+    process.env.AGENT_SLOTS_CONFIG = system.config;
+    assert.equal(machineSlotsDir(system), '/custom/slots');
+    const custom = mkdtempSync(join(tmpdir(), 'slots-'));
+    assert.equal(machineCap(custom), 6, 'the configured file is read wherever it lives');
+  } finally {
+    for (const [k, v] of [['AGENT_SLOTS_DIR', saved.dir], ['AGENT_SLOTS_CONFIG', saved.config]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 });

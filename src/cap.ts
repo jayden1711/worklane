@@ -1,6 +1,6 @@
 // The adaptive agent cap, shared by every instance on the machine. It lives
 // in the slot directory next to the slots it limits:
-//   config.json          {"max_agents": N, "adaptive": {...}}  adaptive is opt-in
+//   the slot config      {"max_agents": N, "adaptive": {...}}  adaptive is opt-in (see slotsConfigPath)
 //   cap.json             the cap in force, why, and the last evaluation
 //   cap-log.jsonl        every change, with its reason
 //   signals/<name>.json  what each instance (and the operator) reports
@@ -9,6 +9,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, write
 import { join } from 'node:path';
 import { z } from 'zod';
 import { tryLock } from './locks.js';
+import { slotsConfigPath } from './os/index.js';
 
 export const AdaptiveConfig = z.strictObject({
   start: z.number().int().min(1).default(2),
@@ -110,7 +111,7 @@ export function readCapState(dir: string): CapState | null {
 
 export function adaptiveConfig(dir: string): AdaptiveConfig | null {
   try {
-    const raw = (JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as { adaptive?: unknown }).adaptive;
+    const raw = (JSON.parse(readFileSync(slotsConfigPath(dir), 'utf8')) as { adaptive?: unknown }).adaptive;
     return raw === undefined ? null : AdaptiveConfig.parse(raw);
   } catch {
     return null;

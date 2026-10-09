@@ -170,10 +170,29 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  * just this one), so the name is deliberately unbranded. Override with
  * AGENT_SLOTS_DIR. See docs/slots.md.
  */
-export function slotsDir(): string {
+/**
+ * Durable system locations for the slots and their config. /var/tmp is
+ * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
+ * days), which would drop the cap and lock files of a long-running machine.
+ */
+export const SYSTEM_SLOTS = { dir: `/var/lib/${BRAND.cli}/agent-slots`, config: `/etc/${BRAND.cli}/slots.json` };
+
+export function slotsDir(system = SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
-  return '/var/tmp/agent-slots';
+  if (existsSync(system.dir)) return system.dir;
+  return '/var/tmp/agent-slots'; // single-user and development machines
+}
+
+/**
+ * The machine's slot config (max_agents, adaptive): AGENT_SLOTS_CONFIG if
+ * set; else the system config file when the system slot directory is in
+ * use and the file exists; else config.json in the slot directory.
+ */
+export function slotsConfigPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+  if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
+  if (dir === system.dir && existsSync(system.config)) return system.config;
+  return join(dir, 'config.json');
 }
 
 export interface ServiceSpec {

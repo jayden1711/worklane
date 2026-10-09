@@ -1,6 +1,7 @@
 // Machine-wide slots, shared by every agent harness on the machine through
 // a tiny file protocol (docs/slots.md):
-//   <dir>/config.json        {"max_agents": N}   the machine cap, set once per box
+//   <config>                 {"max_agents": N, "adaptive": {...}}  the machine cap, set once per box
+//                            (/etc/<cli>/slots.json with the system slot dir, else <dir>/config.json)
 //   <dir>/cap.json           {"cap": N}  the adaptive cap, when the cap evaluator runs
 //   <dir>/slots.lock         held briefly while counting and taking a slot
 //   <dir>/agent-<i>.lock     one per running agent; the count, not the index, is capped
@@ -9,13 +10,13 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { acquireLock, tryLock, type Lock, type LockInfo } from './locks.js';
-import { pidAlive, slotsDir } from './os/index.js';
+import { pidAlive, slotsConfigPath, slotsDir } from './os/index.js';
 
 export const DEFAULT_MAX_AGENTS = 2;
 
 export function machineCap(dir = slotsDir()): number {
   try {
-    const n = (JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as { max_agents?: unknown }).max_agents;
+    const n = (JSON.parse(readFileSync(slotsConfigPath(dir), 'utf8')) as { max_agents?: unknown }).max_agents;
     return typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : DEFAULT_MAX_AGENTS;
   } catch {
     return DEFAULT_MAX_AGENTS;

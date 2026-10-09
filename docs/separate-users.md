@@ -17,7 +17,7 @@ Replace `<name>` with the instance name throughout. Every command marked **root*
 | Group | Members | For |
 |---|---|---|
 | `wl-<name>-work` | all of the instance's users | the repo checkout and worktrees |
-| `agent-slots` | every coordinator user on the machine | the shared slot directory and agent cap |
+| `agent-slots` | every coordinator user on the machine | the shared slot directory (`/var/lib/worklane/agent-slots`) and its config (`/etc/worklane/slots.json`) |
 
 ## Setup (root)
 
@@ -39,8 +39,13 @@ install -d -o root -g root -m 0755 /srv/worklane
 # The repo checkout: owned by the coordinator, group-writable, new files inherit the group.
 install -d -o wl-<name> -g wl-<name>-work -m 2770 /srv/worklane/<name>
 
-# The shared slot directory (once per machine).
-install -d -o root -g agent-slots -m 2770 /var/tmp/agent-slots
+# The shared slot directory and its config (once per machine), outside /var/tmp,
+# which tmp cleaners empty of old files.
+install -d -o root -g root -m 0755 /var/lib/worklane
+install -d -o root -g agent-slots -m 2770 /var/lib/worklane/agent-slots
+install -d -o root -g root -m 0755 /etc/worklane
+printf '{"max_agents":4,"adaptive":{"start":2,"floor":2,"ceiling":8}}\n' > /etc/worklane/slots.json
+chown root:agent-slots /etc/worklane/slots.json && chmod 0664 /etc/worklane/slots.json
 
 # The coordinator may switch to its agent user, without a password, and to nothing else.
 cat > /etc/sudoers.d/worklane-<name> <<'EOF'
