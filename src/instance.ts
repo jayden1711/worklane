@@ -217,3 +217,13 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
   }
   return out;
 }
+
+/** Only an instance's credential references: for the git credential helper, which must work before the repo is cloned. */
+export function loadInstanceCredentials(instanceName: string, dir = instancesDir()): { stateDir: string; repos: string[]; credentials: CredentialsFile } {
+  const home = join(dir, instanceName);
+  const errors: ConfigError[] = [];
+  const inst = readYaml(InstanceFile, join(home, 'instance.yaml'), errors);
+  const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
+  if (errors.length || !inst || !credentials) throw new ConfigInvalid(errors);
+  return { stateDir: join(home, 'state'), repos: inst.repos.map((r) => r.repo), credentials };
+}

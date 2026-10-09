@@ -24,7 +24,8 @@ import { buildReport, tokenWarning } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, listInstances, loadInstance } from './instance.js';
+import { credentialProblems, initInstance, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { installationTokens } from './github-app.js';
 import { openUrl } from './os/index.js';
 import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { checkRepoScope } from './github-scope.js';
@@ -40,7 +41,8 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
-  install [--git-hooks]            scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
+  install [--git-hooks] [--engine path]
+                                   scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
   doctor [--agentshield] [--json]  verify the install
   guardrails check                 run rules against their must-block/ask/allow examples
   guardrails refresh               fetch production fingerprints (stores hashes only)
@@ -139,7 +141,9 @@ async function main(argv: string[]): Promise<number> {
 
     case 'install': {
       const gitHooks = flag(args, '--git-hooks');
-      const r = install({ root, gitHooks });
+      // A machine-wide engine (e.g. /opt/<cli>/current/...): hooks call that stable path, not this run's versioned one.
+      const engineCli = option(args, '--engine');
+      const r = install({ root, gitHooks, ...(engineCli ? { engineCli } : {}) });
       console.log(`${r.scaffolded ? 'scaffolded' : 'kept'} ${BRAND.configDir}/; hooks merged into ${r.settingsPath}`);
       if (r.gitHook) console.log(`pre-commit secret scan: ${r.gitHook}`);
       for (const n of r.notes) console.log(`note: ${n}`);
@@ -463,9 +467,11 @@ async function main(argv: string[]): Promise<number> {
       if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
       const name = process.env[`${BRAND.envPrefix}_INSTANCE`];
       if (!name) return 0;
-      const i = loadInstance(name);
-      if (i.credentials.github.kind !== 'app') return 0;
-      process.stdout.write(`username=x-access-token\npassword=${await instanceTokens(i, process.env)()}\n`);
+      const i = loadInstanceCredentials(name);
+      const g = i.credentials.github;
+      if (g.kind !== 'app') return 0;
+      const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
+      process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
       return 0;
     }
 

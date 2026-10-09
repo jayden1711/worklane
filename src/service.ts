@@ -21,7 +21,7 @@ import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
-import { CliRunner } from './runner.js';
+import { CliRunner, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
 import { credentialProblems, laneRuns, loadInstance, type Instance } from './instance.js';
 
@@ -62,20 +62,24 @@ export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance
 export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
+  // The coordinator's git runs in checkouts agents can write to: no hooks, no fsmonitor command, whatever the repo's config says.
+  const git: [string, string][] = [
+    ['core.hooksPath', '/dev/null'],
+    ['core.fsmonitor', 'false'],
+  ];
   if (i.credentials.github.kind === 'gh-config-dir') {
     env.GH_CONFIG_DIR = i.credentials.github.path;
   } else {
     // App mode: gh has no login to fall back on, and git gets each token from the App through a credential helper.
     env.GH_CONFIG_DIR = join(i.stateDir, 'no-gh-login');
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
-    Object.assign(env, {
-      GIT_CONFIG_COUNT: '2',
-      GIT_CONFIG_KEY_0: 'credential.helper',
-      GIT_CONFIG_VALUE_0: '',
-      GIT_CONFIG_KEY_1: 'credential.helper',
-      GIT_CONFIG_VALUE_1: `!"${process.execPath}" "${cli}" git-credential`,
-    });
+    git.push(['credential.helper', ''], ['credential.helper', `!"${process.execPath}" "${cli}" git-credential`]);
   }
+  env.GIT_CONFIG_COUNT = String(git.length);
+  git.forEach(([k, v], n) => {
+    env[`GIT_CONFIG_KEY_${n}`] = k;
+    env[`GIT_CONFIG_VALUE_${n}`] = v;
+  });
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
   return env;
@@ -112,14 +116,14 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (warn) console.error(warn.replaceAll('**', ''));
   // App tokens renew themselves every hour; only a personal access token can expire on its owner.
   const expiry = i.credentials.github.kind === 'app' ? undefined : scope.expiresAt;
-  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i)), expiry, tokens);
+  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i)), expiry, tokens, i.runAs ?? undefined);
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -127,7 +131,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     return 1;
   }
   const log = new EventLog(site.logPath);
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   const requeued = await coordinator.recover();

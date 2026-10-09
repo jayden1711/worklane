@@ -14,10 +14,10 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { childEnv, cpuCount, diskFree, killTree, machineLoad, shellCommand, spawnDetached } from './os/index.js';
+import { cpuCount, diskFree, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
-import type { AgentRunner, RunResult } from './runner.js';
+import type { AgentRunner, RunAs, RunResult } from './runner.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -38,12 +38,14 @@ export interface CoordinatorDeps {
   stateDir: string;
   /** Slot directory override (tests). */
   slotsDir?: string;
+  /** The OS user project commands run as (checks, gates, setup, full runs): the agent user, never the coordinator's. */
+  commandsAs?: RunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
   tokenExpiresAt?: string | null;
   maxAttempts?: number;
   leaseMs?: number;
   /** Nightly queuing (tests inject this). */
-  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string) => { id: string }[];
+  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
 }
@@ -55,10 +57,10 @@ const COMMAND_TIMEOUT_MS = 2 * 3600_000;
  * in flight, a blocking test run would starve their output streams and trip
  * their stall timers. Output is capped; the tail is kept for reports.
  */
-function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<{ code: number | null; tail: string; out: string }> {
+function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
-    const [file, args] = shellCommand(command);
-    const child = spawn(file, args, { cwd, env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
+    const { file, args, env } = projectCommand(command, runAs);
+    const child = spawn(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
     let out = '';
     const take = (d: Buffer) => {
       out += d.toString();
@@ -69,7 +71,8 @@ function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS): Promi
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(child.pid, () => child.kill('SIGKILL'));
+      if (runAs) killTreeAs(runAs.user, child.pid);
+      else killTree(child.pid, () => child.kill('SIGKILL'));
     }, timeoutMs);
     const finish = (code: number | null) => {
       clearTimeout(timer);
@@ -104,7 +107,12 @@ export class Coordinator {
       },
     };
     this.remote = d.remote ?? 'origin';
-    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup };
+    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+  }
+
+  /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
+  private project(command: string, cwd: string) {
+    return sh(command, cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs);
   }
 
   private get branch() {
@@ -252,7 +260,7 @@ export class Coordinator {
   private maybeNightly() {
     const last = this.d.log.read(0, ['nightly.queued']).at(-1)?.payload as { day: string } | undefined;
     if (!nightlyDue(this.d.cfg.tests.nightly_at, last?.day ?? null)) return;
-    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance);
+    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance, this.d.commandsAs);
     this.emit('nightly.queued', { day: new Date().toLocaleDateString('en-CA'), jobs: jobs.map((j) => j.id) });
   }
 
@@ -496,7 +504,7 @@ export class Coordinator {
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;
       if (!one) return unavailable('tests.yaml runner.one is not set');
-      const onBase = await sh(one.replaceAll('{file}', s.test_path), path);
+      const onBase = await this.project(one.replaceAll('{file}', s.test_path), path);
       if (onBase.code === 0) return unavailable(`the test passes on the unfixed code, so it doesn't reproduce the issue`);
       // Freeze it: commit the test into the worker's branch; its hash is checked later.
       mkdirSync(dirname(join(workerPath, s.test_path)), { recursive: true });
@@ -612,7 +620,7 @@ export class Coordinator {
   private async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
     const checks: { check: string; status: 'pass' | 'fail' | 'unavailable'; exitCode: number | null; tail: string }[] = [];
     const run = async (command: string) => {
-      const r = await sh(command, path);
+      const r = await this.project(command, path);
       const busy = this.d.cfg.tests.stop_gate.busy_patterns.some((p) => new RegExp(p, 'm').test(r.out));
       checks.push({ check: command, status: busy || r.code === null ? 'unavailable' : r.code === 0 ? 'pass' : 'fail', exitCode: r.code, tail: r.tail });
     };
@@ -621,7 +629,7 @@ export class Coordinator {
       if ('command' in d) await run(d.command);
       else if ('suite' in d) {
         const cmd = d.suite === 'full' ? this.d.cfg.tests.runner.full : this.d.cfg.tests.runner.changed;
-        const r = await sh(cmd, path);
+        const r = await this.project(cmd, path);
         const v = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
         checks.push({ check: `${cmd} (baseline gate)`, status: v.outcome === 'pass' ? 'pass' : r.code === null ? 'unavailable' : 'fail', exitCode: r.code, tail: v.outcome === 'fail' ? `${v.note}${v.newFailures.length ? `: ${v.newFailures.join(', ')}` : ''}\n${r.tail}` : v.note });
       }
@@ -855,7 +863,7 @@ export class Coordinator {
         let verdict = null as ReturnType<typeof baselineGate> | null;
         let tail = '';
         for (let attempt = 1; attempt <= 2; attempt++) {
-          const r = await sh(command, path);
+          const r = await this.project(command, path);
           verdict = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
           tail = r.tail;
           if (verdict.outcome === 'pass') break;
@@ -905,7 +913,7 @@ export class Coordinator {
       }
       if (!applied.length) return;
       for (const step of this.d.cfg.tests.land.pre) {
-        const r = await sh(step, path);
+        const r = await this.project(step, path);
         if (r.code !== 0) {
           for (const q of applied) result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
           return;

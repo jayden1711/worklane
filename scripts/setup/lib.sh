@@ -6,6 +6,14 @@ as_root() {
   if [ "$(id -u)" -ne 0 ]; then exec sudo -- bash "$0" "$@"; fi
 }
 
+# Run a bash script as another user, its arguments passed through intact.
+# Never `sudo -i ... -c`: -i re-quotes the command for a login shell, which
+# mangles multi-line scripts. From / so the user needn't reach our cwd.
+run_as() {
+  local user="$1" script="$2"; shift 2
+  (cd / && sudo -H -u "$user" bash -euo pipefail -c "$script" _ "$@")
+}
+
 say() { printf '\n== %s\n' "$*"; }
 
 # Create a user with a private home, if it doesn't exist yet.
