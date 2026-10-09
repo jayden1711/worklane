@@ -33,56 +33,82 @@ function setOwned(o: WorktreeOptions, list: string[]) {
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /**
- * Paths Claude Code's sandbox protects from writes inside the working
- * directory. On Linux it makes a path read-only by mounting over it, so a
- * protected path that doesn't exist yet is first created, empty, as the
- * mount point, and stays in the worktree after the run. Observed with
- * Claude Code 2.1.282 on Linux; extend the list when a version adds more.
+ * What Claude Code's sandbox leaves in a worktree. It protects some paths
+ * from writes inside the working directory; on Linux it does that by
+ * mounting over them, so a protected path that doesn't exist yet is first
+ * created, empty, as the mount point, and stays after the run.
+ *
+ * Two kinds:
+ * - Files and folders at the worktree root, from the sandbox's own list
+ *   (in Claude Code 2.1.282: .gitconfig, .gitmodules, shell startup files,
+ *   .ripgreprc, .mcp.json, .vscode, .idea), plus the other shell files.
+ * - Anything under .claude/. Claude Code protects more of it with each
+ *   version (commands, agents, launch.json, loop.md, output-styles,
+ *   routines, scheduled_tasks.json, ...), so it is covered as a whole
+ *   rather than by name. .claude/ is harness config: agents edit tracked
+ *   files there through review, and never add new ones.
  */
-export const SANDBOX_PLACEHOLDERS = [
-  '.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.bash_aliases', '.profile',
-  '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.zlogout',
-  '.gitconfig', '.gitmodules', '.ripgreprc', '.mcp.json',
-  '.vscode', '.idea',
-  '.claude/commands', '.claude/agents', '.claude/launch.json', '.claude/loop.md',
+export const SANDBOX_ROOT_PLACEHOLDERS = [
+  '.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.zshrc', '.zprofile', '.profile', '.ripgreprc', '.mcp.json', '.vscode', '.idea',
+  '.bash_login', '.bash_logout', '.bash_aliases', '.zshenv', '.zlogin', '.zlogout',
 ];
+const PROTECTED_DIR = '.claude';
 const EXCLUDE_MARKER = `# ${BRAND.cli}: empty mount points Claude Code's sandbox leaves in worktrees; never commit them`;
+const EXCLUDE_END = `# ${BRAND.cli}: end`;
 
 /**
  * Keep the sandbox's placeholders out of anything an agent can commit: an
  * exclude block in the repo's shared info/exclude (it covers every
- * worktree). Exclusion only affects untracked files, so a change to a
- * tracked .bashrc or .gitmodules still shows.
+ * worktree), rewritten each time so it follows this list. Exclusion only
+ * affects untracked files: changes to tracked ones still show.
  */
 export function excludeSandboxPlaceholders(repo: string): void {
   const file = join(resolve(repo, git(repo, 'rev-parse', '--git-common-dir')), 'info', 'exclude');
-  const current = existsSync(file) ? readFileSync(file, 'utf8') : '';
-  if (current.includes(EXCLUDE_MARKER)) return;
+  const lines = (existsSync(file) ? readFileSync(file, 'utf8') : '').split('\n');
+  const kept: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] !== EXCLUDE_MARKER) {
+      kept.push(lines[i]!);
+      continue;
+    }
+    // Drop our previous block: through its end line, or (older blocks) through its patterns.
+    while (i + 1 < lines.length && (lines[i + 1] === EXCLUDE_END || lines[i + 1]!.startsWith('/'))) if (lines[++i] === EXCLUDE_END) break;
+  }
+  const before = kept.join('\n').replace(/\n*$/, '');
+  const block = [EXCLUDE_MARKER, ...SANDBOX_ROOT_PLACEHOLDERS.map((p) => `/${p}`), `/${PROTECTED_DIR}/`, EXCLUDE_END].join('\n');
   mkdirSync(join(file, '..'), { recursive: true });
-  writeFileSync(file, `${current}${current && !current.endsWith('\n') ? '\n' : ''}${EXCLUDE_MARKER}\n${SANDBOX_PLACEHOLDERS.map((p) => `/${p}`).join('\n')}\n`);
+  writeFileSync(file, `${before ? `${before}\n` : ''}${block}\n`);
 }
 
 /** After a run, remove the sandbox's leftover mount points: only empty, untracked ones. */
 export function removeSandboxPlaceholders(worktree: string): string[] {
   const removed: string[] = [];
-  for (const p of SANDBOX_PLACEHOLDERS) {
+  const tracked = (p: string) => git(worktree, 'ls-files', '--', p) !== '';
+  const remove = (p: string): boolean => {
     const full = join(worktree, p);
     let st;
     try {
       st = lstatSync(full);
     } catch {
-      continue;
+      return false;
     }
-    if (git(worktree, 'ls-files', '--', p)) continue; // tracked: the project's own file
+    if (tracked(p)) return false; // the project's own file
     try {
       if (st.isFile() && st.size === 0) unlinkSync(full);
-      else if (st.isDirectory() && readdirSync(full).length === 0) rmdirSync(full);
-      else continue;
+      else if (st.isDirectory()) {
+        // Children first: a folder of empty placeholders is itself a placeholder.
+        for (const child of readdirSync(full)) remove(`${p}/${child}`);
+        if (readdirSync(full).length) return false;
+        rmdirSync(full);
+      } else return false;
       removed.push(p);
+      return true;
     } catch {
-      // not ours to remove (permissions): the exclude still keeps it out of commits
+      return false; // not ours to remove (permissions): the exclude still keeps it out of commits
     }
-  }
+  };
+  for (const p of SANDBOX_ROOT_PLACEHOLDERS) remove(p);
+  if (existsSync(join(worktree, PROTECTED_DIR))) for (const child of readdirSync(join(worktree, PROTECTED_DIR))) remove(`${PROTECTED_DIR}/${child}`);
   return removed;
 }
 
