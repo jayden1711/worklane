@@ -3,21 +3,22 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
 import { EventLog } from '../src/events/log.js';
-import { credentialProblems, initInstance, listInstances, loadInstance } from '../src/instance.js';
+import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, type Instance } from '../src/instance.js';
 import { childEnv } from '../src/os/index.js';
 import { agentEnv } from '../src/runner.js';
 import { instanceEnv } from '../src/service.js';
-import { exampleProject, repoRoot } from './helpers.js';
+import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
 
 function setup(policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: pr\n') {
   const dir = mkdtempSync(join(tmpdir(), 'instances-'));
   const { dir: repo } = exampleProject();
   const home = initInstance('shop', repo, 'example-org/example-shop', dir);
+  agentIsSelf(home);
   writeFileSync(join(home, 'policy.yaml'), policy);
   return { dir, repo, home };
 }
@@ -91,6 +92,7 @@ function two() {
     writeFileSync(join(cfg, 'config.yaml'), readFileSync(join(cfg, 'config.yaml'), 'utf8').replace(/^backlog: github/m, 'backlog: file'));
     writeFileSync(join(cfg, 'agents.yaml'), readFileSync(join(cfg, 'agents.yaml'), 'utf8').replace(/^daily_budget_usd: 40/m, `daily_budget_usd: ${k ? 10 : 40}`));
     const home = initInstance(n, repo, 'example-org/example-shop', dir);
+    agentIsSelf(home);
     writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n');
     mkdirSync(join(home, 'gh'));
     mkdirSync(join(home, 'claude'));
@@ -189,7 +191,7 @@ test('an instance coordinator refuses to start without its own credentials', () 
   rmSync(join(made[0]!.home, 'gh'), { recursive: true });
   const r = spawnSync(process.execPath, [cli, 'coordinator', 'run', '--instance', 'alpha', '--once'], { encoding: 'utf8', env, timeout: 120_000 });
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /credentials missing:[\s\S]*GitHub: gh config dir/);
+  assert.match(r.stderr, /not started:[\s\S]*GitHub: gh config dir/);
   assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
 });
 
@@ -198,4 +200,18 @@ test('agents get the instance\'s Claude config dir, and still no tokens', () => 
   assert.equal(env.CLAUDE_CONFIG_DIR, '/inst/claude');
   assert.equal(env.GH_TOKEN, undefined);
   assert.notEqual(env.GH_CONFIG_DIR, '/inst/gh', 'agents never see the coordinator\'s gh login');
+});
+
+test('instance init names the agent user the setup scripts create', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'instances-'));
+  const home = initInstance('site', '.', 'example-org/example-shop', dir, 'wl-site-agent');
+  assert.match(readFileSync(join(home, 'instance.yaml'), 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: \/home\/wl-site-agent$/m);
+});
+
+test('regression: an instance whose agent user does not exist on this machine is refused before it starts', { skip: process.platform === 'win32' && 'POSIX users' }, () => {
+  const credentials = { version: 1, github: { kind: 'gh-config-dir', path: tmpdir() } };
+  const problems = (runAs: Instance['runAs']) => instanceProblems({ credentials, runAs, evalAs: null } as unknown as Instance);
+  assert.deepEqual(problems({ user: 'wl-no-such-agent-user', home: '/home/wl-no-such-agent-user' }), ['agent user wl-no-such-agent-user (instance.yaml run_as) does not exist on this machine']);
+  assert.deepEqual(problems({ user: userInfo().username, home: join(tmpdir(), 'no-such-home') }), [`agent user ${userInfo().username}'s home ${join(tmpdir(), 'no-such-home')} not found`]);
+  assert.deepEqual(problems({ user: userInfo().username, home: homedir() }), []);
 });

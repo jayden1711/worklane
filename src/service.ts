@@ -23,7 +23,7 @@ import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { CliRunner, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
-import { credentialProblems, laneRuns, loadInstance, type Instance } from './instance.js';
+import { instanceProblems, laneRuns, loadInstance, type Instance } from './instance.js';
 
 export const instanceId = () => `${userInfo().username}@${hostname().split('.')[0]}`;
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
@@ -88,9 +88,9 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
 /** Run an instance's coordinator. Refuses to start without the instance's own credentials. */
 export async function runInstanceCoordinator(name: string, opts: { once?: boolean; intervalMs?: number } = {}): Promise<number> {
   const i = loadInstance(name);
-  const missing = credentialProblems(i.credentials);
+  const missing = instanceProblems(i);
   if (missing.length) {
-    console.error(`instance ${name} not started; credentials missing:\n${missing.map((m) => `  ${m}`).join('\n')}`);
+    console.error(`instance ${name} not started:\n${missing.map((m) => `  ${m}`).join('\n')}`);
     return 1;
   }
   const env = instanceEnv(i);

@@ -21,5 +21,7 @@ test/push-gate.test.ts bob@corp.dev
 test/separate-users.test.ts /home/shop-agent
 test/separate-users.test.ts /home/coord
 test/separate-users.test.ts /home/shop-eval
+test/instance.test.ts /home/wl-no-such-agent-user
+test/setup-scripts.test.ts /home/site-agent
 # Placeholder homes in the separate-users guide.
 docs/separate-users.md /home/wl-

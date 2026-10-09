@@ -39,6 +39,17 @@ export function stateDir(): string {
 }
 
 /** Full path of an executable on PATH, or null. */
+/** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
+export function userExists(user: string): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    execFileSync('id', ['-u', '--', user], { stdio: 'ignore', timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function which(cmd: string): string | null {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {

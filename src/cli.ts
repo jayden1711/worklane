@@ -24,7 +24,7 @@ import { buildReport, tokenWarning } from './reports.js';
 import { startDashboard } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
 import { installationTokens } from './github-app.js';
 import { openUrl } from './os/index.js';
 import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
@@ -497,16 +497,16 @@ async function main(argv: string[]): Promise<number> {
         const repoPath = option(rest, '--repo');
         const gh = option(rest, '--github');
         if (!repoPath || !gh) {
-          console.error('usage: instance init <name> --repo <path> --github <owner/repo>');
+          console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>]');
           return 2;
         }
-        const home = initInstance(target, repoPath, gh);
+        const home = initInstance(target, repoPath, gh, undefined, option(rest, '--agent-user'));
         console.log(`created ${home}\n  edit policy.yaml, and point credentials.yaml at credentials made for this instance`);
         return 0;
       }
       if (sub === 'show' && target) {
         const i = loadInstance(target);
-        const missing = credentialProblems(i.credentials);
+        const missing = instanceProblems(i);
         console.log(`${i.name}: ${i.repo.repo} at ${i.repo.path}`);
         console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, land ${i.policy.land_mode}`);
         console.log(`  repo config: within policy`);
@@ -529,7 +529,7 @@ async function main(argv: string[]): Promise<number> {
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> | instance list | instance show <name>');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] | instance list | instance show <name>');
       return 2;
     }
 
