@@ -90,7 +90,7 @@ test('sandbox settings fail closed and deny the same paths to commands and to th
   assert.match(cliArgs({ prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker' }, s).slice(0, 2).join(' '), /^--settings \{"sandbox":/);
 });
 
-test('lanes: each runs as its user in its own sandbox; only the eval user\'s lane can read the eval key', () => {
+test('lanes: each runs as its user in its own sandbox; only the eval user\'s lane can read the eval key', { skip: process.platform === 'win32' && 'separate users and the sandbox are POSIX-only; native Windows runs commands unsandboxed' }, () => {
   const { dir, home } = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n  eval_user: shop-eval\n  eval_home: /home/shop-eval\n', 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nlanes:\n  default: { allowed_domains: [registry.npmjs.org] }\n  eval: { allowed_domains: [api.anthropic.com], run_as: eval }\n');
   writeFileSync(join(home, 'credentials.yaml'), `version: 1\ngithub: { kind: gh-config-dir, path: ${join(home, 'gh')} }\nclaude: { config_dir: ${join(home, 'claude')} }\neval_key: /home/shop-eval/key\n`);
   const lanes = laneRuns(loadInstance('shop', dir));

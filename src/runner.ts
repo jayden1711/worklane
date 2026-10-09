@@ -6,7 +6,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 
@@ -92,7 +92,7 @@ export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
     HOME: r.home,
     USER: r.user,
     LOGNAME: r.user,
-    CLAUDE_CONFIG_DIR: r.claudeConfigDir ?? join(r.home, '.claude'),
+    CLAUDE_CONFIG_DIR: r.claudeConfigDir ?? posix.join(r.home, '.claude'), // agent users exist on POSIX systems only
     // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
     GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_1: 'safe.directory',
