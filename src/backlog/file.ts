@@ -8,6 +8,7 @@ import type { Backlog, Issue } from './types.js';
 interface FileState {
   issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[] })[];
   labels: string[];
+  prs?: { head: string; base: string; title: string; body: string; url: string }[];
 }
 
 export class FileBacklog implements Backlog {
@@ -90,6 +91,18 @@ export class FileBacklog implements Backlog {
   }
   async createIssue(title: string, body: string, labels: string[]) {
     return this.open({ title, body, author: this.actor, labels });
+  }
+  async openPr(head: string, base: string, title: string, body: string) {
+    const s = this.load();
+    const existing = s.prs?.find((p) => p.head === head);
+    if (existing) return existing.url;
+    const url = `file://pr/${(s.prs?.length ?? 0) + 1}`;
+    (s.prs ??= []).push({ head, base, title, body, url });
+    this.save(s);
+    return url;
+  }
+  prs() {
+    return this.load().prs ?? [];
   }
   async ensureLabels(labels: { name: string }[]) {
     const s = this.load();
