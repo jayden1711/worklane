@@ -20,6 +20,8 @@ export const EventSchemas = {
   'issue.claim_lost': z.strictObject({ issue, instance: z.string(), holder: z.string().nullable() }),
   'issue.released': z.strictObject({ issue, instance: z.string(), why: z.string() }),
   'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string() }),
+  /** The worker found nothing to change, and the coordinator's own checks pass on the unchanged base. */
+  'issue.no_change': z.strictObject({ issue, owner: z.string(), base: sha, why: z.string(), checks: z.array(CheckRunSchema) }),
   // runs
   'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int() }),
   'run.heartbeat': z.strictObject({ issue, role: z.string(), note: z.string() }),

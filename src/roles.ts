@@ -11,6 +11,7 @@ export const WORKER_SCHEMA = {
   properties: {
     summary: { type: 'string', description: 'What you changed and how you verified it, in 2-5 sentences.' },
     blocked: { type: 'string', description: 'Set only if you could not finish: what blocks you.' },
+    no_change_needed: { type: 'string', description: 'Set only if the issue needs no change: its done_when already passes on the unchanged code. Say what you checked and why nothing should change. Commit nothing.' },
     ask: {
       type: 'object',
       description: 'Set only for a real decision the owner must make.',
@@ -83,6 +84,7 @@ const DEFAULTS: Record<string, string> = {
 - Commit your work on the current branch with clear messages (git add, git commit). Never push, never open PRs, never change labels: the coordinator does that after independent review.
 - Never weaken, skip or delete tests to get green. Never edit harness config.
 - If docs disagree with the code, trust the code; treat docs as unverified.
+- If the issue already holds on the unchanged code (its done_when passes and nothing should change), commit nothing and set "no_change_needed" with what you checked; the coordinator re-runs the checks itself. Never make a change just to have one.
 - If you hit a real decision only the owner can make, set "ask". If you're blocked, set "blocked". Otherwise finish the work.`,
   'evaluator-repro': `You are an independent evaluator. You have NOT seen any fix. Write ONE reproduction test for the issue below that FAILS on the current code because of the bug or missing behavior the issue describes (an assertion failure, not an import or setup error), and will pass once it's correctly fixed.
 - Follow the project's test conventions; put the test where the project's runner finds it.

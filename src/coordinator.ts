@@ -385,6 +385,13 @@ export class Coordinator {
         if (out.stop) return;
         removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
+        if (out.noChange) {
+          const done = await this.confirmNoChange(n, owner, path, base, head, doneWhen, repro, out.noChange);
+          if (done.confirmed) return;
+          this.emit('change.rejected', { issue: n, why: done.why });
+          feedback = [`Your previous attempt was rejected: ${done.why}`];
+          continue;
+        }
         const change = await this.inspect(n, path, base, head, repro);
         if ('rejected' in change) {
           this.emit('change.rejected', { issue: n, why: change.rejected });
@@ -553,7 +560,7 @@ export class Coordinator {
     void pid;
     this.cost(n, 'worker', r);
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
     const owner = this.ownerOf(n);
     if (r.reason === 'rate_limited' || r.reason === 'budget_exhausted' || r.reason === 'auth_mismatch') {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, false);
@@ -567,7 +574,36 @@ export class Coordinator {
       await this.block(n, owner, s.blocked);
       return { stop: true as const };
     }
-    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}) };
+    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}) };
+  }
+
+  /**
+   * A worker says the issue needs no change. Not taken on its word: with
+   * nothing committed, the worktree is reset to the base and the coordinator
+   * runs the done_when checks itself. All passing, the owner gets the
+   * verdict and the evidence and decides whether to close; the task stops
+   * (no retries toward a change nobody needs).
+   */
+  private async confirmNoChange(n: number, owner: string, path: string, base: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null, why: string): Promise<{ confirmed: true } | { confirmed: false; why: string }> {
+    const commits = this.git(path, 'rev-list', '--count', `${base}..${head}`);
+    if (commits !== '0') return { confirmed: false, why: `you reported no change needed but committed ${commits} commit(s); either make the change or commit nothing` };
+    this.git(path, 'reset', '-q', '--hard', base);
+    this.git(path, 'clean', '-q', '-fd');
+    const checks = await this.verify(n, path, base, doneWhen, repro);
+    const failing = checks.filter((c) => c.status !== 'pass');
+    if (!checks.length) return { confirmed: false, why: 'you reported no change needed, but done_when has no check the coordinator can run to confirm it' };
+    if (failing.length) return { confirmed: false, why: `you reported no change needed, but on the unchanged base these checks don't pass:\n${failing.map((c) => `- ${c.check}: ${c.status}\n${c.tail}`).join('\n')}` };
+    this.emit('issue.no_change', { issue: n, owner, base, why: why.slice(0, 2000), checks: checks.map(({ tail: _t, ...c }) => c) });
+    const manual = doneWhen.filter((d) => 'manual' in d).map((d) => (d as { manual: string }).manual);
+    await this.d.backlog.removeLabel(n, 'agent:working');
+    await this.d.backlog.removeLabel(n, 'ready');
+    await this.d.backlog.addLabels(n, ['no-change-needed']);
+    await this.d.backlog.comment(
+      n,
+      `[${BRAND.cli}] @${owner} no change needed, so nothing was committed. The worker's finding: ${why}\n\nThe coordinator's own checks on the unchanged base \`${base.slice(0, 8)}\`:\n${checks.map((c) => `- ${c.status === 'pass' ? 'pass' : c.status}: \`${c.check}\``).join('\n')}${manual.length ? `\n\nStill for you to check by hand: ${manual.join('; ')}` : ''}\n\nClose the issue if you agree; otherwise say what's missing and label it \`ready\` again.`,
+    );
+    this.releaseClaim(n, 'no change needed');
+    return { confirmed: true };
   }
 
   /** Mechanical checks on what the worker produced, before anyone trusts it. */

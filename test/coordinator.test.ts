@@ -680,3 +680,56 @@ test('land_mode pr: an approved change goes out as a PR on its own branch; the d
   await c.tick();
   assert.equal(f.backlog.prs().length, 1);
 });
+
+test('no change needed: confirmed by the coordinator\'s own checks on the clean base, reported with evidence, not retried', async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals use cents', body: 'Make totals use integer cents.\n\n```done_when\n- command: grep -q totalCents src/price.js\n- manual: the dashboard shows cents\n```\n', author: 'example-owner', labels: ['ready'] });
+  const runner = agents({
+    worker: (req) => {
+      // It ran a build that rewrote an output, then found nothing to change (the live case: a regenerated sitemap).
+      writeFileSync(join(req.cwd, 'README.md'), 'rebuilt\n');
+      writeFileSync(join(req.cwd, 'build-output.txt'), 'x\n');
+      return { summary: 'checked', no_change_needed: 'src/price.js already computes totals in cents (totalCents).' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(runner.calls.map((r) => r.role), ['worker'], 'one attempt, no evaluator, no retries');
+  const e = f.log.read(0, ['issue.no_change']).at(-1)?.payload as { why: string; checks: { check: string; status: string }[] } | undefined;
+  assert.ok(e, types(f.log).join(', '));
+  assert.match(e.why, /already computes totals in cents/);
+  assert.deepEqual(e.checks.map((x) => x.status), ['pass']);
+  assert.equal(f.log.read(0, ['change.rejected']).length, 0, 'leftover build output is not "uncommitted changes" here: the checks ran on the clean base');
+  const issue = await f.backlog.get(n);
+  assert.equal(issue.state, 'open', 'the owner decides whether to close');
+  assert.ok(issue.labels.includes('no-change-needed') && !issue.labels.includes('ready') && !issue.labels.includes('agent:working') && !issue.labels.includes('blocked'));
+  const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => /no change needed/.test(b)) ?? '';
+  assert.match(comment, /pass: `grep -q totalCents src\/price\.js`/);
+  assert.match(comment, /Still for you to check by hand: the dashboard shows cents/);
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
+  assert.equal(git(f.repo, 'worktree', 'list').split('\n').length, 1, 'worktree removed');
+});
+
+test('a worker that claims no change is needed when the checks fail on the base is told so and retried', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Ignore non-positive quantities', body: 'Totals count negative quantities.\n\n```done_when\n- command: grep -q "qty > 0" src/price.js\n```\n', author: 'example-owner', labels: ['ready'] });
+  let attempt = 0;
+  const runner = agents({
+    worker: (req) => {
+      attempt++;
+      if (attempt === 1) return { summary: 's', no_change_needed: 'looks fine to me' };
+      assert.match(req.prompt, /no change needed, but on the unchanged base these checks don't pass:[\s\S]*grep -q "qty > 0" src\/price\.js: fail/);
+      const p = join(req.cwd, 'src', 'price.js');
+      writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+      commitAll(req.cwd, 'Ignore non-positive quantities');
+      return { summary: 'fixed' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(attempt, 2);
+  assert.equal(f.log.read(0, ['issue.no_change']).length, 0);
+  assert.equal(f.log.read(0, ['land.queued']).length, 1);
+});
