@@ -229,6 +229,47 @@ test('a refusal recorded before block hashes existed is not repeated for an unch
   assert.equal((await f.backlog.comments(n)).length, 0);
 });
 
+test('a worker run that fails at startup is reported with claude\'s error, not retried into "no passing change"', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const normal = agents();
+  let workers = 0;
+  const runner = new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return normal.run(req);
+    workers++;
+    return { reason: 'failed', detail: 'error_during_execution: sandbox required but unavailable: bubblewrap not found', turns: 0 };
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(workers, 1, 'no further attempts after a startup failure');
+  const comments = (await f.backlog.comments(n)).map((x) => x.body);
+  const blocked = comments.find((b) => /blocked:/.test(b)) ?? '';
+  assert.match(blocked, /claude run failed to start/);
+  assert.match(blocked, /sandbox required but unavailable: bubblewrap not found/);
+  assert.ok(!comments.some((b) => /no passing change/.test(b)));
+  assert.equal(f.log.read(0, ['run.startup_failed']).length, 1);
+});
+
+test('a worker run that committed work before failing still gets its attempts', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const normal = agents();
+  let workers = 0;
+  const runner = new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return normal.run(req);
+    workers++;
+    writeFileSync(join(req.cwd, `note-${workers}.txt`), 'partial\n');
+    commitAll(req.cwd, `partial ${workers}`);
+    return { reason: 'failed', detail: 'error_max_turns: ', turns: 200 };
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(f.log.read(0, ['run.startup_failed']).length, 0);
+  assert.ok(workers > 1, 'retried');
+});
+
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
