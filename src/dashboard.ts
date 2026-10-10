@@ -16,7 +16,7 @@ import type { StoredEvent } from './events/types.js';
 import { checkResults, inbox, project } from './projection.js';
 import { instancesDir, loadInstance } from './instance.js';
 import { siteForInstance, siteForRoot } from './service.js';
-import { slotStatus } from './slots.js';
+import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { buildReport } from './reports.js';
 
 /**
@@ -51,6 +51,25 @@ export interface DashboardOptions {
   port?: number;
   webDir?: string;
   pollMs?: number;
+  /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
+  slotsDir?: string;
+}
+
+/**
+ * The emergency stop as the dashboard shows it, read-only: whether one is in
+ * force on this machine now (the STOP file), and whether this instance's
+ * coordinator has halted for it (its own emergency.stop event since then).
+ */
+export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { at: string; by: string; reason: string; running: number } | null; lastResume: string | null }) {
+  const since = inForce?.at ? Date.parse(inForce.at) : NaN;
+  const halted = !!inForce && !!record.lastStop && (Number.isNaN(since) || Date.parse(record.lastStop.at) >= since) && !(record.lastResume && Date.parse(record.lastResume) > Date.parse(record.lastStop.at));
+  return {
+    inForce,
+    /** This coordinator acknowledged it: halted its agents (how many were running) and starts none. */
+    halted: halted ? { at: record.lastStop!.at, running: record.lastStop!.running } : null,
+    lastStop: record.lastStop,
+    lastResume: record.lastResume,
+  };
 }
 
 /** Who may answer a decision from the dashboard: its owner, or one of the project's writers. GitHub logins are case-insensitive. */
@@ -133,7 +152,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const state = () => {
     const events = readEvents(opts.eventsDb);
     const p = project(events);
-    const slots = slotStatus();
+    const slots = slotStatus(opts.slotsDir);
     return {
       brand: { name: BRAND.name, cli: BRAND.cli },
       project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
@@ -145,6 +164,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
+      emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
       inbox: inbox(p, opts.user),
     };
   };
