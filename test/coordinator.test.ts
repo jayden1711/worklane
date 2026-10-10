@@ -11,6 +11,7 @@ import { claim, claimRef } from '../src/claims.js';
 import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator, logTail } from '../src/coordinator.js';
+import type { InstanceSettings } from '../src/instance.js';
 import { EventLog } from '../src/events/log.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
@@ -1462,6 +1463,45 @@ test('waits on the Claude login (a second or more) and transient retries are rec
   await c.idle();
   assert.deepEqual(f.log.read(0, ['run.lock_waited']).map((e) => e.payload), [{ issue: n, role: 'worker', model: 'sonnet', wait_ms: 4200 }]);
   assert.deepEqual(f.log.read(0, ['run.transient_retry']).map((e) => e.payload), [{ issue: n, role: 'worker', model: 'sonnet', attempt: 1, cause: 'rate_limit', wait_ms: 60000, detail: 'API Error: 429' }]);
+});
+
+// ---- instance settings
+
+test("instance settings apply on the next tick, without a restart: they win over the repo's, and refused ones fall back to it", { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  let current: { settings: InstanceSettings; error: string | null } = { settings: { workers: 0 }, error: null };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, settings: () => current });
+  await c.tick();
+  await c.idle();
+  assert.equal(f.log.read(0, ['issue.claimed']).length, 0, 'workers 0 (the instance setting): nothing starts');
+  assert.deepEqual(f.log.read(0, ['settings.applied']).map((e) => e.payload), [{ settings: { workers: 0 }, error: null }]);
+  await c.tick();
+  assert.equal(f.log.read(0, ['settings.applied']).length, 1, 'recorded once per change');
+  current = { settings: {}, error: 'settings refused: workers 9 is outside 1-8 (machine limits)' };
+  await c.tick();
+  await c.idle();
+  assert.equal(f.log.read(0, ['issue.claimed']).length, 1, "refused: the repo's worker count applies again");
+  assert.match(String((f.log.read(0, ['settings.applied']).at(-1)!.payload as { error: string }).error), /refused/);
+});
+
+test('instance settings: a lower daily budget and run windows hold new work', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  let current: { settings: InstanceSettings; error: string | null } = { settings: { run_windows: [{ from: '08:00', to: '09:00' }] }, error: null };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, settings: () => current, now: () => new Date(2026, 9, 10, 12, 0) });
+  await c.tick();
+  assert.equal(f.log.read(0, ['issue.claimed']).length, 0);
+  assert.match((f.log.read(0, ['governor.hold']).at(-1)!.payload as { reason: string }).reason, /outside the run windows \(08:00-09:00\)/);
+  f.log.append('run.cost', { issue: null, role: 'x', model: 'm', usd: 1, turns: 1 }, 'alice');
+  current = { settings: { daily_budget_usd: 0.5 }, error: null };
+  await c.tick();
+  assert.equal(f.log.read(0, ['issue.claimed']).length, 0);
+  assert.match((f.log.read(0, ['governor.hold']).at(-1)!.payload as { reason: string }).reason, /daily budget \$0\.5 reached/);
+  current = { settings: {}, error: null };
+  await c.tick();
+  await c.idle();
+  assert.equal(f.log.read(0, ['issue.claimed']).length, 1, "back to the repo's values: it starts");
 });
 
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {

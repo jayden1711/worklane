@@ -315,6 +315,17 @@ How each level is cleared:
   - `land_mode: pr`: PRs are opened by the coordinator's identity. When the org has Enterprise Cloud, it can hand off to GitHub's native merge queue; the native queue isn't available on private Free/Pro/Team repos.
 - **Only the coordinator pushes.** Agents can't.
 - **PR watch and merge-ready (PR mode).** PRs open as drafts (an ordinary PR where the repo has no drafts). Each tick the coordinator polls a few of its open PRs, each at most once a minute: the PR's head, and the check runs and commit statuses on it. A PR is **ready** only when every check in `config.yaml` `required_checks` passed on the exact commit the evaluator approved, and the evaluator approved it. Missing, pending, cancelled, skipped and neutral checks are not passes, and with no required checks configured nothing is ever ready. Ready means out of draft and labelled `merge-ready`; a head that moves afterwards (someone pushed) takes the label off. Every change is an event (`pr.opened`, `pr.status`, `pr.ready`, `pr.unready`, `pr.closed`). It needs the GitHub App's Checks: read permission (statuses are read when the credential allows).
+- **Instance settings: which config wins.** For everything else the repo's `.worklane/` decides, and the instance policy can only tighten it. For exactly these knobs, the instance's `policy.yaml` `settings` win over the repo, whose values are the defaults:
+  - worker count (`workers`)
+  - daily budget (`daily_budget_usd`)
+  - CI fix runs (`ci_repair.enabled`, `ci_repair.max_fixes_per_pr`)
+  - run windows (`run_windows`), which dispatch now enforces: outside them no new work starts
+
+  **Bounds.** They come from a machine-wide, root-owned `/etc/<cli>/limits.json` (engine defaults without one: 1-8 workers, a $100 budget ceiling, at most 5 fix runs per PR), plus the policy's own `max_workers` and `budget.daily_usd` ceilings. A value outside them is refused, not clamped. A broken limits file refuses every change rather than falling back.
+
+  **Pick-up.** The coordinator re-reads the policy on every tick when its mtime or size changes, so a change applies without a restart (`settings.applied`). Refused settings fall back to the repo's values, with the reason in the event.
+
+  **Changes.** Only through `changeSetting` (src/settings.ts), which the instance's own dashboard calls. Only the owner (`owners.default`) may change a setting. The value is checked against the schema and the bounds; policy.yaml is written atomically (temp file beside it, same owner, mode 0600, rename) with its comments kept; and `settings.changed { key, from, to, by, at }` goes to the instance's event log. Reports list each change.
 - **Auto-merge (PR mode).** The harness may now merge its own PRs, under a policy. The instance's `policy.yaml` `auto_merge` is the kill switch (default off; read at every decision), and `review.yaml` `merge` can only narrow it. A ready PR (see PR watch) **waits for a human** if any of these holds:
   - high-risk: an L3 category, `ci-config`, or the repo's `merge.wait_categories`
   - design-level: the evaluator's `design_change` flag, which is binding; dependency manifests; a new top-level module
