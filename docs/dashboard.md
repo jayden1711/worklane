@@ -35,6 +35,27 @@ Then open the URL `dashboard.sh` printed (`http://127.0.0.1:<port>/?t=<token>`) 
 
 Each instance has its own port and token: run one `dashboard.sh` and one tunnel per instance.
 
+## All instances in one view: the hub
+
+To see every instance on the machine from one page and one tunnel, an admin reviews and runs, once:
+
+```bash
+sudo bash scripts/setup/dashboards.sh <your GitHub login> <name> [<name>...]
+```
+
+- Each instance gets its own dashboard service, `worklane-dashboard-<name>.service`, running as `wl-<name>`. It's the only process that reads that instance's log and records answers in it. It replaces running `dashboard.sh` in a terminal; don't run both, because they use the same port.
+- A viewer user, `wl-dash`, runs the hub, `worklane-dashboard-hub.service`, on port 4399. The page shows an instance switcher, and every call, answers included, is forwarded to the selected instance's own dashboard, which applies its own checks.
+- `wl-dash` can read each instance's `dashboard-token` file and traverse the directories leading to it, through ACLs. It can't list those directories, read any log, config or credential, or write anything outside its own home. The script checks all of this before it finishes. No instance user gets new access, so no instance can read or write another's log.
+- The hub never hands an instance's token to the browser. You only ever hold the hub's token, which the script prints.
+
+From the laptop, one tunnel for all of them:
+
+```bash
+ssh -N -L 4399:127.0.0.1:4399 <you>@<always-on-host>
+```
+
+Then open the hub URL the script printed. After adding an instance, run the script again with the full list.
+
 ## The web UI
 
 The engine install (`scripts/setup/engine.sh`) builds the UI into `dist/web`. In a source checkout, run `npm run build:web`. Without it the page says the UI isn't built.

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Bot, GitMerge, Gauge, History, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
-import { useLiveState, type State } from './api';
+import { hub, hubInstance, selectInstance, useLiveState, type HubInfo, type State } from './api';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
 import { InboxPage } from './pages/Inbox';
@@ -236,6 +236,7 @@ export function App() {
             <div className="truncate text-[11px] text-muted-foreground leading-4">{state?.brand.name}</div>
           </div>
         </div>
+        <InstanceSwitcher />
         <button onClick={() => setMenu(true)} className="mx-3 mt-3 flex h-8 items-center gap-2 rounded-md border bg-background px-2 text-xs text-muted-foreground hover:bg-accent">
           <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
         </button>
@@ -276,6 +277,28 @@ export function App() {
       </main>
       <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
     </div>
+  );
+}
+
+/** On a hub: which instance this page shows, and a switch to the others (each served by its own dashboard). */
+function InstanceSwitcher() {
+  const [info, setInfo] = useState<{ hub: HubInfo; current: string } | null>(null);
+  useEffect(() => {
+    void Promise.all([hub, hubInstance]).then(([h, current]) => h && current && setInfo({ hub: h, current }));
+  }, []);
+  if (!info) return null;
+  return (
+    <label className="mx-3 mt-3 block text-[11px] text-muted-foreground">
+      Instance
+      <select className="mt-1 block h-8 w-full rounded-md border bg-background px-2 text-sm text-foreground" value={info.current} onChange={(e) => selectInstance(e.target.value)} data-instance-switcher>
+        {info.hub.instances.map((i) => (
+          <option key={i.name} value={i.name} disabled={!i.up && i.name !== info.current} title={i.error ?? undefined}>
+            {i.name}
+            {i.up ? '' : ' (not answering)'}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

@@ -201,8 +201,44 @@ function readToken(): string {
 
 export const token = readToken();
 
+/** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */
+export interface HubInfo {
+  instances: { name: string; up: boolean; error: string | null }[];
+}
+export const hub: Promise<HubInfo | null> = fetch('/api/hub', { headers: { authorization: `Bearer ${token}` } })
+  .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
+  .catch(() => null);
+
+/** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
+export const hubInstance: Promise<string | null> = hub.then((h) => {
+  if (!h?.instances.length) return null;
+  let saved: string | null = null;
+  try {
+    saved = sessionStorage.getItem('dash-instance');
+  } catch {
+    // no storage: the default
+  }
+  return h.instances.find((i) => i.name === saved)?.name ?? h.instances.find((i) => i.up)?.name ?? h.instances[0]!.name;
+});
+
+/** Show another instance (hub only): everything reloads from that instance's own server. */
+export function selectInstance(name: string) {
+  try {
+    sessionStorage.setItem('dash-instance', name);
+  } catch {
+    // no storage: this tab can't switch
+  }
+  window.location.reload();
+}
+
+/** An API path as this page reaches it: on a hub, through the selected instance's own server. */
+async function apiPath(path: string): Promise<string> {
+  const inst = await hubInstance;
+  return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
+}
+
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
@@ -227,17 +263,25 @@ export function useLiveState() {
 
   useEffect(() => {
     void refresh();
-    const es = new EventSource(`/api/stream?t=${encodeURIComponent(token)}`);
-    es.addEventListener('hello', () => setLive(true));
-    es.addEventListener('change', () => {
-      window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => {
-        void refresh();
-        setPulse((p) => p + 1);
-      }, 150);
+    let es: EventSource | null = null;
+    let closed = false;
+    void apiPath('/api/stream').then((p) => {
+      if (closed) return;
+      es = new EventSource(`${p}?t=${encodeURIComponent(token)}`);
+      es.addEventListener('hello', () => setLive(true));
+      es.addEventListener('change', () => {
+        window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => {
+          void refresh();
+          setPulse((p) => p + 1);
+        }, 150);
+      });
+      es.onerror = () => setLive(false);
     });
-    es.onerror = () => setLive(false);
-    return () => es.close();
+    return () => {
+      closed = true;
+      es?.close();
+    };
   }, [refresh]);
 
   return { state, error, live, pulse, refresh };
