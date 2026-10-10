@@ -725,6 +725,90 @@ test('land_mode pr: an approved change goes out as a PR on its own branch; the d
   assert.equal(f.backlog.prs().length, 1);
 });
 
+test('PR watch: a draft until the required checks pass on the evaluated commit, then ready and labelled; a moved head takes it back; a merge ends the watch', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci', 'lint'];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0 });
+  await c.tick();
+  await c.idle();
+  await c.tick(); // opens the PR, then polls it: nothing reported yet
+  const opened = f.log.read(0, ['pr.opened']).at(-1)!.payload as { number: number; head: string; draft: boolean };
+  assert.equal(opened.draft, true);
+  const pr = () => f.backlog.prs().find((p) => p.number === opened.number)!;
+  assert.equal(pr().draft, true, 'opened as a draft');
+  assert.equal(pr().headSha, opened.head);
+  const status = () => f.log.read(0, ['pr.status']).map((e) => e.payload as { ready: boolean; reasons: string[]; checks: { name: string; outcome: string }[] });
+  assert.deepEqual(status().at(-1)!.checks, [{ name: 'ci', outcome: 'missing' }, { name: 'lint', outcome: 'missing' }]);
+
+  const check = (name: string, conclusion: string | null) => ({ name, source: 'check_run' as const, status: conclusion ? 'completed' : 'in_progress', conclusion });
+  f.backlog.setChecks(opened.head, [check('ci', null), check('lint', 'success')]);
+  await c.tick();
+  assert.deepEqual(status().at(-1)!.checks.map((x) => x.outcome), ['pending', 'pass']);
+  assert.equal(f.log.read(0, ['pr.ready']).length, 0);
+  const before = status().length;
+  await c.tick();
+  assert.equal(status().length, before, 'an unchanged state is not recorded again');
+
+  f.backlog.setChecks(opened.head, [check('ci', 'success'), check('lint', 'success')]);
+  await c.tick();
+  assert.equal(f.log.read(0, ['pr.ready']).length, 1);
+  assert.equal(pr().draft, false, 'out of draft');
+  assert.ok(pr().labels.includes('merge-ready'));
+  await c.tick();
+  assert.equal(f.log.read(0, ['pr.ready']).length, 1, 'marked once');
+
+  // Someone pushes to the branch: the new head isn't what the evaluator approved.
+  f.backlog.setPr(opened.number, { headSha: 'b'.repeat(40) });
+  f.backlog.setChecks('b'.repeat(40), [check('ci', 'success'), check('lint', 'success')]);
+  await c.tick();
+  const unready = f.log.read(0, ['pr.unready']).at(-1)?.payload as { why: string } | undefined;
+  assert.match(unready?.why ?? '', /not the commit the evaluator approved/);
+  assert.ok(!pr().labels.includes('merge-ready'));
+
+  f.backlog.setPr(opened.number, { merged: true });
+  await c.tick();
+  assert.deepEqual(f.log.read(0, ['pr.closed']).map((e) => e.payload), [{ issue: n, number: opened.number, merged: true }]);
+  assert.deepEqual(c.watchedPrs(), [], 'no longer watched');
+});
+
+test('PR watch: with no required checks configured, a PR is never marked ready, whatever passes', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0 });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const opened = f.log.read(0, ['pr.opened']).at(-1)!.payload as { number: number; head: string };
+  f.backlog.setChecks(opened.head, [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'success' }]);
+  await c.tick();
+  assert.equal(f.log.read(0, ['pr.ready']).length, 0);
+  assert.match((f.log.read(0, ['pr.status']).at(-1)!.payload as { reasons: string[] }).reasons.join(), /no required checks are configured/);
+  assert.equal(f.backlog.prs()[0]!.draft, true);
+});
+
+test('PR watch: polls each PR at most once per interval', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  let polls = 0;
+  const pullRequest = f.backlog.pullRequest.bind(f.backlog);
+  f.backlog.pullRequest = async (n: number) => {
+    polls++;
+    return pullRequest(n);
+  };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 3_600_000 });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  await c.tick();
+  await c.tick();
+  assert.equal(polls, 1);
+});
+
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';

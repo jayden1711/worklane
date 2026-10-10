@@ -12,6 +12,10 @@ agent_runtime:
   max_concurrency: 2        # this harness's cap; the machine-wide slot cap still applies
   run_windows: []           # e.g. [{ from: "08:00", to: "23:00" }]; empty = any time
 land_mode: pr               # direct (fast-forward to the default branch) | pr
+# PR mode: PRs open as drafts and are marked ready (label merge-ready) once every check
+# listed here passed on the exact commit the evaluator approved. Names as GitHub shows
+# them, e.g. ["test", "build (ubuntu-latest)"]. Empty: nothing is ever marked ready.
+required_checks: []
 os: auto                    # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches

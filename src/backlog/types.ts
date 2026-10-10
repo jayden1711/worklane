@@ -25,9 +25,41 @@ export interface Backlog {
   comments(n: number): Promise<{ author: string; body: string }[]>;
   close(n: number): Promise<void>;
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
-  /** Open a pull request from a pushed branch, or return the open one for that branch. Returns its URL. */
-  openPr(head: string, base: string, title: string, body: string): Promise<string>;
+  /**
+   * Open a pull request from a pushed branch, or return the open one for that branch. `draft` asks for a draft
+   * (a repo that doesn't support drafts gets an ordinary PR); `headSha` is the commit just pushed.
+   */
+  openPr(head: string, base: string, title: string, body: string, opts?: { draft?: boolean; headSha?: string }): Promise<{ url: string; number: number; draft: boolean }>;
+  /** A pull request's current state. */
+  pullRequest(n: number): Promise<PullRequest>;
+  /** Every check on a commit: check runs (latest per name) and commit statuses. */
+  checks(sha: string): Promise<CommitCheck[]>;
+  /** Take a draft PR out of draft. */
+  markReady(n: number): Promise<void>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
+}
+
+export interface PullRequest {
+  number: number;
+  url: string;
+  /** The branch name and its current commit. */
+  head: string;
+  headSha: string;
+  draft: boolean;
+  state: 'open' | 'closed' | 'merged';
+}
+
+/** One check on a commit, as GitHub reports it: a check run, or a commit status (completed with its state). */
+export interface CommitCheck {
+  name: string;
+  source: 'check_run' | 'status';
+  /** queued | in_progress | completed for check runs; pending | completed for statuses. */
+  status: string;
+  /** success | failure | cancelled | skipped | neutral | timed_out | action_required | ... ; null until completed. */
+  conclusion: string | null;
+  /** The check run's id (its job, for a run from Actions), when there is one. */
+  id?: number;
+  url?: string;
 }
 
 export const LABELS = [
@@ -38,6 +70,7 @@ export const LABELS = [
   { name: 'needs:decision', color: 'b60205', description: 'Waiting on a decision from the owner' },
   { name: 'money-path', color: '5319e7', description: 'Touches money-path code: extra verification' },
   { name: 'blocked', color: '000000', description: 'Cannot proceed; see the latest comment' },
+  { name: 'merge-ready', color: '0e8a16', description: 'Required checks passed on the commit the evaluator approved' },
   { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
   { name: 'report', color: 'bfdadc', description: 'Scheduled reports are posted here' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },

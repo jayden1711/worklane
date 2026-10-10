@@ -45,6 +45,11 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
+  /**
+   * PR mode: the checks that must pass on a PR's exact head (names as GitHub shows them) before it is marked
+   * ready. None configured: nothing is ever marked ready.
+   */
+  required_checks: z.array(z.string().min(1)).default([]),
   /** Machine-wide limits checked before each new agent starts. */
   governor: z
     .strictObject({
