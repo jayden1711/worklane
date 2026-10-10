@@ -62,6 +62,17 @@ test('a resolution that only rewrites the conflicted hunks is inside; anything e
   assert.deepEqual(outsideHunks({ 'src/x.ts': MERGED }, { 'src/x.ts': null }, ['src/y.ts']), ['src/y.ts (merged cleanly, then changed)', 'src/x.ts (deleted)']);
 });
 
+test('CRLF files (a repo that keeps them, or a checkout with core.autocrlf): hunks parse the same, and a resolution is judged on its content, not its line endings', () => {
+  const crlf = MERGED.replace(/\n/g, '\r\n');
+  assert.deepEqual(parseConflicts('src/x.ts', crlf), parseConflicts('src/x.ts', MERGED));
+  const inside = ['a', 'ours 1 and theirs 1', 'b', 'c', 'both 2', 'd'].join('\r\n');
+  assert.deepEqual(outsideHunks({ 'src/x.ts': crlf }, { 'src/x.ts': inside }, []), [], 'a clean resolution of a CRLF file');
+  const lfHunk = inside.replace('ours 1 and theirs 1\r\n', 'ours 1 and theirs 1\n');
+  assert.deepEqual(outsideHunks({ 'src/x.ts': crlf }, { 'src/x.ts': lfHunk }, []), [], 'a resolver that wrote its hunk with LF');
+  assert.deepEqual(outsideHunks({ 'src/x.ts': crlf }, { 'src/x.ts': inside.replace('\r\nb\r\n', '\r\nb changed\r\n') }, []), ['src/x.ts (lines outside the conflicted hunks changed)']);
+  assert.deepEqual(outsideHunks({ 'src/x.ts': crlf }, { 'src/x.ts': inside.replace('both 2', '=======') }, []), ['src/x.ts (conflict markers left)'], 'a marker line ending in \\r is still a marker');
+});
+
 test('a fix waits for the owner only for changes outside the hunks, risky categories, or an unsure evaluator', () => {
   const ok = { approved: true, confidence: 'high', bothSidesKept: true };
   assert.deepEqual(conflictWaitReasons({ outside: [], riskCategories: [], evaluator: ok }), []);
@@ -82,6 +93,7 @@ function repoWith(base: string) {
   g('config', 'user.name', 'T');
   g('config', 'user.email', 't@example.com');
   g('config', 'commit.gpgsign', 'false');
+  g('config', 'core.autocrlf', 'false'); // the same bytes on every runner; CRLF has its own test
   writeFileSync(join(dir, 'a.txt'), base);
   writeFileSync(join(dir, 'b.txt'), 'b\n');
   g('add', '.');

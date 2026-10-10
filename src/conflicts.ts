@@ -34,9 +34,16 @@ export interface ConflictHunk {
   base?: string;
 }
 
-/** The conflicted hunks in one file's merged text (merge or diff3 markers). */
+/**
+ * A file's lines with their line endings dropped, LF or CRLF alike (a checkout with core.autocrlf, or a repo
+ * that keeps CRLF, writes markers and content with \r\n). Only for reading and comparing: files are never
+ * rewritten with other endings.
+ */
+export const linesOf = (text: string) => text.split(/\r?\n/);
+
+/** The conflicted hunks in one file's merged text (merge or diff3 markers; LF or CRLF). */
 export function parseConflicts(file: string, text: string): ConflictHunk[] {
-  const lines = text.split('\n');
+  const lines = linesOf(text);
   const out: ConflictHunk[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i]!.startsWith('<<<<<<<')) continue;
@@ -107,7 +114,10 @@ export function outsideHunks(conflicted: Record<string, string>, resolved: Recor
       out.push(`${file} (deleted)`);
       continue;
     }
-    if (/^(<<<<<<<|>>>>>>>|\|\|\|\|\|\|\|)/m.test(after) || /^=======$/m.test(after)) {
+    // Compared line by line with line endings dropped, so a CRLF file (or a resolution that wrote LF into one)
+    // is judged on its content.
+    const lines = linesOf(after);
+    if (lines.some((l) => /^(<<<<<<<|>>>>>>>|\|\|\|\|\|\|\|)/.test(l) || l === '=======')) {
       out.push(`${file} (conflict markers left)`);
       continue;
     }
@@ -116,7 +126,7 @@ export function outsideHunks(conflicted: Record<string, string>, resolved: Recor
     const pieces: string[][] = [];
     let cur: string[] = [];
     let inHunk = false;
-    for (const l of text.split('\n')) {
+    for (const l of linesOf(text)) {
       if (!inHunk && l.startsWith('<<<<<<<')) {
         pieces.push(cur);
         cur = [];
@@ -125,7 +135,6 @@ export function outsideHunks(conflicted: Record<string, string>, resolved: Recor
       else if (!inHunk) cur.push(l);
     }
     pieces.push(cur);
-    const lines = after.split('\n');
     const same = (at: number, p: string[]) => p.every((l, k) => lines[at + k] === l);
     const first = pieces[0]!;
     const last = pieces[pieces.length - 1]!;
@@ -138,7 +147,7 @@ export function outsideHunks(conflicted: Record<string, string>, resolved: Recor
       if (j + p.length > lines.length) ok = false;
       else at = j + p.length;
     }
-    if (pieces.length === 1) ok = after === text;
+    if (pieces.length === 1) ok = lines.length === first.length && same(0, first);
     else if (ok) ok = lines.length - last.length >= at && same(lines.length - last.length, last);
     if (!ok) out.push(`${file} (lines outside the conflicted hunks changed)`);
   }
