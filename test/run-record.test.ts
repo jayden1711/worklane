@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { KEEP_RUNS, readRun, RunRecorder, runIssue, runsForIssue, RUNS_DIR } from '../src/run-record.js';
-import { CliRunner } from '../src/runner.js';
+import { CliRunner, stderrTail } from '../src/runner.js';
 import { exampleProject } from './helpers.js';
 
 const cwd = join(tmpdir(), 'wt', 'issue-7');
@@ -114,4 +114,20 @@ test('the dashboard serves an issue\'s runs and one run in full, with the token,
   } finally {
     await d.close();
   }
+});
+
+test('an error result with no text of its own reports the end of claude\'s stderr', { skip: process.platform === 'win32' && 'POSIX shell stand-in' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-stub-'));
+  const bin = join(dir, 'claude');
+  const result = JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', num_turns: 0, total_cost_usd: 0 });
+  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }\nrequire('node:fs').readFileSync(0);\nconsole.error('starting');\nconsole.error('Error: sandbox required but unavailable');\nconsole.log(${JSON.stringify(result)});\nprocess.exit(1);\n`);
+  chmodSync(bin, 0o755);
+  const r = await new CliRunner('cli', { PATH: process.env.PATH ?? '' }, bin).run({ role: 'worker', prompt: 'p', cwd: dir, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000 });
+  assert.equal(r.reason, 'failed');
+  assert.match(r.detail, /^error_during_execution: starting\nError: sandbox required but unavailable$/);
+});
+
+test('stderrTail keeps the last non-empty lines, CRLF or LF', () => {
+  assert.equal(stderrTail('a\r\nb\r\n\r\nc\r\n', 2), 'b\nc');
+  assert.equal(stderrTail(''), '(nothing on stderr)');
 });

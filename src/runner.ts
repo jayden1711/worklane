@@ -146,6 +146,11 @@ export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: s
   return args;
 }
 
+/** The end of claude's stderr, for a failure report: its last few non-empty lines. */
+export function stderrTail(stderr: string, lines = 5): string {
+  return stderr.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-lines).join('\n') || '(nothing on stderr)';
+}
+
 interface ResultLine {
   type: 'result';
   subtype: string;
@@ -258,9 +263,10 @@ export class CliRunner implements AgentRunner {
         };
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
         if (rateLimited || r?.api_error_status === 429) return done({ reason: 'rate_limited', detail: 'usage or rate limit reached', ...base });
-        if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderr.trim().split('\n').pop() ?? ''}`, ...base });
+        if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
         if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
-        if (r.subtype !== 'success' || r.is_error) return done({ reason: 'failed', detail: `${r.subtype}: ${(r.result ?? '').slice(0, 500)}`, ...base });
+        // An error result often carries no text of its own; claude's stderr then says what went wrong.
+        if (r.subtype !== 'success' || r.is_error) return done({ reason: 'failed', detail: `${r.subtype}: ${(r.result ?? '').trim().slice(0, 500) || stderrTail(stderr)}`, ...base });
         done({ reason: 'succeeded', detail: (r.result ?? '').slice(0, 500), ...(r.structured_output !== undefined ? { structured: r.structured_output } : {}), ...base });
       });
     });

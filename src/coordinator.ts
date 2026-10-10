@@ -95,6 +95,9 @@ function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?
   });
 }
 
+/** A failed worker run shorter than this that committed nothing never got to work. */
+export const STARTUP_FAILURE_SECS = 90;
+
 export class Coordinator {
   private readonly remote: string;
   private readonly wt: WorktreeOptions;
@@ -583,6 +586,8 @@ export class Coordinator {
       ...(feedback.length ? ['', ...feedback] : []),
     ];
     let pid = -1;
+    const before = this.git(path, 'rev-parse', 'HEAD');
+    const started = Date.now();
     const r: RunResult = await this.d.runner.run({
       env: this.d.cfg.tests.env,
       role: 'worker',
@@ -611,6 +616,15 @@ export class Coordinator {
     const owner = this.ownerOf(n);
     if (r.reason === 'rate_limited' || r.reason === 'budget_exhausted' || r.reason === 'auth_mismatch') {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, false);
+      return { stop: true as const };
+    }
+    // A run that failed almost at once and committed nothing never got to work: another attempt would fail the
+    // same way, so say what claude reported instead of spending the attempts on "no passing change".
+    const secs = Math.round((Date.now() - started) / 1000);
+    if (r.reason === 'failed' && secs < STARTUP_FAILURE_SECS && this.git(path, 'rev-parse', 'HEAD') === before) {
+      this.emit('run.startup_failed', { issue: n, role: 'worker', attempt, seconds: secs, turns: r.turns, detail: r.detail.slice(0, 2000) });
+      const said = r.detail.slice(0, 1500).replace(/`{3,}/g, "'''");
+      await this.block(n, owner, `the worker's claude run failed to start (ended after ${secs}s, ${r.turns} turn(s), nothing committed), so no further attempts were made. claude reported:\n\n\`\`\`\n${said}\n\`\`\``);
       return { stop: true as const };
     }
     if (s.ask) {

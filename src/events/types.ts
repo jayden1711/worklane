@@ -18,6 +18,8 @@ export const EventSchemas = {
   // backlog and ownership
   'issue.seen': z.strictObject({ issue, title: z.string(), labels: z.array(z.string()), author: z.string(), owner: z.string().nullable(), actionable: z.boolean(), why: z.string() }),
   'contract.agreed': z.strictObject({ issue, done_when: z.array(z.record(z.string(), z.unknown())), by: z.string() }),
+  /** A worker run that failed before doing any work: blocked at once with claude's own report. */
+  'run.startup_failed': z.strictObject({ issue, role: z.string(), attempt: z.number().int(), seconds: z.number().int(), turns: z.number().int(), detail: z.string() }),
   /** block_hash: the done_when block judged (contractKey), so an edit to it is checked again. Older events have none. */
   'contract.missing': z.strictObject({ issue, why: z.string(), block_hash: z.string().optional() }),
   'issue.claimed': z.strictObject({ issue, instance: z.string(), lease: sha, base: sha, owner: z.string() }),
