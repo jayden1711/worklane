@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { StoredEvent } from '../src/events/types.js';
-import { classifyRuns, failureModes, failureModesMarkdown, normalizeCause, REPEATED } from '../src/failure-modes.js';
+import { classifyRuns, failureModes, failureModesMarkdown, mergeCostMarkdown, normalizeCause, REPEATED } from '../src/failure-modes.js';
+import { mergeMetrics } from '../src/merge-metrics.js';
 import type { RunRecord } from '../src/run-record.js';
 
 let id = 0;
@@ -107,4 +108,26 @@ test(`fewer than ${REPEATED} of a cause, or runs outside the window, propose not
   const old = startupCase(7, -10 * 86_400);
   assert.equal(failureModes(old, week).runs.length, 0);
   assert.deepEqual(failureModesMarkdown(failureModes([], week)), ['**How runs ended, last 7 days** (0 run(s))', '- no runs']);
+});
+
+test('the merge-cost lines: conflict fixes, combined-state checks and hotspot holds, with suggestions only when flagged', () => {
+  const T = Date.parse('2026-10-05T08:00:00Z');
+  const m = (s: number, type: string, payload: object) => ({ ts: new Date(T + s * 1000).toISOString(), type, payload });
+  const events = [
+    m(0, 'conflict_fix.detected', { issue: 1, number: 11, head: sha('a'), base_sha: sha('b') }),
+    m(60, 'conflict_fix.finished', { issue: 1, number: 11, base_sha: sha('b'), strategy: 'merge', outcome: 'pushed', head: sha('c'), files: ['src/shared.ts'], waits_owner: false, reasons: [], detail: '' }),
+    m(100, 'light_check.finished', { issue: 1, number: 11, head: sha('c'), main_sha: sha('d'), overlap: [], outcome: 'merge', wait_ms: 120_000 }),
+    m(200, 'hotspot.held', { issue: 2, by: 1, files: ['src/shared.ts'] }),
+    m(500, 'hotspot.released', { issue: 2, waited_ms: 300_000, files: ['src/shared.ts'] }),
+    m(1800, 'pr.closed', { issue: 1, number: 11, merged: true }),
+  ];
+  const md = mergeCostMarkdown(mergeMetrics(events, { since: new Date(T - 86_400_000) })).join('\n');
+  assert.match(md, /^\*\*Conflicts and merge waits, last 7 days\*\* \(1 merged PR\(s\)\)/);
+  assert.match(md, /- Conflict fixes: 1 PR\(s\), median 30 min from conflict to merged, 0 needed you; ~30 min per merged PR/);
+  assert.match(md, /- Combined-state checks: 1, 2 min added \(merge 1\); ~2 min per merged PR/);
+  assert.match(md, /- Hotspot holds: 1, 5 min waited \(most on src\/shared\.ts 5 min\); ~5 min per merged PR/);
+  assert.match(md, /\*\*Tuning suggestions\*\* \(nothing changes unless you change the config\)\n- Conflict fixes add 30 min per merged PR: consider listing src\/shared\.ts as hotspots/);
+  assert.match(md, /- Hotspot holds add 5 min per merged PR, most on src\/shared\.ts/);
+  assert.doesNotMatch(md, /Combined-state checks add/, 'under the threshold: no suggestion');
+  assert.deepEqual(mergeCostMarkdown(mergeMetrics([], { since: new Date(T) })), ['**Conflicts and merge waits, last 7 days** (0 merged PR(s))', '- no conflict fixes, combined-state checks or hotspot holds']);
 });

@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import type { StoredEvent } from './events/types.js';
-import { failureModes, failureModesMarkdown, type FailureProposal } from './failure-modes.js';
+import { failureModes, failureModesMarkdown, mergeCostMarkdown, type FailureProposal } from './failure-modes.js';
+import { mergeMetrics } from './merge-metrics.js';
 import { project } from './projection.js';
 import { readRun, RUNS_DIR, type RunRecord } from './run-record.js';
 
@@ -133,9 +134,12 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   // Weekly: how every run ended, the commonest causes, and fixes proposed for any cause seen 3+ times.
   let proposals: FailureProposal[] = [];
   if (opts.weekly ?? weeklyDue(cfg.project.reports.times, opts.slot, now)) {
-    const f = failureModes(events, { since: new Date(now.getTime() - 7 * 86_400_000), until: now, records: opts.runRecords ?? [] });
+    const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
+    const f = failureModes(events, { since: weekAgo, until: now, records: opts.runRecords ?? [] });
     proposals = f.proposals;
     lines.push('', ...failureModesMarkdown(f));
+    // What resolving and avoiding conflicts cost per merged PR, flagged with a suggestion when it adds more than a few minutes.
+    lines.push('', ...mergeCostMarkdown(mergeMetrics(events, { since: weekAgo })));
   }
 
   return { markdown: lines.join('\n'), proposals };

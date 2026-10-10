@@ -88,8 +88,20 @@ test('the weekly failure-mode section: first report on Mondays and every preview
   assert.match(weekly.markdown, /\*\*How runs ended, last 7 days\*\* \(3 run\(s\)\)/);
   assert.match(weekly.markdown, /startup failure, 3×/);
   assert.equal(weekly.proposals.length, 1);
+  assert.match(weekly.markdown, /\*\*Conflicts and merge waits, last 7 days\*\* \(0 merged PR\(s\)\)\n- no conflict fixes/);
+  // A conflict that took 30 minutes to get merged: over the few-minutes threshold, so the report suggests a tuning.
+  const conflicted = [
+    ...events,
+    e(40, 'conflict_fix.detected', { issue: 5, number: 15, head: 'a'.repeat(40), base_sha: 'b'.repeat(40) }),
+    e(100, 'conflict_fix.finished', { issue: 5, number: 15, base_sha: 'b'.repeat(40), strategy: 'merge', outcome: 'pushed', head: 'c'.repeat(40), files: ['lib/shared.js'], waits_owner: false, reasons: [], detail: '' }),
+    e(40 + 1800, 'pr.closed', { issue: 5, number: 15, merged: true }),
+  ];
+  const tuned = buildReport(conflicted, cfg, { since, now: monday, slot: first }).markdown;
+  assert.match(tuned, /- Conflict fixes: 1 PR\(s\), median 30 min from conflict to merged, 0 needed you; ~30 min per merged PR/);
+  assert.match(tuned, /\*\*Tuning suggestions\*\*[^\n]*\n- Conflict fixes add 30 min per merged PR: consider listing lib\/shared\.js as hotspots/);
   const daily = buildReport(events, cfg, { since, now: tuesday, slot: first });
   assert.doesNotMatch(daily.markdown, /How runs ended/);
+  assert.doesNotMatch(daily.markdown, /Conflicts and merge waits/);
   assert.deepEqual(daily.proposals, []);
 });
 
