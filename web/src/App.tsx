@@ -78,7 +78,7 @@ const NAV = [
   { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd' },
   { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's' },
   { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l' },
-  { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p' },
+  { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
   { to: '/agents', label: 'Agents', icon: Bot, chord: 'a' },
   { to: '/activity', label: 'Activity', icon: History, chord: 'e' },
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y' },
@@ -256,6 +256,7 @@ export function App() {
               countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
               active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
               onSelect={() => navigate(n.to)}
+              {...('testId' in n ? { testId: n.testId } : {})}
             />
           ))}
         </nav>

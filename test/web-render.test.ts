@@ -146,6 +146,10 @@ test('the PR page: what waits for you and exactly why, what is moving, what auto
   assert.match(html, /data-pr="104" data-phase="auto_merged"[\s\S]*href="https:\/\/example.test\/commit\/f"[\s\S]*docs only, 12 lines/, 'auto-merged: the merge commit linked, and why');
   assert.match(html, /data-refused="18"[\s\S]*900 changed lines, over the 800 limit/);
   assert.match(r.renderPage('prs', asOwner), /<h1[^>]*>Pull requests/);
+  // Stable hooks for every section and action on the page (kebab-case data-testid).
+  for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
+    assert.match(html, new RegExp(`data-testid="${id}"`), `data-testid ${id}`);
+  }
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {
