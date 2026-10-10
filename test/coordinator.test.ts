@@ -607,6 +607,34 @@ test('regression: an approving review that did not read every changed file does 
   assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands on a partial review');
 });
 
+test("the project's checks are skipped once an issue's own check failed, and run when they pass", { skip }, async () => {
+  const f = fixture();
+  const marker = join(f.base, 'project-check-ran');
+  f.cfg.tests.checks = [`touch "${marker}"`];
+  f.backlog.open({ title: 'Totals count negative quantities', body: 'Totals.\n\n```done_when\n- command: test -f no-such-file\n```\n', author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 2 });
+  await c.tick();
+  await c.idle();
+  assert.equal(existsSync(marker), false, 'the long check never ran');
+  const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string }[] }).filter((p) => p.stage === 'verify');
+  assert.ok(verify.length >= 1);
+  for (const v of verify) assert.deepEqual(v.checks.map((x) => x.status), ['fail', 'skipped']);
+  const retry = runner.calls.filter((r) => r.role === 'worker')[1]!;
+  const feedback = retry.prompt.slice(retry.prompt.indexOf('Independent checks failed'));
+  assert.match(feedback, /test -f no-such-file: fail/);
+  assert.doesNotMatch(feedback, /project-check-ran/, 'a skipped check is not reported to the worker as a failure');
+
+  const g = fixture();
+  const ran = join(g.base, 'project-check-ran');
+  g.cfg.tests.checks = [`touch "${ran}"`];
+  g.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const d = new Coordinator({ cfg: g.cfg, log: g.log, backlog: g.backlog, runner: agents(), repo: g.repo, instance: 'alice', stateDir: g.stateDir, slotsDir: g.slotsDir, machine: g.machine });
+  await d.tick();
+  await d.idle();
+  assert.equal(existsSync(ran), true, 'with the issue checks green, the project check runs');
+});
+
 test('emergency stop: one command halts every agent across instances; their tasks requeue; nothing starts until resumed', { skip }, async () => {
   const a = fixture();
   const b = fixture();

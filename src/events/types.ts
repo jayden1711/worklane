@@ -7,7 +7,8 @@ const sha = z.string().regex(/^[0-9a-f]{7,40}$/);
 
 const CheckRunSchema = z.strictObject({
   check: z.string(),
-  status: z.enum(['pass', 'fail', 'unavailable']),
+  /** skipped: not run, because an earlier check already failed. */
+  status: z.enum(['pass', 'fail', 'unavailable', 'skipped']),
   exitCode: z.number().nullable(),
   /** The end of a failing check's output: why it failed. */
   tail: z.string().max(2000).optional(),
