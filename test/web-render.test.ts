@@ -22,6 +22,7 @@ interface Render {
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
+  renderHealth(view: unknown, instances?: unknown[]): string;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   pages: Record<string, unknown>;
 }
@@ -176,6 +177,68 @@ test('the UI asks for hub instances only when a hub served the page (no 404 on a
   assert.deepEqual(asked, [], 'not served by a hub: no request at all');
   assert.deepEqual(await r.probeHub(true, get, 't'), { instances: [{ name: 'a', up: true, error: null }] });
   assert.deepEqual(asked, ['/api/hub']);
+});
+
+test('the health panel: suggestions, machine figures, services, check times with slowdowns, usage per day, and the instances side by side on a hub', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const series = Array.from({ length: 8 }, (_, i) => ({ at: new Date(Date.UTC(2026, 0, 1, i)).toISOString(), ms: 60_000 + i * 5_000, status: 'pass' }));
+  const view = {
+    instance: 'shop@box',
+    machine: {
+      at: new Date().toISOString(),
+      platform: 'linux',
+      memory: { totalBytes: 32e9, availableBytes: 2e9, swapTotalBytes: 8e9, swapFreeBytes: 4e9 },
+      load: [3, 9, 8] as [number, number, number],
+      units: [
+        { unit: 'harness.slice', memoryCurrent: 6e9, memoryMax: null, memorySwapCurrent: 0, cpuUsageNSec: 7_200e9, activeState: 'active' },
+        { unit: 'harness-shop.service', memoryCurrent: 9.5e9, memoryMax: 10e9, memorySwapCurrent: 1e9, cpuUsageNSec: 600e9, activeState: 'active' },
+        { unit: 'gone.service', error: 'not loaded' },
+      ],
+      disks: [{ path: '/srv', freeBytes: 6e9, totalBytes: 100e9 }, { path: '/missing', error: 'ENOENT' }],
+      unavailable: ['swap: example'],
+    },
+    cores: 4,
+    checks: {
+      timings: [
+        { check: 'make test-full', runs: 25, series, recentMedianMs: 90_000, priorMedianMs: 60_000, regression: { slowerPct: 50 } },
+        { check: 'make lint', runs: 3, series: series.slice(0, 3), recentMedianMs: 2_000, priorMedianMs: null, regression: null },
+      ],
+      slowest: ['make test-full', 'make lint'],
+      regressions: ['make test-full'],
+      rule: 'slower: the median of the last 5 runs is more than 25% (and 2 s) over the median of up to 20 runs before them',
+    },
+    usage: { days: [{ day: today, runs: 7, estimatedUsd: 3.2, turns: 90, rateLimited: 3, authProblems: 1, retries: { token_refresh: 1, overloaded: 2 }, retryWaitMs: 30_000, lockWaits: 2, lockWaitMs: 95_000 }], quotaNote: "How much of the Claude subscription's usage limit is left isn't visible to this harness." },
+    suggestions: ['Consider running fewer agents at once (the policy\'s max_workers): only 6% of memory (2.0 GB) is available.', 'Consider looking at why "make test-full" got slower.'],
+  };
+  const html = r.renderHealth(view, [
+    { name: 'shop', view, error: null },
+    { name: 'site', view: null, error: 'connection refused' },
+  ]);
+  for (const id of ['health-panel', 'health-suggestions', 'health-machine', 'health-memory', 'health-swap', 'health-load', 'health-disk', 'health-units', 'health-instances', 'health-checks', 'health-checks-table', 'health-usage', 'health-usage-table', 'health-quota-note', 'health-unavailable', 'health-sparkline', 'health-regression']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.equal((html.match(/data-testid="health-suggestion"/g) ?? []).length, 2);
+  assert.match(html, /2 to consider/);
+  assert.match(html, /Suggestions only: nothing is changed for you/);
+  assert.match(html, /2\.0 GB[\s\S]*of 32\.0 GB/, 'memory available');
+  assert.match(html, /4\.0 GB[\s\S]*of 8\.0 GB/, 'swap in use');
+  assert.match(html, /9\.0[\s\S]*4 cores/, '5-minute load, cores');
+  assert.match(html, /6\.0 GB[\s\S]*6% of 100\.0 GB · \/srv/, 'free disk');
+  assert.match(html, /not read[\s\S]*ENOENT/, 'a volume that couldn\'t be read says so');
+  assert.equal((html.match(/data-testid="health-unit-row"/g) ?? []).length, 3);
+  assert.match(html, /harness-shop\.service[\s\S]*9\.5 GB of 10\.0 GB/);
+  assert.match(html, /not read: not loaded/);
+  assert.match(html, /data-testid="health-check-row"[^>]*style="background:var\(--orange-tint\)"[\s\S]*make test-full[\s\S]*slower \+50%/, 'the slower check is flagged');
+  assert.match(html, /not enough runs/);
+  assert.match(html, /<title>[^<]*: 1 min 0 s \(pass\)<\/title>/, 'hovering a point gives its time');
+  assert.match(html, new RegExp(`data-testid="health-usage-row"[\\s\\S]*${today}[\\s\\S]*~\\$3\\.20[\\s\\S]*3 \\(token_refresh 1, overloaded 2\\)[\\s\\S]*2, 1 min 35 s`));
+  assert.match(html, /isn&#x27;t visible to this harness/);
+  assert.equal((html.match(/data-testid="health-instance-row"/g) ?? []).length, 2);
+  assert.match(html, /not answering: connection refused/);
+  // Nothing measured (not Linux): it says so rather than showing zeros; and a quiet machine has nothing to do.
+  const bare = r.renderHealth({ ...view, machine: null, suggestions: ['Nothing to suggest: memory, disk, load, usage and check times are within the usual limits.'], checks: { ...view.checks, timings: [], slowest: [], regressions: [] }, usage: { ...view.usage, days: [] } });
+  assert.match(bare, /not measured/);
+  assert.match(bare, /nothing to do/);
+  assert.match(bare, /No timed check runs yet/);
+  assert.doesNotMatch(bare, /data-testid="health-instances"/, 'no hub: no instances table');
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {

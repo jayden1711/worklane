@@ -2,7 +2,8 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { CheckRun, HubInfo, PrsView, State } from './api';
+import type { CheckRun, HealthView, HubInfo, PrsView, State } from './api';
+import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { InstanceList, StopBanner } from './App';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -45,4 +46,5 @@ export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList is
 export const renderInstances = (hub: HubInfo, current: string) => renderToStaticMarkup(<InstanceList hub={hub} current={current} onSelect={() => {}} />);
 export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsView view={view} />);
 export { probeHub } from './api';
+export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => renderToStaticMarkup(<HealthPanelView view={view} {...(instances ? { instances } : {})} />);
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);

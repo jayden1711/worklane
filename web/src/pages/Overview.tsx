@@ -1,5 +1,6 @@
 import type { State } from '../api';
 import { navigate } from '../App';
+import { HealthPanel } from '../components/HealthPanel';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 
@@ -107,6 +108,8 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
             )}
           </Card>
         </div>
+
+        <HealthPanel />
 
         <Card className="overflow-hidden">
           <div className="primitive-card-bar flex items-center justify-between border-b border-line">
