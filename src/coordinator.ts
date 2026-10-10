@@ -22,6 +22,8 @@ import { compareInstructions, engineRoleCases, instructionTargets, parseCases, r
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
+import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
+import { mergeBaseInto } from './merge-base.js';
 import { runIssue } from './run-record.js';
 import { applySettings, inRunWindow } from './settings.js';
 import type { InstanceSettings } from './instance.js';
@@ -77,6 +79,10 @@ export interface CoordinatorDeps {
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
+/** When GitHub is still computing whether a PR can merge, look again this soon. */
+const MERGEABLE_RECHECK_MS = 10_000;
+/** How often the default branch's tip is checked for a merge (which can make open PRs conflict). */
+const TIP_CHECK_MS = 15_000;
 /** A wait on the Claude login shorter than this isn't worth an event. */
 const LOCK_WAIT_RECORDED_MS = 1_000;
 
@@ -121,6 +127,9 @@ export class Coordinator {
   /** The hotspot files each running task is expected to change. */
   private taskHotspots = new Map<number, string[]>();
   private fileIx: { key: string; ix: FileIndex } | null = null;
+  /** The default branch's tip as last seen, and when it was last checked. */
+  private defaultTip = '';
+  private tipCheckedAt = 0;
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
   /** The repo's own config: the defaults the instance's settings apply over. */
@@ -236,6 +245,13 @@ export class Coordinator {
       if (this.active.has(p.issue) || this.d.log.read(e.id, ['ci_fix.finished']).some((f) => (f.payload as { number: number }).number === p.number)) continue;
       release(p.issue, p.lease, { repo: this.d.repo, remote: this.remote });
       this.emit('ci_fix.finished', { issue: p.issue, number: p.number, outcome: 'interrupted', head: null, detail: 'coordinator restarted mid-run' });
+    }
+    // The same for a conflict fix run (it still counts toward the PR's cap).
+    for (const e of this.d.log.read(0, ['conflict_fix.started'])) {
+      const p = e.payload as EventPayload<'conflict_fix.started'>;
+      if (this.active.has(p.issue) || this.d.log.read(e.id, ['conflict_fix.finished']).some((f) => (f.payload as { number: number }).number === p.number)) continue;
+      release(p.issue, p.lease, { repo: this.d.repo, remote: this.remote });
+      this.emit('conflict_fix.finished', { issue: p.issue, number: p.number, base_sha: p.base_sha, strategy: p.strategy, outcome: 'interrupted', head: null, files: [], waits_owner: false, reasons: [], detail: 'coordinator restarted mid-run' });
     }
     const requeued: number[] = [];
     for (const e of this.d.log.read(0, ['issue.claimed'])) {
@@ -963,7 +979,7 @@ export class Coordinator {
     return checks;
   }
 
-  private async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[]) {
+  private async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[], opts: { extra?: string[]; schema?: object } = {}) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.evaluator!;
     const extra = [
@@ -971,6 +987,7 @@ export class Coordinator {
       `Reproduction test: ${repro?.path || 'none'}`,
       `Coordinator's check results: ${checks.map((c) => `${c.check}=${c.status}`).join(', ') || 'none'}`,
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
+      ...(opts.extra ?? []),
     ];
     const r = await this.d.runner.run({
       env: this.d.cfg.tests.env,
@@ -984,12 +1001,12 @@ export class Coordinator {
       disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
       maxTurns: 60,
       maxBudgetUsd: role.budget_usd ?? 5,
-      jsonSchema: VERDICT_SCHEMA,
+      jsonSchema: opts.schema ?? VERDICT_SCHEMA,
       stallMs: 15 * 60_000,
       timeoutMs: COMMAND_TIMEOUT_MS,
     });
     this.cost(n, 'evaluator-verdict', r);
-    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[]; design_change?: boolean; design_reason?: string } | undefined;
+    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[]; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
     // A review that didn't read every changed file can't pass on its own: those files go to a human.
     const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
     const unread = changed.filter((f) => !reviewed.has(f));
@@ -1003,7 +1020,7 @@ export class Coordinator {
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
     this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design });
-    return { ...v, unread };
+    return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
   }
 
   private cost(issue: number, role: string, r: RunResult) {
@@ -1385,6 +1402,16 @@ export class Coordinator {
   private async watchPrs() {
     const now = Date.now();
     const interval = this.d.prPollMs ?? 60_000;
+    // A merge into the default branch (by anyone) is when PRs start conflicting: look at all of them now.
+    if (this.watchedPrs().length && now - this.tipCheckedAt >= TIP_CHECK_MS) {
+      this.tipCheckedAt = now;
+      const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
+      const tip = r.status === 0 ? (r.stdout.split(/\s/)[0] ?? '') : '';
+      if (tip && tip !== this.defaultTip) {
+        if (this.defaultTip) this.prPolled.clear();
+        this.defaultTip = tip;
+      }
+    }
     const due = this.watchedPrs()
       .filter((p) => now - (this.prPolled.get(p.number) ?? 0) >= interval)
       .sort((a, b) => (this.prPolled.get(a.number) ?? 0) - (this.prPolled.get(b.number) ?? 0))
@@ -1402,6 +1429,9 @@ export class Coordinator {
       this.emit('pr.closed', { issue: n, number, merged: pr.state === 'merged' });
       return;
     }
+    const conflict = conflictTrigger(pr);
+    if (conflict.act === 'recheck') this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + MERGEABLE_RECHECK_MS);
+    if (conflict.act === 'fix') return this.maybeFixConflict(w, pr);
     const r = this.prReadiness(n, pr.headSha, await this.d.backlog.checks(pr.headSha));
     const last = this.d.log.read(0, ['pr.status']).map((e) => e.payload as EventPayload<'pr.status'>).filter((p) => p.number === number).at(-1);
     const checks = r.checks.map((c) => ({ name: c.name, outcome: c.outcome }));
@@ -1458,7 +1488,7 @@ export class Coordinator {
     } catch {
       // an unreadable policy is "off"
     }
-    return mergeDecision({
+    const d = mergeDecision({
       policyOn,
       repoOn: review.merge.auto,
       stopped: this.autoMergeStopped(),
@@ -1477,6 +1507,10 @@ export class Coordinator {
         this.instructionResults(n),
       ),
     });
+    // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).
+    const fix = this.d.log.read(0, ['conflict_fix.finished']).map((e) => e.payload as EventPayload<'conflict_fix.finished'>).filter((p) => p.number === number && p.outcome === 'pushed' && p.head === pr.headSha).at(-1);
+    if (fix?.reasons.length) return { ...d, auto: false, reasons: [...d.reasons, ...fix.reasons] };
+    return d;
   }
 
   /**
@@ -1508,6 +1542,7 @@ export class Coordinator {
       return;
     }
     this.emit('merge.done', { issue: n, number, head: pr.headSha, sha: m.sha, url: pr.url, title: pr.title });
+    this.prPolled.clear(); // the other open PRs may conflict now: look at them on the next pass
     await this.d.backlog.comment(number, `[${BRAND.cli}] Auto-merged as \`${m.sha.slice(0, 8)}\` (a merge commit of the evaluated head \`${pr.headSha.slice(0, 8)}\`): every required check passed on it and nothing in it needs a human under this instance's merge policy.`);
   }
 
@@ -1612,7 +1647,7 @@ export class Coordinator {
   /** The last commit the harness itself put on a PR's branch: the head it opened with, or its latest pushed fix. */
   private ourHead(number: number): string | null {
     let head: string | null = null;
-    for (const e of this.d.log.read(0, ['pr.opened', 'ci_fix.finished'])) {
+    for (const e of this.d.log.read(0, ['pr.opened', 'ci_fix.finished', 'conflict_fix.finished'])) {
       const p = e.payload as { number: number; head: string | null; outcome?: string };
       if (p.number === number && (e.type === 'pr.opened' || p.outcome === 'pushed')) head = p.head;
     }
@@ -1786,6 +1821,239 @@ export class Coordinator {
     if (s.blocked) return { ended: `the fix run was blocked: ${s.blocked}` };
     if (s.ask) return { ended: `the fix run has a question for you: ${s.ask.question}` };
     return { summary: s.summary ?? '', ...(s.no_change_needed ? { no_change_needed: s.no_change_needed } : {}) };
+  }
+
+  // ---------------------------------------------------------------- conflict fix runs
+
+  /**
+   * GitHub reports a watched PR as conflicting with its base: merge the base into the branch and let a worker
+   * resolve the conflicted hunks, within the cap; otherwise ask the owner. Never on a branch someone else
+   * pushed to. Recorded once per head and base as conflict_fix.detected.
+   */
+  private async maybeFixConflict(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+    const { issue: n, number } = w;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted) return;
+    const baseRef = pr.base || this.branch;
+    this.git(this.d.repo, 'fetch', '-q', this.remote, baseRef);
+    const baseSha = this.git(this.d.repo, 'rev-parse', `${this.remote}/${baseRef}`);
+    // The branch already contains its base: GitHub's merge check is behind. Look again soon instead.
+    this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
+    if (spawnSync('git', ['merge-base', '--is-ancestor', baseSha, pr.headSha], { cwd: this.d.repo }).status === 0) {
+      this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + MERGEABLE_RECHECK_MS);
+      return;
+    }
+    const seen = this.d.log.read(0, ['conflict_fix.detected']).filter((e) => {
+      const p = e.payload as EventPayload<'conflict_fix.detected'>;
+      return p.number === number && p.head === pr.headSha && p.base_sha === baseSha;
+    }).at(-1);
+    // The owner was already asked about this head and base: once is enough (a new push or base looks again).
+    if (seen && this.d.log.read(seen.id, ['conflict_fix.finished']).some((e) => (e.payload as { number: number; outcome: string }).number === number && (e.payload as { outcome: string }).outcome === 'gave_up')) return;
+    if (!seen) this.emit('conflict_fix.detected', { issue: n, number, head: pr.headSha, base_sha: baseSha });
+    const give = (reason: string) => this.giveUpConflict(w, pr.headSha, baseSha, reason, []);
+    const ours = this.ourHead(number);
+    if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
+    const cfg = this.d.cfg.project.conflicts;
+    if (!cfg.fix) return give('conflict fix runs are off (config.yaml conflicts.fix)');
+    const used = conflictFixesUsed(this.d.log.read(0, ['conflict_fix.started']), number);
+    if (used >= cfg.max_fixes_per_pr) return give(`${used} conflict fix run(s) already, the limit (config.yaml conflicts.max_fixes_per_pr: ${cfg.max_fixes_per_pr})`);
+    const hold = this.governorHold();
+    this.noteHold(hold);
+    if (hold) return;
+    const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${n} conflict fix`, this.d.slotsDir);
+    if (!slot) {
+      this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+      return;
+    }
+    const p = this.conflictRun(w, pr, baseRef, baseSha, used + 1)
+      .catch((e: Error) => {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `conflict fix #${n}`, kind: 'error', message: e.message.slice(0, 500) });
+      })
+      .finally(() => {
+        slot.release();
+        this.active.delete(n);
+      });
+    this.active.set(n, p);
+  }
+
+  /** No (more) conflict fixes on this PR: say why on it, label it, ask the owner to review. */
+  private async giveUpConflict(w: EventPayload<'pr.opened'>, head: string, baseSha: string, reason: string, files: string[], record = true) {
+    const owner = this.ownerOf(w.issue);
+    if (record) this.emit('conflict_fix.finished', { issue: w.issue, number: w.number, base_sha: baseSha, strategy: 'merge', outcome: 'gave_up', head: null, files, waits_owner: true, reasons: [], detail: reason.slice(0, 1000) });
+    await this.d.backlog.addLabels(w.number, ['needs-owner']);
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} this PR conflicts with its base (\`${baseSha.slice(0, 8)}\`) at \`${head.slice(0, 8)}\`. No conflict fix: ${reason}. It needs you; nothing here merges it.`);
+    try {
+      await this.d.backlog.requestReview(w.number, [owner]);
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${w.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
+  }
+
+  /** git, returning null instead of throwing (a path missing at a commit, an unmerged index entry). */
+  private gitOrNull(cwd: string, ...args: string[]): string | null {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.replace(/\n$/, '') : null;
+  }
+
+  /** What the base branch changed in the conflicted files since the PR branched: each commit's subject and body. */
+  private baseSides(path: string, head: string, baseSha: string, files: string[]): Side[] {
+    const mb = this.gitOrNull(path, 'merge-base', head, baseSha);
+    if (!mb) return [];
+    const log = this.gitOrNull(path, 'log', '--format=%s%x1f%b%x1e', '-n', '5', `${mb}..${baseSha}`, '--', ...files) ?? '';
+    return log
+      .split('\x1e')
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map((x) => {
+        const [subject, body] = x.split('\x1f');
+        return { label: subject!.trim(), intent: (body ?? '').trim().slice(0, 1500) || subject!.trim() };
+      });
+  }
+
+  /**
+   * One conflict fix: reclaim the issue, a worktree at the PR's head, merge the base in (a merge commit), a
+   * worker for the conflicted hunks, then inspect, verify and evaluate against the new base (with the
+   * resolution diff given to the evaluator separately), and a push to the same branch only if it is still at
+   * the head the run started from. The merge policy then decides from scratch on the new head.
+   */
+  private async conflictRun(w: EventPayload<'pr.opened'>, pr: PullRequest, baseRef: string, baseSha: string, attempt: number) {
+    const { issue: n, number } = w;
+    const last = <T>(type: StoredEvent['type']) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
+    const claimed = last<EventPayload<'issue.claimed'>>('issue.claimed')!;
+    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
+    const frozen = last<EventPayload<'repro.frozen'>>('repro.frozen');
+    const repro = frozen ? { path: frozen.path, hash: frozen.hash } : null;
+    const issue = await this.d.backlog.get(n);
+    this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
+    const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
+    const won = claim(lease, { repo: this.d.repo, remote: this.remote });
+    if (!won.won) return; // held elsewhere; the next poll tries again
+    let leaseSha = won.sha;
+    this.emit('conflict_fix.started', { issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
+    const heartbeat = setInterval(() => {
+      const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
+      if (next) leaseSha = next;
+    }, 20 * 60_000);
+    heartbeat.unref();
+    const { name, branch, taskFile } = this.paths(n);
+    let files: string[] = [];
+    let finished: Omit<EventPayload<'conflict_fix.finished'>, 'issue' | 'number' | 'base_sha' | 'strategy'> = { outcome: 'no_push', head: null, files: [], waits_owner: false, reasons: [], detail: '' };
+    const give = async (reason: string) => {
+      finished = { outcome: 'gave_up', head: null, files, waits_owner: true, reasons: [], detail: reason.slice(0, 1000) };
+      await this.giveUpConflict(w, pr.headSha, baseSha, reason, files, false);
+    };
+    try {
+      const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
+      if (setupErrors.length) return await give(`the fix worktree's setup failed: ${setupErrors.join('; ')}`);
+      this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) });
+      const merged = mergeBaseInto(path, baseSha, `Merge ${baseRef} into ${pr.head}`);
+      if ('error' in merged) return await give(`merging ${baseRef} into the branch failed: ${merged.error}`);
+      let outside: string[] = [];
+      let summary = `${baseRef} merged in without conflicts (GitHub's conflict no longer reproduces)`;
+      let resolution = 'No conflicted hunks: the base merged in cleanly.';
+      if (!merged.clean) {
+        files = Object.keys(merged.conflicted).sort();
+        // What the merge itself made of every other file, to tell a resolution that strays from one that doesn't.
+        const staged = Object.fromEntries(merged.otherFiles.map((f) => [f, this.gitOrNull(path, 'rev-parse', `:${f}`)]));
+        const hunks = Object.entries(merged.conflicted).flatMap(([f, t]) => parseConflicts(f, t));
+        const brief = conflictBrief({ baseRef, baseSha, strategy: 'merge', hunks, ours: { label: `this pull request (#${number}, issue #${n}: ${issue.title})`, intent: issue.body }, theirs: this.baseSides(path, pr.headSha, baseSha, files) });
+        const s = await this.conflictAgent(issue, doneWhen, path, taskFile, repro, pr, brief, attempt);
+        if ('ended' in s) return await give(s.ended);
+        summary = s.summary;
+        removeSandboxPlaceholders(path);
+        if (this.git(path, 'diff', '--name-only', '--diff-filter=U')) return await give('the fix run left conflicts unresolved');
+        // Still exactly the merge of the PR's head and the base: no rewritten history, no extra commits.
+        if (this.gitOrNull(path, 'rev-parse', 'HEAD^1') !== pr.headSha || this.gitOrNull(path, 'rev-parse', 'HEAD^2') !== baseSha) return await give('the fix run did not finish the merge commit of the branch and its base (it rewrote history, added commits, or left the merge uncommitted)');
+        // Exactly as committed (no trimming): the comparison is line for line, the last line included.
+        const committed = (f: string) => {
+          const r = spawnSync('git', ['show', `HEAD:${f}`], { cwd: path, encoding: 'utf8' });
+          return r.status === 0 ? r.stdout : null;
+        };
+        const resolved = Object.fromEntries(files.map((f) => [f, committed(f)]));
+        const expected = new Set([...files, ...merged.otherFiles]);
+        const strays = [
+          ...merged.otherFiles.filter((f) => this.gitOrNull(path, 'rev-parse', `HEAD:${f}`) !== staged[f]),
+          ...this.git(path, 'diff', '--name-only', 'HEAD^1', 'HEAD').split('\n').filter((f) => f && !expected.has(f)),
+        ];
+        outside = outsideHunks(merged.conflicted, resolved, strays);
+        resolution = ['How the conflicts were resolved (a combined diff of the merge commit against both parents):', '```diff', (this.gitOrNull(path, 'show', '--format=', '--cc', 'HEAD') ?? '').slice(0, 12_000), '```'].join('\n');
+      }
+      const head = this.git(path, 'rev-parse', 'HEAD');
+      // Against the new base: the PR's own change, not what the base brought in.
+      const change = await this.inspect(n, path, baseSha, head, repro);
+      if ('rejected' in change) return await give(`the resolution was rejected: ${change.rejected}`);
+      const checks = await this.verify(n, path, head, doneWhen, repro);
+      const red = checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped');
+      if (red.length) return await give(`the resolution doesn't pass the coordinator's own checks: ${red.map((c) => `${c.check} ${c.status}`).join(', ')}`);
+      const verdict = await this.evaluate(issue, doneWhen, path, baseSha, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path), {
+        extra: [
+          `This head merges ${baseRef} (${baseSha.slice(0, 8)}) into the pull request to resolve a conflict. Judge the change against the new base, and answer both_sides_kept: does the resolution keep what this pull request does AND what ${baseRef} changed?`,
+          resolution,
+        ],
+        schema: conflictVerdictSchema(VERDICT_SCHEMA),
+      });
+      if (!verdict.patch_correct) return await give(`the evaluator rejected the resolution: ${verdict.advice || 'no reason given'}`);
+      const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+      const touched = change.files.filter((f) => files.includes(f.path));
+      const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review) : null;
+      const reasons = conflictWaitReasons({ outside, riskCategories: lvl?.level === 'L3' ? lvl.reasons : [], evaluator: { approved: verdict.patch_correct, confidence: verdict.confidence, bothSidesKept: merged.clean ? true : verdict.bothSidesKept } });
+      const push = checkedPush({ cwd: path, remote: this.remote, base: baseSha, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, expect: pr.headSha });
+      if (!push.ok && 'refused' in push) {
+        this.emit('push.refused', { issue: n, head, stage: 'push', reasons: push.refused });
+        return await give(pushRefusal(push.refused));
+      }
+      if (!push.ok) return await give(`the branch moved while the fix ran (someone pushed), so the harness didn't push over it: ${push.error.split('\n').pop()}`);
+      finished = { outcome: 'pushed', head, files, waits_owner: reasons.length > 0, reasons, detail: summary.slice(0, 1000) };
+      await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
+    } catch (e) {
+      if (!(e instanceof Halted)) throw e;
+      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: 'stopped by an emergency stop' };
+    } finally {
+      clearInterval(heartbeat);
+      release(n, leaseSha, { repo: this.d.repo, remote: this.remote });
+      try {
+        removeWorktree(this.wt, name);
+      } catch {
+        // already gone
+      }
+      this.emit('conflict_fix.finished', { issue: n, number, base_sha: baseSha, strategy: 'merge', ...finished });
+    }
+  }
+
+  /** The conflict fix's worker: the issue's brief plus the conflicted hunks and both sides' intent. */
+  private async conflictAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, brief: string, attempt: number): Promise<{ summary: string } | { ended: string }> {
+    const n = issue.number;
+    const workers = this.d.cfg.agents.roles.workers!;
+    const extra = [
+      `Conflict fix ${attempt} for this issue's pull request (${pr.url}, branch ${pr.head}).`,
+      brief,
+      'The merge is in progress in this worktree. Resolve every conflicted file, `git add` them, and finish the merge with `git commit --no-edit`. Make no other commits, never rebase or reset, and change nothing the merge did not leave conflicted. The coordinator then re-runs the done_when checks, the evaluator judges the resolution, and the coordinator pushes it.',
+      ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
+    ];
+    const r = await this.d.runner.run({
+      env: this.d.cfg.tests.env,
+      role: 'worker',
+      ...laneOf(issue),
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, extra),
+      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
+      cwd: path,
+      model: workers.model,
+      allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
+      maxTurns: 100,
+      maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+      jsonSchema: WORKER_SCHEMA,
+      taskFile,
+      stallMs: 20 * 60_000,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: workers.model, worktree: path, pid: p, pgid: p, attempt }),
+    });
+    this.cost(n, 'conflict-fix', r);
+    this.emit('run.finished', { issue: n, role: 'conflict-fix', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; ask?: { question: string } };
+    if (r.reason !== 'succeeded') return { ended: `the fix run ended: ${r.reason} (${r.detail.slice(0, 300)})` };
+    if (s.blocked) return { ended: `the fix run was blocked: ${s.blocked}` };
+    if (s.ask) return { ended: `the fix run has a question for you: ${s.ask.question}` };
+    return { summary: s.summary ?? '' };
   }
 
   /** The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue. */

@@ -56,6 +56,18 @@ export const ProjectConfig = z.strictObject({
    * Absent: lockfiles, registries and changelogs, shared test helpers. An empty list turns holds off.
    */
   hotspots: z.array(z.string().min(1)).optional(),
+  /**
+   * PR mode: when GitHub reports a harness PR as conflicting, merge its base into the branch and let a worker
+   * resolve the conflicted hunks, then the usual checks and evaluator. `max_fixes_per_pr` caps the runs (a
+   * run a restart cut short counts). Only merging is supported; rebasing (which rewrites the branch) is not.
+   */
+  conflicts: z
+    .strictObject({
+      fix: z.boolean().default(true),
+      max_fixes_per_pr: z.number().int().min(0).default(1),
+      strategy: z.literal('merge').default('merge'),
+    })
+    .prefault({}),
   /** Machine-wide limits checked before each new agent starts. */
   governor: z
     .strictObject({

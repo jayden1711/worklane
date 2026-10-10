@@ -126,6 +126,25 @@ export const EventSchemas = {
   'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
   /** No more fix runs on this PR; the owner is asked to look. */
+  /** GitHub reports a harness PR as conflicting with its base (recorded once per head). */
+  'conflict_fix.detected': z.strictObject({ issue, number: z.number().int().positive(), head: sha, base_sha: sha }),
+  'conflict_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, base_sha: sha, strategy: z.literal('merge'), attempt: z.number().int().positive(), lease: sha }),
+  /**
+   * How a conflict fix ended. pushed: the resolved branch is on the PR (head); waits_owner and reasons: why it
+   * then waits for a human. gave_up: no (more) fixes, the owner is asked. interrupted: a restart cut it short.
+   */
+  'conflict_fix.finished': z.strictObject({
+    issue,
+    number: z.number().int().positive(),
+    base_sha: sha.nullable(),
+    strategy: z.literal('merge'),
+    outcome: z.enum(['pushed', 'no_push', 'gave_up', 'interrupted']),
+    head: sha.nullable(),
+    files: z.array(z.string()),
+    waits_owner: z.boolean(),
+    reasons: z.array(z.string()),
+    detail: z.string(),
+  }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
   'deploy.requested': z.strictObject({ env: z.string(), sha }),
