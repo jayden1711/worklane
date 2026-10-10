@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { api, type CheckRun, type State } from '../api';
 import { navigate, typing } from '../App';
+import { DotPill, Meter, RecordsTable } from '../components/patterns';
 import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { DecisionCard } from './Decisions';
 import { Header } from './Overview';
@@ -12,8 +13,8 @@ interface RawEvent { id: number; ts: string; type: string; actor: string; payloa
 
 function Prop({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[96px_1fr] items-start gap-2 py-1.5 text-sm">
-      <div className="pt-0.5 text-xs text-muted-foreground">{label}</div>
+    <div className="grid grid-cols-[96px_1fr] items-start gap-2 py-2 text-[13px]">
+      <div className="pt-0.5 text-[12px] text-ink-3">{label}</div>
       <div className="min-w-0">{children}</div>
     </div>
   );
@@ -28,49 +29,60 @@ function check(d: Record<string, unknown>): string {
   return JSON.stringify(d);
 }
 
-const CHECK_TONE = { pass: 'ok', fail: 'danger', unavailable: 'warn', skipped: 'neutral' } as const;
+const CHECK_DOT = { pass: 'green', fail: 'red', unavailable: 'orange', skipped: 'ink' } as const;
 
-/** Every run of the coordinator's own checks, newest first; a failing check shows the end of its output. */
-function Checks({ runs }: { runs: CheckRun[] }) {
+/**
+ * Every run of the coordinator's own checks, newest first, each as a records table
+ * (Beautiful UI's diff and records tables): a failing row is tinted red and carries
+ * the end of its output, open on the latest run.
+ */
+export function Checks({ runs }: { runs: CheckRun[] }) {
   return (
-    <Card>
-      <div className="border-b px-4 py-2.5 text-sm font-medium">Checks run by the coordinator</div>
+    <section className="space-y-2" aria-label="Checks run by the coordinator">
+      <div className="text-[13px] font-medium text-ink">Checks run by the coordinator</div>
       {runs.length ? (
-        <ol className="divide-y">
-          {runs.map((r, i) => (
-            <li key={r.id} className="px-4 py-2.5" data-check-run={r.id}>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">{r.stage}</span>
-                {r.head && <span className="font-mono">{r.head.slice(0, 8)}</span>}
-                <span title={r.at}>{ago(r.at)}</span>
-                {i === 0 && <Badge tone="info">latest</Badge>}
-              </div>
-              <ul className="mt-1.5 space-y-1">
-                {r.checks.map((c, j) => (
-                  <li key={j} className="text-sm">
-                    <div className="flex items-center gap-2">
-                      <Badge tone={CHECK_TONE[c.status as keyof typeof CHECK_TONE] ?? 'neutral'}>{c.status}</Badge>
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs" title={c.check}>
+        runs.map((r, i) => (
+          <div key={r.id} data-check-run={r.id} className="space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
+              <span className="font-medium text-ink-2">{r.stage}</span>
+              {r.head && <span className="font-mono">{r.head.slice(0, 8)}</span>}
+              <span title={r.at}>{ago(r.at)}</span>
+              {i === 0 && <Badge tone="info">latest</Badge>}
+            </div>
+            <RecordsTable head={['Check', 'Result', 'Exit']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-20">
+              {r.checks.map((c, j) => {
+                const failed = c.status === 'fail';
+                return (
+                  <Fragment key={j}>
+                    <tr className="border-b border-line last:border-0" style={{ background: failed ? 'var(--red-tint)' : undefined }} data-check={c.status}>
+                      <td className="primitive-table-cell truncate font-mono text-[12px]" style={{ color: failed ? 'var(--red)' : 'var(--ink)' }} title={c.check}>
                         {c.check}
-                      </span>
-                      {c.exitCode !== null && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">exit {c.exitCode}</span>}
-                    </div>
+                      </td>
+                      <td className="primitive-table-cell">
+                        <DotPill tone={CHECK_DOT[c.status as keyof typeof CHECK_DOT] ?? 'ink'}>{c.status}</DotPill>
+                      </td>
+                      <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{c.exitCode ?? '-'}</td>
+                    </tr>
                     {c.tail && (
-                      <details className="mt-1" open={i === 0 && c.status === 'fail'}>
-                        <summary className="cursor-pointer text-xs text-muted-foreground">output (end)</summary>
-                        <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-2 font-mono text-[11px] leading-snug">{c.tail}</pre>
-                      </details>
+                      <tr className="border-b border-line last:border-0">
+                        <td colSpan={3} className="px-3 pb-2.5">
+                          <details open={i === 0 && failed}>
+                            <summary className="cursor-pointer py-1 text-[12px] text-ink-3">output (end)</summary>
+                            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-control bg-inset p-2 font-mono text-[11px] leading-snug text-ink-2 shadow-hairline">{c.tail}</pre>
+                          </details>
+                        </td>
+                      </tr>
                     )}
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ))}
-        </ol>
+                  </Fragment>
+                );
+              })}
+            </RecordsTable>
+          </div>
+        ))
       ) : (
-        <div className="p-4 text-sm text-muted-foreground">No checks run yet.</div>
+        <Card className="p-4 text-[13px] text-ink-3">No checks run yet.</Card>
       )}
-    </Card>
+    </section>
   );
 }
 
@@ -114,40 +126,45 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
       <div className="grid gap-6 p-6 lg:grid-cols-[1fr_320px]">
         <div className="min-w-0 space-y-4">
           <div>
-            <h2 className="text-lg font-semibold">{t.title}</h2>
-            <a href={gh} target="_blank" rel="noreferrer" className="text-xs text-info hover:underline">
+            <h2 className="text-[18px] font-semibold tracking-tight text-ink">{t.title}</h2>
+            <a href={gh} target="_blank" rel="noreferrer" className="text-[12px] text-blue-ink hover:underline">
               {state.project.repo}#{t.issue} ↗
             </a>
           </div>
           {decision && <DecisionCard d={decision} selected />}
           {t.status === 'blocked' && t.blockedReason && (
-            <Card className="border-danger/40 bg-danger/5 p-3 text-sm">
-              <div className="text-xs font-medium text-danger">Blocked</div>
-              <div className="mt-1 whitespace-pre-wrap">{t.blockedReason}</div>
-            </Card>
+            <div className="rounded-card bg-red-tint p-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]">
+              <div className="text-[12px] font-medium text-red">Blocked</div>
+              <div className="mt-1 whitespace-pre-wrap text-ink">{t.blockedReason}</div>
+            </div>
           )}
           {t.verdict && (
-            <Card className="p-3">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="font-medium">Evaluator verdict</span>
-                <Badge tone={t.verdict.patch_correct ? 'ok' : 'danger'}>{t.verdict.patch_correct ? 'patch correct' : 'patch rejected'}</Badge>
-                <Badge tone={t.verdict.test_correct ? 'ok' : 'warn'}>{t.verdict.test_correct ? 'test correct' : 'test doubted'}</Badge>
-                <Badge>{t.verdict.confidence} confidence</Badge>
+            <Card className="overflow-hidden">
+              <div className="primitive-card-pad">
+                <div className="text-[13px] font-medium text-ink">Evaluator verdict</div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <Badge tone={t.verdict.patch_correct ? 'ok' : 'danger'}>{t.verdict.patch_correct ? 'patch correct' : 'patch rejected'}</Badge>
+                  <Badge tone={t.verdict.test_correct ? 'ok' : 'warn'}>{t.verdict.test_correct ? 'test correct' : 'test doubted'}</Badge>
+                </div>
+                {t.verdict.advice && <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">{t.verdict.advice}</p>}
               </div>
-              {t.verdict.advice && <div className="mt-2 text-sm text-muted-foreground">{t.verdict.advice}</div>}
+              <div className="primitive-card-footer flex items-center gap-2 border-t border-line">
+                <Meter signal={t.verdict.confidence === 'high' ? 3 : t.verdict.confidence === 'medium' ? 2 : 1} tone={t.verdict.confidence === 'high' ? 'var(--green)' : t.verdict.confidence === 'medium' ? 'var(--orange)' : 'var(--red)'} />
+                <span className="text-[12.5px] font-medium text-ink-2">{t.verdict.confidence} confidence</span>
+              </div>
             </Card>
           )}
           <Checks runs={checks} />
           <RunList issue={t.issue} lastId={state.lastId} />
-          <Card>
-            <div className="border-b px-4 py-2.5 text-sm font-medium">Timeline</div>
+          <Card className="overflow-hidden">
+            <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Timeline</div>
             {events.length ? (
               <ol className="divide-y">
                 {events.map((e) => {
                   const a = state.activity.find((x) => x.id === e.id);
                   return (
-                    <li key={e.id} className="flex gap-3 px-4 py-2 text-sm">
-                      <span className="w-16 shrink-0 text-xs text-muted-foreground" title={e.ts}>
+                    <li key={e.id} className="flex gap-3 border-line px-3 py-2 text-[13px] text-ink">
+                      <span className="w-16 shrink-0 text-[12px] text-ink-3" title={e.ts}>
                         {ago(e.ts)}
                       </span>
                       <span className="min-w-0 flex-1">{a?.summary ?? e.type}</span>
@@ -157,12 +174,12 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
                 })}
               </ol>
             ) : (
-              <div className="p-4 text-sm text-muted-foreground">No events.</div>
+              <div className="p-4 text-[13px] text-ink-3">No events.</div>
             )}
           </Card>
         </div>
         <aside className="space-y-4">
-          <Card className="divide-y px-4 py-2">
+          <Card className="divide-y divide-line px-3 py-1">
             <Prop label="Status">
               <StatusBadge status={t.status} />
             </Prop>

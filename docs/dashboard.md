@@ -56,6 +56,24 @@ ssh -N -L 4399:127.0.0.1:4399 <you>@<always-on-host>
 
 Then open the hub URL the script printed. After adding an instance, run the script again with the full list.
 
+## Look and feel
+
+The pages use [Beautiful UI](https://www.beautifului.dev/)'s palette and patterns (MIT; see `THIRD_PARTY_NOTICES.md`), adapted to the dashboard's data:
+- decisions are approval cards
+- agent runs are task rows, and a run's steps are tool chips
+- checks are records tables
+- pages and the hub's instances are sidebar rows
+- the headline figures are insight cards
+
+The shared pieces live in `web/src/components/patterns.tsx` and `ui.tsx`. `test/web-render.test.ts` renders every page from the demo project's state and checks that its data is shown and that decisions stay answerable only where the server allows.
+
+To see every page, light and dark, against a freshly seeded demo (needs Chrome or Chromium):
+
+```bash
+node scripts/dev/screenshots.mjs --out shots                  # this checkout, built
+node scripts/dev/compare-screenshots.mjs --out shots          # origin/main vs the current branch: shots/before, shots/after
+```
+
 ## The web UI
 
 The engine install (`scripts/setup/engine.sh`) builds the UI into `dist/web`. In a source checkout, run `npm run build:web`. Without it the page says the UI isn't built.

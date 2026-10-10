@@ -1,39 +1,86 @@
-/* Theme tokens follow shadcn/ui's neutral palette (MIT; see THIRD_PARTY_NOTICES.md). */
+/* Theme tokens: Beautiful UI's palette, radii, shadows and motion (MIT, beautifului.dev),
+   with the shadcn/ui-style token names the pages use mapped onto it (MIT). Both are
+   credited in THIRD_PARTY_NOTICES.md. */
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --border: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --danger: oklch(0.577 0.245 27.325);
-  --warn: oklch(0.769 0.188 70.08);
-  --ok: oklch(0.627 0.194 149.214);
-  --info: oklch(0.546 0.245 262.881);
+  /* Beautiful UI */
+  --page: oklch(98.5% 0.001 286.376);
+  --canvas: oklch(96.1% 0.002 247.84);
+  --surface: oklch(100% 0 0);
+  --inset: oklch(97.9% 0.002 247.839);
+  --hover: oklch(97% 0.002 247.839);
+  --hover-2: oklch(93.3% 0.003 247.86);
+  --field: oklch(96.1% 0.001 286.375);
+  --ink: oklch(24.7% 0.006 258.361);
+  --ink-2: oklch(50.6% 0.01 264.477);
+  --ink-3: oklch(69.5% 0.009 264.505);
+  --line: oklch(94.6% 0.003 264.542);
+  --line-strong: oklch(91.2% 0.005 258.326);
+  --blue: oklch(62.6% 0.205 254.947);
+  --blue-ink: oklch(55.6% 0.187 255.617);
+  --blue-tint: oklch(62.6% 0.205 254.947 / 0.12);
+  --green: oklch(60.3% 0.155 150.883);
+  --green-tint: oklch(60.3% 0.155 150.883 / 0.12);
+  --orange: oklch(68.9% 0.179 49.902);
+  --orange-tint: oklch(68.9% 0.179 49.902 / 0.12);
+  --red: oklch(62.1% 0.192 23.042);
+  --red-tint: oklch(62.1% 0.192 23.042 / 0.1);
+  --shadow-xs: 0 0 4px 0 #0000000a;
+  --shadow-sm: 0 18px 47px 0 #00000008, 0 7.5px 19px 0 #00000005, 0 4px 10.5px 0 #00000005, 0 2.3px 5.8px 0 #00000003, 0 1.2px 3.1px 0 #00000003, 0 0.5px 1.3px 0 #00000003;
+  --shadow-md: 0 17.54px 23.39px 0 #0000000a, 0 9.4px 12.5px 0 #00000008, 0 5.25px 7px 0 #00000005, 0 2.79px 3.72px -2px #00000003, 0 1.16px 1.5px 0 #00000003;
+  --shadow-hairline: 0 0 0 1px var(--line);
+  --shadow-btn: 0 0 0 1px var(--line-strong), var(--shadow-xs);
+  --shadow-card: 0 0 0 1px var(--line), var(--shadow-sm);
+  --shadow-raised: 0 0 0 1px var(--line), var(--shadow-md);
+  --shadow-overlay: 0 0 0 1px var(--line), 0 25px 50px 0 #0000000d, 0 12px 24px 0 #0000000a, 0 6px 12px 0 #00000008;
 }
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --border: oklch(1 0 0 / 12%);
-  --ring: oklch(0.556 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --danger: oklch(0.704 0.191 22.216);
-  --warn: oklch(0.828 0.189 84.429);
-  --ok: oklch(0.723 0.219 149.579);
-  --info: oklch(0.623 0.214 259.815);
+  --page: oklch(20.9% 0.004 264.477);
+  --canvas: oklch(23.1% 0.004 264.487);
+  --surface: oklch(26% 0.006 271.191);
+  --inset: oklch(24.3% 0.004 264.492);
+  --hover: oklch(28.9% 0.006 271.22);
+  --hover-2: oklch(31.8% 0.007 274.747);
+  --field: oklch(29.3% 0.006 271.223);
+  --ink: oklch(96.4% 0.002 247.839);
+  --ink-2: oklch(73.1% 0.008 260.731);
+  --ink-3: oklch(54.1% 0.01 264.484);
+  --line: oklch(30.8% 0.006 258.354);
+  --line-strong: oklch(35.6% 0.007 264.474);
+  --blue: oklch(68% 0.173 253.301);
+  --blue-ink: oklch(78.8% 0.113 248.33);
+  --blue-tint: oklch(68% 0.173 253.301 / 0.16);
+  --green: oklch(70.5% 0.154 153.814);
+  --green-tint: oklch(70.5% 0.154 153.814 / 0.14);
+  --orange: oklch(74.6% 0.156 55.642);
+  --orange-tint: oklch(74.6% 0.156 55.642 / 0.14);
+  --red: oklch(66.6% 0.18 21.433);
+  --red-tint: oklch(66.6% 0.18 21.433 / 0.14);
+  --shadow-btn: 0 0 0 1px oklch(100% 0 0 / 0.1), 0 1px 2px oklch(0% 0 0 / 0.3);
+  --shadow-card: 0 0 0 1px oklch(100% 0 0 / 0.11), 0 1px 2px oklch(0% 0 0 / 0.2), 0 2px 6px oklch(0% 0 0 / 0.2);
+  --shadow-raised: 0 0 0 1px oklch(100% 0 0 / 0.13), 0 2px 10px oklch(0% 0 0 / 0.22);
+  --shadow-overlay: 0 0 0 1px oklch(100% 0 0 / 0.15), 0 8px 28px oklch(0% 0 0 / 0.34);
+}
+/* The names the pages use, on the palette above. */
+:root,
+.dark {
+  --background: var(--page);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --muted: var(--inset);
+  --muted-foreground: var(--ink-2);
+  --accent: var(--hover-2);
+  --border: var(--line);
+  --ring: var(--blue);
+  --primary: var(--ink);
+  --primary-foreground: var(--surface);
+  --danger: var(--red);
+  --warn: var(--orange);
+  --ok: var(--green);
+  --info: var(--blue);
 }
 @theme inline {
   --color-background: var(--background);
@@ -50,8 +97,59 @@
   --color-warn: var(--warn);
   --color-ok: var(--ok);
   --color-info: var(--info);
+  --color-page: var(--page);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-inset: var(--inset);
+  --color-hover: var(--hover);
+  --color-hover-2: var(--hover-2);
+  --color-field: var(--field);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-blue: var(--blue);
+  --color-blue-ink: var(--blue-ink);
+  --color-blue-tint: var(--blue-tint);
+  --color-green: var(--green);
+  --color-green-tint: var(--green-tint);
+  --color-orange: var(--orange);
+  --color-orange-tint: var(--orange-tint);
+  --color-red: var(--red);
+  --color-red-tint: var(--red-tint);
+  --radius-chip: 6px;
+  --radius-control: 8px;
+  --radius-card: 10px;
+  --radius-window: 14px;
+  --shadow-hairline: var(--shadow-hairline);
+  --shadow-btn: var(--shadow-btn);
+  --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-overlay: var(--shadow-overlay);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@keyframes pop-in { 0% { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+@keyframes fade-up { 0% { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fade-in { 0% { opacity: 0; } to { opacity: 1; } }
+@keyframes spin { to { transform: rotate(1turn); } }
+@keyframes shimmer-text { 0% { background-position: 150%; } to { background-position: -50%; } }
+@layer components {
+  .primitive-card-pad { padding: 12px; }
+  .primitive-card-bar { padding: 10px 12px; }
+  .primitive-card-footer { padding: 10px; }
+  .primitive-table-cell { padding: 10px 12px; }
+  .primitive-icon-button { border-radius: var(--radius-control); justify-content: center; align-items: center; width: 28px; height: 28px; display: inline-flex; }
+  /* A label that shimmers while something is loading (Beautiful UI's loading state). */
+  .shimmer-text {
+    background: linear-gradient(90deg, var(--ink-3) 0%, var(--ink-3) 40%, var(--ink) 50%, var(--ink-3) 60%, var(--ink-3) 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer-text 1.6s linear infinite;
+  }
 }
 html, body, #root { height: 100%; }
 body { background: var(--background); color: var(--foreground); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }

@@ -1,26 +1,20 @@
 import type { State } from '../api';
 import { navigate } from '../App';
+import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
-    <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b bg-background/90 px-6 backdrop-blur">
-      <h1 className="text-sm font-semibold">{title}</h1>
-      {sub && <span className="text-xs text-muted-foreground">{sub}</span>}
+    <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b border-line bg-page/90 px-6 backdrop-blur">
+      <h1 className="text-[14px] font-semibold tracking-tight text-ink">{title}</h1>
+      {sub && <span className="truncate text-[12.5px] text-ink-3">{sub}</span>}
       <div className="ml-auto flex items-center gap-2">{children}</div>
     </header>
   );
 }
 
-function Stat({ label, value, hint, tone }: { label: string; value: string | number; hint?: string; tone?: 'warn' | 'danger' | 'ok' }) {
-  return (
-    <Card className="p-4">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={cx('mt-1 text-2xl font-semibold tabular-nums', tone === 'warn' && 'text-warn', tone === 'danger' && 'text-danger', tone === 'ok' && 'text-ok')}>{value}</div>
-      {hint && <div className="mt-1 truncate text-xs text-muted-foreground">{hint}</div>}
-    </Card>
-  );
-}
+/** A headline figure, as an insight card (Beautiful UI). */
+const Stat = InsightCard;
 
 const ACTIVE = new Set(['claimed', 'reproducing', 'building', 'verifying', 'evaluating']);
 
@@ -45,15 +39,15 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
         </div>
 
         <div className="grid gap-3 lg:grid-cols-3">
-          <Card className="p-4">
+          <Card className="p-3">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span title={EST_NOTE}>Estimated spend today</span>
               <span className="tabular-nums" title={EST_NOTE}>
                 {estUsd(state.spendToday)} of {usd(state.budget)}
               </span>
             </div>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={Math.round(budgetPct)} aria-valuemin={0} aria-valuemax={100}>
-              <div className={cx('h-full rounded-full', budgetPct > 90 ? 'bg-danger' : budgetPct > 70 ? 'bg-warn' : 'bg-primary')} style={{ width: `${budgetPct}%` }} />
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-valuenow={Math.round(budgetPct)} aria-valuemin={0} aria-valuemax={100}>
+              <div className={cx('h-full rounded-full', budgetPct > 90 ? 'bg-red' : budgetPct > 70 ? 'bg-orange' : 'bg-blue')} style={{ width: `${budgetPct}%` }} />
             </div>
             <div className="mt-3 space-y-1">
               {Object.entries(state.spendByRole)
@@ -66,7 +60,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
                 ))}
             </div>
           </Card>
-          <Card className="p-4">
+          <Card className="p-3">
             <div className="text-xs text-muted-foreground">Main's baseline</div>
             {state.baseline ? (
               <>
@@ -86,7 +80,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
               <div className="mt-2 text-xs text-muted-foreground">None recorded. Until there is one, a red run can't land.</div>
             )}
           </Card>
-          <Card className="p-4">
+          <Card className="p-3">
             <div className="text-xs text-muted-foreground">Coordinator</div>
             {state.coordinator ? (
               <div className="mt-1 space-y-1 text-sm">
@@ -114,18 +108,18 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
           </Card>
         </div>
 
-        <Card>
-          <div className="flex items-center justify-between border-b px-4 py-2.5">
-            <span className="text-sm font-medium">Recent activity</span>
+        <Card className="overflow-hidden">
+          <div className="primitive-card-bar flex items-center justify-between border-b border-line">
+            <span className="text-[13px] font-medium text-ink">Recent activity</span>
             <span key={pulse} className="text-[11px] text-muted-foreground">live</span>
           </div>
           {state.activity.length ? (
-            <ul className="divide-y">
+            <ul className="divide-y divide-line">
               {state.activity.slice(0, 25).map((a) => (
-                <li key={a.id} className="flex items-center gap-3 px-4 py-2 text-sm">
+                <li key={a.id} className="flex items-center gap-3 px-3 py-2 text-[13px] text-ink transition-colors hover:bg-inset">
                   <span className="w-16 shrink-0 text-xs text-muted-foreground">{ago(a.ts)}</span>
                   {a.issue !== null ? (
-                    <button className="w-12 shrink-0 text-left font-mono text-xs text-info hover:underline" onClick={() => navigate(`/issues/${a.issue}`)}>
+                    <button className="w-12 shrink-0 text-left font-mono text-[12px] text-blue-ink hover:underline" onClick={() => navigate(`/issues/${a.issue}`)}>
                       #{a.issue}
                     </button>
                   ) : (
