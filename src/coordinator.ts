@@ -22,6 +22,8 @@ import { compareInstructions, engineRoleCases, instructionTargets, parseCases, r
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { runIssue } from './run-record.js';
+import { applySettings, inRunWindow } from './settings.js';
+import type { InstanceSettings } from './instance.js';
 import { readiness, requiredOutcomes, type Readiness } from './pr-watch.js';
 import { instructionEvalReasons, mergeDecision, type MergeDecision } from './merge-policy.js';
 import { scanRange } from './scan/secrets.js';
@@ -63,6 +65,10 @@ export interface CoordinatorDeps {
   prPollMs?: number;
   /** The instance policy's auto-merge kill switch, read on every decision (absent or throwing: off). */
   autoMerge?: () => boolean;
+  /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
+  settings?: () => { settings: InstanceSettings; error: string | null };
+  /** The clock (tests). */
+  now?: () => Date;
   /** Nightly queuing (tests inject this). */
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
@@ -113,6 +119,9 @@ export class Coordinator {
   private active = new Map<number, Promise<void>>();
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
+  /** The repo's own config: the defaults the instance's settings apply over. */
+  private readonly repoCfg: Config;
+  private settingsKey = '';
   /** When each auto-merge's commit on the default branch was last polled (ms). */
   private mainPolled = new Map<string, number>();
   private landing = false;
@@ -147,6 +156,7 @@ export class Coordinator {
         },
       },
     };
+    this.repoCfg = d.cfg;
     this.remote = d.remote ?? 'origin';
     this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
   }
@@ -197,6 +207,7 @@ export class Coordinator {
       }
     };
     this.checkEmergency();
+    await step('settings', () => this.refreshSettings(), undefined);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
@@ -337,10 +348,28 @@ export class Coordinator {
     else this.emit('governor.release', { load: (this.d.machine?.load ?? machineLoad)(), free_disk_pct: null });
   }
 
+  /**
+   * The instance's settings (policy.yaml), re-read every tick: when they change, the repo's config with
+   * them applied becomes the config in effect, without a restart. Refused settings: the repo's values.
+   */
+  refreshSettings(): void {
+    if (!this.d.settings) return;
+    const r = this.d.settings();
+    const key = JSON.stringify(r);
+    if (key === this.settingsKey) return;
+    this.settingsKey = key;
+    this.d.cfg = applySettings(this.repoCfg, r.settings);
+    this.emit('settings.applied', { settings: r.settings as Record<string, unknown>, error: r.error });
+  }
+
   private async dispatch(): Promise<number> {
     if (this.stopped || this.halt.signal.aborted) return 0;
     const workers = this.d.cfg.agents.roles.workers;
     if (!workers?.enabled) return 0;
+    if (!inRunWindow(this.d.cfg.project.agent_runtime.run_windows, this.d.now?.() ?? new Date())) {
+      this.noteHold({ reason: `outside the run windows (${this.d.cfg.project.agent_runtime.run_windows.map((w) => `${w.from}-${w.to}`).join(', ')})`, load: null, freeDiskPct: null });
+      return 0;
+    }
     let started = 0;
     const ready = await this.d.backlog.list('ready');
     // Fill free capacity this tick: one pass over the ready issues, one start per free worker.

@@ -119,6 +119,10 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   const stop = events.filter((e) => e.type === 'merge.stopped' || e.type === 'merge.resumed').at(-1);
   if (stop?.type === 'merge.stopped') lines.push('', `**Auto-merge stopped**: ${(stop.payload as { reason: string }).reason}. Every PR waits for you until the operator clears it.`);
 
+  // Instance settings the owner changed since the last report.
+  const changed = events.filter((e) => after(e) && e.type === 'settings.changed').map((e) => e.payload as { key: string; from: unknown; to: unknown; by: string });
+  if (changed.length) lines.push('', `**Settings changed** (${changed.length})`, ...changed.map((c) => `- ${c.key}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)} (@${c.by})`));
+
   // Usage, as the CLI estimates it: not billed money (a subscription isn't charged per run).
   const spendSince = events.filter((e) => after(e) && e.type === 'run.cost').reduce((s, e) => s + (e.payload as { usd: number }).usd, 0);
   lines.push('', `**Spend** (the CLI's cost estimate, not billed money): ~${money(spendSince)} since the last report; ~${money(p.spendToday)} today, against the ${money(cfg.agents.daily_budget_usd)} daily usage guard.`);

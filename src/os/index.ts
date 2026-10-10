@@ -1,9 +1,10 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
-import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 import { safeProjectEnv } from '../project-env.js';
 
@@ -434,6 +435,25 @@ export function diskFree(path: string): { freePct: number; freeGb: number; total
   const total = st.blocks * st.bsize;
   const free = st.bavail * st.bsize;
   return { freePct: total ? (free / total) * 100 : 0, freeGb: free / 1e9, totalGb: total / 1e9 };
+}
+
+/**
+ * Replace a file's content atomically: a temp file beside it (so the rename stays on one filesystem), with
+ * `mode` and, on POSIX, the original's owner and group; then rename over it. On failure the temp file is
+ * removed and the original is untouched.
+ */
+export function replaceFileAtomically(path: string, data: string, mode: number): void {
+  const st = statSync(path);
+  const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(4).toString('hex')}.tmp`);
+  try {
+    writeFileSync(tmp, data, { mode });
+    chmodSync(tmp, mode);
+    if (process.platform !== 'win32' && typeof process.getuid === 'function' && (st.uid !== process.getuid() || st.gid !== process.getgid!())) chownSync(tmp, st.uid, st.gid);
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
 }
 
 export function cpuCount(): number {

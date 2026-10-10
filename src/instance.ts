@@ -37,6 +37,20 @@ export const InstanceFile = z.strictObject({
     .optional(),
 });
 
+const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'must be HH:MM');
+
+/**
+ * The operator's settings for this instance: each one set here wins over the repo's value (which is the
+ * default when it's absent). Bounds come from the machine's limits file; see settings.ts.
+ */
+export const InstanceSettings = z.strictObject({
+  workers: z.number().int().min(0).optional(),
+  daily_budget_usd: z.number().positive().optional(),
+  ci_repair: z.strictObject({ enabled: z.boolean().optional(), max_fixes_per_pr: z.number().int().min(0).optional() }).optional(),
+  run_windows: z.array(z.strictObject({ from: hhmm, to: hhmm })).optional(),
+});
+export type InstanceSettings = z.infer<typeof InstanceSettings>;
+
 export const PolicyFile = z.strictObject({
   version: z.literal(1),
   budget: z.strictObject({ daily_usd: z.number().positive() }),
@@ -52,6 +66,8 @@ export const PolicyFile = z.strictObject({
    * takes effect without a restart.
    */
   auto_merge: z.boolean().default(false),
+  /** Instance settings that win over the repo's: worker count, daily budget, CI fix runs, run windows. */
+  settings: InstanceSettings.default({}),
   /**
    * Agents run as a separate OS user by default (instance.yaml run_as).
    * Setting this lets them run as the coordinator's own user, which can read
