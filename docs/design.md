@@ -314,6 +314,7 @@ How each level is cleared:
   - `land_mode: direct`: the coordinator fast-forward pushes to `main`. A plain non-force push is itself a compare-and-swap: it is rejected if `main` moved.
   - `land_mode: pr`: PRs are opened by the coordinator's identity. When the org has Enterprise Cloud, it can hand off to GitHub's native merge queue; the native queue isn't available on private Free/Pro/Team repos.
 - **Only the coordinator pushes.** Agents can't.
+- **Push limits.** Every push of agent-written code goes through one function that checks `guardrails.yaml` `push` first: no file over `max_file_mb` (default 10) in any commit of the range, including one added and later deleted; no path matching `refuse_paths`; at most `max_changed_lines` (default 1500); and never a `.github/workflows/` change, which the harness's credential can't push anyway. The same check runs on each change before it is verified, so the worker is told and no test run is spent; a refusal at the push blocks the issue with every reason. Either one records `push.refused`. A test fails if engine code pushes any other way (lease refs aside).
 - **Steps for each batch:**
   1. Admission: evaluator pass, level cleared, and the secret and policy gates are green.
   2. In a throwaway worktree, rebase the batch onto `main@tip`. On conflict, abort and send the change back to its worker; never guess.

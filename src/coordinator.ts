@@ -18,6 +18,7 @@ import { cpuCount, diskFree, killTree, killTreeAs, machineLoad, projectCommand, 
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
+import { checkedPush, pushProblems } from './push-check.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -382,6 +383,8 @@ export class Coordinator {
       if (repro?.path) writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] }));
       const maxAttempts = this.d.maxAttempts ?? 3;
       let feedback: string[] = [];
+      // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
+      let refused: string[] | null = null;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt);
         if (out.stop) return;
@@ -397,6 +400,7 @@ export class Coordinator {
           continue;
         }
         const change = await this.inspect(n, path, base, head, repro);
+        refused = 'rejected' in change ? (change.refused ?? null) : null;
         if ('rejected' in change) {
           this.emit('change.rejected', { issue: n, why: change.rejected });
           feedback = [`Your previous attempt was rejected: ${change.rejected}`];
@@ -424,7 +428,7 @@ export class Coordinator {
         }
         return;
       }
-      await this.block(n, owner, `no passing change after ${maxAttempts} attempts`);
+      await this.block(n, owner, refused ? `no pushable change after ${maxAttempts} attempts; ${pushRefusal(refused)}` : `no passing change after ${maxAttempts} attempts`);
     } catch (e) {
       if (!(e instanceof Halted)) throw e;
       // Requeued: the task starts over once the stop is lifted.
@@ -649,6 +653,12 @@ export class Coordinator {
     const scan = await scanRange(path, `${base}..${head}`);
     if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };
     if (scan.status === 'unavailable') return { rejected: `secret scan could not run (${scan.error}); not accepting an unscanned change` };
+    // The push limits, checked now so a change that can't be pushed doesn't spend a test run first.
+    const limits = pushProblems(path, base, head, this.d.cfg.guardrails.push);
+    if (limits.length) {
+      this.emit('push.refused', { issue: n, head, stage: 'change', reasons: limits });
+      return { rejected: `it can't be pushed: ${limits.join('; ')}`, refused: limits };
+    }
     const numstat = this.git(path, 'diff', '--numstat', `${base}..${head}`).split('\n').filter(Boolean);
     const files: ChangeFile[] = numstat.map((l) => {
       const [a, r, p] = l.split('\t');
@@ -1016,10 +1026,18 @@ export class Coordinator {
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
-      const push = spawnSync('git', ['push', this.remote, `${head}:refs/heads/${this.branch}`], { cwd: path, encoding: 'utf8' });
-      if (push.status !== 0) {
+      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push });
+      if (!push.ok && 'refused' in push) {
+        for (const q of applied) {
+          this.emit('push.refused', { issue: q.issue, head, stage: 'push', reasons: push.refused });
+          result(q.issue, 'rejected', null, `push refused: ${push.refused.join('; ')}`);
+          await this.block(q.issue, ownerOf(q.issue), pushRefusal(push.refused));
+        }
+        return;
+      }
+      if (!push.ok) {
         // The tip moved under us: leave them queued; the next tick rebuilds on the new tip.
-        for (const q of applied) result(q.issue, 'deferred', null, `push rejected (tip moved): ${push.stderr.trim().split('\n').pop()}`);
+        for (const q of applied) result(q.issue, 'deferred', null, `push rejected (tip moved): ${push.error.split('\n').pop()}`);
         return;
       }
       this.emit('check.result', { issue: applied[0]!.issue, head, stage: 'land', checks: gates.notes.map((note) => ({ check: note, status: 'pass', exitCode: 0 })) });
@@ -1046,9 +1064,16 @@ export class Coordinator {
     const n = q.issue;
     const branch = this.paths(n).branch;
     if (branch === this.branch) throw new Error(`refusing to push the default branch ${this.branch} in pr mode`);
-    const push = spawnSync('git', ['push', this.remote, `+${q.head}:refs/heads/${branch}`], { cwd: this.d.repo, encoding: 'utf8' });
-    if (push.status !== 0) {
-      this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `pushing ${branch} failed: ${(push.stderr || '').trim().slice(-500)}` });
+    const claimedBase = (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
+    const push = checkedPush({ cwd: this.d.repo, remote: this.remote, base: claimedBase, head: q.head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, force: true });
+    if (!push.ok && 'refused' in push) {
+      this.emit('push.refused', { issue: n, head: q.head, stage: 'push', reasons: push.refused });
+      this.emit('land.result', { issue: n, outcome: 'rejected', landed: null, detail: `push refused: ${push.refused.join('; ')}`.slice(0, 2000) });
+      await this.block(n, this.ownerOf(n), pushRefusal(push.refused));
+      return;
+    }
+    if (!push.ok) {
+      this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `pushing ${branch} failed: ${push.error.slice(-500)}` });
       await this.block(n, this.ownerOf(n), `could not push the task branch ${branch}`);
       return;
     }
@@ -1152,3 +1177,8 @@ const DEFAULT_REVIEW = {
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
 };
+
+/** The blocked comment for a refused push: every reason, one per line. */
+function pushRefusal(reasons: string[]): string {
+  return `the push was refused:\n${reasons.map((r) => `- ${r}`).join('\n')}`;
+}
