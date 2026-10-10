@@ -13,7 +13,7 @@ import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
-import { inbox, project } from './projection.js';
+import { checkResults, inbox, project } from './projection.js';
 import { instancesDir, loadInstance } from './instance.js';
 import { siteForInstance, siteForRoot } from './service.js';
 import { slotStatus } from './slots.js';
@@ -166,6 +166,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const issue = url.searchParams.get('issue');
           // One issue's whole history, or the recent tail of everything.
           return json(res, 200, issue ? evs.filter((e) => (e.payload as { issue?: number }).issue === Number(issue)) : evs.slice(-500));
+        }
+        if (url.pathname === '/api/checks' && req.method === 'GET') {
+          const issue = Number(url.searchParams.get('issue'));
+          if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
+          return json(res, 200, checkResults(readEvents(opts.eventsDb), issue));
         }
         if (url.pathname === '/api/stream' && req.method === 'GET') {
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });

@@ -429,3 +429,31 @@ export function inbox(p: Projection, user: string) {
     notify: p.tasks.filter((t) => (t.status === 'landed' || t.status === 'done') && t.level === 'L2' && mine(t.owner)).slice(0, 20),
   };
 }
+
+/** One run of the coordinator's own checks on an issue, as the issue page shows it. */
+export interface CheckRunView {
+  id: number;
+  at: string;
+  /** verify, land, ... or "no change" for a no-change finding checked on the unchanged base. */
+  stage: string;
+  head: string;
+  checks: { check: string; status: string; exitCode: number | null; tail: string | null }[];
+}
+
+/** An issue's check results, newest first: every check the coordinator ran itself, with each failure's output. */
+export function checkResults(events: StoredEvent[], issue: number): CheckRunView[] {
+  const out: CheckRunView[] = [];
+  for (const e of events) {
+    if (e.type !== 'check.result' && e.type !== 'issue.no_change') continue;
+    const p = e.payload as { issue: number; head?: string; base?: string; stage?: string; checks: { check: string; status: string; exitCode: number | null; tail?: string }[] };
+    if (p.issue !== issue) continue;
+    out.push({
+      id: e.id,
+      at: e.ts,
+      stage: e.type === 'issue.no_change' ? 'no change' : String(p.stage),
+      head: String(p.head ?? p.base ?? ''),
+      checks: p.checks.map((c) => ({ check: c.check, status: c.status, exitCode: c.exitCode ?? null, tail: c.tail ?? null })),
+    });
+  }
+  return out.reverse();
+}

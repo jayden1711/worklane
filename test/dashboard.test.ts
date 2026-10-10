@@ -285,3 +285,26 @@ test('every cost the web UI shows goes through the estimate formatter', () => {
     for (const m of src.matchAll(/\busd\(([^)]*)\)/g)) assert.doesNotMatch(m[1]!, /cost|spend|\bv\b/i, `${f}: ${m[0]} shows a cost without saying it's an estimate`);
   }
 });
+
+test('an issue\'s check results, newest first, with each failure\'s output; served per issue', async () => {
+  const s = await server();
+  try {
+    const head = 'c'.repeat(40);
+    s.log.append('check.result', { issue: 4, head, stage: 'verify', checks: [{ check: 'npm test', status: 'fail', exitCode: 1, tail: 'AssertionError: 2 !== 3' }, { check: 'npm run full', status: 'skipped', exitCode: null }] }, 'c');
+    s.log.append('check.result', { issue: 5, head, stage: 'verify', checks: [{ check: 'other issue', status: 'pass', exitCode: 0 }] }, 'c');
+    s.log.append('check.result', { issue: 4, head: 'd'.repeat(40), stage: 'verify', checks: [{ check: 'npm test', status: 'pass', exitCode: 0 }] }, 'c');
+    s.log.append('issue.no_change', { issue: 4, owner: 'example-owner', base: 'e'.repeat(40), why: 'already fixed', checks: [{ check: 'npm test', status: 'pass', exitCode: 0 }] }, 'c');
+    const r = await fetch(`${s.base}/api/checks?issue=4`, { headers: s.h });
+    assert.equal(r.status, 200);
+    const runs = (await r.json()) as { stage: string; head: string; checks: { check: string; status: string; exitCode: number | null; tail: string | null }[] }[];
+    assert.deepEqual(runs.map((x) => [x.stage, x.head[0]]), [['no change', 'e'], ['verify', 'd'], ['verify', 'c']], 'newest first, this issue only');
+    assert.deepEqual(runs[2]!.checks, [
+      { check: 'npm test', status: 'fail', exitCode: 1, tail: 'AssertionError: 2 !== 3' },
+      { check: 'npm run full', status: 'skipped', exitCode: null, tail: null },
+    ]);
+    assert.equal((await fetch(`${s.base}/api/checks?issue=4`)).status, 401, 'needs the token');
+    assert.equal((await fetch(`${s.base}/api/checks?issue=x`, { headers: s.h })).status, 400);
+  } finally {
+    await s.d.close();
+  }
+});
