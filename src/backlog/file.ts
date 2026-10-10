@@ -13,6 +13,11 @@ interface FilePr {
   draft: boolean;
   merged: boolean;
   reviewers?: string[];
+  /** GitHub's mergeable_state; clean unless a test says otherwise. */
+  mergeableState?: string;
+  /** The merge commit, once merged. */
+  mergeSha?: string;
+  mergeTitle?: string;
 }
 
 interface FileState {
@@ -119,7 +124,22 @@ export class FileBacklog implements Backlog {
   async pullRequest(n: number): Promise<PullRequest> {
     const i = this.load().issues.find((x) => x.number === n && x.pr);
     if (!i) throw new Error(`pull request #${n} not found`);
-    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state };
+    const state = i.pr!.mergeableState ?? 'clean';
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state };
+  }
+  /** Test hook: how a merge happens (e.g. a real merge commit on a test remote); returns the merge commit. */
+  mergeWith?: (pr: { number: number; head: string; headSha: string; base: string }) => string;
+  async mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
+    const i = this.load().issues.find((x) => x.number === n && x.pr);
+    if (!i || i.state !== 'open') return { ok: false, why: 'not open' };
+    if (i.pr!.headSha !== sha) return { ok: false, why: `head is ${i.pr!.headSha}, not ${sha}` };
+    if ((i.pr!.mergeableState ?? 'clean') === 'dirty') return { ok: false, why: 'merge conflict' };
+    const mergeSha = this.mergeWith ? this.mergeWith({ number: n, head: i.pr!.head, headSha: sha, base: i.pr!.base }) : sha.replace(/^./, 'f');
+    this.edit(n, (x) => {
+      Object.assign(x.pr!, { merged: true, mergeSha, mergeTitle: title });
+      x.state = 'closed';
+    });
+    return { ok: true, sha: mergeSha };
   }
   async checks(sha: string) {
     return this.load().checks?.[sha] ?? [];
@@ -153,7 +173,7 @@ export class FileBacklog implements Backlog {
       .map((i) => ({ number: i.number, title: i.title, body: i.body, labels: i.labels, state: i.state, comments: i.comments, ...i.pr! }));
   }
   /** Test helper: change a pull request as GitHub would (a push moves headSha; a merge or close ends it). */
-  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged'>> & { state?: 'open' | 'closed' }) {
+  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged' | 'mergeableState'>> & { state?: 'open' | 'closed' }) {
     this.edit(n, (i) => {
       const { state, ...rest } = patch;
       Object.assign(i.pr!, rest);

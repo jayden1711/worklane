@@ -15,7 +15,12 @@ const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
 export const DEFAULT_CATEGORIES: Record<string, string[]> = {
   docs: ['**/*.md', 'docs/**', '**/*.txt', 'art/**', 'assets/**'],
   tests: ['test/**', 'tests/**', '**/*.test.*', '**/*.spec.*', '**/__tests__/**'],
-  dependency: ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', '**/package.json', '**/package-lock.json'],
+  dependency: [
+    'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', '**/package.json', '**/package-lock.json',
+    '**/pyproject.toml', '**/requirements*.txt', '**/setup.py', '**/setup.cfg', '**/poetry.lock', '**/uv.lock', '**/Pipfile', '**/Pipfile.lock',
+    '**/Cargo.toml', '**/Cargo.lock', '**/go.mod', '**/go.sum', '**/Gemfile', '**/Gemfile.lock',
+  ],
+  'ci-config': ['.github/**', '.gitlab-ci.yml', '.circleci/**'],
   'harness-config': [`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md'],
   'guardrail-config': [`${BRAND.configDir}/guardrails.yaml`],
   migration: ['**/migrations/**', '**/*.sql', 'prisma/schema.prisma'],

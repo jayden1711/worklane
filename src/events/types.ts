@@ -53,6 +53,9 @@ export const EventSchemas = {
     advice: z.string(),
     /** Changed files the evaluator didn't read; any means the change goes to a human. */
     unread: z.array(z.string()).optional(),
+    /** The evaluator's binding design-level flag; absent (an older or failed verdict) counts as doubt. */
+    design_change: z.boolean().optional(),
+    design_reason: z.string().optional(),
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
@@ -78,6 +81,16 @@ export const EventSchemas = {
   'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
   'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted']), head: sha.nullable(), detail: z.string() }),
+  /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
+  'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),
+  /** Auto-merged: a merge commit `sha` of the evaluated `head`. */
+  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
+  'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
+  /** The default branch's required checks on an auto-merge's commit. */
+  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red']), failed: z.array(z.string()) }),
+  /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
+  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
+  'merge.resumed': z.strictObject({ detail: z.string() }),
   /** No more fix runs on this PR; the owner is asked to look. */
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),

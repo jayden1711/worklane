@@ -9,6 +9,7 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
+import type { ReviewConfig } from './config/schema.js';
 import { actionable, ownerFor, parseContract, type Backlog, type CommitCheck, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
@@ -19,7 +20,8 @@ import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './rev
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
-import { readiness, type Readiness } from './pr-watch.js';
+import { readiness, requiredOutcomes, type Readiness } from './pr-watch.js';
+import { mergeDecision, type MergeDecision } from './merge-policy.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -52,6 +54,8 @@ export interface CoordinatorDeps {
   leaseMs?: number;
   /** How often each open PR is polled for its checks (ms; default 60 s). */
   prPollMs?: number;
+  /** The instance policy's auto-merge kill switch, read on every decision (absent or throwing: off). */
+  autoMerge?: () => boolean;
   /** Nightly queuing (tests inject this). */
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
@@ -97,6 +101,8 @@ export class Coordinator {
   private active = new Map<number, Promise<void>>();
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
+  /** When each auto-merge's commit on the default branch was last polled (ms). */
+  private mainPolled = new Map<string, number>();
   private landing = false;
   private stopped = false;
   /** Aborted by an emergency stop: every agent run gets this signal. */
@@ -172,6 +178,7 @@ export class Coordinator {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
+    await step('merged', () => this.watchMerges(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
@@ -641,6 +648,18 @@ export class Coordinator {
     return this.d.commitIdentity ?? DEFAULT_COMMIT_IDENTITY;
   }
 
+  /** Each file the change base..head touches, with its line counts and added lines (for content checks). */
+  private changeFiles(cwd: string, base: string, head: string): ChangeFile[] {
+    return this.git(cwd, 'diff', '--numstat', `${base}..${head}`)
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const [a, r, p] = l.split('\t');
+        const added = this.git(cwd, 'diff', '-U0', `${base}..${head}`, '--', p!).split('\n').filter((x) => x.startsWith('+') && !x.startsWith('+++')).map((x) => x.slice(1));
+        return { path: p!, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added };
+      });
+  }
+
   /** Mechanical checks on what the worker produced, before anyone trusts it. */
   private async inspect(n: number, path: string, base: string, head: string, repro: { path: string; hash: string } | null) {
     if (repro?.path) {
@@ -672,12 +691,7 @@ export class Coordinator {
       this.emit('push.refused', { issue: n, head, stage: 'change', reasons: limits });
       return { rejected: `it can't be pushed: ${limits.join('; ')}`, refused: limits };
     }
-    const numstat = this.git(path, 'diff', '--numstat', `${base}..${head}`).split('\n').filter(Boolean);
-    const files: ChangeFile[] = numstat.map((l) => {
-      const [a, r, p] = l.split('\t');
-      const added = this.git(path, 'diff', '-U0', `${base}..${head}`, '--', p!).split('\n').filter((x) => x.startsWith('+') && !x.startsWith('+++')).map((x) => x.slice(1));
-      return { path: p!, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added };
-    });
+    const files = this.changeFiles(path, base, head);
     // Tamper guard: tests deleted, skipped, focused, or with fewer assertions.
     const tampered: string[] = [];
     const pattern = this.d.cfg.tests.vacuity?.assertion_pattern ?? '\\b(assert|expect|check)\\b';
@@ -760,7 +774,7 @@ export class Coordinator {
       timeoutMs: COMMAND_TIMEOUT_MS,
     });
     this.cost(n, 'evaluator-verdict', r);
-    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[] } | undefined;
+    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[]; design_change?: boolean; design_reason?: string } | undefined;
     // A review that didn't read every changed file can't pass on its own: those files go to a human.
     const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
     const unread = changed.filter((f) => !reviewed.has(f));
@@ -772,7 +786,8 @@ export class Coordinator {
       advice: r.reason === 'succeeded' ? (s?.advice ?? '') : `evaluator run ${r.reason}: ${r.detail}`,
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}) });
+    const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design });
     return { ...v, unread };
   }
 
@@ -1098,7 +1113,7 @@ export class Coordinator {
     const body = [
       `Closes #${n}`,
       '',
-      `Opened by ${BRAND.name}. It never merges this; a human does.`,
+      `Opened by ${BRAND.name}. It merges this itself only if the instance's merge policy allows (required checks green on the evaluated commit, nothing high-risk, design-level, big or in doubt); otherwise it waits for a human.`,
       '',
       `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
       `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
@@ -1186,6 +1201,180 @@ export class Coordinator {
       this.emit('pr.unready', { issue: n, number, head: pr.headSha, why: r.reasons.join('; ').slice(0, 1000) });
     }
     if (!r.ready && r.failed.length) await this.maybeFix(w, pr, r);
+    if (r.ready) await this.mergeOrWait(w, pr);
+  }
+
+  // ---------------------------------------------------------------- merge policy
+
+  private get stopFile() {
+    return join(this.d.stateDir, 'auto-merge-stopped.json');
+  }
+
+  /** Why auto-merge is stopped for this instance, or null. Persisted in a file only the operator clears. */
+  autoMergeStopped(): string | null {
+    if (!existsSync(this.stopFile)) return null;
+    try {
+      return String((JSON.parse(readFileSync(this.stopFile, 'utf8')) as { reason?: string }).reason ?? 'stopped');
+    } catch {
+      return `the stop file ${this.stopFile} is unreadable`;
+    }
+  }
+
+  /** The policy's call on a ready PR at its current head. */
+  mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const base = (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
+    const files = this.changeFiles(this.d.repo, base, pr.headSha);
+    const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
+    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+    const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
+    const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
+    const v = this.events(n).filter((e) => e.type === 'eval.verdict' && (e.payload as { head: string }).head === pr.headSha).at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
+    let policyOn = false;
+    try {
+      policyOn = this.d.autoMerge?.() ?? false;
+    } catch {
+      // an unreadable policy is "off"
+    }
+    return mergeDecision({
+      policyOn,
+      repoOn: review.merge.auto,
+      stopped: this.autoMergeStopped(),
+      level,
+      waitCategories: [...review.levels.L3_human.when, 'ci-config', ...review.merge.wait_categories],
+      limits: { max_lines: review.merge.max_lines, max_files: review.merge.max_files },
+      lines: files.reduce((s, f) => s + f.added + f.removed, 0),
+      files: files.length,
+      verdict: v ?? null,
+      newTopLevel,
+      ciFixRuns: this.d.log.read(0, ['ci_fix.started']).filter((e) => (e.payload as { number: number }).number === number).length,
+      foreignPush: pr.headSha !== this.ourHead(number),
+      pushLimitHit: this.events(n).some((e) => e.type === 'push.refused'),
+    });
+  }
+
+  /**
+   * A ready PR: merge it (a merge commit, pinned to the evaluated head) when the policy allows and GitHub says
+   * it merges cleanly; otherwise ask the owner once per head, saying why.
+   */
+  private async mergeOrWait(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+    const { issue: n, number } = w;
+    const prior = this.d.log
+      .read(0, ['merge.decided'])
+      .map((e) => e.payload as EventPayload<'merge.decided'>)
+      .filter((p) => p.number === number && p.head === pr.headSha)
+      .at(-1);
+    if (prior && !prior.auto) return; // already waiting for the owner
+    const d = this.mergeDecisionFor(n, number, pr);
+    if (d.auto) {
+      // GitHub still computing: try again next poll. A conflict, or anything else blocking a clean merge: a human.
+      if (pr.mergeable === null || pr.mergeableState === 'unknown' || pr.mergeableState === 'draft') return;
+      if (!pr.mergeable || !['clean', 'unstable', 'has_hooks'].includes(pr.mergeableState)) d.reasons.push(`GitHub can't merge it cleanly (${pr.mergeableState})`);
+      const failures = this.d.log.read(0, ['merge.failed']).map((e) => e.payload as EventPayload<'merge.failed'>).filter((p) => p.number === number && p.head === pr.headSha);
+      if (failures.length >= 3) d.reasons.push(`merging failed ${failures.length} times: ${failures.at(-1)!.why}`);
+      d.auto = d.reasons.length === 0;
+    }
+    if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
+    if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
+    const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
+    if (!m.ok) {
+      this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
+      return;
+    }
+    this.emit('merge.done', { issue: n, number, head: pr.headSha, sha: m.sha, url: pr.url, title: pr.title });
+    await this.d.backlog.comment(number, `[${BRAND.cli}] Auto-merged as \`${m.sha.slice(0, 8)}\` (a merge commit of the evaluated head \`${pr.headSha.slice(0, 8)}\`): every required check passed on it and nothing in it needs a human under this instance's merge policy.`);
+  }
+
+  /** A PR that waits for the owner: the needs-owner label, one comment with every reason, a review request. */
+  private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[]) {
+    const owner = this.ownerOf(w.issue);
+    await this.d.backlog.addLabels(w.number, ['needs-owner']);
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and waits for you to review and merge (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}`);
+    try {
+      await this.d.backlog.requestReview(w.number, [owner]);
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${w.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
+  }
+
+  /**
+   * After each auto-merge, the default branch's required checks on its merge commit. Red, with the commit
+   * before it green: stop auto-merging on this instance, open a revert PR and tell the owner. Red with main
+   * already red before it: stop and tell, nothing to revert. A stop lasts until the operator clears it.
+   */
+  private async watchMerges() {
+    const stopped = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+    if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
+    const judged = new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
+    const now = Date.now();
+    for (const e of this.d.log.read(0, ['merge.done'])) {
+      const m = e.payload as EventPayload<'merge.done'>;
+      if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
+      this.mainPolled.set(m.sha, now);
+      const required = this.d.cfg.project.required_checks;
+      const outcomes = requiredOutcomes(required, await this.d.backlog.checks(m.sha));
+      const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
+      if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) continue; // still running
+      this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed });
+      if (failed.length) await this.mainWentRed(m, failed);
+    }
+  }
+
+  private async mainWentRed(m: EventPayload<'merge.done'>, failed: string[]) {
+    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+    let parent = '';
+    try {
+      parent = this.git(this.d.repo, 'rev-parse', `${m.sha}^1`);
+    } catch {
+      // not a commit we have: treated as "main's state before it is unknown"
+    }
+    const before = parent ? requiredOutcomes(this.d.cfg.project.required_checks, await this.d.backlog.checks(parent)) : [];
+    const wasGreen = before.length > 0 && before.every((c) => c.outcome === 'pass');
+    const revert = wasGreen ? await this.openRevert(m, failed) : null;
+    const what = `${this.branch}'s required checks failed (${failed.join(', ')}) on \`${m.sha.slice(0, 8)}\` after auto-merging #${m.number}`;
+    const reason = wasGreen ? `${what}${revert ? `; revert PR ${revert.url}` : '; opening a revert PR failed'}` : `${what}, but ${this.branch} was not green before it (\`${parent.slice(0, 8) || '?'}\`), so nothing was reverted`;
+    writeFileSync(this.stopFile, JSON.stringify({ reason, number: m.number, sha: m.sha, revert: revert?.url ?? null, at: new Date().toISOString() }, null, 2));
+    this.emit('merge.stopped', { reason, number: m.number, sha: m.sha, revert: revert?.url ?? null });
+    const owner = this.ownerOf(m.issue);
+    const resume = `Auto-merge is stopped on this instance until the operator deletes \`${this.stopFile}\`; until then every PR waits for you.`;
+    await this.d.backlog.comment(m.number, `[${BRAND.cli}] @${owner} ${reason}. ${resume}`);
+    if (revert) {
+      await this.d.backlog.addLabels(revert.number, ['needs-owner']);
+      await this.d.backlog.comment(revert.number, `[${BRAND.cli}] @${owner} reverts #${m.number}: ${what}. This revert waits for you; it never merges itself. ${resume}`);
+      try {
+        await this.d.backlog.requestReview(revert.number, [owner]);
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${revert.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+      }
+    }
+  }
+
+  /** A PR reverting an auto-merge (git revert -m 1 on the current tip), through the push checks. Never watched, so never merged by the harness. */
+  private async openRevert(m: EventPayload<'merge.done'>, failed: string[]): Promise<{ url: string; number: number } | null> {
+    const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+    const dir = join(this.d.stateDir, 'reverts', `pr-${m.number}`);
+    const branch = `${BRAND.cli}/revert-pr-${m.number}`;
+    spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+    try {
+      this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
+      const rv = spawnSync('git', ['-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'revert', '-m', '1', '--no-edit', m.sha], { cwd: dir, encoding: 'utf8' });
+      if (rv.status !== 0) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `revert #${m.number}`, kind: 'error', message: (rv.stderr || rv.stdout).trim().slice(-500) });
+        return null;
+      }
+      const head = this.git(dir, 'rev-parse', 'HEAD');
+      const push = checkedPush({ cwd: dir, remote: this.remote, base: tip, head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, force: true });
+      if (!push.ok) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `revert #${m.number}`, kind: 'error', message: ('refused' in push ? push.refused.join('; ') : push.error).slice(0, 500) });
+        return null;
+      }
+      const body = `Reverts #${m.number} (\`${m.sha.slice(0, 8)}\`): after it was auto-merged, ${this.branch}'s required checks failed: ${failed.join(', ')}.\n\nOpened by ${BRAND.name}. It never merges this; a human does.`;
+      const pr = await this.d.backlog.openPr(branch, this.branch, `Revert "${m.title}" (#${m.number})`, body, { headSha: head });
+      return { url: pr.url, number: pr.number };
+    } finally {
+      spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+      spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
+    }
   }
 
   // ---------------------------------------------------------------- CI fix runs
@@ -1445,6 +1634,7 @@ const DEFAULT_REVIEW = {
     L2_notify: { when: ['app-non-money-large', 'dependency', 'test-machinery'] },
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
+  merge: { auto: true, max_lines: 400, max_files: 10, wait_categories: [] as string[] },
 };
 
 /** The end of a CI job log, for a fix run's brief: the last lines, without the runner's per-line timestamps. */

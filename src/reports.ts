@@ -81,8 +81,21 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   if (!blocked.length) lines.push('- nothing');
   for (const t of blocked) lines.push(`- #${t.issue} ${t.title} (@${t.owner ?? '?'}): ${(t.blockedReason ?? '').split('\n')[0]!.slice(0, 200)}`);
 
+  // Once a day (the first report of the day, and the preview): every auto-merge of the last 24 hours, with links.
+  const first = [...cfg.project.reports.times].sort()[0];
+  if (!opts.slot || opts.slot === first) {
+    const dayAgo = now.getTime() - 86_400_000;
+    const merged = events.filter((e) => e.type === 'merge.done' && Date.parse(e.ts) > dayAgo).map((e) => e.payload as { number: number; title: string; url: string; sha: string });
+    lines.push('', `**Auto-merged, last 24 h** (${merged.length})`);
+    if (!merged.length) lines.push('- nothing');
+    for (const m of merged) lines.push(`- [#${m.number}](${m.url}) ${m.title} \`${m.sha.slice(0, 8)}\``);
+  }
+  const stop = events.filter((e) => e.type === 'merge.stopped' || e.type === 'merge.resumed').at(-1);
+  if (stop?.type === 'merge.stopped') lines.push('', `**Auto-merge stopped**: ${(stop.payload as { reason: string }).reason}. Every PR waits for you until the operator clears it.`);
+
+  // Usage, as the CLI estimates it: not billed money (a subscription isn't charged per run).
   const spendSince = events.filter((e) => after(e) && e.type === 'run.cost').reduce((s, e) => s + (e.payload as { usd: number }).usd, 0);
-  lines.push('', `**Spend**: ${money(spendSince)} since the last report; ${money(p.spendToday)} today of ${money(cfg.agents.daily_budget_usd)}.`);
+  lines.push('', `**Spend** (the CLI's cost estimate, not billed money): ~${money(spendSince)} since the last report; ~${money(p.spendToday)} today, against the ${money(cfg.agents.daily_budget_usd)} daily usage guard.`);
 
   const holds = events.filter((e) => after(e) && e.type === 'governor.hold').map((e) => (e.payload as { reason: string }).reason);
   if (holds.length) lines.push('', `**Machine**: dispatch held ${holds.length} time(s): ${[...new Set(holds)].slice(0, 3).join('; ')}.`);

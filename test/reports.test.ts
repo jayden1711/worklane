@@ -32,7 +32,7 @@ test('report: landed, in review, decisions with owner and wait, blocked with rea
   assert.match(markdown, /- @ada: #2 Round up or down\? \(waiting 2\.0h; recommended: down\)/);
   assert.match(markdown, /- @ada: Ship the beta\?/, 'decisions not tied to an issue are listed too');
   assert.match(markdown, /- #3 Flaky import \(@ada\): needs a staging token$/m, 'first line of the reason only');
-  assert.match(markdown, /\*\*Spend\*\*: \$1\.50 since the last report/);
+  assert.match(markdown, /\*\*Spend\*\* \(the CLI's cost estimate, not billed money\): ~\$1\.50 since the last report/);
 });
 
 test('report slots: the latest configured time already passed today', () => {

@@ -36,6 +36,8 @@ export interface Backlog {
   checks(sha: string): Promise<CommitCheck[]>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
+  /** Merge a PR with a merge commit (never squash), only if its head is still `sha`. Returns the merge commit. */
+  mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }>;
   /** Ask these people to review a PR (GitHub notifies them). */
   requestReview(n: number, logins: string[]): Promise<void>;
   /**
@@ -54,6 +56,11 @@ export interface PullRequest {
   headSha: string;
   draft: boolean;
   state: 'open' | 'closed' | 'merged';
+  title: string;
+  /** GitHub's merge check: null while it's still computing. */
+  mergeable: boolean | null;
+  /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */
+  mergeableState: string;
 }
 
 /** One check on a commit, as GitHub reports it: a check run, or a commit status (completed with its state). */
@@ -79,6 +86,7 @@ export const LABELS = [
   { name: 'blocked', color: '000000', description: 'Cannot proceed; see the latest comment' },
   { name: 'merge-ready', color: '0e8a16', description: 'Required checks passed on the commit the evaluator approved' },
   { name: 'ci-failing', color: 'b60205', description: 'A required check fails and CI fix runs stopped; see the latest comment' },
+  { name: 'needs-owner', color: 'd93f0b', description: 'Waits for the owner to review and merge; the latest comment says why' },
   { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
   { name: 'report', color: 'bfdadc', description: 'Scheduled reports are posted here' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },

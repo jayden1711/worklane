@@ -299,6 +299,21 @@ export const ReviewConfig = z.strictObject({
     L2_notify: z.strictObject({ when: z.array(z.string()) }),
     L3_human: z.strictObject({ when: z.array(z.string()), over_lines: z.number().int().positive().optional() }),
   }),
+  /**
+   * PR mode: which of the harness's own ready PRs it may merge itself. Only where the instance policy turns
+   * auto-merge on; this can only narrow it. Everything outside it waits for a human.
+   */
+  merge: z
+    .strictObject({
+      /** false: every PR waits for a human, whatever the instance policy says. */
+      auto: z.boolean().default(true),
+      /** Over either and the PR waits. */
+      max_lines: z.number().int().positive().default(400),
+      max_files: z.number().int().positive().default(10),
+      /** Categories (built-in or from `categories`) that wait, on top of the L3 ones, ci-config and dependency. */
+      wait_categories: z.array(z.string()).default([]),
+    })
+    .prefault({}),
 });
 
 // ---------- deploy.yaml ----------
