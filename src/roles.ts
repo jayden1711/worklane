@@ -37,13 +37,18 @@ export const REPRO_SCHEMA = {
 export const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['patch_correct', 'test_correct', 'confidence', 'advice', 'files_reviewed'],
+  required: ['patch_correct', 'test_correct', 'confidence', 'advice', 'files_reviewed', 'design_change'],
   properties: {
     files_reviewed: { type: 'array', items: { type: 'string' }, description: 'Every changed file whose diff you read in full (repo-relative paths).' },
     patch_correct: { type: 'boolean', description: 'The change does what the issue and done_when ask, without breaking anything else you can see.' },
     test_correct: { type: 'boolean', description: 'The reproduction test checks the right behavior (false if the test itself is wrong).' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     advice: { type: 'string', description: 'What is wrong and how to fix it (patch or test). Empty if nothing.' },
+    design_change: {
+      type: 'boolean',
+      description: 'true if the change is design-level: a new top-level module or package, a change to a public CLI or API surface or to a file format, a new dependency, or an architecture change. A human then reviews it before it merges.',
+    },
+    design_reason: { type: 'string', description: 'When design_change is true: what about the design changes, in one sentence.' },
   },
 } as const;
 
@@ -96,6 +101,7 @@ const DEFAULTS: Record<string, string> = {
 - patch_correct: does the change actually do what the issue asks, without regressions you can see?
 - test_correct: does the reproduction test check the right behavior? You may conclude the TEST is wrong rather than the patch.
 - List in files_reviewed every changed file whose diff you read in full. A review that leaves a changed file unread does not pass.
+- design_change: true if the change is design-level (a new top-level module or package, a public CLI or API surface or file format change, a new dependency, an architecture change), with design_reason. It is binding: a design change always waits for a human, however correct it is. When unsure, say true.
 - Be specific in advice. Do not edit anything.`,
 };
 

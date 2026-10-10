@@ -142,7 +142,28 @@ export class GitHubBacklog implements Backlog {
 
   async pullRequest(n: number): Promise<PullRequest> {
     const p = await this.req<GhPull>('GET', `/repos/${this.repo}/pulls/${n}`);
-    return { number: p.number, url: p.html_url, head: p.head.ref, headSha: p.head.sha, draft: Boolean(p.draft), state: p.merged ? 'merged' : p.state === 'closed' ? 'closed' : 'open' };
+    return {
+      number: p.number,
+      url: p.html_url,
+      head: p.head.ref,
+      headSha: p.head.sha,
+      draft: Boolean(p.draft),
+      state: p.merged ? 'merged' : p.state === 'closed' ? 'closed' : 'open',
+      title: p.title ?? '',
+      mergeable: p.mergeable ?? null,
+      mergeableState: p.mergeable_state ?? 'unknown',
+    };
+  }
+
+  async mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
+    try {
+      const r = await this.req<{ sha: string; merged: boolean; message?: string }>('PUT', `/repos/${this.repo}/pulls/${n}/merge`, { merge_method: 'merge', sha, commit_title: title });
+      return r.merged ? { ok: true, sha: r.sha } : { ok: false, why: r.message ?? 'not merged' };
+    } catch (e) {
+      // 405: not mergeable now; 409: the head moved off `sha`. Both are a "not now", never a merge of something else.
+      if (e instanceof GitHubError && (e.status === 405 || e.status === 409 || e.status === 422)) return { ok: false, why: e.message };
+      throw e;
+    }
   }
 
   async checks(sha: string): Promise<CommitCheck[]> {
@@ -218,4 +239,7 @@ interface GhPull {
   draft?: boolean;
   state: string;
   merged?: boolean;
+  title?: string;
+  mergeable?: boolean | null;
+  mergeable_state?: string;
 }

@@ -47,6 +47,12 @@ export const PolicyFile = z.strictObject({
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
   /**
+   * The instance's kill switch for auto-merge (PR mode): off, every PR waits for a human. On, the repo's
+   * review.yaml `merge` rules decide, and can only narrow it. Re-read on every check, so turning it off
+   * takes effect without a restart.
+   */
+  auto_merge: z.boolean().default(false),
+  /**
    * Agents run as a separate OS user by default (instance.yaml run_as).
    * Setting this lets them run as the coordinator's own user, which can read
    * every credential the coordinator holds: for trying things out only.
@@ -232,7 +238,7 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
     'instance.yaml',
     `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${agentUser}\n  agent_home: /home/${agentUser}\n`,
   );
-  write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2 }\nland_mode: pr\n`);
+  write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2 }\nland_mode: pr\n# On: the harness merges its own PRs that review.yaml's merge rules allow; off: every PR waits for you.\nauto_merge: false\n`);
   write(
     'credentials.yaml',
     `# References only. Point these at credentials made for this instance; never your own login.\nversion: 1\ngithub: { kind: gh-config-dir, path: ${JSON.stringify(join(home, 'gh'))} }\n# claude: { config_dir: ... }   only when agents run as this user (no run_as)\n`,

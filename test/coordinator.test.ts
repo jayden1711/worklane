@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
@@ -822,14 +822,15 @@ const failing = (id: number) => [{ name: 'ci', source: 'check_run' as const, sta
 const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
 
 /** PR mode with one required check and fix runs on; runs the task until its PR is open. */
-async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean } = {}) {
+async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void } = {}) {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   if (opts.fixes !== false) f.cfg.agents.roles.ci_repair = { enabled: true, model: 'sonnet', max_fixes_per_pr: 2 };
+  opts.edit?.(f.cfg);
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const runner = agents(over);
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0 });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}) });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -1008,6 +1009,195 @@ test('a CI fix run cut off by a restart is recorded as interrupted and its claim
 test('logTail: the last lines of a job log, runner timestamps stripped, bounded', () => {
   assert.equal(logTail('2026-10-10T07:44:38.7864502Z a\r\n2026-10-10T07:44:38.7Z b\nc', 2), 'b\nc');
   assert.equal(logTail('x'.repeat(50), 150, 10).length, 10);
+});
+
+// ---- merge policy
+
+/** A diligent evaluator that approves with high confidence and answers the design question. */
+const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}) });
+
+/** Required check green on the PR's head, then one poll. */
+async function green(t: Awaited<ReturnType<typeof openPr>>) {
+  t.f.backlog.setChecks(t.pr().headSha, passing);
+  await t.c.tick();
+}
+
+/** Merges for real on the test remote (a --no-ff merge commit of the PR head), as GitHub would. */
+function realMerges(t: Awaited<ReturnType<typeof openPr>>) {
+  t.f.backlog.mergeWith = (pr) => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'gh-merge-')), 'c');
+    git(t.f.base, 'clone', '-q', t.f.remote, dir);
+    git(dir, 'fetch', '-q', 'origin', pr.head);
+    git(dir, '-c', 'user.email=gh@example.com', '-c', 'user.name=GitHub', '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-ff', '-m', `Merge pull request #${pr.number}`, pr.headSha);
+    git(dir, 'push', '-q', 'origin', 'main');
+    return git(dir, 'rev-parse', 'HEAD');
+  };
+}
+
+const reasonsOf = (t: Awaited<ReturnType<typeof openPr>>) => (lastOf(t.f.log, 'merge.decided') as { auto: boolean; reasons: string[] });
+
+test('auto-merge: a clean ready PR is merged with a merge commit pinned to the evaluated head', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  const calls: { sha: string; title: string }[] = [];
+  const merge = t.f.backlog.mergePr.bind(t.f.backlog);
+  t.f.backlog.mergePr = async (n, sha, title) => {
+    calls.push({ sha, title });
+    return merge(n, sha, title);
+  };
+  await green(t);
+  assert.deepEqual([reasonsOf(t).auto, reasonsOf(t).reasons], [true, []]);
+  assert.deepEqual(calls, [{ sha: t.opened.head, title: `Totals count negative quantities (#${t.n}) (#${t.opened.number})` }]);
+  const done = lastOf(t.f.log, 'merge.done') as { head: string; sha: string };
+  assert.equal(done.head, t.opened.head);
+  assert.ok(t.pr().merged);
+  assert.ok(t.pr().comments.some((x) => /Auto-merged as `.{8}` \(a merge commit of the evaluated head/.test(x.body)));
+  assert.ok(!t.pr().labels.includes('needs-owner'));
+  await t.c.tick();
+  assert.deepEqual(lastOf(t.f.log, 'pr.closed'), { issue: t.n, number: t.opened.number, merged: true });
+});
+
+test('auto-merge off (the instance kill switch, the default): a ready PR waits, with the reason, a label and a review request, once', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() });
+  await green(t);
+  assert.deepEqual([reasonsOf(t).auto, reasonsOf(t).reasons], [false, ['auto-merge is off for this instance (policy.yaml auto_merge)']]);
+  assert.ok(!t.pr().merged);
+  assert.ok(t.pr().labels.includes('needs-owner'));
+  assert.deepEqual(t.pr().reviewers, ['example-owner']);
+  const pings = () => t.pr().comments.filter((x) => /waits for you to review and merge/.test(x.body)).length;
+  assert.equal(pings(), 1);
+  await t.c.tick();
+  await t.c.tick();
+  assert.equal(pings(), 1, 'asked once per head');
+});
+
+test('auto-merge: the kill switch is read at decision time, and a throwing or unreadable policy counts as off', { skip }, async () => {
+  let on = true;
+  const t = await openPr({ 'evaluator-verdict': approve() }, {
+    autoMerge: () => {
+      if (!on) throw new Error('policy.yaml unreadable');
+      return on;
+    },
+  });
+  on = false;
+  await green(t);
+  assert.match(reasonsOf(t).reasons.join(), /auto-merge is off for this instance/);
+  assert.ok(!t.pr().merged);
+});
+
+test("auto-merge: the repo's own high-risk category waits, naming the path", { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, {
+    autoMerge: () => true,
+    edit: (cfg) => {
+      cfg.review!.categories = { ...cfg.review!.categories, pricing: ['src/price.js'] };
+      cfg.review!.merge.wait_categories = ['pricing'];
+    },
+  });
+  await green(t);
+  assert.deepEqual(reasonsOf(t).reasons, ['high-risk: pricing (src/price.js)']);
+  assert.ok(!t.pr().merged && t.pr().labels.includes('needs-owner'));
+});
+
+test("auto-merge: the evaluator's design-change flag is binding", { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve(true) }, { autoMerge: () => true });
+  await green(t);
+  assert.deepEqual(reasonsOf(t).reasons, ['design: the evaluator flagged a design change: adds a public option']);
+  assert.ok(!t.pr().merged);
+});
+
+test('auto-merge: an evaluator that gives no design answer is doubt', { skip }, async () => {
+  const t = await openPr({}, { autoMerge: () => true });
+  await green(t);
+  assert.deepEqual(reasonsOf(t).reasons, ['doubt: the evaluator gave no design-change answer']);
+});
+
+test('auto-merge: over the configured size waits', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.review!.merge.max_lines = 2) });
+  await green(t);
+  assert.match(reasonsOf(t).reasons.join(), /^big: \d+ changed lines \(over 2\)$/);
+});
+
+test('auto-merge: a PR that needed a CI fix run waits, even once green', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(fixer), 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  t.f.backlog.setChecks(t.opened.head, failing(81));
+  t.f.backlog.setJobLog(81, 'red\n');
+  await t.c.tick();
+  await t.c.idle();
+  t.sync();
+  await green(t);
+  assert.deepEqual(reasonsOf(t).reasons, ['doubt: 1 CI fix run(s) on this PR']);
+  assert.ok(!t.pr().merged);
+});
+
+test("auto-merge: GitHub's merge check decides too: still computing waits a poll, a conflict waits for the owner", { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'unknown' });
+  await green(t);
+  assert.equal(t.f.log.read(0, ['merge.decided']).length, 0, 'no decision while GitHub computes');
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'dirty' });
+  await t.c.tick();
+  assert.deepEqual(reasonsOf(t).reasons, ["GitHub can't merge it cleanly (dirty)"]);
+  assert.ok(!t.pr().merged);
+});
+
+test('auto-merge stop: main red after an auto-merge (green before it) stops auto-merge, opens a revert PR that never auto-merges, and asks the owner; only the operator resumes it', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  realMerges(t);
+  const before = git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!;
+  t.f.backlog.setChecks(before, passing);
+  await green(t);
+  const done = lastOf(t.f.log, 'merge.done') as { sha: string };
+  assert.equal(git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], done.sha);
+  t.f.backlog.setChecks(done.sha, failing(91));
+  await t.c.tick();
+  assert.deepEqual(lastOf(t.f.log, 'merge.main_result'), { issue: t.n, number: t.opened.number, sha: done.sha, outcome: 'red', failed: ['ci'] });
+  const stop = lastOf(t.f.log, 'merge.stopped') as { reason: string; revert: string | null };
+  assert.ok(stop.revert, stop.reason);
+  assert.ok(existsSync(join(t.f.stateDir, 'auto-merge-stopped.json')), 'persisted');
+  const revert = t.f.backlog.prs().find((p) => p.head === `${BRAND.cli}/revert-pr-${t.opened.number}`)!;
+  assert.ok(revert, 'a revert PR');
+  assert.equal(revert.title, `Revert "Totals count negative quantities (#${t.n})" (#${t.opened.number})`);
+  assert.doesNotMatch(git(t.f.repo, 'show', `${revert.headSha}:src/price.js`), /qty > 0/, 'the revert undoes the change');
+  assert.ok(revert.labels.includes('needs-owner'));
+  assert.deepEqual(revert.reviewers, ['example-owner']);
+  assert.ok(t.pr().comments.some((x) => /@example-owner main's required checks failed \(ci\).*Auto-merge is stopped on this instance until the operator deletes/.test(x.body)));
+  assert.ok(!t.c.watchedPrs().some((w) => w.number === revert.number), 'the revert PR is never watched, so never auto-merged (and never reverted)');
+  // A new PR now waits, however clean.
+  assert.match(String(t.c.autoMergeStopped()), /after auto-merging/);
+  // Survives a restart: a new coordinator still sees the stop.
+  const again = new Coordinator({ cfg: t.f.cfg, log: t.f.log, backlog: t.f.backlog, runner: agents(), repo: t.f.repo, instance: 'alice', stateDir: t.f.stateDir, slotsDir: t.f.slotsDir, machine: t.f.machine, prPollMs: 0, autoMerge: () => true });
+  assert.ok(again.autoMergeStopped());
+  rmSync(join(t.f.stateDir, 'auto-merge-stopped.json'));
+  await again.tick();
+  assert.ok(t.f.log.read(0, ['merge.resumed']).length === 1, 'the operator cleared it');
+  assert.equal(again.autoMergeStopped(), null);
+});
+
+test('auto-merge stop: main red after an auto-merge but already red before it: stopped and told, nothing reverted', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  realMerges(t);
+  const before = git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!;
+  t.f.backlog.setChecks(before, failing(92));
+  await green(t);
+  const done = lastOf(t.f.log, 'merge.done') as { sha: string };
+  t.f.backlog.setChecks(done.sha, failing(93));
+  await t.c.tick();
+  const stop = lastOf(t.f.log, 'merge.stopped') as { reason: string; revert: string | null };
+  assert.equal(stop.revert, null);
+  assert.match(stop.reason, /was not green before it/);
+  assert.ok(!t.f.backlog.prs().some((p) => p.head.includes('revert')));
+});
+
+test('auto-merge: main green after it is recorded and nothing stops', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  realMerges(t);
+  await green(t);
+  const done = lastOf(t.f.log, 'merge.done') as { sha: string };
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['merge.main_result']).length, 0, 'pending: nothing yet');
+  t.f.backlog.setChecks(done.sha, passing);
+  await t.c.tick();
+  assert.equal((lastOf(t.f.log, 'merge.main_result') as { outcome: string }).outcome, 'green');
+  assert.equal(t.f.log.read(0, ['merge.stopped']).length, 0);
 });
 
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {

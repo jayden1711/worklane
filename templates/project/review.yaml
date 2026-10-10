@@ -7,3 +7,17 @@ levels:
   L1_evaluator: { when: [ui, app-non-money], max_lines: 400, max_files: 10 }
   L2_notify:    { when: [app-non-money-large, dependency, test-machinery] }
   L3_human:     { when: [money-path, migration, auth, secrets, deploy-config, release-config, harness-config, guardrail-config, deletes-data], over_lines: 800 }
+
+# PR mode: which ready PRs the harness merges itself (a merge commit of the exact evaluated
+# commit), only where the instance policy's auto_merge is on. Everything else waits for you:
+# - high-risk: any L3_human category above, ci-config, and wait_categories below
+#   (add your own in `categories`, e.g. { pricing: [src/billing/**] }, and list them here)
+# - design-level: the evaluator's design_change flag, dependency manifests, a new top-level module
+# - big: over max_lines changed lines or max_files files
+# - doubt: evaluator confidence below high, an uncertain verdict, a CI fix run, someone else's
+#   push to the branch, or a push limit hit
+merge:
+  auto: true
+  max_lines: 400
+  max_files: 10
+  wait_categories: []
