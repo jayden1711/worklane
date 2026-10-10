@@ -69,3 +69,13 @@ machine_sudoers() {
   for u in "$@"; do users="$users, $u"; done
   printf '\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\n' "$users"
 }
+
+# The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
+# joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
+# updater refuses a skipped required check. A test derives this list from the workflows.
+UPDATE_DEFAULT_CHECKS=("agentshield" "denylist" "desktop" "push-gate" "scan" "test (macos-latest, 22)" "test (macos-latest, 24)" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test (windows-latest, 22)" "test (windows-latest, 24)")
+
+# updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
+updates_config_json() {
+  node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
+}
