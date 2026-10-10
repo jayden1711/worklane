@@ -4,7 +4,7 @@
 // human answering a decision, recorded as an event like the CLI does, and
 // only by that decision's owner or one of the project's writers.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,8 @@ import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
 import { inbox, project } from './projection.js';
+import { instancesDir, loadInstance } from './instance.js';
+import { siteForInstance, siteForRoot } from './service.js';
 import { slotStatus } from './slots.js';
 import { buildReport } from './reports.js';
 
@@ -58,6 +60,19 @@ export function mayAnswer(owner: string, user: string, owners: { writers: string
 }
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
+
+/**
+ * Which log and state a dashboard reads. A project checkout's own, or, with
+ * an instance, that instance's: run it as the instance's coordinator user,
+ * the only user that can read (and, for answers, write) the instance's log.
+ */
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number } {
+  const s = instance ? siteForInstance(loadInstance(instance, dir)) : siteForRoot(root);
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317 };
+}
+
+/** An instance's dashboard port, the same every time (so a tunnel to it can be set up once): 4400-4899, from its name. */
+export const instancePort = (name: string) => 4400 + (createHash('sha256').update(name).digest().readUInt32BE(0) % 500);
 
 /** Where the built web UI is served from: dist/web next to this module's dist/src (`npm run build:web` writes it there). */
 export const DEFAULT_WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
