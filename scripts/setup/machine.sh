@@ -14,8 +14,9 @@ say "shared agent slots (group agent-slots) and their config"
 ensure_group agent-slots
 install -d -o root -g agent-slots -m 2770 /var/lib/worklane/agent-slots
 if [ ! -f /etc/worklane/slots.json ]; then printf '{"max_agents":%s}\n' "$cap" > /etc/worklane/slots.json; fi
-chown root:agent-slots /etc/worklane/slots.json
-chmod 0664 /etc/worklane/slots.json
+# Readable by all, writable by root only: the cap changes through the machine helper (machine-helper.sh).
+chown root:root /etc/worklane/slots.json
+chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
 say "sandbox dependencies"

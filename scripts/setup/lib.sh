@@ -49,3 +49,23 @@ refuse_if_open() {
   echo "close them (chmod -R o-rwx $state), make sure the coordinator runs an engine that keeps them closed, then run this again" >&2
   exit 1
 }
+
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 18
+# allowed commands (set-slots 1..16, set-updates on, set-updates off) as root, and nothing else.
+# Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
+MACHINE_HELPER=/usr/local/libexec/worklane-machine
+machine_sudoers() {
+  local u n cmds=()
+  [ "$#" -ge 1 ] || { echo "machine_sudoers: no users" >&2; return 1; }
+  for u in "$@"; do
+    [[ "$u" =~ ^wl-[a-z][a-z0-9-]{0,20}$ && "$u" != wl-dash ]] || { echo "machine_sudoers: $u is not a coordinator user" >&2; return 1; }
+  done
+  for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
+  cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
+  printf '# Coordinators may change the machine slot cap and the update switch, through one validating helper.\n'
+  printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
+  for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
+  local users="$1"; shift
+  for u in "$@"; do users="$users, $u"; done
+  printf '\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\n' "$users"
+}
