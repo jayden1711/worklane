@@ -137,7 +137,8 @@ export function targetExpr(target) {
   if (target.startsWith('testid:')) return `document.querySelector(${JSON.stringify(`[data-testid="${target.slice(7)}"]`)})`;
   if (target.startsWith('text:')) {
     const want = JSON.stringify(target.slice(5).trim());
-    return `[...document.querySelectorAll('button,a,[role=button],[role=tab],[role=option],[role=menuitem]')].find((e) => e.innerText.trim() === ${want} && e.offsetParent !== null)`;
+    // The whole text, or its first line (buttons often carry a key hint on a line of its own).
+    return `[...document.querySelectorAll('button,a,[role=button],[role=tab],[role=option],[role=menuitem]')].find((e) => { const t = e.innerText.trim(); return (t === ${want} || t.split('\\n')[0].trim() === ${want}) && e.offsetParent !== null; })`;
   }
   return `document.querySelector(${JSON.stringify(target)})`;
 }

@@ -42,7 +42,8 @@ test('pages are found by feature-map id or by path, with their parameters', () =
 test('targets: testid and text shorthands and plain CSS become element lookups', () => {
   const expr = fm.targetExpr as (t: string) => string;
   assert.equal(expr('testid:pr-row'), 'document.querySelector("[data-testid=\\"pr-row\\"]")');
-  assert.match(expr('text:Approve'), /innerText\.trim\(\) === "Approve"/);
+  // The whole text or its first line: buttons often carry a key hint on a second line.
+  assert.match(expr('text:Approve'), /t === "Approve" \|\| t\.split\('\\n'\)\[0\]\.trim\(\) === "Approve"/);
   assert.equal(expr('main header h1'), 'document.querySelector("main header h1")');
 });
 
@@ -57,10 +58,10 @@ test('a baseline makes only new console errors count: ports are ignored, a new p
 // Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise.
 const chrome = ctl.findChrome(process.env.CHROME);
 const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
-test('end to end: opens a page in a real headless Chrome, and keeps all its state in its temporary directory', { skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built') || (process.platform === 'win32' && 'checked on macOS and Linux') }, () => {
+test('end to end: opens a page in a real headless Chrome with PR history, and keeps all its state in its temporary directory', { skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built') || (process.platform === 'win32' && 'checked on macOS and Linux') }, () => {
   // A state dir the script must not write to: before the fix, the run record for the run page landed here.
   const mine = mkdtempSync(join(tmpdir(), 'not-the-demo-'));
-  const r = spawnSync(process.execPath, [join(dir, 'control-dashboard.mjs'), 'open', 'run-detail', ...(process.env.CHROME ? ['--chrome', process.env.CHROME] : [])], {
+  const r = spawnSync(process.execPath, [join(dir, 'control-dashboard.mjs'), 'open', 'run-detail', '--with-prs', ...(process.env.CHROME ? ['--chrome', process.env.CHROME] : [])], {
     encoding: 'utf8',
     env: { ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: mine },
     timeout: 120_000,
@@ -69,5 +70,7 @@ test('end to end: opens a page in a real headless Chrome, and keeps all its stat
   assert.equal(first.page, 'run-detail', `${r.stdout}\n${r.stderr}`);
   assert.match(first.heading ?? '', /run$/);
   assert.deepEqual(readdirSync(mine), [], 'nothing written to the caller\'s state dir');
+  // The PR history matches this engine's event schemas: every event was recorded.
+  assert.doesNotMatch(r.stderr, /not recorded/, r.stderr);
   void readFileSync;
 });

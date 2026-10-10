@@ -23,7 +23,8 @@
 //   eval <js expression>                                   its value (JSON)
 //
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
-// --keep (leave the temporary directory), --no-chrome-sandbox (for nested sandboxes; see the skill).
+// --with-prs (add pull-request history for the PR views), --keep (leave the temporary directory),
+// --no-chrome-sandbox (for nested sandboxes; see the skill).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -162,6 +163,7 @@ async function start() {
     const state = await (await fetch(`${base}/api/state`, { headers: { authorization: `Bearer ${token}` } })).json();
     const issue = state.tasks.find((t) => t.status === 'awaiting_decision')?.issue ?? state.tasks[0]?.issue;
     const run = await seedRun(root, issue);
+    if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
 
     const profile = join(work, 'chrome');
     mkdirSync(profile);
@@ -212,6 +214,51 @@ async function seedRun(root, issue) {
   return r.id;
 }
 
+/**
+ * --with-prs: pull-request history for the PR views (the demo opens none): one PR being checked, one
+ * waiting for its owner after a CI fix run gave up, one auto-merged, a refused push, and an auto-merge
+ * stop with its revert. Appended through the engine's own event log, so each event is checked against
+ * its schema; an engine without these events gets none.
+ */
+async function seedPrs(root, issues) {
+  const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
+  const svc = join(engine, 'dist', 'src', 'service.js');
+  if (!existsSync(logMod) || !existsSync(svc) || issues.length < 4) return;
+  const { EventLog } = await import(pathToFileURL(logMod).href);
+  const { logPath } = await import(pathToFileURL(svc).href);
+  const log = new EventLog(logPath(root));
+  const [a, b, c, d] = issues;
+  const h = (n) => String(n).repeat(7).slice(0, 7) + 'abcdef0';
+  const url = (n) => `https://github.com/example/shop/pull/${n}`;
+  const events = [
+    ['pr.opened', { issue: a, number: 101, url: url(101), head: h(1), draft: true }],
+    ['pr.status', { issue: a, number: 101, head: h(1), ready: false, reasons: ['test pending'], checks: [{ name: 'lint', outcome: 'pass' }, { name: 'test', outcome: 'pending' }] }],
+    ['pr.opened', { issue: b, number: 102, url: url(102), head: h(2), draft: true }],
+    ['pr.status', { issue: b, number: 102, head: h(2), ready: false, reasons: ['test failed'], checks: [{ name: 'lint', outcome: 'pass' }, { name: 'test', outcome: 'fail' }] }],
+    ['ci_fix.started', { issue: b, number: 102, head: h(2), checks: ['test'], attempt: 1, lease: h(9) }],
+    ['ci_fix.finished', { issue: b, number: 102, outcome: 'no_push', head: null, detail: 'the failure is in a test this change does not touch' }],
+    ['ci_fix.gave_up', { issue: b, number: 102, head: h(2), reason: 'the worker showed the failure is not caused by this change' }],
+    ['merge.decided', { issue: b, number: 102, head: h(2), auto: false, reasons: ['a CI fix run happened on this PR', 'high-risk: migrations'] }],
+    ['pr.opened', { issue: c, number: 103, url: url(103), head: h(3), draft: true }],
+    ['pr.status', { issue: c, number: 103, head: h(3), ready: true, reasons: [], checks: [{ name: 'lint', outcome: 'pass' }, { name: 'test', outcome: 'pass' }] }],
+    ['pr.ready', { issue: c, number: 103, head: h(3) }],
+    ['merge.decided', { issue: c, number: 103, head: h(3), auto: true, reasons: ['every required check passed on the evaluated commit', '42 lines in 2 files'] }],
+    ['merge.done', { issue: c, number: 103, head: h(3), sha: h(4), url: url(103), title: 'Round totals to the cent' }],
+    ['pr.closed', { issue: c, number: 103, merged: true }],
+    ['merge.main_result', { issue: c, number: 103, sha: h(4), outcome: 'red', failed: ['test'] }],
+    ['merge.stopped', { reason: 'main went red after an auto-merge', number: 103, sha: h(4), revert: url(104) }],
+    ['push.refused', { issue: d, head: h(5), stage: 'change', reasons: ['changes 1900 lines (limit 1500)'] }],
+  ];
+  for (const [type, payload] of events) {
+    try {
+      log.append(type, payload, 'demo');
+    } catch (e) {
+      // An older engine doesn't know the event: left out, and said so.
+      console.error(`--with-prs: ${type} not recorded (${e.message.split('\n')[0]})`);
+    }
+  }
+}
+
 /** The controller: one tab, the console errors it has seen, and the commands. */
 class Controller {
   constructor(s, map) {
@@ -243,7 +290,8 @@ class Controller {
     return { n: this.issue, id: this.run ?? '' };
   }
   async open(which) {
-    const found = findPage(this.map, which);
+    // A path the map doesn't have yet (a page being added) opens too; it's ready once it shows any heading.
+    const found = findPage(this.map, which) ?? (which.startsWith('/') ? { page: { id: which, route: which, ready: '' }, params: {} } : null);
     if (!found) throw new Error(`no page ${JSON.stringify(which)} in docs/feature-map.md`);
     const params = { ...this.params(found.page), ...found.params };
     const path = which.startsWith('/') ? which : pagePath(found.page, params);
