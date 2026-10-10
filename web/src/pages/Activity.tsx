@@ -24,26 +24,26 @@ export function ActivityPage({ state }: { state: State }) {
   return (
     <div>
       <Header title="Activity" sub="every event from the log, newest first">
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter…" className="h-7 w-48 rounded-md border bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring" />
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter…" className="h-7 w-48 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]" />
       </Header>
       <div className="space-y-3 p-6">
         <div className="flex flex-wrap gap-1.5">
           {Object.keys(GROUPS).map((g) => (
-            <button key={g} onClick={() => setGroup(g)} className={cx('h-7 rounded-md border px-2.5 text-xs', group === g ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent')}>
+            <button key={g} onClick={() => setGroup(g)} className={cx('h-7 rounded-full px-2.5 text-[12px]', group === g ? 'bg-ink font-medium text-surface' : 'text-ink-2 shadow-hairline hover:bg-hover-2')}>
               {g}
             </button>
           ))}
         </div>
-        <Card>
+        <Card className="overflow-hidden">
           {rows.length ? (
-            <ul className="divide-y">
+            <ul className="divide-y divide-line">
               {rows.map((a) => (
                 <li key={a.id} className="flex items-center gap-3 px-4 py-2 text-sm">
                   <span className="w-16 shrink-0 text-xs text-muted-foreground" title={a.ts}>
                     {ago(a.ts)}
                   </span>
                   {a.issue !== null ? (
-                    <button className="w-12 shrink-0 text-left font-mono text-xs text-info hover:underline" onClick={() => navigate(`/issues/${a.issue}`)}>
+                    <button className="w-12 shrink-0 text-left font-mono text-xs text-blue-ink hover:underline" onClick={() => navigate(`/issues/${a.issue}`)}>
                       #{a.issue}
                     </button>
                   ) : (

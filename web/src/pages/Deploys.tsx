@@ -32,13 +32,13 @@ export function Deploys({ state }: { state: State }) {
           <Empty title="No deploys recorded" hint="After landing, the coordinator checks each environment is serving the landed commit." />
         )}
 
-        <Card>
-          <div className="border-b px-4 py-2.5 text-sm font-medium">Landed, not yet verified anywhere ({waiting.length})</div>
+        <Card className="overflow-hidden">
+          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Landed, not yet verified anywhere ({waiting.length})</div>
           {waiting.length ? (
-            <ul className="divide-y">
+            <ul className="divide-y divide-line">
               {waiting.map((t) => (
                 <li key={t.issue} className="flex items-center gap-3 px-4 py-2 text-sm">
-                  <button className="font-mono text-xs text-info hover:underline" onClick={() => navigate(`/issues/${t.issue}`)}>
+                  <button className="font-mono text-xs text-blue-ink hover:underline" onClick={() => navigate(`/issues/${t.issue}`)}>
                     #{t.issue}
                   </button>
                   <span className="min-w-0 flex-1 truncate">{t.title}</span>
@@ -51,10 +51,10 @@ export function Deploys({ state }: { state: State }) {
           )}
         </Card>
 
-        <Card>
-          <div className="border-b px-4 py-2.5 text-sm font-medium">History</div>
+        <Card className="overflow-hidden">
+          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">History</div>
           {state.deploys.length ? (
-            <ul className="divide-y">
+            <ul className="divide-y divide-line">
               {state.deploys.map((d, i) => {
                 const t = issueFor(d.sha);
                 return (
@@ -63,7 +63,7 @@ export function Deploys({ state }: { state: State }) {
                     <Badge tone={TONE[d.status as keyof typeof TONE] ?? 'neutral'}>{d.status}</Badge>
                     <span className="font-mono text-xs">{d.sha.slice(0, 8)}</span>
                     {t && (
-                      <button className="min-w-0 truncate text-left text-xs text-info hover:underline" onClick={() => navigate(`/issues/${t.issue}`)}>
+                      <button className="min-w-0 truncate text-left text-xs text-blue-ink hover:underline" onClick={() => navigate(`/issues/${t.issue}`)}>
                         #{t.issue} {t.title}
                       </button>
                     )}

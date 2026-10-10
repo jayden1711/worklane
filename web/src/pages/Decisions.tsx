@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { decide, type Decision, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
-import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd } from '../components/ui';
+import { ValuePill } from '../components/patterns';
+import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
 import { Header } from './Overview';
 
+/**
+ * A decision as an approval card (Beautiful UI's approval and recommendation cards):
+ * the question is the heading, the recommendation is called out, the receipts sit in
+ * an inset list, and each option is a row; picking one answers it. Only the
+ * decision's owner or a writer gets the rows (canAnswer); everyone else sees whom it waits on.
+ */
 export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selected: boolean; onAnswered?: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -19,54 +26,75 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
       setBusy(null);
     }
   };
+  const recommended = (o: string, i: number) => o === d.recommendation || (i === 0 && !d.options.includes(d.recommendation));
+  const receipts = d.receipts.filter(Boolean);
   return (
-    <Card id={d.id} className={cx('p-4 transition-shadow', selected && 'ring-2 ring-ring')} data-decision={d.id}>
-      <div className="flex items-start gap-3">
-        <Avatar login={d.owner} size={24} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            {d.issue !== null && (
-              <button className="font-mono text-info hover:underline" onClick={() => navigate(`/issues/${d.issue}`)}>
-                #{d.issue}
-              </button>
-            )}
-            <Badge tone={d.kind === 'land' ? 'danger' : 'warn'}>{d.kind === 'land' ? 'Approve landing' : 'Question'}</Badge>
-            <span>for @{d.owner}</span>
-            <span>· asked {ago(d.askedAt)}</span>
-          </div>
-          <div className="mt-1.5 text-sm font-medium">{d.question}</div>
-          <div className="mt-1 text-sm">
-            <span className="text-muted-foreground">Recommendation: </span>
-            {d.recommendation}
-          </div>
-          {!!d.receipts.filter(Boolean).length && (
-            <ul className="mt-2 space-y-0.5 rounded-md bg-muted/60 p-2 text-xs text-muted-foreground">
-              {d.receipts.filter(Boolean).map((r, i) => (
-                <li key={i} className="truncate" title={r}>
-                  {r}
-                </li>
-              ))}
-            </ul>
+    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
+      <div className="primitive-card-pad">
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
+          <Avatar login={d.owner} size={18} />
+          {d.issue !== null && (
+            <button className="font-mono text-blue-ink hover:underline" onClick={() => navigate(`/issues/${d.issue}`)}>
+              #{d.issue}
+            </button>
           )}
-          {!d.answer && d.canAnswer === false ? (
-            <div className="mt-3 text-xs text-muted-foreground">Waiting on @{d.owner}; only they or one of the project's writers can answer it.</div>
-          ) : d.answer ? (
-            <div className="mt-3 text-xs text-muted-foreground">
-              Answered <span className="font-medium text-foreground">{d.answer.answer}</span> by @{d.answer.by} {ago(d.answer.at)}
-            </div>
-          ) : (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {d.options.map((o, i) => (
-                <Button key={o} size="sm" variant={o === d.recommendation || (i === 0 && !d.options.includes(d.recommendation)) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)}>
-                  {busy === o ? '…' : o} <Kbd>{i + 1}</Kbd>
-                </Button>
-              ))}
-              {err && <span className="text-xs text-danger">{err}</span>}
-            </div>
-          )}
+          <Badge tone={d.kind === 'land' ? 'danger' : 'warn'}>{d.kind === 'land' ? 'Approve landing' : 'Question'}</Badge>
+          <span>for @{d.owner}</span>
+          <span>· asked {ago(d.askedAt)}</span>
         </div>
+        <div className="mt-2 text-[14px] font-medium text-ink">{d.question}</div>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">
+          Recommended: <ValuePill>{d.recommendation}</ValuePill>
+        </p>
+        {!!receipts.length && (
+          <ul className="mt-2.5 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12px] text-ink-2 shadow-hairline">
+            {receipts.map((r, i) => (
+              <li key={i} className="truncate" title={r}>
+                {r}
+              </li>
+            ))}
+          </ul>
+        )}
+        {!d.answer && d.canAnswer !== false && (
+          <div className="mt-2.5 flex flex-col gap-1" role="group" aria-label="Answer">
+            {d.options.map((o, i) => (
+              <button
+                key={o}
+                type="button"
+                data-option={o}
+                disabled={!!busy}
+                onClick={() => void answer(o)}
+                className="flex items-center gap-2 rounded-control py-1.5 pr-2 pl-1.5 text-left transition-colors duration-100 hover:bg-hover disabled:opacity-60"
+              >
+                <span className={cx('flex size-4 shrink-0 items-center justify-center rounded-full', busy === o ? 'bg-ink' : 'shadow-[inset_0_0_0_1.5px_var(--line-strong)]')}>
+                  <span className="size-1.5 rounded-full bg-surface" style={{ transform: busy === o ? 'scale(1)' : 'scale(0)' }} />
+                </span>
+                <span className={cx('min-w-0 flex-1 truncate text-[13px]', /reject|close/.test(o) ? 'text-red' : 'text-ink')}>{busy === o ? `${o}…` : o}</span>
+                {recommended(o, i) && <Badge tone="ok">recommended</Badge>}
+                <Kbd>{i + 1}</Kbd>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-    </Card>
+      <div className="primitive-card-footer flex min-h-10 items-center gap-2 border-t border-line text-[12px]">
+        {d.answer ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-green-tint py-1 pr-2.5 pl-1 font-medium text-green">
+            <span className="flex size-4.5 items-center justify-center rounded-full bg-green text-white">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            </span>
+            Answered {d.answer.answer} by @{d.answer.by} {ago(d.answer.at)}
+          </span>
+        ) : d.canAnswer === false ? (
+          <span className="text-ink-3">Waiting on @{d.owner}; only they or one of the project's writers can answer it.</span>
+        ) : (
+          <span className="text-ink-3">Pick an option to answer; the coordinator acts on its next tick.</span>
+        )}
+        {err && <span className="ml-auto text-red">{err}</span>}
+      </div>
+    </div>
   );
 }
 
@@ -109,7 +137,7 @@ export function Decisions({ state }: { state: State }) {
   return (
     <div>
       <Header title="Decisions" sub={`${open.length} waiting`}>
-        <span className="hidden items-center gap-1 text-xs text-muted-foreground md:flex">
+        <span className="hidden items-center gap-1 text-[12px] text-ink-3 md:flex">
           <Kbd>j</Kbd>/<Kbd>k</Kbd> move · <Kbd>1-9</Kbd> answer · <Kbd>a</Kbd> approve · <Kbd>r</Kbd> reject
         </span>
         <Button size="sm" variant="outline" onClick={() => setShowAnswered((v) => !v)}>

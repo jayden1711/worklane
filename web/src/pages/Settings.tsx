@@ -1,12 +1,13 @@
 import type { ReactNode } from 'react';
 import { getSettings, useFetch } from '../api';
+import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
 import { Header } from './Overview';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <Card>
-      <div className="border-b px-4 py-2.5 text-sm font-medium">{title}</div>
+    <Card className="overflow-hidden">
+      <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">{title}</div>
       <dl className="divide-y text-sm">{children}</dl>
     </Card>
   );
@@ -25,8 +26,13 @@ const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span c
 
 export function SettingsPage() {
   const { data: s, error } = useFetch(getSettings);
-  if (error) return <div className="p-8 text-sm text-danger">Can't load settings: {error}</div>;
-  if (!s) return <div className="p-8 text-sm text-muted-foreground">Loading…</div>;
+  if (error || !s)
+    return (
+      <div>
+        <Header title="Settings" sub="read-only" />
+        {error ? <div className="p-8 text-[13px] text-red">Can't load settings: {error}</div> : <Loading />}
+      </div>
+    );
   return (
     <div>
       <Header title="Settings" sub={`read-only · change these in ${s.configDir}/ through a reviewed commit`} />

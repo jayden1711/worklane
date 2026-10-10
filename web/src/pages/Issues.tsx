@@ -73,7 +73,7 @@ function Row({ t, selected }: { t: Task; selected: boolean }) {
 
 function BoardCard({ t }: { t: Task }) {
   return (
-    <button onClick={() => navigate(`/issues/${t.issue}`)} className="w-full rounded-md border bg-card p-2.5 text-left text-sm shadow-xs hover:border-ring">
+    <button onClick={() => navigate(`/issues/${t.issue}`)} className="w-full rounded-card bg-surface p-2.5 text-left text-[13px] shadow-card transition-shadow hover:shadow-raised">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">#{t.issue}</span>
         <LevelBadge level={t.level} />
@@ -172,7 +172,7 @@ export function Issues({ state }: { state: State }) {
         <span className="hidden items-center gap-1 text-xs text-muted-foreground lg:flex">
           <Kbd>/</Kbd> search · <Kbd>j</Kbd>/<Kbd>k</Kbd> · <Kbd>↵</Kbd> open · <Kbd>b</Kbd> board
         </span>
-        <div className="flex rounded-md border p-0.5">
+        <div className="flex rounded-full bg-hover-2 p-0.5">
           <button onClick={() => setMode('list')} className={cx('rounded px-2 py-1', mode === 'list' && 'bg-accent')} aria-label="List view" title="List">
             <List className="size-4" />
           </button>
@@ -185,13 +185,13 @@ export function Issues({ state }: { state: State }) {
         <div className="flex flex-wrap items-center gap-1">
           {mode === 'list' &&
             TABS.map((t) => (
-              <button key={t.key} onClick={() => setTab(t.key)} className={cx('rounded-md px-2.5 py-1 text-sm', tab === t.key ? 'bg-accent font-medium' : 'text-muted-foreground hover:text-foreground')}>
+              <button key={t.key} onClick={() => setTab(t.key)} className={cx('rounded-full px-2.5 py-1 text-[12.5px]', tab === t.key ? 'bg-surface font-medium text-ink shadow-btn' : 'text-ink-2 hover:text-ink')}>
                 {t.label} <span className="text-xs text-muted-foreground">{state.tasks.filter((x) => t.statuses.includes(x.status)).length}</span>
               </button>
             ))}
           <span className="mx-2 h-4 w-px bg-border" />
           {[...builtins, ...custom].map((v) => (
-            <button key={v.name} onClick={() => setFilters(v.filters)} className={cx('rounded-md px-2 py-1 text-xs', JSON.stringify(v.filters) === JSON.stringify(filters) ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-accent')}>
+            <button key={v.name} onClick={() => setFilters(v.filters)} className={cx('rounded-full px-2.5 py-1 text-[12px]', JSON.stringify(v.filters) === JSON.stringify(filters) ? 'bg-ink text-surface' : 'text-ink-2 hover:bg-hover-2')}>
               {v.name}
             </button>
           ))}
@@ -217,7 +217,7 @@ export function Issues({ state }: { state: State }) {
             value={filters.text ?? ''}
             onChange={(e) => setFilters((f) => ({ ...f, text: e.target.value || undefined }))}
             placeholder="Filter…"
-            className="h-7 w-44 rounded-md border bg-background px-2 text-xs outline-none focus:border-ring"
+            className="h-7 w-44 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]"
           />
           {owners.map((o) => (
             <Chip key={o} k="owner" value={o} label={`@${o}`} />
@@ -263,7 +263,7 @@ export function Issues({ state }: { state: State }) {
                           <span>{col.label}</span>
                           <span>{items.length}</span>
                         </div>
-                        <div className="space-y-2 rounded-lg bg-muted/50 p-2" title={col.statuses.map((s) => STATUS_LABEL[s]).join(', ')}>
+                        <div className="space-y-2 rounded-card bg-canvas p-2" title={col.statuses.map((s) => STATUS_LABEL[s]).join(', ')}>
                           {items.map((t) => (
                             <BoardCard key={t.issue} t={t} />
                           ))}

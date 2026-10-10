@@ -1,20 +1,22 @@
-// Small component set in the style of shadcn/ui (MIT; credited in THIRD_PARTY_NOTICES.md).
+// Small component set: shadcn/ui's API shape (MIT), styled after Beautiful UI's atoms (MIT,
+// beautifului.dev). Both credited in THIRD_PARTY_NOTICES.md.
 import { useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
 import type { TaskStatus } from '../api';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
+/** Pill actions: a dark primary, a raised secondary (outline), a quiet ghost, a red danger. */
 export function Button({ variant = 'default', size = 'md', className, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md' }) {
   return (
     <button
       {...p}
       className={cx(
-        'inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-colors disabled:pointer-events-none disabled:opacity-50',
-        size === 'sm' ? 'h-7 px-2.5 text-xs' : 'h-8 px-3 text-sm',
-        variant === 'default' && 'bg-primary text-primary-foreground hover:opacity-90',
-        variant === 'outline' && 'border bg-background hover:bg-accent',
-        variant === 'ghost' && 'hover:bg-accent',
-        variant === 'danger' && 'border border-danger/40 text-danger hover:bg-danger/10',
+        'inline-flex items-center justify-center gap-1.5 rounded-full font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40',
+        size === 'sm' ? 'h-7 px-3 text-[12.5px]' : 'h-8 px-3.5 text-[13px]',
+        variant === 'default' && 'bg-ink text-surface hover:opacity-90',
+        variant === 'outline' && 'bg-surface text-ink shadow-btn hover:bg-hover',
+        variant === 'ghost' && 'text-ink-2 hover:bg-hover-2 hover:text-ink',
+        variant === 'danger' && 'bg-red-tint text-red hover:bg-red hover:text-white',
         className,
       )}
     />
@@ -22,22 +24,23 @@ export function Button({ variant = 'default', size = 'md', className, ...p }: Bu
 }
 
 export function Card({ className, ...p }: HTMLAttributes<HTMLDivElement>) {
-  return <div {...p} className={cx('rounded-lg border bg-card', className)} />;
+  return <div {...p} className={cx('rounded-card bg-surface shadow-card', className)} />;
 }
 
 export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{children}</kbd>;
+  return <kbd className="inline-flex h-4.5 min-w-4.5 items-center justify-center rounded-[5px] bg-inset px-1 font-mono text-[10px] text-ink-3 shadow-hairline">{children}</kbd>;
 }
 
 export function Badge({ tone = 'neutral', children, className }: { tone?: 'neutral' | 'ok' | 'warn' | 'danger' | 'info'; children: ReactNode; className?: string }) {
   const tones = {
-    neutral: 'bg-muted text-muted-foreground',
-    ok: 'bg-ok/15 text-ok',
-    warn: 'bg-warn/20 text-foreground',
-    danger: 'bg-danger/15 text-danger',
-    info: 'bg-info/15 text-info',
+    neutral: 'bg-inset text-ink-2 shadow-hairline',
+    ok: 'bg-green-tint text-green',
+    warn: 'bg-orange-tint text-orange',
+    danger: 'bg-red-tint text-red',
+    info: 'bg-blue-tint text-blue-ink',
   };
-  return <span className={cx('inline-flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium', tones[tone], className)}>{children}</span>;
+  // Beautiful UI's status pill: rounded, tinted, 11.5px.
+  return <span className={cx('inline-flex h-5.5 items-center gap-1 whitespace-nowrap rounded-full px-2 text-[11.5px] font-medium', tones[tone], className)}>{children}</span>;
 }
 
 export function Avatar({ login, title, size = 20 }: { login: string | null | undefined; title?: string; size?: number }) {
@@ -45,7 +48,7 @@ export function Avatar({ login, title, size = 20 }: { login: string | null | und
   const isAgent = login.includes('@') || ['worker', 'evaluator', 'investigator'].some((r) => login.startsWith(r));
   if (isAgent) {
     return (
-      <span title={title ?? login} className="inline-flex items-center justify-center rounded-md bg-info/15 font-mono text-[9px] font-semibold text-info" style={{ width: size, height: size }}>
+      <span title={title ?? login} className="inline-flex items-center justify-center rounded-[7px] bg-ink font-mono text-[9px] font-semibold text-surface" style={{ width: size, height: size }}>
         AI
       </span>
     );
@@ -125,9 +128,9 @@ export const estUsd = (n: number) => `~${usd(n)}`;
 
 export function Empty({ title, hint }: { title: string; hint?: string }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed p-10 text-center">
-      <div className="text-sm font-medium">{title}</div>
-      {hint && <div className="max-w-sm text-xs text-muted-foreground">{hint}</div>}
+    <div className="flex flex-col items-center justify-center gap-1 rounded-card bg-inset p-10 text-center shadow-hairline">
+      <div className="text-[13px] font-medium text-ink">{title}</div>
+      {hint && <div className="max-w-sm text-[12.5px] text-ink-3">{hint}</div>}
     </div>
   );
 }

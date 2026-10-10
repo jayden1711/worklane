@@ -178,7 +178,11 @@ export function useFetch<T>(fn: () => Promise<T>, dep: unknown = 0): { data: T |
   return { data, error };
 }
 
+/** In a browser (not the render checks, which render pages on the server). */
+const inBrowser = typeof window !== 'undefined';
+
 function readToken(): string {
+  if (!inBrowser) return '';
   const url = new URL(window.location.href);
   const t = url.searchParams.get('t');
   if (t) {
@@ -205,9 +209,11 @@ export const token = readToken();
 export interface HubInfo {
   instances: { name: string; up: boolean; error: string | null }[];
 }
-export const hub: Promise<HubInfo | null> = fetch('/api/hub', { headers: { authorization: `Bearer ${token}` } })
-  .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
-  .catch(() => null);
+export const hub: Promise<HubInfo | null> = inBrowser
+  ? fetch('/api/hub', { headers: { authorization: `Bearer ${token}` } })
+      .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
+      .catch(() => null)
+  : Promise.resolve(null);
 
 /** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
 export const hubInstance: Promise<string | null> = hub.then((h) => {

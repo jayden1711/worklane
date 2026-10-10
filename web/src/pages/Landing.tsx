@@ -8,7 +8,7 @@ const REVIEW = new Set(['verifying', 'evaluating', 'awaiting_decision']);
 
 function IssueLink({ n }: { n: number }) {
   return (
-    <button className="font-mono text-xs text-info hover:underline" onClick={() => navigate(`/issues/${n}`)}>
+    <button className="font-mono text-xs text-blue-ink hover:underline" onClick={() => navigate(`/issues/${n}`)}>
       #{n}
     </button>
   );
@@ -20,10 +20,10 @@ export function Landing({ state }: { state: State }) {
     <div>
       <Header title="Land queue" sub={`land mode ${state.project.landMode} · changes land in tested batches`} />
       <div className="space-y-6 p-6">
-        <Card>
-          <div className="border-b px-4 py-2.5 text-sm font-medium">Queued to land ({state.landQueue.length})</div>
+        <Card className="overflow-hidden">
+          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Queued to land ({state.landQueue.length})</div>
           {state.landQueue.length ? (
-            <ul className="divide-y">
+            <ul className="divide-y divide-line">
               {state.landQueue.map((q, i) => (
                 <li key={q.issue} className="flex items-center gap-3 px-4 py-2 text-sm">
                   <span className="w-5 text-xs tabular-nums text-muted-foreground">{i + 1}</span>
@@ -47,10 +47,10 @@ export function Landing({ state }: { state: State }) {
           )}
         </Card>
 
-        <Card>
-          <div className="border-b px-4 py-2.5 text-sm font-medium">In review ({review.length})</div>
+        <Card className="overflow-hidden">
+          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">In review ({review.length})</div>
           {review.length ? (
-            <ul className="divide-y">
+            <ul className="divide-y divide-line">
               {review.map((t) => (
                 <li key={t.issue} className="flex items-center gap-3 px-4 py-2 text-sm">
                   <IssueLink n={t.issue} />
@@ -67,10 +67,10 @@ export function Landing({ state }: { state: State }) {
         </Card>
 
         <div className="grid gap-6">
-          <Card>
-            <div className="border-b px-4 py-2.5 text-sm font-medium">Recent batches</div>
+          <Card className="overflow-hidden">
+            <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Recent batches</div>
             {state.batches.length ? (
-              <ul className="divide-y">
+              <ul className="divide-y divide-line">
                 {state.batches.map((b) => (
                   <li key={b.id} className="space-y-1 px-4 py-2 text-sm">
                     <div className="flex items-center gap-2">

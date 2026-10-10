@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Bot, GitMerge, Gauge, History, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { hub, hubInstance, selectInstance, useLiveState, type HubInfo, type State } from './api';
+import { Loading, SidebarRow } from './components/patterns';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
 import { InboxPage } from './pages/Inbox';
@@ -92,16 +93,16 @@ function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; set
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/30" />
-        <Dialog.Content className="fixed left-1/2 top-[18%] z-50 w-[min(640px,calc(100vw-32px))] -translate-x-1/2 overflow-hidden rounded-xl border bg-card shadow-2xl" aria-describedby={undefined}>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/20" />
+        <Dialog.Content className="fixed left-1/2 top-[18%] z-50 w-[min(640px,calc(100vw-32px))] -translate-x-1/2 overflow-hidden rounded-window bg-surface shadow-overlay" style={{ animation: 'pop-in 160ms cubic-bezier(0.23,1,0.32,1) both' }} aria-describedby={undefined}>
           <Dialog.Title className="sr-only">Command menu</Dialog.Title>
-          <Command label="Command menu" className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground">
-            <div className="flex items-center gap-2 border-b px-3">
-              <Search className="size-4 text-muted-foreground" />
-              <Command.Input autoFocus placeholder="Go to a page, an issue, or run an action…" className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground" />
+          <Command label="Command menu" className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-3">
+            <div className="flex items-center gap-2 border-b border-line px-3">
+              <Search className="size-4 text-ink-3" />
+              <Command.Input autoFocus placeholder="Go to a page, an issue, or run an action…" className="h-11 w-full bg-transparent text-[13.5px] font-medium text-ink outline-none placeholder:text-ink-3" />
             </div>
             <Command.List className="max-h-[50vh] overflow-y-auto p-1.5">
-              <Command.Empty className="p-6 text-center text-sm text-muted-foreground">No results.</Command.Empty>
+              <Command.Empty className="p-6 text-center text-[13px] text-ink-3">No results.</Command.Empty>
               <Command.Group heading="Pages">
                 {NAV.map((n) => (
                   <Item key={n.to} onSelect={() => go(n.to)} hint={`g ${n.chord}`}>
@@ -122,7 +123,7 @@ function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; set
               <Command.Group heading="Issues">
                 {state?.tasks.slice(0, 200).map((t) => (
                   <Item key={t.issue} value={`#${t.issue} ${t.title}`} onSelect={() => go(`/issues/${t.issue}`)}>
-                    <span className="w-10 font-mono text-xs text-muted-foreground">#{t.issue}</span> {t.title}
+                    <span className="w-10 font-mono text-[12px] text-ink-3">#{t.issue}</span> {t.title}
                   </Item>
                 ))}
               </Command.Group>
@@ -153,7 +154,7 @@ function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; set
 
 function Item({ children, onSelect, hint, value }: { children: React.ReactNode; onSelect: () => void; hint?: string; value?: string }) {
   return (
-    <Command.Item onSelect={onSelect} {...(value ? { value } : {})} className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm data-[selected=true]:bg-accent">
+    <Command.Item onSelect={onSelect} {...(value ? { value } : {})} className="flex h-9 cursor-pointer items-center gap-2 rounded-control px-2 text-[13.5px] text-ink data-[selected=true]:bg-hover-2">
       {children}
       {hint && (
         <span className="ml-auto">
@@ -211,7 +212,7 @@ export function App() {
   const issueMatch = path.match(/^\/issues\/(\d+)/);
   const runMatch = path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
   let page: React.ReactNode;
-  if (!state) page = <div className="p-8 text-sm text-muted-foreground">{error ? `Can't load: ${error}` : 'Loading…'}</div>;
+  if (!state) page = error ? <div className="p-8 text-[13px] text-red">Can't load: {error}</div> : <Loading />;
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
   else if (runMatch) page = <RunDetail id={runMatch[1]!} />;
@@ -228,45 +229,39 @@ export function App() {
 
   return (
     <div className="flex h-full">
-      <aside className="flex w-56 shrink-0 flex-col border-r bg-muted/40 max-md:hidden">
-        <div className="flex h-12 items-center gap-2 border-b px-4">
-          <div className="flex size-6 items-center justify-center rounded-md bg-primary text-[11px] font-bold text-primary-foreground">{state?.brand.name[0] ?? '·'}</div>
+      <aside className="flex w-56 shrink-0 flex-col bg-canvas max-md:hidden">
+        <div className="flex h-12 items-center gap-2 px-4">
+          <div className="flex size-6 shrink-0 items-center justify-center rounded-[7px] bg-ink text-[11px] font-semibold text-surface">{state?.brand.name[0] ?? '·'}</div>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold leading-4">{state?.project.name ?? '…'}</div>
-            <div className="truncate text-[11px] text-muted-foreground leading-4">{state?.brand.name}</div>
+            <div className="truncate text-[13.5px] font-medium leading-4 text-ink">{state?.project.name ?? '…'}</div>
+            <div className="truncate text-[11px] leading-4 text-ink-3">{state?.brand.name}</div>
           </div>
         </div>
         <InstanceSwitcher />
-        <button onClick={() => setMenu(true)} className="mx-3 mt-3 flex h-8 items-center gap-2 rounded-md border bg-background px-2 text-xs text-muted-foreground hover:bg-accent">
+        <button onClick={() => setMenu(true)} className="mx-2 mt-2 flex h-8 items-center gap-2 rounded-control bg-surface px-2 text-[12.5px] text-ink-3 shadow-btn transition-colors hover:text-ink">
           <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
         </button>
-        <nav className="mt-3 flex flex-col gap-0.5 px-2">
-          {NAV.map((n) => {
-            const active = n.to === '/' ? path === '/' : path.startsWith(n.to);
-            const count = counts[n.to as keyof typeof counts];
-            return (
-              <a
-                key={n.to}
-                href={n.to}
-                onClick={(e) => {
-                  e.preventDefault();
-                  navigate(n.to);
-                }}
-                className={cx('flex h-8 items-center gap-2 rounded-md px-2 text-sm', active ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent hover:text-foreground')}
-              >
-                <n.icon className="size-4" /> {n.label}
-                {!!count && <span className={cx('ml-auto rounded px-1.5 text-[11px] font-medium', n.to === '/decisions' || n.to === '/inbox' ? 'bg-warn/25 text-foreground' : 'text-muted-foreground')}>{count}</span>}
-              </a>
-            );
-          })}
+        <nav className="mt-3 flex flex-col gap-px px-2" aria-label="Pages">
+          {NAV.map((n) => (
+            <SidebarRow
+              key={n.to}
+              href={n.to}
+              icon={<n.icon className="size-4" />}
+              label={n.label}
+              count={counts[n.to as keyof typeof counts]}
+              countTone={n.to === '/decisions' || n.to === '/inbox' ? 'warn' : undefined}
+              active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
+              onSelect={() => navigate(n.to)}
+            />
+          ))}
         </nav>
-        <div className="mt-auto flex items-center gap-2 border-t px-4 py-3 text-[11px] text-muted-foreground">
-          <span className={cx('inline-block size-2 rounded-full', live ? 'bg-ok' : 'bg-danger')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
+        <div className="mx-2 mt-auto mb-2 flex items-center gap-2 border-t border-line px-2 pt-3 text-[11.5px] text-ink-3">
+          <span className={cx('inline-block size-2 rounded-full', live ? 'bg-green' : 'bg-red')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
           {live ? 'Live' : 'Reconnecting'}
-          <span className="ml-auto flex items-center gap-1">
+          <span className="ml-auto flex items-center gap-1 tabular-nums">
             <Activity className="size-3" /> {state?.lastId ?? 0}
           </span>
-          <button onClick={toggleTheme} className="rounded p-1 hover:bg-accent" title="Toggle theme" aria-label="Toggle theme">
+          <button onClick={toggleTheme} className="primitive-icon-button size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" title="Toggle theme" aria-label="Toggle theme">
             {theme === 'dark' ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
           </button>
         </div>
@@ -280,6 +275,26 @@ export function App() {
   );
 }
 
+/** On a hub: its instances as sidebar rows; the current one is active, one that isn't answering is marked and can't be picked. */
+export function InstanceList({ hub: info, current, onSelect }: { hub: HubInfo; current: string; onSelect: (name: string) => void }) {
+  return (
+    <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher>
+      <div className="px-2 pt-1 pb-1 text-[11.5px] font-medium text-ink-3">Instances</div>
+      {info.instances.map((i) => (
+        <SidebarRow
+          key={i.name}
+          icon={<span className={cx('size-2 rounded-full', i.up ? 'bg-green' : 'bg-red')} />}
+          label={i.up ? i.name : `${i.name} (not answering)`}
+          title={i.error ?? undefined}
+          active={i.name === current}
+          disabled={!i.up && i.name !== current}
+          onSelect={() => i.name !== current && onSelect(i.name)}
+        />
+      ))}
+    </nav>
+  );
+}
+
 /** On a hub: which instance this page shows, and a switch to the others (each served by its own dashboard). */
 function InstanceSwitcher() {
   const [info, setInfo] = useState<{ hub: HubInfo; current: string } | null>(null);
@@ -287,33 +302,21 @@ function InstanceSwitcher() {
     void Promise.all([hub, hubInstance]).then(([h, current]) => h && current && setInfo({ hub: h, current }));
   }, []);
   if (!info) return null;
-  return (
-    <label className="mx-3 mt-3 block text-[11px] text-muted-foreground">
-      Instance
-      <select className="mt-1 block h-8 w-full rounded-md border bg-background px-2 text-sm text-foreground" value={info.current} onChange={(e) => selectInstance(e.target.value)} data-instance-switcher>
-        {info.hub.instances.map((i) => (
-          <option key={i.name} value={i.name} disabled={!i.up && i.name !== info.current} title={i.error ?? undefined}>
-            {i.name}
-            {i.up ? '' : ' (not answering)'}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
+  return <InstanceList hub={info.hub} current={info.current} onSelect={selectInstance} />;
 }
 
 /** Read-only: an emergency stop in force on this machine, shown on every page. It is lifted on the machine itself. */
-function StopBanner({ state }: { state: State }) {
+export function StopBanner({ state }: { state: State }) {
   const e = state.emergency;
   if (!e?.inForce) return null;
   return (
-    <div role="alert" className="border-b border-danger/40 bg-danger/10 px-6 py-2.5 text-sm" data-emergency-stop>
-      <span className="font-semibold text-danger">Emergency stop in force</span>
-      <span className="text-muted-foreground">
+    <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-emergency-stop>
+      <span className="font-semibold text-red">Emergency stop in force</span>
+      <span className="text-ink-2">
         {' '}
         since {e.inForce.at ? ago(e.inForce.at) : 'an unknown time'}, by {e.inForce.by}: {e.inForce.reason}.{' '}
         {e.halted ? `This coordinator halted ${e.halted.running} running agent(s) ${ago(e.halted.at)} and starts none.` : "This coordinator hasn't confirmed it yet."} Agents on this
-        machine stay stopped until it's lifted on the machine with <code className="rounded bg-muted px-1 font-mono text-xs">{state.brand.cli} resume-all</code>.
+        machine stay stopped until it's lifted on the machine with <code className="rounded-chip bg-surface px-1 font-mono text-[12px] shadow-hairline">{state.brand.cli} resume-all</code>.
       </span>
     </div>
   );
