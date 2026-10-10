@@ -16,6 +16,7 @@ import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { LogsPage } from './pages/Logs';
+import { RunDetail } from './pages/RunDetail';
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -208,10 +209,12 @@ export function App() {
   );
 
   const issueMatch = path.match(/^\/issues\/(\d+)/);
+  const runMatch = path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
   let page: React.ReactNode;
   if (!state) page = <div className="p-8 text-sm text-muted-foreground">{error ? `Can't load: ${error}` : 'Loading…'}</div>;
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
+  else if (runMatch) page = <RunDetail id={runMatch[1]!} />;
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
   else if (path.startsWith('/issues')) page = <Issues state={state} />;
   else if (path === '/land') page = <Landing state={state} />;

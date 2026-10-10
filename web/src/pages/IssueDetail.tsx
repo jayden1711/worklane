@@ -5,6 +5,7 @@ import { navigate, typing } from '../App';
 import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { DecisionCard } from './Decisions';
 import { Header } from './Overview';
+import { RunList } from './RunDetail';
 import { areaOf } from './Issues';
 
 interface RawEvent { id: number; ts: string; type: string; actor: string; payload: Record<string, unknown> }
@@ -137,6 +138,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
             </Card>
           )}
           <Checks runs={checks} />
+          <RunList issue={t.issue} lastId={state.lastId} />
           <Card>
             <div className="border-b px-4 py-2.5 text-sm font-medium">Timeline</div>
             {events.length ? (

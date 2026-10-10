@@ -10,6 +10,7 @@ import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
 import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
+import { RunRecorder } from './run-record.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch';
 
@@ -36,6 +37,8 @@ export interface RunRequest {
   lane?: string;
   /** The project's own variables (tests.yaml env); never one the harness sets. */
   env?: Record<string, string>;
+  /** The issue this run works on, for its run record; read from the worktree or task file name when unset. */
+  issue?: number;
 }
 
 export interface RunResult {
@@ -195,6 +198,8 @@ export class CliRunner implements AgentRunner {
       chmodSync(promptDir, 0o755);
     }
     const cleanup = () => promptDir && rmSync(promptDir, { recursive: true, force: true });
+    // What the agent did, for the dashboard: written by this process into the coordinator's state dir (the dashboard can't read the agent user's home).
+    const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) }) : null;
     return new Promise((resolve) => {
       const argv = cliArgs(req, lane?.settings, systemPromptFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
@@ -231,6 +236,7 @@ export class CliRunner implements AgentRunner {
           } catch {
             continue;
           }
+          record?.line(j);
           if (j.type === 'result') result = j as ResultLine;
           else if (j.type === 'rate_limit_event' && j.rate_limit_info?.status === 'rejected') rateLimited = true;
           else if (j.type === 'assistant') req.onActivity?.('assistant turn');
@@ -246,12 +252,16 @@ export class CliRunner implements AgentRunner {
         const r = result as ResultLine | null;
         const model = Object.keys(r?.modelUsage ?? {})[0] ?? req.model;
         const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}) };
-        if (ended) return resolve({ reason: ended, detail: `killed: ${ended}`, ...base });
-        if (rateLimited || r?.api_error_status === 429) return resolve({ reason: 'rate_limited', detail: 'usage or rate limit reached', ...base });
-        if (!r) return resolve({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderr.trim().split('\n').pop() ?? ''}`, ...base });
-        if (r.subtype === 'error_max_budget_usd') return resolve({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
-        if (r.subtype !== 'success' || r.is_error) return resolve({ reason: 'failed', detail: `${r.subtype}: ${(r.result ?? '').slice(0, 500)}`, ...base });
-        resolve({ reason: 'succeeded', detail: (r.result ?? '').slice(0, 500), ...(r.structured_output !== undefined ? { structured: r.structured_output } : {}), ...base });
+        const done = (out: RunResult) => {
+          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}) });
+          resolve(out);
+        };
+        if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
+        if (rateLimited || r?.api_error_status === 429) return done({ reason: 'rate_limited', detail: 'usage or rate limit reached', ...base });
+        if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderr.trim().split('\n').pop() ?? ''}`, ...base });
+        if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
+        if (r.subtype !== 'success' || r.is_error) return done({ reason: 'failed', detail: `${r.subtype}: ${(r.result ?? '').slice(0, 500)}`, ...base });
+        done({ reason: 'succeeded', detail: (r.result ?? '').slice(0, 500), ...(r.structured_output !== undefined ? { structured: r.structured_output } : {}), ...base });
       });
     });
   }

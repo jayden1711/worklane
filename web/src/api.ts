@@ -46,6 +46,37 @@ export interface Decision {
   canAnswer?: boolean;
 }
 
+/** One step of an agent run: a shell command or a file write. */
+export interface RunStep {
+  kind: 'command' | 'write';
+  tool: string;
+  what: string;
+  status: 'ok' | 'error' | 'no result';
+  exitCode: number | null;
+  output: string;
+}
+
+/** What an agent did in one run (GET /api/runs/:id), recorded by the runner. */
+export interface RunRecord {
+  id: string;
+  issue: number | null;
+  role: string;
+  model: string;
+  startedAt: string;
+  endedAt: string | null;
+  reason: string | null;
+  costUsd: number | null;
+  turns: number | null;
+  steps: RunStep[];
+  files: string[];
+  otherTools: number;
+  final: string;
+  truncated: boolean;
+}
+
+/** An issue's runs without their steps (GET /api/runs?issue=n). */
+export type RunSummary = Omit<RunRecord, 'steps' | 'otherTools' | 'final'> & { commands: number; failedCommands: number };
+
 /** The coordinator's service log (GET /api/logs), read-only. */
 export interface ServiceLog {
   source: 'journal' | 'file' | 'none';

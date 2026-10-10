@@ -18,6 +18,7 @@ import type { StoredEvent } from './events/types.js';
 import { checkResults, inbox, project } from './projection.js';
 import { instancesDir, loadInstance } from './instance.js';
 import { siteForInstance, siteForRoot } from './service.js';
+import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { buildReport } from './reports.js';
 
@@ -267,6 +268,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/logs' && req.method === 'GET') {
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
+        }
+        // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
+        if (url.pathname === '/api/runs' && req.method === 'GET') {
+          const issue = Number(url.searchParams.get('issue'));
+          if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
+          return json(res, 200, runsForIssue(opts.stateDir, issue));
+        }
+        if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
+          const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
+          return run ? json(res, 200, run) : json(res, 404, { error: 'no such run' });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
