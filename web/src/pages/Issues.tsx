@@ -51,7 +51,7 @@ function matches(t: Task, f: Filters): boolean {
 
 function Row({ t, selected }: { t: Task; selected: boolean }) {
   return (
-    <button data-issue={t.issue} onClick={() => navigate(`/issues/${t.issue}`)} className={cx('flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-accent', selected && 'bg-accent')}>
+    <button data-issue={t.issue} data-testid="issue-row" onClick={() => navigate(`/issues/${t.issue}`)} className={cx('flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-accent', selected && 'bg-accent')}>
       <span className="w-12 shrink-0 font-mono text-xs text-muted-foreground">#{t.issue}</span>
       <StatusBadge status={t.status} />
       <span className="min-w-0 flex-1 truncate">{t.title}</span>
@@ -73,7 +73,7 @@ function Row({ t, selected }: { t: Task; selected: boolean }) {
 
 function BoardCard({ t }: { t: Task }) {
   return (
-    <button onClick={() => navigate(`/issues/${t.issue}`)} className="w-full rounded-card bg-surface p-2.5 text-left text-[13px] shadow-card transition-shadow hover:shadow-raised">
+    <button data-testid="issue-card" onClick={() => navigate(`/issues/${t.issue}`)} className="w-full rounded-card bg-surface p-2.5 text-left text-[13px] shadow-card transition-shadow hover:shadow-raised">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">#{t.issue}</span>
         <LevelBadge level={t.level} />
@@ -167,16 +167,16 @@ export function Issues({ state }: { state: State }) {
   const areas = lanes ? [...new Set(rows.map((t) => areaOf(t, state)))] : ['all'];
 
   return (
-    <div>
+    <div data-testid="page-issues">
       <Header title="Issues" sub={`${rows.length} shown`}>
         <span className="hidden items-center gap-1 text-xs text-muted-foreground lg:flex">
           <Kbd>/</Kbd> search · <Kbd>j</Kbd>/<Kbd>k</Kbd> · <Kbd>↵</Kbd> open · <Kbd>b</Kbd> board
         </span>
         <div className="flex rounded-full bg-hover-2 p-0.5">
-          <button onClick={() => setMode('list')} className={cx('rounded px-2 py-1', mode === 'list' && 'bg-accent')} aria-label="List view" title="List">
+          <button onClick={() => setMode('list')} className={cx('rounded px-2 py-1', mode === 'list' && 'bg-accent')} aria-label="List view" title="List" data-testid="issues-list-mode">
             <List className="size-4" />
           </button>
-          <button onClick={() => setMode('board')} className={cx('rounded px-2 py-1', mode === 'board' && 'bg-accent')} aria-label="Board view" title="Board">
+          <button onClick={() => setMode('board')} className={cx('rounded px-2 py-1', mode === 'board' && 'bg-accent')} aria-label="Board view" title="Board" data-testid="issues-board-mode">
             <Columns3 className="size-4" />
           </button>
         </div>
@@ -185,7 +185,7 @@ export function Issues({ state }: { state: State }) {
         <div className="flex flex-wrap items-center gap-1">
           {mode === 'list' &&
             TABS.map((t) => (
-              <button key={t.key} onClick={() => setTab(t.key)} className={cx('rounded-full px-2.5 py-1 text-[12.5px]', tab === t.key ? 'bg-surface font-medium text-ink shadow-btn' : 'text-ink-2 hover:text-ink')}>
+              <button key={t.key} data-testid="issues-tab" onClick={() => setTab(t.key)} className={cx('rounded-full px-2.5 py-1 text-[12.5px]', tab === t.key ? 'bg-surface font-medium text-ink shadow-btn' : 'text-ink-2 hover:text-ink')}>
                 {t.label} <span className="text-xs text-muted-foreground">{state.tasks.filter((x) => t.statuses.includes(x.status)).length}</span>
               </button>
             ))}
@@ -214,6 +214,7 @@ export function Issues({ state }: { state: State }) {
         <div className="flex flex-wrap items-center gap-1.5">
           <input
             ref={search}
+            data-testid="issues-filter"
             value={filters.text ?? ''}
             onChange={(e) => setFilters((f) => ({ ...f, text: e.target.value || undefined }))}
             placeholder="Filter…"

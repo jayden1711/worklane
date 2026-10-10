@@ -30,7 +30,7 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
   const recommended = (o: string) => o === d.recommendation;
   const receipts = d.receipts.filter(Boolean);
   return (
-    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
+    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
       <div className="primitive-card-pad">
         <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
           <Avatar login={d.owner} size={18} />
@@ -61,7 +61,7 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
           // destructive ones (reject, close) are red, the rest raised; each carries its key.
           <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
             {d.options.map((o, i) => (
-              <Button key={o} type="button" size="sm" data-option={o} variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
+              <Button key={o} type="button" size="sm" data-option={o} data-testid="decision-option" variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
                 {busy === o ? `${o}…` : o}
                 <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
               </Button>
@@ -127,12 +127,12 @@ export function Decisions({ state }: { state: State }) {
   }, [sel, list]);
 
   return (
-    <div>
+    <div data-testid="page-decisions">
       <Header title="Decisions" sub={`${open.length} waiting`}>
         <span className="hidden items-center gap-1 text-[12px] text-ink-3 md:flex">
           <Kbd>j</Kbd>/<Kbd>k</Kbd> move · <Kbd>1-9</Kbd> answer · <Kbd>a</Kbd> approve · <Kbd>r</Kbd> reject
         </span>
-        <Button size="sm" variant="outline" onClick={() => setShowAnswered((v) => !v)}>
+        <Button size="sm" variant="outline" onClick={() => setShowAnswered((v) => !v)} data-testid="show-answered">
           {showAnswered ? 'Hide answered' : 'Show answered'}
         </Button>
       </Header>

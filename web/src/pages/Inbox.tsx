@@ -21,7 +21,7 @@ export function InboxPage({ state }: { state: State }) {
   const { decisions, blocked, notify } = state.inbox;
   const empty = !decisions.length && !blocked.length && !notify.length;
   return (
-    <div>
+    <div data-testid="page-inbox">
       <Header title="Inbox" sub={`for @${state.user}`} />
       <div className="mx-auto max-w-4xl space-y-6 p-6">
         {empty && <Empty title="You're all caught up" hint="Decisions that need you, your blocked tasks, and L2 changes landed on your behalf show up here." />}

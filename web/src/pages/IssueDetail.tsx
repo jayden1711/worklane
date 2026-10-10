@@ -38,7 +38,7 @@ const CHECK_DOT = { pass: 'green', fail: 'red', unavailable: 'orange', skipped: 
  */
 export function Checks({ runs }: { runs: CheckRun[] }) {
   return (
-    <section className="space-y-2" aria-label="Checks run by the coordinator">
+    <section className="space-y-2" aria-label="Checks run by the coordinator" data-testid="checks-card">
       <div className="text-[13px] font-medium text-ink">Checks run by the coordinator</div>
       {runs.length ? (
         runs.map((r, i) => (
@@ -49,7 +49,7 @@ export function Checks({ runs }: { runs: CheckRun[] }) {
               <span title={r.at}>{ago(r.at)}</span>
               {i === 0 && <Badge tone="info">latest</Badge>}
             </div>
-            <RecordsTable head={['Check', 'Result', 'Exit']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-20">
+            <RecordsTable testId="checks-table" head={['Check', 'Result', 'Exit']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-20">
               {r.checks.map((c, j) => {
                 const failed = c.status === 'fail';
                 return (
@@ -117,7 +117,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
   const decision = state.decisions.find((d) => d.id === t.openDecision);
   const gh = `https://github.com/${state.project.repo}/issues/${t.issue}`;
   return (
-    <div>
+    <div data-testid="page-issue-detail">
       <Header title={`#${t.issue}`} sub={t.title}>
         <button onClick={() => navigate('/issues')} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
           <ArrowLeft className="size-3.5" /> Issues <span className="ml-1 rounded border px-1 font-mono text-[10px]">Esc</span>

@@ -9,7 +9,7 @@ const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succ
 export function Agents({ state }: { state: State }) {
   const g = state.governor;
   return (
-    <div>
+    <div data-testid="page-agents">
       <Header title="Agents" sub={`${state.slots.running} of ${state.slots.cap} machine-wide slots in use`} />
       <div className="space-y-6 p-6">
         <div className="grid gap-3 lg:grid-cols-3">

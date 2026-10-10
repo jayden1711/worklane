@@ -7,10 +7,10 @@ const getReport = () => api<{ report: string }>('/api/report');
 export function Reports({ state, pulse }: { state: State; pulse: number }) {
   const { data, error } = useFetch(getReport, pulse);
   return (
-    <div>
+    <div data-testid="page-reports">
       <Header title="Reports" sub="posted at the configured times as comments on one report issue" />
       <div className="grid gap-6 p-6 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+        <Card className="lg:col-span-2" data-testid="report-preview">
           <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Next report (preview)</div>
           <pre className="max-h-[640px] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-5">{error ? `Can't load the report: ${error}` : (data?.report ?? 'Loading…')}</pre>
         </Card>

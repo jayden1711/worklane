@@ -30,9 +30,9 @@ export function table(md, heading) {
   return rows;
 }
 
-/** Pages: { id, route, file, sidebar, shortcut, ready }. Features: { name, where, how, keys, selector }. */
+/** Pages: { id, route, file, sidebar, shortcut, root, ready }. Features: { name, where, how, keys, selector }. */
 export function parseFeatureMap(md) {
-  const pages = table(md, 'Pages').map((r) => ({ id: r.page, route: r.route, file: r.file, sidebar: r.sidebar === '–' ? null : r.sidebar, shortcut: r.shortcut, ready: r['ready when'] }));
+  const pages = table(md, 'Pages').map((r) => ({ id: r.page, route: r.route, file: r.file, sidebar: r.sidebar === '–' ? null : r.sidebar, shortcut: r.shortcut, root: r.root || null, ready: r['ready when'] }));
   const features = table(md, 'Features').map((r) => ({ name: r.feature, where: r.where, how: r['how a person reaches it'], keys: r.keys, selector: r.selector }));
   return { pages, features };
 }
@@ -44,7 +44,7 @@ export function loadFeatureMap(file = MAP_FILE) {
 /** Every data-testid a map names (in `[data-testid="x"]` selectors). */
 export function mappedTestIds(map) {
   const ids = new Set();
-  for (const s of [...map.features.map((f) => f.selector), ...map.pages.map((p) => p.ready)]) for (const m of s.matchAll(/data-testid="([^"]+)"/g)) ids.add(m[1]);
+  for (const s of [...map.features.map((f) => f.selector), ...map.pages.map((p) => p.ready), ...map.pages.map((p) => p.root ?? '')]) for (const m of s.matchAll(/data-testid="([^"]+)"/g)) ids.add(m[1]);
   return [...ids];
 }
 
