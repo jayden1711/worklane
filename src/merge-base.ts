@@ -16,10 +16,11 @@ export type MergeResult =
 /**
  * Merge `base` (a commit) into the worktree's current branch with a merge commit. Clean: the new head.
  * Conflicted: each conflicted file's text with markers, and the files the merge did change cleanly (left
- * staged; a resolver commits the result). Identity comes from the environment, as for every harness commit.
+ * staged; a resolver commits the result). A clean merge is committed as `identity`: every harness commit
+ * carries the harness's identity, and the coordinator rejects any other.
  */
-export function mergeBaseInto(worktree: string, base: string, message: string): MergeResult {
-  const r = git(worktree, '-c', 'merge.conflictStyle=diff3', 'merge', '--no-ff', '--no-edit', '-m', message, base);
+export function mergeBaseInto(worktree: string, base: string, message: string, identity: { name: string; email: string }): MergeResult {
+  const r = git(worktree, '-c', `user.name=${identity.name}`, '-c', `user.email=${identity.email}`, '-c', 'merge.conflictStyle=diff3', 'merge', '--no-ff', '--no-edit', '-m', message, base);
   if (r.status === 0) return { clean: true, head: git(worktree, 'rev-parse', 'HEAD').stdout.trim() };
   const unmerged = git(worktree, 'diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
   if (!unmerged.length) return { error: (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ') || `git merge exited ${r.status}` };

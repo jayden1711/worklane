@@ -73,6 +73,8 @@ test('a fix waits for the owner only for changes outside the hunks, risky catego
   assert.match(conflictWaitReasons({ outside: [], riskCategories: [], evaluator: { ...ok, approved: false } })[0]!, /rejected/);
 });
 
+const BOT = { name: 'harness-bot', email: 'harness-bot@example.com' };
+
 function repoWith(base: string) {
   const dir = mkdtempSync(join(tmpdir(), 'merge-'));
   const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -98,7 +100,7 @@ test('merging the base in: clean merges commit; a conflict reports each file wit
   g('commit', '-qam', 'main');
   const mainSha = g('rev-parse', 'HEAD');
   g('checkout', '-q', 'pr');
-  const r = mergeBaseInto(dir, mainSha, 'Merge main');
+  const r = mergeBaseInto(dir, mainSha, 'Merge main', BOT);
   assert.ok('clean' in r && !r.clean);
   if ('clean' in r && !r.clean) {
     assert.deepEqual(Object.keys(r.conflicted), ['a.txt']);
@@ -119,7 +121,10 @@ test('merging the base in: clean merges commit; a conflict reports each file wit
   clean.g('commit', '-qam', 'main');
   const m = clean.g('rev-parse', 'HEAD');
   clean.g('checkout', '-q', 'pr');
-  const ok = mergeBaseInto(clean.dir, m, 'Merge main');
+  const ok = mergeBaseInto(clean.dir, m, 'Merge main', BOT);
   assert.ok('clean' in ok && ok.clean);
-  if ('clean' in ok && ok.clean) assert.equal(clean.g('rev-list', '--count', '--merges', `${m}..${ok.head}`), '1', 'a merge commit, not a rebase');
+  if ('clean' in ok && ok.clean) {
+    assert.equal(clean.g('rev-list', '--count', '--merges', `${m}..${ok.head}`), '1', 'a merge commit, not a rebase');
+    assert.equal(clean.g('log', '-1', '--format=%an <%ae> / %cn <%ce>', ok.head), `${BOT.name} <${BOT.email}> / ${BOT.name} <${BOT.email}>`, "the harness's identity, not the repo's configured one");
+  }
 });

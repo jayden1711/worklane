@@ -1945,7 +1945,7 @@ export class Coordinator {
       const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
       if (setupErrors.length) return await give(`the fix worktree's setup failed: ${setupErrors.join('; ')}`);
       this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) });
-      const merged = mergeBaseInto(path, baseSha, `Merge ${baseRef} into ${pr.head}`);
+      const merged = mergeBaseInto(path, baseSha, `Merge ${baseRef} into ${pr.head}`, this.identity);
       if ('error' in merged) return await give(`merging ${baseRef} into the branch failed: ${merged.error}`);
       let outside: string[] = [];
       let summary = `${baseRef} merged in without conflicts (GitHub's conflict no longer reproduces)`;
