@@ -7,7 +7,10 @@
 #   bash scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>
 #       The coordinator's GitHub identity: a GitHub App installed on only the instance's repo.
 #       Installs the App's private key for wl-<name> (0400), then verifies it by minting an
-#       installation token and checking the installation reaches exactly <owner/repo>.
+#       installation token and checking the installation reaches exactly <owner/repo> with the
+#       permissions below.
+#   bash scripts/setup/credentials.sh <name> verify-app
+#       Read-only: the same check with the key already installed (after changing the App's permissions).
 #   bash scripts/setup/credentials.sh <name> claude
 #       The agent user's Claude login (interactive).
 #   bash scripts/setup/credentials.sh <name> github
@@ -15,16 +18,21 @@
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
 #       The eval user's API key; only once evals are on.
 #
-# The App's permissions: Contents read/write (fetch, push task branches, lease refs), Issues read/write
-# (the backlog), Pull requests read/write (open PRs; Worklane never merges), Metadata read. Nothing else.
-# Workflows is deliberately left out: GitHub refuses a push that changes .github/workflows without it,
-# so such a change can't go out through the coordinator. No webhook.
+# The App's permissions (checked by app-permissions.mjs): Contents read/write (fetch, push task branches,
+# lease refs), Issues read/write (the backlog), Pull requests read/write (open PRs; Worklane never merges),
+# Checks read (CI results on its PRs), Metadata read; and Actions read, which CI fix runs need for job
+# logs. Workflows is deliberately left out: GitHub refuses a push that changes .github/workflows without
+# it, so such a change can't go out through the coordinator. Administration and Actions write are refused
+# too. No webhook.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-name="${1:?usage: credentials.sh <name> github-app|claude|github|eval-key ...}"
-what="${2:?usage: credentials.sh <name> github-app|claude|github|eval-key ...}"
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key ...}"
+what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"
+here="$(cd "$(dirname "$0")" && pwd)"
+# Mint a token as the coordinator user (who alone can read the key) and check what it reaches and may do.
+verify_app() { (cd / && sudo -u "$coord" node --input-type=module - "$@" < "$here/app-permissions.mjs"); }
 
 case "$what" in
   github-app)
@@ -41,33 +49,7 @@ case "$what" in
     install -d -o "$coord" -g "$coord" -m 0700 "$dir"
     install -o "$coord" -g "$coord" -m 0400 "$src" "$key"
     say "verify as $coord: mint an installation token and list what the installation reaches"
-    sudo -u "$coord" node - "$key" "$app_id" "$inst_id" "$repo" <<'JS'
-const [key, appId, instId, repo] = process.argv.slice(2);
-const { createSign } = require('node:crypto');
-const { readFileSync } = require('node:fs');
-const b64 = (x) => Buffer.from(x).toString('base64url');
-const iat = Math.floor(Date.now() / 1000) - 60;
-const head = b64(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-const body = b64(JSON.stringify({ iat, exp: iat + 600, iss: appId }));
-const jwt = `${head}.${body}.${b64(createSign('RSA-SHA256').update(`${head}.${body}`).sign(readFileSync(key, 'utf8')))}`;
-const h = (auth) => ({ authorization: `Bearer ${auth}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' });
-(async () => {
-  const app = await fetch('https://api.github.com/app', { headers: h(jwt) });
-  if (!app.ok) throw new Error(`the key does not sign for App ${appId} (GitHub ${app.status})`);
-  const t = await fetch(`https://api.github.com/app/installations/${instId}/access_tokens`, { method: 'POST', headers: h(jwt) });
-  if (!t.ok) throw new Error(`could not mint a token for installation ${instId} (GitHub ${t.status})`);
-  const { token, permissions } = await t.json();
-  const r = await fetch('https://api.github.com/installation/repositories?per_page=100', { headers: h(token) });
-  const repos = (await r.json()).repositories.map((x) => x.full_name.toLowerCase());
-  console.log(`App ${appId} (${(await app.json()).slug}), installation ${instId}`);
-  console.log(`reaches: ${repos.join(', ') || 'nothing'}`);
-  console.log(`permissions: ${Object.entries(permissions).map(([k, v]) => `${k}:${v}`).join(', ')}`);
-  if (repos.length !== 1 || repos[0] !== repo.toLowerCase()) throw new Error(`the installation must reach exactly ${repo}`);
-  if (permissions.workflows) throw new Error('the App has the Workflows permission; remove it');
-  if (permissions.administration) throw new Error('the App has the Administration permission; remove it');
-  console.log('OK: the key works and the installation reaches only the instance repo');
-})().catch((e) => { console.error(`FAILED: ${e.message}`); process.exit(1); });
-JS
+    verify_app "$key" "$app_id" "$inst_id" "$repo"
     echo
     creds="/home/$coord/.local/state/worklane/instances/$name/credentials.yaml"
     if [ -f "$creds" ]; then
@@ -79,6 +61,24 @@ JS
     read -rp "Delete the copy you brought to this machine ($src) now with shred? [y/N] " yn
     if [ "$yn" = y ]; then shred -u "$src" && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
     echo "Now delete the key on your other machine (the downloaded .pem). If it's ever lost, generate a new one in the App's settings."
+    ;;
+  verify-app)
+    # Nothing is installed or written: the key, ids and repo come from the instance's own files.
+    home="/home/$coord/.local/state/worklane/instances/$name"
+    say "verify as $coord: the installed App key, its installation, and the token's permissions"
+    read -r key app_id inst_id repo < <(cd / && sudo -u "$coord" node --input-type=module - "$home" <<'JS'
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+const { parse } = createRequire('/opt/worklane/current/package.json')('yaml');
+const home = process.argv[2];
+const gh = parse(readFileSync(`${home}/credentials.yaml`, 'utf8')).github;
+if (gh?.kind !== 'app') { console.error(`${home}/credentials.yaml has no GitHub App (github.kind is ${gh?.kind})`); process.exit(1); }
+const repo = parse(readFileSync(`${home}/instance.yaml`, 'utf8')).repos[0].repo;
+console.log(gh.key_path, gh.app_id, gh.installation_id, repo);
+JS
+)
+    [ -n "${repo:-}" ] || { echo "could not read the instance's App settings" >&2; exit 1; }
+    verify_app "$key" "$app_id" "$inst_id" "$repo"
     ;;
   github)
     echo "fallback: a personal access token instead of a GitHub App (prefer github-app)"
