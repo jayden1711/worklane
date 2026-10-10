@@ -23,7 +23,8 @@ import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type Ru
 import { checkedPush, pushProblems } from './push-check.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
-import { mergeBaseInto } from './merge-base.js';
+import { abortMerge, changedFiles, mergeBaseInto } from './merge-base.js';
+import { importsOf, lightCheckPlan, lightOutcome } from './light-check.js';
 import { runIssue } from './run-record.js';
 import { applySettings, inRunWindow } from './settings.js';
 import type { InstanceSettings } from './instance.js';
@@ -130,6 +131,8 @@ export class Coordinator {
   /** The default branch's tip as last seen, and when it was last checked. */
   private defaultTip = '';
   private tipCheckedAt = 0;
+  /** PRs whose combined-state check is running. */
+  private lightRunning = new Set<number>();
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
   /** The repo's own config: the defaults the instance's settings apply over. */
@@ -1533,6 +1536,16 @@ export class Coordinator {
       const failures = this.d.log.read(0, ['merge.failed']).map((e) => e.payload as EventPayload<'merge.failed'>).filter((p) => p.number === number && p.head === pr.headSha);
       if (failures.length >= 3) d.reasons.push(`merging failed ${failures.length} times: ${failures.at(-1)!.why}`);
       d.auto = d.reasons.length === 0;
+      // The default branch moved under the PR in a way that could matter: check the combination (fast tier only,
+      // off the PR) before merging. Not decided until that check has a result.
+      if (d.auto) {
+        const gate = await this.combinedGate(w, pr);
+        if (gate === 'pending') return;
+        if (gate !== 'merge') {
+          d.reasons.push(gate.hold);
+          d.auto = false;
+        }
+      }
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
@@ -1821,6 +1834,88 @@ export class Coordinator {
     if (s.blocked) return { ended: `the fix run was blocked: ${s.blocked}` };
     if (s.ask) return { ended: `the fix run has a question for you: ${s.ask.question}` };
     return { summary: s.summary ?? '', ...(s.no_change_needed ? { no_change_needed: s.no_change_needed } : {}) };
+  }
+
+  // ---------------------------------------------------------------- combined-state check
+
+  /**
+   * Whether a PR the policy would merge can merge as is: yes when the combined-state check is off, the default
+   * branch hasn't moved since the PR branched, or its new commits touch nothing the PR touches or imports.
+   * Otherwise the result of the check on that exact head and branch tip (started in the background if there is
+   * none yet: 'pending'). The PR is never changed: a pass merges the unchanged head that already passed CI.
+   */
+  private async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | { hold: string }> {
+    if (!this.d.cfg.project.combined_check) return 'merge';
+    const { number } = w;
+    const baseRef = pr.base || this.branch;
+    this.git(this.d.repo, 'fetch', '-q', this.remote, baseRef, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
+    const mainSha = this.git(this.d.repo, 'rev-parse', `${this.remote}/${baseRef}`);
+    const mb = this.gitOrNull(this.d.repo, 'merge-base', pr.headSha, mainSha);
+    if (!mb) return { hold: `can't find where this PR branched from ${baseRef}, so the combination can't be checked` };
+    const mainChanged = mb === mainSha ? [] : changedFiles(this.d.repo, mb, mainSha);
+    const prFiles = this.git(this.d.repo, 'diff', '--name-only', mb, pr.headSha).split('\n').filter(Boolean);
+    const imports: Record<string, string[]> = {};
+    if (mainChanged.length) {
+      const tree = new Set(this.git(this.d.repo, 'ls-tree', '-r', '--name-only', pr.headSha).split('\n').filter(Boolean));
+      for (const f of prFiles) {
+        if (!/\.((m|c)?(j|t)sx?|py)$/.test(f)) continue;
+        const r = spawnSync('git', ['show', `${pr.headSha}:${f}`], { cwd: this.d.repo, encoding: 'utf8' });
+        if (r.status === 0) imports[f] = importsOf(f, r.stdout, tree);
+      }
+    }
+    const plan = lightCheckPlan({ enabled: true, mainChanged, prFiles, imports });
+    if (plan.action === 'merge-now') return 'merge';
+    const done = this.d.log
+      .read(0, ['light_check.finished'])
+      .map((e) => e.payload as EventPayload<'light_check.finished'>)
+      .filter((p) => p.number === number && p.head === pr.headSha && p.main_sha === mainSha)
+      .at(-1);
+    if (done?.outcome === 'merge') return 'merge';
+    if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
+    if (done?.outcome === 'conflict') return 'pending'; // GitHub reports the conflict next, and the conflict path takes it
+    if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
+      this.lightRunning.add(number);
+      void this.lightCheck(w, pr, baseRef, mainSha, plan.overlap)
+        .catch((e: Error) => this.emit('coordinator.error', { instance: this.d.instance, where: `combined check #${number}`, kind: 'error', message: e.message.slice(0, 500) }))
+        .finally(() => this.lightRunning.delete(number));
+    }
+    return 'pending';
+  }
+
+  /** Merge the default branch into the PR head in a scratch worktree and run the fast tier there. Nothing is pushed. */
+  private async lightCheck(w: EventPayload<'pr.opened'>, pr: PullRequest, baseRef: string, mainSha: string, overlap: string[]) {
+    const { issue: n, number } = w;
+    const t0 = Date.now();
+    this.emit('light_check.started', { issue: n, number, head: pr.headSha, main_sha: mainSha, overlap });
+    const name = `issue-${n}-combined`;
+    let outcome: 'merge' | 'hold' | 'conflict' = 'hold';
+    let detail = '';
+    try {
+      const { path, setupErrors } = createWorktree(this.wt, name, `${BRAND.cli}/combined-${n}`, pr.headSha);
+      if (setupErrors.length) detail = `the scratch worktree's setup failed: ${setupErrors.join('; ')}`;
+      else {
+        const m = mergeBaseInto(path, mainSha, `Combined check: ${baseRef} into ${pr.head}`, this.identity);
+        if ('error' in m) detail = `merging ${baseRef} in failed: ${m.error}`;
+        else if (!m.clean) {
+          abortMerge(path);
+          outcome = 'conflict';
+          detail = `conflicts in ${Object.keys(m.conflicted).join(', ')}`;
+        } else {
+          const r = await this.project(this.d.cfg.tests.runner.changed, path);
+          outcome = lightOutcome({ merged: true, fastPassed: r.code === 0 });
+          detail = r.code === 0 ? '' : r.tail.slice(-1500);
+        }
+      }
+    } finally {
+      try {
+        removeWorktree(this.wt, name);
+      } catch {
+        // already gone
+      }
+      spawnSync('git', ['branch', '-D', `${BRAND.cli}/combined-${n}`], { cwd: this.d.repo });
+      this.emit('light_check.finished', { issue: n, number, head: pr.headSha, main_sha: mainSha, overlap, outcome, wait_ms: Math.max(0, Date.now() - t0), detail });
+      this.prPolled.delete(number); // decide on the next pass, not after the poll interval
+    }
   }
 
   // ---------------------------------------------------------------- conflict fix runs

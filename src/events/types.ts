@@ -126,6 +126,10 @@ export const EventSchemas = {
   'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
   /** No more fix runs on this PR; the owner is asked to look. */
+  /** The combined-state check started: the default branch moved and touched what this PR touches (overlap). */
+  'light_check.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()) }),
+  /** merge: the fast tier passed on the combination; hold: it failed (a human decides); conflict: they don't merge. */
+  'light_check.finished': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()), outcome: z.enum(['merge', 'hold', 'conflict']), wait_ms: z.number().int().nonnegative(), detail: z.string() }),
   /** GitHub reports a harness PR as conflicting with its base (recorded once per head). */
   'conflict_fix.detected': z.strictObject({ issue, number: z.number().int().positive(), head: sha, base_sha: sha }),
   'conflict_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, base_sha: sha, strategy: z.literal('merge'), attempt: z.number().int().positive(), lease: sha }),

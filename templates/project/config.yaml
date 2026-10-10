@@ -24,6 +24,9 @@ required_checks: []
 # resolves the conflicted hunks, and the usual checks and evaluator follow (it never merges a fix that
 # strays outside the hunks or that the evaluator isn't sure keeps both sides; those wait for you).
 # conflicts: { fix: true, max_fixes_per_pr: 1 }
+# Before an auto-merge, if main moved and touched what the PR touches (or imports), the fast tier
+# (tests.yaml runner.changed) runs on the combination in a scratch worktree; nothing is pushed to the PR.
+# combined_check: true
 os: auto                   # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches
