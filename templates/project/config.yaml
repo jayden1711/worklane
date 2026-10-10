@@ -20,6 +20,10 @@ required_checks: []
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.
 # hotspots: ["**/package-lock.json", "src/plugins/registry.ts", "test/helpers.ts"]
+# PR mode: when GitHub reports one of its PRs as conflicting, the harness merges the base in, a worker
+# resolves the conflicted hunks, and the usual checks and evaluator follow (it never merges a fix that
+# strays outside the hunks or that the evaluator isn't sure keeps both sides; those wait for you).
+# conflicts: { fix: true, max_fixes_per_pr: 1 }
 os: auto                   # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches

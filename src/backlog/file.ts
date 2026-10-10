@@ -132,7 +132,7 @@ export class FileBacklog implements Backlog {
     const i = this.load().issues.find((x) => x.number === n && x.pr);
     if (!i) throw new Error(`pull request #${n} not found`);
     const state = i.pr!.mergeableState ?? 'clean';
-    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state };
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state };
   }
   /** Test hook: how a merge happens (e.g. a real merge commit on a test remote); returns the merge commit. */
   mergeWith?: (pr: { number: number; head: string; headSha: string; base: string }) => string;

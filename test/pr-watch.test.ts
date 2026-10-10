@@ -117,8 +117,8 @@ test('GitHub markReady: the GraphQL mutation on the PR node, only for a draft', 
 });
 
 test('GitHub pullRequest: merged, closed and open states, head branch and sha', async () => {
-  const g = (p: object) => github({ 'GET /repos/o/r/pulls/9': () => ({ status: 200, body: { number: 9, html_url: 'u', node_id: 'n', head: { ref: 'br', sha: HEAD }, ...p } }) }).b.pullRequest(9);
-  assert.deepEqual(await g({ state: 'open', draft: true }), { number: 9, url: 'u', head: 'br', headSha: HEAD, draft: true, state: 'open', title: '', mergeable: null, mergeableState: 'unknown' });
+  const g = (p: object) => github({ 'GET /repos/o/r/pulls/9': () => ({ status: 200, body: { number: 9, html_url: 'u', node_id: 'n', head: { ref: 'br', sha: HEAD }, base: { ref: 'main' }, ...p } }) }).b.pullRequest(9);
+  assert.deepEqual(await g({ state: 'open', draft: true }), { number: 9, url: 'u', head: 'br', headSha: HEAD, base: 'main', draft: true, state: 'open', title: '', mergeable: null, mergeableState: 'unknown' });
   const m = await g({ state: 'open', title: 'T', mergeable: true, mergeable_state: 'clean' });
   assert.deepEqual([m.title, m.mergeable, m.mergeableState], ['T', true, 'clean']);
   assert.equal((await g({ state: 'closed', merged: true })).state, 'merged');

@@ -147,6 +147,7 @@ export class GitHubBacklog implements Backlog {
       url: p.html_url,
       head: p.head.ref,
       headSha: p.head.sha,
+      base: p.base?.ref ?? '',
       draft: Boolean(p.draft),
       state: p.merged ? 'merged' : p.state === 'closed' ? 'closed' : 'open',
       title: p.title ?? '',
@@ -236,6 +237,7 @@ interface GhPull {
   html_url: string;
   node_id: string;
   head: { ref: string; sha: string };
+  base?: { ref: string };
   draft?: boolean;
   state: string;
   merged?: boolean;

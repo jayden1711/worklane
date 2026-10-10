@@ -1357,15 +1357,219 @@ test('auto-merge: a PR that needed a CI fix run waits, even once green', { skip 
   assert.ok(!t.pr().merged);
 });
 
-test("auto-merge: GitHub's merge check decides too: still computing waits a poll, a conflict waits for the owner", { skip }, async () => {
+test("auto-merge: GitHub's merge check decides too: still computing waits a poll, and so does a stale conflict on a branch that already has its base", { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
   t.f.backlog.setPr(t.opened.number, { mergeableState: 'unknown' });
   await green(t);
   assert.equal(t.f.log.read(0, ['merge.decided']).length, 0, 'no decision while GitHub computes');
   t.f.backlog.setPr(t.opened.number, { mergeableState: 'dirty' });
   await t.c.tick();
-  assert.deepEqual(reasonsOf(t).reasons, ["GitHub can't merge it cleanly (dirty)"]);
+  assert.equal(t.f.log.read(0, ['merge.decided']).length, 0);
+  assert.equal(t.f.log.read(0, ['conflict_fix.detected']).length, 0, 'main has not moved: nothing to fix, no run spent');
   assert.ok(!t.pr().merged);
+});
+
+// ---- conflict fix runs
+
+/** Someone else's change lands on main on the very line the PR changed: a real conflict for the PR. */
+function conflictOnMain(t: Awaited<ReturnType<typeof openPr>>): string {
+  const dir = join(mkdtempSync(join(tmpdir(), 'other-')), 'c');
+  git(t.f.base, 'clone', '-q', t.f.remote, dir);
+  const p = join(dir, 'src', 'price.js');
+  writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty, 0);', 'sum + cents * qty, 0); // audited'));
+  git(dir, '-c', 'user.email=o@example.com', '-c', 'user.name=Other', '-c', 'commit.gpgsign=false', 'commit', '-qam', 'Mark the totals line as audited');
+  git(dir, 'push', '-q', 'origin', 'main');
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'dirty' });
+  return git(dir, 'rev-parse', 'HEAD');
+}
+
+/** A conflict-fix worker: keeps both sides of the totals line; `stray` also edits a line outside the hunk. */
+const resolver = (o: { stray?: boolean } = {}) => (req: RunRequest) => {
+  if (!/Conflict fix \d/.test(req.prompt)) return null;
+  const p = join(req.cwd, 'src', 'price.js');
+  let text = readFileSync(p, 'utf8').replace(/<<<<<<<[\s\S]*?>>>>>>>[^\n]*\n/, '  return items.reduce((sum, { cents, qty }) => sum + (qty > 0 ? cents * qty : 0), 0); // audited\n');
+  if (o.stray) text = text.replace("throw new RangeError('pct must be 0-100')", "throw new RangeError('pct must be between 0 and 100')");
+  writeFileSync(p, text);
+  commitAll(req.cwd, 'Merge main into the branch, keeping both changes');
+  return { summary: 'kept the quantity guard and the audit note' };
+};
+
+/** An evaluator that also answers the conflict question. */
+const approveBoth = (kept: boolean, confidence = 'high') => (req: RunRequest) => ({ ...approve()(req), confidence, ...(/both_sides_kept/.test(req.prompt) ? { both_sides_kept: kept } : {}) });
+
+test('conflict fix: a PR GitHub reports as conflicting gets its base merged in and the hunk resolved; re-verified, evaluated against the new base, pushed, then auto-merged', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(resolver()), 'evaluator-verdict': approveBoth(true) }, { autoMerge: () => true });
+  const mainSha = conflictOnMain(t);
+  await t.c.tick();
+  await t.c.idle();
+  const brief = t.runner.calls.find((r) => /Conflict fix 1/.test(r.prompt))?.prompt ?? '';
+  assert.match(brief, /1 hunk\(s\) in 1 file\(s\) conflict/);
+  assert.match(brief, /What this PR is for: this pull request/);
+  assert.match(brief, /What changed on main: Mark the totals line as audited/);
+  assert.match(brief, /\/\/ audited/, 'the base side of the hunk');
+  const evalPrompt = t.runner.calls.filter((r) => r.role === 'evaluator-verdict').at(-1)!.prompt;
+  assert.match(evalPrompt, /both_sides_kept/);
+  assert.match(evalPrompt, /How the conflicts were resolved/, 'the resolution diff, separately');
+  assert.ok(t.f.log.read(0, ['conflict_fix.detected']).length === 1);
+  const done = lastOf(t.f.log, 'conflict_fix.finished') as { outcome: string; head: string; files: string[]; waits_owner: boolean; reasons: string[]; base_sha: string; strategy: string };
+  assert.deepEqual([done.outcome, done.files, done.waits_owner, done.reasons, done.base_sha, done.strategy], ['pushed', ['src/price.js'], false, [], mainSha, 'merge']);
+  assert.equal(done.head, t.remoteHead(), 'pushed to the PR branch');
+  assert.equal(git(t.f.repo, 'rev-parse', `${done.head}^1`), t.opened.head, 'a merge commit on top of the PR head');
+  assert.equal(git(t.f.repo, 'rev-parse', `${done.head}^2`), mainSha);
+  // GitHub now sees the new head, mergeable; CI passes on it: the merge policy decides from scratch.
+  t.sync();
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'clean' });
+  await green(t);
+  assert.deepEqual([reasonsOf(t).auto, reasonsOf(t).reasons], [true, []]);
+  assert.ok(t.pr().merged);
+});
+
+test('conflict fix: a resolution that changes lines outside the conflicted hunks, or an evaluator short of sure, waits for the owner', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(resolver({ stray: true })), 'evaluator-verdict': approveBoth(true) }, { autoMerge: () => true });
+  conflictOnMain(t);
+  await t.c.tick();
+  await t.c.idle();
+  const done = lastOf(t.f.log, 'conflict_fix.finished') as { outcome: string; waits_owner: boolean; reasons: string[] };
+  assert.equal(done.outcome, 'pushed');
+  assert.deepEqual(done.reasons, ['conflict fix: changed outside the conflicted hunks: src/price.js (lines outside the conflicted hunks changed)']);
+  t.sync();
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'clean' });
+  await green(t);
+  assert.equal(reasonsOf(t).auto, false);
+  assert.ok(reasonsOf(t).reasons.includes(done.reasons[0]!));
+  assert.ok(!t.pr().merged);
+
+  const u = await openPr({ worker: workerWith(resolver()), 'evaluator-verdict': approveBoth(false) }, { autoMerge: () => true });
+  conflictOnMain(u);
+  await u.c.tick();
+  await u.c.idle();
+  assert.deepEqual((lastOf(u.f.log, 'conflict_fix.finished') as { reasons: string[] }).reasons, ['conflict fix: the evaluator found a side whose behavior was lost']);
+});
+
+test('conflict fix: the cap (default 1, a run cut short by a restart counts), runs off, or a branch someone else pushed to: the owner is asked, once', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(resolver()), 'evaluator-verdict': approveBoth(true) }, { autoMerge: () => true });
+  conflictOnMain(t);
+  // A run that a restart cut off: recovered as interrupted, and it used the one allowed run.
+  t.f.log.append('conflict_fix.started', { issue: t.n, number: t.opened.number, head: t.opened.head, base_sha: t.opened.head, strategy: 'merge', attempt: 1, lease: t.opened.head }, 'test');
+  await t.c.recover();
+  assert.equal((lastOf(t.f.log, 'conflict_fix.finished') as { outcome: string }).outcome, 'interrupted');
+  await t.c.tick();
+  await t.c.idle();
+  const gave = lastOf(t.f.log, 'conflict_fix.finished') as { outcome: string; detail: string };
+  assert.equal(gave.outcome, 'gave_up');
+  assert.match(gave.detail, /1 conflict fix run\(s\) already, the limit \(config\.yaml conflicts\.max_fixes_per_pr: 1\)/);
+  assert.ok(!t.runner.calls.some((r) => /Conflict fix/.test(r.prompt)), 'no new run');
+  assert.ok(t.pr().labels.includes('needs-owner'));
+  assert.deepEqual(t.pr().reviewers, ['example-owner']);
+  const asks = () => t.pr().comments.filter((x) => /this PR conflicts with its base/.test(x.body)).length;
+  assert.equal(asks(), 1);
+  await t.c.tick();
+  await t.c.tick();
+  assert.equal(asks(), 1, 'asked once per head and base');
+
+  const off = await openPr({}, { autoMerge: () => true, edit: (cfg) => void (cfg.project.conflicts.fix = false) });
+  conflictOnMain(off);
+  await off.c.tick();
+  assert.match((lastOf(off.f.log, 'conflict_fix.finished') as { detail: string }).detail, /conflict fix runs are off/);
+
+  const theirs = await openPr({}, { autoMerge: () => true });
+  conflictOnMain(theirs);
+  theirs.f.backlog.setPr(theirs.opened.number, { headSha: 'c'.repeat(40), mergeableState: 'dirty' });
+  await theirs.c.tick();
+  assert.match((lastOf(theirs.f.log, 'conflict_fix.finished') as { detail: string }).detail, /someone else pushed to the branch/);
+});
+
+test('conflict fix: only a real conflict starts one; behind, blocked and still-computing states never do', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(resolver()), 'evaluator-verdict': approveBoth(true) }, { autoMerge: () => true });
+  conflictOnMain(t);
+  for (const state of ['behind', 'blocked', 'unknown']) {
+    t.f.backlog.setPr(t.opened.number, { mergeableState: state });
+    await t.c.tick();
+    await t.c.idle();
+  }
+  assert.equal(t.f.log.read(0, ['conflict_fix.detected', 'conflict_fix.started']).length, 0);
+  assert.ok(!t.runner.calls.some((r) => /Conflict fix/.test(r.prompt)));
+});
+
+/**
+ * Two harness PRs that change the same line differently: once the first merges, the second conflicts.
+ * Polls every tick until both are open; the caller then sets a slow poll to see what brings PR 2 back.
+ */
+async function twoPrs() {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  const body = (what: string) => `${what}.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n`;
+  const a = f.backlog.open({ title: 'Guard totals against negative quantities', body: body('Ignore non-positive quantities in totals'), author: 'example-owner', labels: ['ready'] });
+  const b = f.backlog.open({ title: 'Clamp quantities in totals', body: body('Clamp quantities at zero in totals'), author: 'example-owner', labels: ['ready'] });
+  const line = 'sum + cents * qty, 0);';
+  const runner = agents({
+    worker: (req) => {
+      const p = join(req.cwd, 'src', 'price.js');
+      if (/Conflict fix \d/.test(req.prompt)) {
+        writeFileSync(p, readFileSync(p, 'utf8').replace(/<<<<<<<[\s\S]*?>>>>>>>[^\n]*\n/, '  return items.reduce((sum, { cents, qty }) => sum + cents * Math.max(qty, 0), 0);\n'));
+        commitAll(req.cwd, 'Merge main into the branch, keeping both changes');
+        return { summary: 'both clamp the quantity' };
+      }
+      const guard = /Guard totals/.test(req.prompt);
+      writeFileSync(p, readFileSync(p, 'utf8').replace(line, guard ? 'sum + (qty > 0 ? cents * qty : 0), 0);' : 'sum + cents * Math.max(qty, 0), 0);'));
+      commitAll(req.cwd, guard ? 'Guard totals' : 'Clamp quantities');
+      return { summary: 'done' };
+    },
+    'evaluator-verdict': approveBoth(true),
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
+  for (let i = 0; i < 12 && f.log.read(0, ['pr.opened']).length < 2; i++) {
+    await c.tick();
+    await c.idle();
+  }
+  const opened = f.log.read(0, ['pr.opened']).map((e) => e.payload as { issue: number; number: number; head: string });
+  assert.equal(opened.length, 2, 'both PRs open');
+  const prA = opened.find((o) => o.issue === a)!;
+  const prB = opened.find((o) => o.issue === b)!;
+  f.backlog.mergeWith = (pr) => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'gh-merge-')), 'c');
+    git(f.base, 'clone', '-q', f.remote, dir);
+    git(dir, 'fetch', '-q', 'origin', pr.head);
+    git(dir, '-c', 'user.email=gh@example.com', '-c', 'user.name=GitHub', '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-ff', '-m', `Merge pull request #${pr.number}`, pr.headSha);
+    git(dir, 'push', '-q', 'origin', 'main');
+    return git(dir, 'rev-parse', 'HEAD');
+  };
+  // From here, the slow poll: PR 2 isn't due for an hour on its own.
+  const inner = c as unknown as { d: { prPollMs: number }; prPolled: Map<number, number>; tipCheckedAt: number };
+  inner.d.prPollMs = 3_600_000;
+  inner.prPolled.set(prB.number, Date.now());
+  return { f, c, prA, prB, inner, conflictStarted: () => f.log.read(0, ['conflict_fix.started']).some((e) => (e.payload as { number: number }).number === prB.number) };
+}
+
+test('conflict fix: right after an auto-merge, the other open PRs are looked at again on the next pass, so a new conflict is fixed at once', { skip }, async () => {
+  const t = await twoPrs();
+  t.inner.tipCheckedAt = Date.now(); // only the merge itself may bring PR 2 back here
+  t.inner.prPolled.set(t.prA.number, 0);
+  t.f.backlog.setChecks(t.prA.head, passing);
+  await t.c.tick();
+  assert.ok(t.f.log.read(0, ['merge.done']).some((e) => (e.payload as { number: number }).number === t.prA.number), 'PR 1 auto-merged');
+  // GitHub now reports PR 2 as conflicting with the new main.
+  t.f.backlog.setPr(t.prB.number, { mergeableState: 'dirty' });
+  t.inner.tipCheckedAt = Date.now();
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(t.conflictStarted(), "PR 2's conflict fix started on the next pass, not after the hour-long poll");
+});
+
+test('conflict fix: when the default branch moves (anyone merged), the open PRs are looked at again within seconds', { skip }, async () => {
+  const t = await twoPrs();
+  t.inner.prPolled.set(t.prA.number, Date.now());
+  // Someone merges PR 1 by hand on GitHub: the harness didn't merge it, so only the branch tip shows it.
+  t.inner.tipCheckedAt = 0;
+  await t.c.tick(); // records main's current tip
+  const pr = t.f.backlog.prs().find((p) => p.number === t.prA.number)!;
+  t.f.backlog.mergeWith!({ number: t.prA.number, head: pr.head, headSha: t.prA.head, base: 'main' });
+  t.f.backlog.setPr(t.prB.number, { mergeableState: 'dirty' });
+  t.inner.tipCheckedAt = 0; // the 15 s since the last tip check have passed
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(t.conflictStarted(), "PR 2's conflict fix started once main's tip moved");
 });
 
 test('auto-merge stop: main red after an auto-merge (green before it) stops auto-merge, opens a revert PR that never auto-merges, and asks the owner; only the operator resumes it', { skip }, async () => {

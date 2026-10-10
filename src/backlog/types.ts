@@ -55,6 +55,8 @@ export interface PullRequest {
   /** The branch name and its current commit. */
   head: string;
   headSha: string;
+  /** The branch it merges into (its actual base, which a conflict fix merges in). */
+  base: string;
   draft: boolean;
   state: 'open' | 'closed' | 'merged';
   title: string;
