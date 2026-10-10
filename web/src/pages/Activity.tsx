@@ -12,6 +12,7 @@ const GROUPS: Record<string, (t: string) => boolean> = {
   Landing: (t) => t.startsWith('land.') || t.startsWith('deploy.'),
   Issues: (t) => t.startsWith('issue.') || t.startsWith('contract.'),
   System: (t) => /^(coordinator|governor|report|nightly|baseline)\./.test(t),
+  Settings: (t) => t.startsWith('settings.'),
 };
 
 export function ActivityPage({ state }: { state: State }) {

@@ -23,6 +23,9 @@ import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
+import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError } from './settings.js';
+import { PolicyFile } from './instance.js';
+import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
 
 /**
@@ -63,10 +66,12 @@ export interface DashboardOptions {
   journalReader?: JournalReader;
   /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
   slotsDir?: string;
-  /** The instance's policy file (its auto-merge kill switch); none for a checkout. */
+  /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
   policyFile?: string | null;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
+  /** The machine's limits file for settings; the system one when unset. */
+  limitsPath?: string;
 }
 
 /**
@@ -114,6 +119,47 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
  */
 export function healthStats(o: { serviceUnit: string | null; root: string; stateDir: string }): MachineStats {
   return machineStats({ units: [`${BRAND.cli}.slice`, ...(o.serviceUnit ? [o.serviceUnit] : [])], paths: [...new Set([o.root, o.stateDir])] });
+}
+
+/**
+ * The Settings page's instance section: each setting's value in effect and where it comes from (the
+ * instance's policy, or the repo's default), the bounds a new value must keep (the machine's limits and
+ * the policy's own ceilings), and whether this dashboard's user, the owner, may change them.
+ */
+export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'cfg' | 'user' | 'limitsPath'>) {
+  const owner = o.cfg.project.owners.default;
+  const base = { owner, user: o.user, canChange: !!o.policyFile && !!o.user && o.user.toLowerCase() === owner.toLowerCase(), keys: [...SETTING_KEYS] };
+  if (!o.policyFile) return { ...base, available: false as const, why: "settings belong to an instance: this dashboard serves a checkout, whose config comes from the repo" };
+  let limits: ReturnType<typeof loadLimits> | null = null;
+  let limitsError: string | null = null;
+  try {
+    limits = loadLimits(o.limitsPath);
+  } catch (e) {
+    limitsError = (e as Error).message;
+  }
+  let policy: PolicyFile;
+  try {
+    policy = PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS());
+  } catch (e) {
+    return { ...base, canChange: false, available: false as const, why: `the instance policy can't be read: ${(e as Error).message.split('\n')[0]}` };
+  }
+  const s = policy.settings;
+  const set: Record<string, boolean> = {
+    workers: s.workers !== undefined,
+    daily_budget_usd: s.daily_budget_usd !== undefined,
+    'ci_repair.enabled': s.ci_repair?.enabled !== undefined,
+    'ci_repair.max_fixes_per_pr': s.ci_repair?.max_fixes_per_pr !== undefined,
+    run_windows: s.run_windows !== undefined,
+  };
+  return {
+    ...base,
+    canChange: base.canChange && !limitsError,
+    available: true as const,
+    limits,
+    limitsError,
+    ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
+    settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: set[key] ? ('instance' as const) : ('repo' as const) })),
+  };
 }
 
 /** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
@@ -382,6 +428,19 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             // no stats: the view says unknown
           }
           return json(res, 200, healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }));
+        }
+        // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
+        if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView(opts));
+        if (url.pathname === '/api/instance-settings' && req.method === 'POST') {
+          if (!opts.policyFile) return json(res, 400, { error: 'settings are an instance\'s: this dashboard serves a checkout' });
+          const body = (await readBody(req)) as { key?: string; value?: unknown };
+          try {
+            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: opts.user, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
+            return json(res, 200, { ok: true, ...r });
+          } catch (e) {
+            if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
+            throw e;
+          }
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));

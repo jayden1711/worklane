@@ -112,6 +112,13 @@ const RUN_STATUS: Record<string, TaskStatus> = {
   'evaluator-verdict': 'evaluating',
 };
 
+/** A setting's value as one short line: run windows as from-to pairs, the rest as written. */
+export function settingText(v: unknown): string {
+  if (Array.isArray(v)) return v.length ? v.map((w) => (w && typeof w === 'object' && 'from' in w ? `${(w as { from: string }).from}-${(w as { to: string }).to}` : JSON.stringify(w))).join(', ') : 'any time';
+  if (v === undefined || v === null) return 'unset';
+  return String(v);
+}
+
 export function summarize(e: StoredEvent): string {
   const p = e.payload as Record<string, unknown>;
   switch (e.type) {
@@ -169,6 +176,8 @@ export function summarize(e: StoredEvent): string {
       return `report posted (${p.slot})`;
     case 'nightly.queued':
       return 'nightly runs queued';
+    case 'settings.changed':
+      return `setting ${p.key}: ${settingText(p.from)} → ${settingText(p.to)}, by @${p.by}`;
     default:
       return e.type;
   }
