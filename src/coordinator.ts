@@ -9,7 +9,7 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
-import { actionable, ownerFor, parseContract, type Backlog, type DoneWhenList, type Issue } from './backlog/types.js';
+import { actionable, ownerFor, parseContract, type Backlog, type CommitCheck, type DoneWhenList, type Issue } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -19,6 +19,7 @@ import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './rev
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
+import { readiness, type Readiness } from './pr-watch.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -49,6 +50,8 @@ export interface CoordinatorDeps {
   appKeyPath?: string;
   maxAttempts?: number;
   leaseMs?: number;
+  /** How often each open PR is polled for its checks (ms; default 60 s). */
+  prPollMs?: number;
   /** Nightly queuing (tests inject this). */
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
@@ -92,6 +95,8 @@ export class Coordinator {
   private readonly remote: string;
   private readonly wt: WorktreeOptions;
   private active = new Map<number, Promise<void>>();
+  /** When each watched PR was last polled (ms). */
+  private prPolled = new Map<number, number>();
   private landing = false;
   private stopped = false;
   /** Aborted by an emergency stop: every agent run gets this signal. */
@@ -166,6 +171,7 @@ export class Coordinator {
     await step('report', () => this.maybeReport(), undefined);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
+    await step('prs', () => this.watchPrs(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
@@ -1040,7 +1046,7 @@ export class Coordinator {
         for (const q of applied) result(q.issue, 'deferred', null, `push rejected (tip moved): ${push.error.split('\n').pop()}`);
         return;
       }
-      this.emit('check.result', { issue: applied[0]!.issue, head, stage: 'land', checks: gates.notes.map((note) => ({ check: note, status: 'pass', exitCode: 0 })) });
+      this.emit('check.result', { issue: applied[0]!.issue, head, stage: 'land', checks: gates.notes.map((note) => ({ check: note, status: 'pass' as const, exitCode: 0 })) });
       this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'landed', detail: gates.notes.join('; ') });
       for (const q of applied) result(q.issue, 'landed', head, `landed on ${this.branch} (${gates.notes.join('; ')})`);
       for (const q of applied) await this.afterLand(q.issue, head, ownerOf(q.issue));
@@ -1093,7 +1099,10 @@ export class Coordinator {
     ].join('\n');
     let url: string;
     try {
-      url = await this.d.backlog.openPr(branch, this.branch, `${issue.title} (#${n})`, body);
+      // A draft until its required checks pass on the commit the evaluator approved (the PR watcher marks it ready).
+      const pr = await this.d.backlog.openPr(branch, this.branch, `${issue.title} (#${n})`, body, { draft: true, headSha: q.head });
+      url = pr.url;
+      this.emit('pr.opened', { issue: n, number: pr.number, url, head: q.head, draft: pr.draft });
     } catch (e) {
       this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `opening the PR failed: ${(e as Error).message.slice(0, 500)}` });
       await this.block(n, this.ownerOf(n), `could not open a PR for ${branch}`);
@@ -1109,6 +1118,71 @@ export class Coordinator {
     }
     await this.d.backlog.comment(n, `[${BRAND.cli}] Opened ${url} for review. Merging it closes this issue.`);
     this.emit('issue.released', { issue: n, instance: this.d.instance, why: 'pr opened' });
+  }
+
+  // ---------------------------------------------------------------- PR watch
+
+  /** Open PRs this instance opened: the latest pr.opened per number, without a pr.closed after it. */
+  watchedPrs(): EventPayload<'pr.opened'>[] {
+    const open = new Map<number, EventPayload<'pr.opened'>>();
+    for (const e of this.d.log.read(0, ['pr.opened', 'pr.closed'])) {
+      const p = e.payload as EventPayload<'pr.opened'> | EventPayload<'pr.closed'>;
+      if (e.type === 'pr.opened') open.set(p.number, p as EventPayload<'pr.opened'>);
+      else open.delete(p.number);
+    }
+    return [...open.values()];
+  }
+
+  /**
+   * Each watched PR, at most once per poll interval and a few per tick: read its head and the checks on it,
+   * record changes, and mark it ready (out of draft, labelled merge-ready) once every required check passed
+   * on the exact commit the evaluator approved. A head that moves after that takes the label off again.
+   */
+  private async watchPrs() {
+    const now = Date.now();
+    const interval = this.d.prPollMs ?? 60_000;
+    const due = this.watchedPrs()
+      .filter((p) => now - (this.prPolled.get(p.number) ?? 0) >= interval)
+      .sort((a, b) => (this.prPolled.get(a.number) ?? 0) - (this.prPolled.get(b.number) ?? 0))
+      .slice(0, 10);
+    for (const watched of due) {
+      this.prPolled.set(watched.number, now);
+      await this.watchPr(watched);
+    }
+  }
+
+  private async watchPr(w: EventPayload<'pr.opened'>) {
+    const { issue: n, number } = w;
+    const pr = await this.d.backlog.pullRequest(number);
+    if (pr.state !== 'open') {
+      this.emit('pr.closed', { issue: n, number, merged: pr.state === 'merged' });
+      return;
+    }
+    const r = this.prReadiness(n, pr.headSha, await this.d.backlog.checks(pr.headSha));
+    const last = this.d.log.read(0, ['pr.status']).map((e) => e.payload as EventPayload<'pr.status'>).filter((p) => p.number === number).at(-1);
+    const checks = r.checks.map((c) => ({ name: c.name, outcome: c.outcome }));
+    if (!last || last.head !== pr.headSha || last.ready !== r.ready || JSON.stringify(last.checks) !== JSON.stringify(checks)) {
+      this.emit('pr.status', { issue: n, number, head: pr.headSha, ready: r.ready, reasons: r.reasons, checks });
+    }
+    const marked = this.d.log
+      .read(0, ['pr.ready', 'pr.unready'])
+      .filter((e) => (e.payload as { number: number }).number === number)
+      .at(-1);
+    const markedHead = marked?.type === 'pr.ready' ? (marked.payload as EventPayload<'pr.ready'>).head : null;
+    if (r.ready && markedHead !== pr.headSha) {
+      if (pr.draft) await this.d.backlog.markReady(number);
+      await this.d.backlog.addLabels(number, ['merge-ready']);
+      this.emit('pr.ready', { issue: n, number, head: pr.headSha });
+    } else if (!r.ready && markedHead) {
+      await this.d.backlog.removeLabel(number, 'merge-ready');
+      this.emit('pr.unready', { issue: n, number, head: pr.headSha, why: r.reasons.join('; ').slice(0, 1000) });
+    }
+  }
+
+  /** The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue. */
+  prReadiness(n: number, head: string, checks: CommitCheck[]): Readiness {
+    const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
+    return readiness({ required: this.d.cfg.project.required_checks, checks, head, evaluated: v ? { head: v.head, approved: v.patch_correct } : null });
   }
 
   private async afterLand(n: number, sha: string, owner: string) {

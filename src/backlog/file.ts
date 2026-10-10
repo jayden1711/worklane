@@ -3,12 +3,23 @@
 // their label history.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Backlog, Issue } from './types.js';
+import type { Backlog, CommitCheck, Issue, PullRequest } from './types.js';
+
+interface FilePr {
+  head: string;
+  base: string;
+  url: string;
+  headSha: string;
+  draft: boolean;
+  merged: boolean;
+}
 
 interface FileState {
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[] })[];
+  // As on GitHub, a pull request is an issue too (same numbering, labels and comments), with `pr` set.
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[]; pr?: FilePr })[];
   labels: string[];
-  prs?: { head: string; base: string; title: string; body: string; url: string }[];
+  /** Checks per commit sha (tests set them). */
+  checks?: Record<string, CommitCheck[]>;
 }
 
 export class FileBacklog implements Backlog {
@@ -56,7 +67,7 @@ export class FileBacklog implements Backlog {
   }
 
   async list(label: string) {
-    return this.load().issues.filter((i) => i.state === 'open' && i.labels.includes(label)).map(strip);
+    return this.load().issues.filter((i) => !i.pr && i.state === 'open' && i.labels.includes(label)).map(strip);
   }
   async get(n: number) {
     const i = this.load().issues.find((x) => x.number === n);
@@ -92,17 +103,49 @@ export class FileBacklog implements Backlog {
   async createIssue(title: string, body: string, labels: string[]) {
     return this.open({ title, body, author: this.actor, labels });
   }
-  async openPr(head: string, base: string, title: string, body: string) {
+  async openPr(head: string, base: string, title: string, body: string, opts: { draft?: boolean; headSha?: string } = {}) {
     const s = this.load();
-    const existing = s.prs?.find((p) => p.head === head);
-    if (existing) return existing.url;
-    const url = `file://pr/${(s.prs?.length ?? 0) + 1}`;
-    (s.prs ??= []).push({ head, base, title, body, url });
+    const existing = s.issues.find((i) => i.pr?.head === head && i.state === 'open');
+    if (existing) return { url: existing.pr!.url, number: existing.number, draft: existing.pr!.draft };
+    const number = (s.issues.at(-1)?.number ?? 0) + 1;
+    const url = `file://pr/${number}`;
+    s.issues.push({ number, title, body, author: this.actor, assignees: [], state: 'open', labels: [], labelEvents: [], comments: [], pr: { head, base, url, headSha: opts.headSha ?? '', draft: Boolean(opts.draft), merged: false } });
     this.save(s);
-    return url;
+    return { url, number, draft: Boolean(opts.draft) };
   }
+  async pullRequest(n: number): Promise<PullRequest> {
+    const i = this.load().issues.find((x) => x.number === n && x.pr);
+    if (!i) throw new Error(`pull request #${n} not found`);
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state };
+  }
+  async checks(sha: string) {
+    return this.load().checks?.[sha] ?? [];
+  }
+  async markReady(n: number) {
+    this.edit(n, (i) => {
+      if (i.pr) i.pr.draft = false;
+    });
+  }
+  /** Test helper: the pull requests, oldest first. */
   prs() {
-    return this.load().prs ?? [];
+    return this.load()
+      .issues.filter((i) => i.pr)
+      .map((i) => ({ number: i.number, title: i.title, body: i.body, labels: i.labels, state: i.state, ...i.pr! }));
+  }
+  /** Test helper: change a pull request as GitHub would (a push moves headSha; a merge or close ends it). */
+  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged'>> & { state?: 'open' | 'closed' }) {
+    this.edit(n, (i) => {
+      const { state, ...rest } = patch;
+      Object.assign(i.pr!, rest);
+      if (state) i.state = state;
+      if (patch.merged) i.state = 'closed';
+    });
+  }
+  /** Test helper: the checks GitHub reports on a commit. */
+  setChecks(sha: string, checks: CommitCheck[]) {
+    const s = this.load();
+    (s.checks ??= {})[sha] = checks;
+    this.save(s);
   }
   async ensureLabels(labels: { name: string }[]) {
     const s = this.load();
@@ -114,6 +157,6 @@ export class FileBacklog implements Backlog {
 }
 
 function strip(i: FileState['issues'][number]): Issue {
-  const { labelEvents: _e, comments: _c, ...rest } = i;
+  const { labelEvents: _e, comments: _c, pr: _p, ...rest } = i;
   return rest;
 }

@@ -3,7 +3,7 @@
 // permission" unless it is).
 import { execFileSync } from 'node:child_process';
 import { classifyGitHubError } from '../github/errors.js';
-import type { Backlog, Issue } from './types.js';
+import type { Backlog, CommitCheck, Issue, PullRequest } from './types.js';
 
 export class GitHubError extends Error {
   constructor(
@@ -46,7 +46,9 @@ export class GitHubBacklog implements Backlog {
     const json = text ? (JSON.parse(text) as unknown) : undefined;
     if (!res.ok) {
       const c = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), json);
-      throw new GitHubError(res.status, c.kind, c.message, c.retryAfter);
+      // A validation failure says why in errors[] ("Validation Failed" alone says nothing).
+      const details = ((json as { errors?: { message?: string }[] } | undefined)?.errors ?? []).map((x) => x?.message).filter(Boolean);
+      throw new GitHubError(res.status, c.kind, details.length ? `${c.message}: ${details.join('; ')}` : c.message, c.retryAfter);
     }
     return json as T;
   }
@@ -115,11 +117,51 @@ export class GitHubBacklog implements Backlog {
     return (await this.req<{ number: number }>('POST', `/repos/${this.repo}/issues`, { title, body, labels })).number;
   }
 
-  async openPr(head: string, base: string, title: string, body: string) {
+  async openPr(head: string, base: string, title: string, body: string, opts: { draft?: boolean } = {}) {
     const owner = this.repo.split('/')[0];
-    const open = await this.req<{ html_url: string }[]>('GET', `/repos/${this.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`);
-    if (open[0]) return open[0].html_url;
-    return (await this.req<{ html_url: string }>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body })).html_url;
+    const open = await this.req<GhPull[]>('GET', `/repos/${this.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`);
+    if (open[0]) return { url: open[0].html_url, number: open[0].number, draft: Boolean(open[0].draft) };
+    let pr: GhPull;
+    try {
+      pr = await this.req<GhPull>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body, ...(opts.draft ? { draft: true } : {}) });
+    } catch (e) {
+      // Some plans don't offer drafts on private repos: open an ordinary PR instead.
+      if (!(opts.draft && e instanceof GitHubError && e.status === 422 && /draft/i.test(e.message))) throw e;
+      pr = await this.req<GhPull>('POST', `/repos/${this.repo}/pulls`, { head, base, title, body });
+    }
+    return { url: pr.html_url, number: pr.number, draft: Boolean(pr.draft) };
+  }
+
+  async pullRequest(n: number): Promise<PullRequest> {
+    const p = await this.req<GhPull>('GET', `/repos/${this.repo}/pulls/${n}`);
+    return { number: p.number, url: p.html_url, head: p.head.ref, headSha: p.head.sha, draft: Boolean(p.draft), state: p.merged ? 'merged' : p.state === 'closed' ? 'closed' : 'open' };
+  }
+
+  async checks(sha: string): Promise<CommitCheck[]> {
+    const out: CommitCheck[] = [];
+    for (let page = 1; page < 10; page++) {
+      const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
+      out.push(...r.check_runs.map((c) => ({ name: c.name, source: 'check_run' as const, status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}) })));
+      if (r.check_runs.length < 100) break;
+    }
+    // Commit statuses need their own permission; without it (403) or with none (404), there are just no statuses.
+    let statuses: { context: string; state: string; target_url?: string | null }[] = [];
+    try {
+      statuses = (await this.req<{ statuses: typeof statuses }>('GET', `/repos/${this.repo}/commits/${sha}/status`)).statuses;
+    } catch (e) {
+      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
+    }
+    for (const s of statuses) {
+      out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}) });
+    }
+    return out;
+  }
+
+  async markReady(n: number) {
+    const p = await this.req<GhPull>('GET', `/repos/${this.repo}/pulls/${n}`);
+    if (!p.draft) return;
+    const r = await this.req<{ errors?: { message: string }[] }>('POST', '/graphql', { query: 'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }', variables: { id: p.node_id } });
+    if (r.errors?.length) throw new GitHubError(200, 'graphql', r.errors.map((x) => x.message).join('; '));
   }
 
   async ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]> {
@@ -143,4 +185,14 @@ interface GhIssue {
   assignees?: { login: string }[];
   state: string;
   pull_request?: unknown;
+}
+
+interface GhPull {
+  number: number;
+  html_url: string;
+  node_id: string;
+  head: { ref: string; sha: string };
+  draft?: boolean;
+  state: string;
+  merged?: boolean;
 }

@@ -61,6 +61,19 @@ export const EventSchemas = {
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),
+  /** PR mode: a pull request the harness opened, and its watch. */
+  'pr.opened': z.strictObject({ issue, number: z.number().int().positive(), url: z.string(), head: sha, draft: z.boolean() }),
+  'pr.status': z.strictObject({
+    issue,
+    number: z.number().int().positive(),
+    head: sha,
+    ready: z.boolean(),
+    reasons: z.array(z.string()),
+    checks: z.array(z.strictObject({ name: z.string(), outcome: z.enum(['pass', 'fail', 'pending', 'cancelled', 'skipped', 'missing']) })),
+  }),
+  'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
+  'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
   'deploy.requested': z.strictObject({ env: z.string(), sha }),
   'deploy.verified': z.strictObject({ env: z.string(), sha }),
