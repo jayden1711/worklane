@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
-import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
@@ -60,6 +60,38 @@ export function writeAgentReadable(file: string, data: string, gid: number): voi
   if (process.platform === 'win32') return;
   chownSync(file, process.getuid!(), gid);
   chmodSync(file, 0o640);
+}
+
+/**
+ * groupOnly over a whole tree, for state an older engine left open: every directory 0770, every file 0660
+ * (0600 files stay 0600). Symlinks are never followed or changed. Returns what it changed, relative to `root`.
+ * No-op on Windows.
+ */
+export function groupOnlyTree(root: string): string[] {
+  if (process.platform === 'win32' || !existsSync(root)) return [];
+  const changed: string[] = [];
+  const walk = (dir: string, rel: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const r = rel ? `${rel}/${name}` : name;
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch {
+        continue; // removed meanwhile
+      }
+      if (st.isSymbolicLink()) continue;
+      const before = st.mode & 0o777;
+      groupOnly(p);
+      if ((statSync(p).mode & 0o777) !== before) changed.push(r);
+      if (st.isDirectory()) walk(p, r);
+    }
+  };
+  const before = statSync(root).mode & 0o777;
+  groupOnly(root);
+  if ((statSync(root).mode & 0o777) !== before) changed.push('.');
+  walk(root, '');
+  return changed;
 }
 
 /** mkdir -p, then groupOnly on the directory itself. */
