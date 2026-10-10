@@ -103,10 +103,21 @@ test('decisions are answerable only where the server allows it (canAnswer)', () 
   const open = asOwner.decisions.filter((d) => !d.answer);
   const mine = r.renderPage('decisions', asOwner);
   const options = open.reduce((n, d) => n + d.options.length, 0);
-  assert.equal((mine.match(/data-option=/g) ?? []).length, options, 'the owner gets one row per option');
+  // Every option is a button (an action that answers), not a radio or a row in a list.
+  const buttons = [...mine.matchAll(/<button\b[^>]*data-option="([^"]*)"[^>]*>/g)];
+  assert.equal(buttons.length, options, 'the owner gets one button per option');
+  for (const [tag] of buttons) assert.match(tag, /type="button"/);
+  assert.equal((mine.match(/data-option=/g) ?? []).length, options, 'nothing but buttons carries an option');
+  assert.doesNotMatch(mine, /type="radio"|role="radio"/);
+  for (const d of open) {
+    const rec = d.options.includes((d as { recommendation?: string }).recommendation ?? '') ? (d as { recommendation?: string }).recommendation! : d.options[0]!;
+    const tag = buttons.find(([, o]) => o === rec)?.[0] ?? '';
+    assert.match(tag, /bg-ink/, `the recommended option "${rec}" is the primary button`);
+  }
+  for (const [tag, o] of buttons) if (/reject|close/.test(o!)) assert.match(tag, /text-red/, `"${o}" is marked destructive`);
   assert.ok(asOther.decisions.every((d) => d.canAnswer === false), 'the server says another user may not answer');
   const theirs = r.renderPage('decisions', asOther);
-  assert.equal((theirs.match(/data-option=/g) ?? []).length, 0, 'no option rows for someone who can\'t answer');
+  assert.equal((theirs.match(/data-option=/g) ?? []).length, 0, 'no option buttons for someone who can\'t answer');
   assert.match(theirs, /Waiting on @example-owner/);
 });
 

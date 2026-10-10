@@ -56,23 +56,14 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
           </ul>
         )}
         {!d.answer && d.canAnswer !== false && (
-          <div className="mt-2.5 flex flex-col gap-1" role="group" aria-label="Answer">
+          // Each option is an action: one click answers. The recommended one is the dark primary pill,
+          // destructive ones (reject, close) are red, the rest raised; each carries its key.
+          <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
             {d.options.map((o, i) => (
-              <button
-                key={o}
-                type="button"
-                data-option={o}
-                disabled={!!busy}
-                onClick={() => void answer(o)}
-                className="flex items-center gap-2 rounded-control py-1.5 pr-2 pl-1.5 text-left transition-colors duration-100 hover:bg-hover disabled:opacity-60"
-              >
-                <span className={cx('flex size-4 shrink-0 items-center justify-center rounded-full', busy === o ? 'bg-ink' : 'shadow-[inset_0_0_0_1.5px_var(--line-strong)]')}>
-                  <span className="size-1.5 rounded-full bg-surface" style={{ transform: busy === o ? 'scale(1)' : 'scale(0)' }} />
-                </span>
-                <span className={cx('min-w-0 flex-1 truncate text-[13px]', /reject|close/.test(o) ? 'text-red' : 'text-ink')}>{busy === o ? `${o}…` : o}</span>
-                {recommended(o, i) && <Badge tone="ok">recommended</Badge>}
-                <Kbd>{i + 1}</Kbd>
-              </button>
+              <Button key={o} type="button" size="sm" data-option={o} variant={recommended(o, i) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o, i) ? 'recommended' : undefined}>
+                {busy === o ? `${o}…` : o}
+                <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o, i) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
+              </Button>
             ))}
           </div>
         )}
@@ -90,7 +81,7 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
         ) : d.canAnswer === false ? (
           <span className="text-ink-3">Waiting on @{d.owner}; only they or one of the project's writers can answer it.</span>
         ) : (
-          <span className="text-ink-3">Pick an option to answer; the coordinator acts on its next tick.</span>
+          <span className="text-ink-3">Click an option to answer; the coordinator acts on its next tick.</span>
         )}
         {err && <span className="ml-auto text-red">{err}</span>}
       </div>
