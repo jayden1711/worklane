@@ -5,7 +5,7 @@
 // branch in their own worktree; everything outward-facing happens here.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
@@ -15,7 +15,7 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { cpuCount, diskFree, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached } from './os/index.js';
+import { cpuCount, diskFree, groupOnlyDir, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached, writeGroupOnly } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
@@ -406,14 +406,14 @@ export class Coordinator {
     try {
       const { path, setupErrors } = createWorktree(this.wt, name, branch, base);
       if (setupErrors.length) throw new Error(`worktree setup failed: ${setupErrors.join('; ')}`);
-      mkdirSync(dirname(taskFile), { recursive: true });
-      writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen }));
+      groupOnlyDir(dirname(taskFile));
+      writeGroupOnly(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen }));
 
       if (issue.labels.includes('type:investigation')) return await this.investigate(issue, doneWhen, path, taskFile, base, owner);
 
       const repro = doneWhen.some((d) => 'repro' in d && d.repro) ? await this.reproduce(issue, doneWhen, base, path) : null;
       // The frozen test is off-limits to the worker: its hook denies writes to it.
-      if (repro?.path) writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] }));
+      if (repro?.path) writeGroupOnly(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] }));
       const maxAttempts = this.d.maxAttempts ?? 3;
       let feedback: string[] = [];
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
@@ -1428,7 +1428,7 @@ export class Coordinator {
     const revert = wasGreen ? await this.openRevert(m, failed) : null;
     const what = `${this.branch}'s required checks failed (${failed.join(', ')}) on \`${m.sha.slice(0, 8)}\` after auto-merging #${m.number}`;
     const reason = wasGreen ? `${what}${revert ? `; revert PR ${revert.url}` : '; opening a revert PR failed'}` : `${what}, but ${this.branch} was not green before it (\`${parent.slice(0, 8) || '?'}\`), so nothing was reverted`;
-    writeFileSync(this.stopFile, JSON.stringify({ reason, number: m.number, sha: m.sha, revert: revert?.url ?? null, at: new Date().toISOString() }, null, 2));
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason, number: m.number, sha: m.sha, revert: revert?.url ?? null, at: new Date().toISOString() }, null, 2));
     this.emit('merge.stopped', { reason, number: m.number, sha: m.sha, revert: revert?.url ?? null });
     const owner = this.ownerOf(m.issue);
     const resume = `Auto-merge is stopped on this instance until the operator deletes \`${this.stopFile}\`; until then every PR waits for you.`;
@@ -1578,8 +1578,8 @@ export class Coordinator {
     try {
       const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
       if (setupErrors.length) return await give(`the fix worktree's setup failed: ${setupErrors.join('; ')}`);
-      mkdirSync(dirname(taskFile), { recursive: true });
-      writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) }));
+      groupOnlyDir(dirname(taskFile));
+      writeGroupOnly(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) }));
       const s = await this.fixAgent(issue, doneWhen, path, taskFile, repro, pr, logs, attempt);
       if ('ended' in s) return await give(s.ended);
       removeSandboxPlaceholders(path);

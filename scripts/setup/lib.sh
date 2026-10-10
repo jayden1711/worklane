@@ -35,3 +35,17 @@ install_sudoers() {
   mv -f "$tmp" "/etc/sudoers.d/$name"
   echo "installed /etc/sudoers.d/$name"
 }
+
+# Everything under a directory that anyone outside its owner and group can read, write or enter.
+open_to_others() { find "$1" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print 2>/dev/null; }
+
+# Fail, naming the files, when anything under an instance's state is open to others.
+refuse_if_open() {
+  local state="$1" why="$2" open
+  open="$(open_to_others "$state")"
+  [ -z "$open" ] && return 0
+  echo "refusing to $why: these under $state are open to other users:" >&2
+  printf '  %s\n' $open >&2
+  echo "close them (chmod -R o-rwx $state), make sure the coordinator runs an engine that keeps them closed, then run this again" >&2
+  exit 1
+}

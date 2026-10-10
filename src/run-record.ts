@@ -4,10 +4,11 @@
 // stream-json it already reads, into the coordinator's own state dir (the
 // dashboard can't read the agent user's session files). Bounded in size and
 // redacted; a recording problem never affects the run.
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { redact } from './events/redact.js';
+import { groupOnlyDir } from './os/index.js';
 
 export const RUNS_DIR = 'runs';
 /** Run records kept per state dir; the oldest go first. */
@@ -137,7 +138,7 @@ export class RunRecorder {
       // The session's own result text is its final message; else the last thing it said.
       if (end.final?.trim()) this.rec.final = clip(end.final, MAX_FINAL);
       const dir = join(this.stateDir, RUNS_DIR);
-      mkdirSync(dir, { recursive: true });
+      groupOnlyDir(dir);
       const file = join(dir, `${this.rec.id}.json`);
       const tmp = join(dir, `.${this.rec.id}.tmp`);
       writeFileSync(tmp, JSON.stringify(redact(this.rec)), { mode: 0o600 });

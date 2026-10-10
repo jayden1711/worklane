@@ -32,6 +32,8 @@ for name in "$@"; do
   [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   [ -d "$(state_of "$name")" ] || { echo "no state for instance $name at $(state_of "$name"); run engine.sh with it first" >&2; exit 1; }
+  # An ACL on the way to the token would expose anything there that others may read: refuse first.
+  refuse_if_open "$(state_of "$name")" "grant $viewer any access"
 done
 
 dash_unit() {
@@ -48,6 +50,7 @@ WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/worklane dashboard --instance $1 --service --user $login
 Restart=on-failure
+UMask=0007
 RestartSec=10
 NoNewPrivileges=yes
 ProtectSystem=full
@@ -72,6 +75,7 @@ WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service
 Restart=on-failure
+UMask=0007
 RestartSec=10
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -112,6 +116,7 @@ for name in "$@"; do
   wait_for "$state/dashboard-token" "$unit"
 
   say "instance $name: $viewer may read its dashboard token, nothing else"
+  refuse_if_open "$state" "grant $viewer any access"
   # Traverse only (x): $viewer can reach the token file by name, but can't list or read anything on the way.
   d="$state"
   while :; do

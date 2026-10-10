@@ -3,6 +3,7 @@
 // equal the log's. An exit code or "write returned" is never proof.
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { groupOnlyDir, writeGroupOnly } from '../os/index.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -81,8 +82,8 @@ export function dirStore(root: string): BackupStore {
   return {
     name: `dir:${root}`,
     async put(key, data) {
-      mkdirSync(root, { recursive: true });
-      writeFileSync(join(root, key), data);
+      groupOnlyDir(root);
+      writeGroupOnly(join(root, key), data);
     },
     async get(key) {
       try {

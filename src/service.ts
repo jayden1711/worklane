@@ -25,6 +25,9 @@ import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
 import { instanceProblems, laneRuns, loadInstance, type Instance } from './instance.js';
 
+/** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
+export const INSTANCE_UMASK = 0o007;
+
 export const instanceId = () => `${userInfo().username}@${hostname().split('.')[0]}`;
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
@@ -109,7 +112,8 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   // Agents run as another user in the same group: worktrees and slot files must be group-writable both ways.
-  if (i.runAs) process.umask(0o002);
+  // Nothing the coordinator makes is for anyone outside its group: no access for others.
+  if (i.runAs) process.umask(INSTANCE_UMASK);
   for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
   Object.assign(process.env, env);
   const gh = i.credentials.github;
