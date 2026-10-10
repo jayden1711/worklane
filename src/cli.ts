@@ -21,7 +21,7 @@ import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
-import { DEFAULT_WEB_DIR, startDashboard, webUiBuilt } from './dashboard.js';
+import { dashboardSite, DEFAULT_WEB_DIR, startDashboard, webUiBuilt } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
@@ -69,8 +69,9 @@ usage: ${BRAND.cli} <command> [options]
                                    run the coordinator in the foreground (the service runs this)
   up | down [--instance name]      install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
-  dashboard [--port n] [--user login] [--no-open] [--app]
-                                   the live dashboard on 127.0.0.1 (reads the event log)
+  dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
+                                   the live dashboard on 127.0.0.1 (reads the event log; with
+                                   --instance, that instance's, as its coordinator user)
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -381,23 +382,28 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'dashboard': {
-      const cfg = loadConfig(root);
       // No subcommand here: options start right after the command.
       const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
+      const instance = instanceOpt;
+      // An instance's log is readable only by its coordinator user: run this as that user.
+      const site = dashboardSite(root, instance);
+      const cfg = site.cfg;
       const portOpt = option(opts, '--port');
       const userOpt = option(opts, '--user');
       const noOpen = flag(opts, '--no-open');
       const app = flag(opts, '--app');
       let user = userOpt ?? process.env[`${BRAND.envPrefix}_USER`];
-      if (!user) {
+      // An instance's coordinator user has no personal GitHub login to ask: the owner unless --user says otherwise.
+      if (!user && !instance) {
         try {
           user = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
         } catch {
-          user = cfg.project.owners.default;
+          // fall back to the owner
         }
       }
-      const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: user || cfg.project.owners.default, port: portOpt ? Number(portOpt) : 4317 });
-      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}, as @${user}\n  ${d.url}\n(local only; Ctrl+C to stop)`);
+      user = user || cfg.project.owners.default;
+      const d = await startDashboard({ root: site.root, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port });
+      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
         const bin = desktopBinary();
