@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config/load.js';
-import { settingsView, startDashboard } from '../src/dashboard.js';
+import { mayAnswer, settingsView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { inbox, project } from '../src/projection.js';
 import { exampleProject } from './helpers.js';
@@ -118,7 +119,7 @@ test('settings show choices, never commands, fingerprints or deploy details', ()
   assert.match(shown, /"landMode"/);
 });
 
-async function server(withWeb = true) {
+async function server(withWeb = true, user = 'example-owner') {
   const { dir, log, db } = logWith();
   const { dir: root } = exampleProject();
   const web = join(dir, 'web');
@@ -126,7 +127,7 @@ async function server(withWeb = true) {
     mkdirSync(web);
     writeFileSync(join(web, 'index.html'), '<!doctype html><title>ok</title>');
   }
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: join(dir, 'state'), user: 'example-owner', webDir: web, pollMs: 50 });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: join(dir, 'state'), user, webDir: web, pollMs: 50 });
   const base = d.url.split('/?')[0]!;
   return { d, log, base, h: { authorization: `Bearer ${d.token}` } };
 }
@@ -224,3 +225,63 @@ test('saved views round-trip; without a built UI the server says how to build it
   }
 });
 
+
+test('only the decision\'s owner or a writer can answer it from the dashboard', async () => {
+  // The example project's writers are example-owner and example-collaborator.
+  const asked = { kind: 'land' as const, issue: 9, question: 'Approve?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] };
+  const s = await server(true, 'someone-else');
+  try {
+    s.log.append('decision.asked', { ...asked, id: 'd-1', owner: 'example-owner' }, 'c');
+    s.log.append('decision.asked', { ...asked, id: 'd-2', owner: 'someone-else' }, 'c');
+    const post = (id: string) => fetch(`${s.base}/api/decide`, { method: 'POST', headers: { ...s.h, 'content-type': 'application/json' }, body: JSON.stringify({ id, answer: 'approve' }) });
+    const refused = await post('d-1');
+    assert.equal(refused.status, 403, 'not the owner and not a writer');
+    assert.match(((await refused.json()) as { error: string }).error, /for @example-owner/);
+    assert.equal(s.log.read(0, ['decision.answered']).length, 0, 'nothing recorded');
+    assert.equal((await post('d-2')).status, 200, 'the owner can');
+    const st = (await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { decisions: { id: string; canAnswer: boolean }[] };
+    assert.deepEqual(Object.fromEntries(st.decisions.map((d) => [d.id, d.canAnswer])), { 'd-1': false, 'd-2': true }, 'the UI is told which it may answer');
+  } finally {
+    await s.d.close();
+  }
+  const w = await server(true, 'Example-Collaborator');
+  try {
+    w.log.append('decision.asked', { ...asked, id: 'd-3', owner: 'example-owner' }, 'c');
+    const r = await fetch(`${w.base}/api/decide`, { method: 'POST', headers: { ...w.h, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'd-3', answer: 'reject' }) });
+    assert.equal(r.status, 200, 'a writer can, whatever the case of the login');
+  } finally {
+    await w.d.close();
+  }
+  assert.equal(mayAnswer('example-owner', '', { writers: ['example-owner'] }), false, 'no user, no answer');
+});
+
+test('spend by role counts today only, like spend today; costs are labelled as estimates', async () => {
+  const { log } = logWith();
+  log.append('run.cost', { issue: 1, role: 'worker', model: 'm', usd: 2, turns: 1 }, 'c');
+  log.append('run.cost', { issue: 1, role: 'evaluator', model: 'm', usd: 1, turns: 1 }, 'c');
+  const events = log.read();
+  const today = events[0]!.ts.slice(0, 10);
+  const yesterday = project(events.map((e) => ({ ...e, ts: e.ts.replace(today, '2000-01-01') })), today);
+  assert.equal(yesterday.spendToday, 0);
+  assert.deepEqual(yesterday.spendByRole, {}, 'yesterday\'s runs are not today\'s spend by role');
+  const now = project(events, today);
+  assert.deepEqual(now.spendByRole, { worker: 2, evaluator: 1 });
+  assert.equal(now.spendToday, 3);
+  const s = await server();
+  try {
+    const st = (await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { costBasis: string };
+    assert.equal(st.costBasis, 'estimate');
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('every cost the web UI shows goes through the estimate formatter', () => {
+  const pages = fileURLToPath(new URL('../../web/src/', import.meta.url));
+  const ui = readFileSync(join(pages, 'components', 'ui.tsx'), 'utf8');
+  assert.match(ui, /export const estUsd = \(n: number\) => `~\$/, 'estimates render with a ~');
+  for (const f of readdirSync(join(pages, 'pages'))) {
+    const src = readFileSync(join(pages, 'pages', f), 'utf8');
+    for (const m of src.matchAll(/\busd\(([^)]*)\)/g)) assert.doesNotMatch(m[1]!, /cost|spend|\bv\b/i, `${f}: ${m[0]} shows a cost without saying it's an estimate`);
+  }
+});

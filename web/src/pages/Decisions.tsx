@@ -48,7 +48,9 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
               ))}
             </ul>
           )}
-          {d.answer ? (
+          {!d.answer && d.canAnswer === false ? (
+            <div className="mt-3 text-xs text-muted-foreground">Waiting on @{d.owner}; only they or one of the project's writers can answer it.</div>
+          ) : d.answer ? (
             <div className="mt-3 text-xs text-muted-foreground">
               Answered <span className="font-medium text-foreground">{d.answer.answer}</span> by @{d.answer.by} {ago(d.answer.at)}
             </div>
@@ -86,6 +88,7 @@ export function Decisions({ state }: { state: State }) {
       const cur = list[sel];
       if (e.key === 'j') setSel((s) => Math.min(list.length - 1, s + 1));
       else if (e.key === 'k') setSel((s) => Math.max(0, s - 1));
+      else if (cur && (cur.answer || cur.canAnswer === false) && (/^[1-9]$/.test(e.key) || e.key === 'a' || e.key === 'r')) return;
       else if (cur && !cur.answer && /^[1-9]$/.test(e.key)) {
         const o = cur.options[Number(e.key) - 1];
         if (o) void decide(cur.id, o);

@@ -70,7 +70,9 @@ export interface Projection {
   lastId: number;
   tasks: Task[];
   decisions: Decision[];
+  /** Estimated (Claude Code's per-run cost estimate, not billed money), today only. */
   spendToday: number;
+  /** Same estimate, today only, split by role. */
   spendByRole: Record<string, number>;
   landedToday: number;
   baseline: { sha: string; failing: string[]; at: string } | null;
@@ -254,8 +256,10 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       case 'run.cost': {
         const usd = Number(p.usd);
         if (t) t.costUsd += usd;
-        spendByRole[String(p.role)] = (spendByRole[String(p.role)] ?? 0) + usd;
-        if (e.ts.startsWith(today)) spendToday += usd;
+        if (e.ts.startsWith(today)) {
+          spendToday += usd;
+          spendByRole[String(p.role)] = (spendByRole[String(p.role)] ?? 0) + usd;
+        }
         break;
       }
       case 'decision.asked': {
