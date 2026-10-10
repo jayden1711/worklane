@@ -287,6 +287,24 @@ test('task files the coordinator writes into its state are closed to others, wha
   assert.equal(statSync(join(f.stateDir, 'tasks')).mode & 0o007, 0, 'tasks/ too');
 });
 
+test('with separate users, task files go to the agents\' read-only task directory, and the agent is pointed there', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const tasksDir = join(mkdtempSync(join(tmpdir(), 'inst-')), 'tasks');
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, agentTasks: { dir: tasksDir, gid: process.getgid?.() ?? 0 } });
+  await c.tick();
+  await c.idle();
+  const task = join(tasksDir, `issue-${n}.json`);
+  assert.ok(existsSync(task), 'written to the task directory');
+  assert.ok(!existsSync(join(f.stateDir, 'tasks', `issue-${n}.json`)), 'not into the coordinator\'s private state');
+  assert.ok(runner.calls.filter((r) => r.taskFile).every((r) => r.taskFile === task), 'every run with a task file is pointed at it');
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(task).mode & 0o777, 0o640);
+    assert.equal(statSync(tasksDir).mode & 0o777, 0o750);
+  }
+});
+
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });

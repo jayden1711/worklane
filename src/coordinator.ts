@@ -15,7 +15,7 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { cpuCount, diskFree, groupOnlyDir, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached, writeGroupOnly } from './os/index.js';
+import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached, writeAgentReadable, writeGroupOnly } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
@@ -42,6 +42,11 @@ export interface CoordinatorDeps {
   stateDir: string;
   /** Slot directory override (tests). */
   slotsDir?: string;
+  /**
+   * Where task files go when agents run as their own user: a directory the agent user can read but not
+   * write (group `gid`, 2750; files 0640), outside the worktree. Without it, task files stay in stateDir.
+   */
+  agentTasks?: { dir: string; gid: number };
   /** The OS user project commands run as (checks, gates, setup, full runs): the agent user, never the coordinator's. */
   commandsAs?: RunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
@@ -374,7 +379,7 @@ export class Coordinator {
   // ---------------------------------------------------------------- task pipeline
 
   private paths(issue: number) {
-    return { name: `issue-${issue}`, branch: `${BRAND.cli}/issue-${issue}`, taskFile: join(this.d.stateDir, 'tasks', `issue-${issue}.json`) };
+    return { name: `issue-${issue}`, branch: `${BRAND.cli}/issue-${issue}`, taskFile: join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `issue-${issue}.json`) };
   }
 
   async runTask(issue: Issue, doneWhen: DoneWhenList): Promise<void> {
@@ -405,14 +410,13 @@ export class Coordinator {
     try {
       const { path, setupErrors } = createWorktree(this.wt, name, branch, base);
       if (setupErrors.length) throw new Error(`worktree setup failed: ${setupErrors.join('; ')}`);
-      groupOnlyDir(dirname(taskFile));
-      writeGroupOnly(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen }));
+      this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen });
 
       if (issue.labels.includes('type:investigation')) return await this.investigate(issue, doneWhen, path, taskFile, base, owner);
 
       const repro = doneWhen.some((d) => 'repro' in d && d.repro) ? await this.reproduce(issue, doneWhen, base, path) : null;
       // The frozen test is off-limits to the worker: its hook denies writes to it.
-      if (repro?.path) writeGroupOnly(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] }));
+      if (repro?.path) this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] });
       const maxAttempts = this.d.maxAttempts ?? 3;
       let feedback: string[] = [];
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
@@ -681,6 +685,21 @@ export class Coordinator {
         const added = this.git(cwd, 'diff', '-U0', `${base}..${head}`, '--', p!).split('\n').filter((x) => x.startsWith('+') && !x.startsWith('+++')).map((x) => x.slice(1));
         return { path: p!, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added };
       });
+  }
+
+  /**
+   * The task file the agent's hook reads (its frozen paths): readable by the agent user, never writable by it,
+   * so an agent can neither lose its guard nor rewrite it. The hook refuses every tool call if it can't read it.
+   */
+  private writeTask(file: string, task: object) {
+    const at = this.d.agentTasks;
+    if (at) {
+      agentReadableDir(at.dir, at.gid);
+      writeAgentReadable(file, JSON.stringify(task), at.gid);
+    } else {
+      groupOnlyDir(dirname(file));
+      writeGroupOnly(file, JSON.stringify(task));
+    }
   }
 
   /** Mechanical checks on what the worker produced, before anyone trusts it. */
@@ -1506,8 +1525,7 @@ export class Coordinator {
     try {
       const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
       if (setupErrors.length) return await give(`the fix worktree's setup failed: ${setupErrors.join('; ')}`);
-      groupOnlyDir(dirname(taskFile));
-      writeGroupOnly(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) }));
+      this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) });
       const s = await this.fixAgent(issue, doneWhen, path, taskFile, repro, pr, logs, attempt);
       if ('ended' in s) return await give(s.ended);
       removeSandboxPlaceholders(path);

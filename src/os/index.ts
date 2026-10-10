@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { availableParallelism, homedir, loadavg } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -26,6 +26,39 @@ export function groupOnly(...paths: string[]): void {
       // not there (yet)
     }
   }
+}
+
+/**
+ * A directory the agent user can read but not write: owned by this (coordinator) user, group `gid` (the group
+ * the agents share), 2750, so files made in it keep that group. No-op beyond mkdir on Windows.
+ */
+export function agentReadableDir(dir: string, gid: number): void {
+  if (process.platform === 'win32') {
+    mkdirSync(dir, { recursive: true });
+    return;
+  }
+  const me = process.getuid!();
+  // The parent must not let anyone else rename or replace this directory: a group-writable parent (the agents'
+  // group) gets the sticky bit, which this user may set on a directory it owns; otherwise refuse.
+  const parent = dirname(dir);
+  mkdirSync(parent, { recursive: true });
+  const p = statSync(parent);
+  if ((p.mode & 0o022) !== 0 && (p.mode & 0o1000) === 0) {
+    if (p.uid !== me) throw new Error(`${parent} is writable by others and not sticky, and not ours to fix: task files can't be kept safe there`);
+    chmodSync(parent, (p.mode & 0o7777) | 0o1000);
+  }
+  if (existsSync(dir) && statSync(dir).uid !== me) throw new Error(`${dir} exists but isn't owned by this user; refusing to keep task files there`);
+  mkdirSync(dir, { recursive: true, mode: 0o750 });
+  chownSync(dir, me, gid);
+  chmodSync(dir, 0o2750);
+}
+
+/** A file the agent user can read but not write: owner this user, group `gid`, 0640. */
+export function writeAgentReadable(file: string, data: string, gid: number): void {
+  writeFileSync(file, data, { mode: 0o640 });
+  if (process.platform === 'win32') return;
+  chownSync(file, process.getuid!(), gid);
+  chmodSync(file, 0o640);
 }
 
 /** mkdir -p, then groupOnly on the directory itself. */
