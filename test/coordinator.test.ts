@@ -590,6 +590,21 @@ test('a worker runs in the lane its issue names with a lane:<name> label', { ski
   assert.equal(runner.calls.find((r) => r.role === 'evaluator-repro')!.lane, undefined, 'evaluators stay in the default lane');
 });
 
+test('regression: the worker is told the coordinator runs the checks and which fast tests to run, not that a removed Stop gate will', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.checks = ['node -e "process.exit(0)"'];
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  const worker = runner.calls.find((r) => r.role === 'worker')!;
+  assert.doesNotMatch(worker.appendSystemPrompt ?? '', /Stop gate/);
+  assert.match(worker.appendSystemPrompt ?? '', /the coordinator runs each check itself/);
+  assert.match(worker.prompt, /Fast tests to run while you work: node --test --test-reporter=spec/);
+  assert.match(worker.prompt, /the coordinator runs each done_when check, then: node -e "process\.exit\(0\)"/);
+});
+
 test('regression: an approving review that did not read every changed file does not pass; the change waits for a human', { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
