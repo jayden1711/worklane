@@ -23,6 +23,8 @@ import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
+import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
+import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError } from './settings.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
@@ -72,6 +74,8 @@ export interface DashboardOptions {
   machineStats?: () => MachineStats | null;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
+  /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
+  machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
 }
 
 /**
@@ -119,6 +123,27 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
  */
 export function healthStats(o: { serviceUnit: string | null; root: string; stateDir: string }): MachineStats {
   return machineStats({ units: [`${BRAND.cli}.slice`, ...(o.serviceUnit ? [o.serviceUnit] : [])], paths: [...new Set([o.root, o.stateDir])] });
+}
+
+/**
+ * The machine-wide settings as the Settings page shows them: the agent slot cap now (and its bounds), whether
+ * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
+ * the helper's change log and the updater's log, newest first.
+ */
+export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'>) {
+  const owner = o.cfg.project.owners.default;
+  const slots = slotStatus(o.slotsDir);
+  const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
+  return {
+    owner,
+    user: o.user,
+    canChange: !!o.user && o.user.toLowerCase() === owner.toLowerCase(),
+    helper: MACHINE_HELPER,
+    slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
+    updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
+    changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
+    history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
+  };
 }
 
 /**
@@ -441,6 +466,22 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
             throw e;
           }
+        }
+        // Machine-wide settings (the slot cap, engine updates) and their history. A change goes through the
+        // machine helper (sudo, src/machine.ts) as this server's user, the instance's coordinator; only the owner may ask.
+        if (url.pathname === '/api/machine' && req.method === 'GET') return json(res, 200, machineView(opts));
+        if (url.pathname === '/api/machine' && req.method === 'POST') {
+          const owner = opts.cfg.project.owners.default;
+          if (!opts.user || opts.user.toLowerCase() !== owner.toLowerCase()) return json(res, 403, { error: `only the owner (@${owner}) may change machine settings; @${opts.user || 'unknown'} may not` });
+          const body = (await readBody(req)) as { what?: string; value?: unknown };
+          const exec = opts.machine?.exec;
+          let r;
+          if (body.what === 'slots') r = setSlotCap(Number(body.value), ...(exec ? [exec] : []));
+          else if (body.what === 'updates') {
+            if (typeof body.value !== 'boolean') return json(res, 400, { error: 'updates is on (true) or off (false)' });
+            r = setUpdates(body.value, ...(exec ? [exec] : []));
+          } else return json(res, 400, { error: 'what is slots or updates' });
+          return r.ok ? json(res, 200, { ok: true, output: r.output, machine: machineView(opts) }) : json(res, 400, { error: r.error });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
