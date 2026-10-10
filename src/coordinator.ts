@@ -539,7 +539,14 @@ export class Coordinator {
     const role = this.d.cfg.agents.roles.workers!;
     const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
     const remaining = Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday());
-    const extra = [...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []), ...this.answers(n), ...(feedback.length ? ['', ...feedback] : [])];
+    const { runner, checks } = this.d.cfg.tests;
+    const extra = [
+      `Fast tests to run while you work: ${runner.changed}`,
+      `When you finish, the coordinator runs each done_when check${checks.length ? `, then: ${checks.join('; ')}` : ''}.`,
+      ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
+      ...this.answers(n),
+      ...(feedback.length ? ['', ...feedback] : []),
+    ];
     let pid = -1;
     const r: RunResult = await this.d.runner.run({
       role: 'worker',
@@ -667,7 +674,7 @@ export class Coordinator {
     return { files, tampered, patchHash };
   }
 
-  /** The coordinator's own run of the contract: it never trusts the agent's word or its Stop gate alone. */
+  /** The coordinator's own run of the contract: it never trusts the agent's word. */
   private async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
     const checks: { check: string; status: 'pass' | 'fail' | 'unavailable'; exitCode: number | null; tail: string }[] = [];
     const run = async (command: string) => {
