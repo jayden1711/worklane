@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Columns3, List, Save, X } from 'lucide-react';
 import { listViews, saveViews, type Filters, type SavedView, type State, type Task, type TaskStatus } from '../api';
 import { navigate, pageKey, typing } from '../App';
-import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd, LevelBadge, STATUS_LABEL, StatusBadge, usd } from '../components/ui';
+import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd, LevelBadge, STATUS_LABEL, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { Header } from './Overview';
 
 const TABS: { key: string; label: string; statuses: TaskStatus[] }[] = [
@@ -65,7 +65,7 @@ function Row({ t, selected }: { t: Task; selected: boolean }) {
         <Avatar login={t.owner} title={`owner @${t.owner ?? 'unassigned'}`} />
         {t.delegate && <Avatar login={`${t.delegate.role}@${t.delegate.instance}`} title={`agent delegate: ${t.delegate.role} (${t.delegate.instance})`} />}
       </span>
-      <span className="hidden w-14 text-right text-xs tabular-nums text-muted-foreground sm:block">{t.costUsd ? usd(t.costUsd) : ''}</span>
+      <span className="hidden w-14 text-right text-xs tabular-nums text-muted-foreground sm:block" title={t.costUsd ? EST_NOTE : undefined}>{t.costUsd ? estUsd(t.costUsd) : ''}</span>
       <span className="w-14 text-right text-xs text-muted-foreground">{ago(t.lastActivity)}</span>
     </button>
   );

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { api, type State } from '../api';
 import { navigate, typing } from '../App';
-import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, usd } from '../components/ui';
+import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { DecisionCard } from './Decisions';
 import { Header } from './Overview';
 import { areaOf } from './Issues';
@@ -151,8 +151,8 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
               )}
             </Prop>
             <Prop label="Repro test">{t.repro ? <span className="font-mono text-xs">{t.repro}</span> : <span className="text-xs text-muted-foreground">none</span>}</Prop>
-            <Prop label="Cost">
-              <span className="tabular-nums">{usd(t.costUsd)}</span>
+            <Prop label="Est. cost">
+              <span className="tabular-nums" title={EST_NOTE}>{estUsd(t.costUsd)}</span>
               <span className="ml-2 text-xs text-muted-foreground">{t.attempts ? `${t.attempts} attempt(s)` : ''}</span>
             </Prop>
             <Prop label="Change">

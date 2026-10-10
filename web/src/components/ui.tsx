@@ -118,6 +118,11 @@ export function ago(ts: string | null | undefined): string {
 
 export const usd = (n: number) => `$${n.toFixed(n < 10 ? 2 : 0)}`;
 
+/** What every cost figure is: the agent CLI's own estimate of a run's cost, not money billed. */
+export const EST_NOTE = "estimated: the agent CLI's own per-run cost estimate, not money billed";
+/** A cost estimate, marked as one. */
+export const estUsd = (n: number) => `~${usd(n)}`;
+
 export function Empty({ title, hint }: { title: string; hint?: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-1 rounded-lg border border-dashed p-10 text-center">

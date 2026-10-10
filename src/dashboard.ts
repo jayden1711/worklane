@@ -1,7 +1,8 @@
 // The local dashboard server: static UI plus a small API over the event
 // log. It binds to 127.0.0.1, requires a per-install token, reads the log
 // read-only, and pushes changes over one SSE stream. Its only write is a
-// human answering a decision, recorded as an event like the CLI does.
+// human answering a decision, recorded as an event like the CLI does, and
+// only by that decision's owner or one of the project's writers.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -48,6 +49,12 @@ export interface DashboardOptions {
   port?: number;
   webDir?: string;
   pollMs?: number;
+}
+
+/** Who may answer a decision from the dashboard: its owner, or one of the project's writers. GitHub logins are case-insensitive. */
+export function mayAnswer(owner: string, user: string, owners: { writers: string[] }): boolean {
+  const u = user.toLowerCase();
+  return !!u && (owner.toLowerCase() === u || owners.writers.some((w) => w.toLowerCase() === u));
 }
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
@@ -114,6 +121,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       budget: opts.cfg.agents.daily_budget_usd,
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
+      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
+      costBasis: 'estimate' as const,
       inbox: inbox(p, opts.user),
     };
   };
@@ -148,8 +158,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const body = (await readBody(req)) as { id?: string; answer?: string };
           const log = new EventLog(opts.eventsDb);
           try {
-            const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === body.id)?.payload as { options: string[] } | undefined;
+            const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === body.id)?.payload as { options: string[]; owner: string } | undefined;
             if (!q) return json(res, 404, { error: `no decision ${body.id}` });
+            if (!mayAnswer(q.owner, opts.user, opts.cfg.project.owners)) return json(res, 403, { error: `@${opts.user} can't answer this: it's for @${q.owner} (or one of the project's writers)` });
             if (!body.answer || !q.options.includes(body.answer)) return json(res, 400, { error: `answer must be one of ${q.options.join(', ')}` });
             const answered = log.read(0, ['decision.answered']).some((e) => (e.payload as { id: string }).id === body.id);
             if (answered) return json(res, 409, { error: 'already answered' });

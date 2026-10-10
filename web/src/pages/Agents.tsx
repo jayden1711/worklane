@@ -1,6 +1,6 @@
 import type { State } from '../api';
 import { navigate } from '../App';
-import { ago, Avatar, Badge, Card, cx, Empty, usd } from '../components/ui';
+import { ago, Avatar, Badge, Card, cx, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { Header } from './Overview';
 
 const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
@@ -41,12 +41,12 @@ export function Agents({ state }: { state: State }) {
             </ul>
           </Card>
           <Card className="p-4">
-            <div className="text-xs text-muted-foreground">Spend today by role</div>
+            <div className="text-xs text-muted-foreground" title={EST_NOTE}>Estimated spend today by role</div>
             <div className="mt-2 space-y-1">
               {Object.entries(state.spendByRole).map(([r, v]) => (
                 <div key={r} className="flex justify-between text-xs">
                   <span className="text-muted-foreground">{r}</span>
-                  <span className="tabular-nums">{usd(v)}</span>
+                  <span className="tabular-nums" title={EST_NOTE}>{estUsd(v)}</span>
                 </div>
               ))}
               {!Object.keys(state.spendByRole).length && <div className="text-xs text-muted-foreground">Nothing spent today.</div>}
@@ -92,7 +92,7 @@ export function Agents({ state }: { state: State }) {
                     #{r.issue}
                   </button>
                   <Badge tone={REASON_TONE[r.reason ?? ''] ?? 'neutral'}>{r.reason}</Badge>
-                  <span className="ml-auto w-16 text-right text-xs tabular-nums">{usd(r.costUsd)}</span>
+                  <span className="ml-auto w-16 text-right text-xs tabular-nums" title={EST_NOTE}>{estUsd(r.costUsd)}</span>
                   <span className="w-20 text-right text-xs text-muted-foreground">{ago(r.finishedAt)}</span>
                 </li>
               ))}

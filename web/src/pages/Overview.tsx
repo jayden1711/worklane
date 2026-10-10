@@ -1,6 +1,6 @@
 import type { State } from '../api';
 import { navigate } from '../App';
-import { ago, Badge, Card, cx, Empty, usd } from '../components/ui';
+import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
@@ -47,9 +47,9 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
         <div className="grid gap-3 lg:grid-cols-3">
           <Card className="p-4">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Spend today</span>
-              <span className="tabular-nums">
-                {usd(state.spendToday)} of {usd(state.budget)}
+              <span title={EST_NOTE}>Estimated spend today</span>
+              <span className="tabular-nums" title={EST_NOTE}>
+                {estUsd(state.spendToday)} of {usd(state.budget)}
               </span>
             </div>
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={Math.round(budgetPct)} aria-valuemin={0} aria-valuemax={100}>
@@ -61,7 +61,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
                 .map(([role, v]) => (
                   <div key={role} className="flex justify-between text-xs">
                     <span className="text-muted-foreground">{role}</span>
-                    <span className="tabular-nums">{usd(v)}</span>
+                    <span className="tabular-nums" title={EST_NOTE}>{estUsd(v)}</span>
                   </div>
                 ))}
             </div>

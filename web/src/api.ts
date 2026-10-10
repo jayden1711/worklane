@@ -42,6 +42,8 @@ export interface Decision {
   receipts: string[];
   askedAt: string;
   answer: { by: string; answer: string; at: string } | null;
+  /** Whether the dashboard's user may answer it (its owner or a writer); the server refuses otherwise. */
+  canAnswer?: boolean;
 }
 
 export interface Activity { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }
@@ -56,6 +58,8 @@ export interface State {
   lastId: number;
   tasks: Task[];
   decisions: Decision[];
+  /** Every cost figure is an estimate (the agent CLI's own per-run cost estimate), not money billed. */
+  costBasis: 'estimate';
   spendToday: number;
   spendByRole: Record<string, number>;
   landedToday: number;
