@@ -1,6 +1,7 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
 import { z } from 'zod';
+import { projectEnvProblem } from '../project-env.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -238,6 +239,19 @@ export const TestsConfig = z.strictObject({
   nightly_at: hhmm.optional(),
   /** Exits 0 when no full test run is live on this machine (any harness or session). Queued full runs wait for it. */
   idle_probe: z.string().optional(),
+  /**
+   * Variables set for the project's agent sessions (and the hooks they run) and its commands
+   * (checks, worktree setup), e.g. a fixed test worker count. Never secrets or harness variables.
+   */
+  env: z
+    .record(z.string(), z.string().regex(/^[^\0\n]*$/, 'one line'))
+    .superRefine((env, ctx) => {
+      for (const k of Object.keys(env)) {
+        const why = projectEnvProblem(k);
+        if (why) ctx.addIssue({ code: 'custom', path: [k], message: why });
+      }
+    })
+    .default({}),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
   checks: z.array(z.string()).default([]),
   tiers: z

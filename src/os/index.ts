@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync 
 import { availableParallelism, homedir, loadavg } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
+import { safeProjectEnv } from '../project-env.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -111,10 +112,12 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
  * one, with a clean environment. Project commands run code agents wrote, so
  * they never run as the user that holds the instance's credentials.
  */
-export function projectCommand(command: string, runAs?: { user: string; home: string }): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+export function projectCommand(command: string, runAs?: { user: string; home: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
-  if (!runAs) return { file, args, env: childEnv() };
+  const own = safeProjectEnv(projectEnv);
+  if (!runAs) return { file, args, env: childEnv(own) };
   const env = {
+    ...own,
     HOME: runAs.home,
     USER: runAs.user,
     LOGNAME: runAs.user,

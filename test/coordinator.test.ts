@@ -799,3 +799,19 @@ test('regression: a commit with any identity but the harness\'s is rejected befo
   const queued = f.log.read(0, ['land.queued']).at(-1)!.payload as { head: string };
   assert.equal(git(f.repo, 'log', '-1', '--format=%an <%ae> / %cn <%ce>', queued.head), `${DEFAULT_COMMIT_IDENTITY.name} <${DEFAULT_COMMIT_IDENTITY.email}> / ${DEFAULT_COMMIT_IDENTITY.name} <${DEFAULT_COMMIT_IDENTITY.email}>`);
 });
+
+test("the project's own variables reach its agents, its worktree setup and its checks", { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.env = { PROJECT_PROBE: 'yes' };
+  f.cfg.tests.worktree.setup = ['test "$PROJECT_PROBE" = yes'];
+  f.cfg.tests.checks = ['test "$PROJECT_PROBE" = yes'];
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  for (const role of ['evaluator-repro', 'worker', 'evaluator-verdict']) assert.deepEqual(runner.calls.find((r) => r.role === role)?.env, { PROJECT_PROBE: 'yes' }, role);
+  const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string }[] }).find((p) => p.stage === 'verify')!;
+  assert.deepEqual(verify.checks.find((x) => x.check.includes('PROJECT_PROBE')), { check: 'test "$PROJECT_PROBE" = yes', status: 'pass', exitCode: 0 });
+  assert.equal(f.log.read(0, ['coordinator.error']).length, 0, 'worktree setup saw the variable');
+});
