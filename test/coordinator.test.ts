@@ -1491,6 +1491,87 @@ test('conflict fix: only a real conflict starts one; behind, blocked and still-c
   assert.ok(!t.runner.calls.some((r) => /Conflict fix/.test(r.prompt)));
 });
 
+/**
+ * Two harness PRs that change the same line differently: once the first merges, the second conflicts.
+ * Polls every tick until both are open; the caller then sets a slow poll to see what brings PR 2 back.
+ */
+async function twoPrs() {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  const body = (what: string) => `${what}.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n`;
+  const a = f.backlog.open({ title: 'Guard totals against negative quantities', body: body('Ignore non-positive quantities in totals'), author: 'example-owner', labels: ['ready'] });
+  const b = f.backlog.open({ title: 'Clamp quantities in totals', body: body('Clamp quantities at zero in totals'), author: 'example-owner', labels: ['ready'] });
+  const line = 'sum + cents * qty, 0);';
+  const runner = agents({
+    worker: (req) => {
+      const p = join(req.cwd, 'src', 'price.js');
+      if (/Conflict fix \d/.test(req.prompt)) {
+        writeFileSync(p, readFileSync(p, 'utf8').replace(/<<<<<<<[\s\S]*?>>>>>>>[^\n]*\n/, '  return items.reduce((sum, { cents, qty }) => sum + cents * Math.max(qty, 0), 0);\n'));
+        commitAll(req.cwd, 'Merge main into the branch, keeping both changes');
+        return { summary: 'both clamp the quantity' };
+      }
+      const guard = /Guard totals/.test(req.prompt);
+      writeFileSync(p, readFileSync(p, 'utf8').replace(line, guard ? 'sum + (qty > 0 ? cents * qty : 0), 0);' : 'sum + cents * Math.max(qty, 0), 0);'));
+      commitAll(req.cwd, guard ? 'Guard totals' : 'Clamp quantities');
+      return { summary: 'done' };
+    },
+    'evaluator-verdict': approveBoth(true),
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
+  for (let i = 0; i < 12 && f.log.read(0, ['pr.opened']).length < 2; i++) {
+    await c.tick();
+    await c.idle();
+  }
+  const opened = f.log.read(0, ['pr.opened']).map((e) => e.payload as { issue: number; number: number; head: string });
+  assert.equal(opened.length, 2, 'both PRs open');
+  const prA = opened.find((o) => o.issue === a)!;
+  const prB = opened.find((o) => o.issue === b)!;
+  f.backlog.mergeWith = (pr) => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'gh-merge-')), 'c');
+    git(f.base, 'clone', '-q', f.remote, dir);
+    git(dir, 'fetch', '-q', 'origin', pr.head);
+    git(dir, '-c', 'user.email=gh@example.com', '-c', 'user.name=GitHub', '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-ff', '-m', `Merge pull request #${pr.number}`, pr.headSha);
+    git(dir, 'push', '-q', 'origin', 'main');
+    return git(dir, 'rev-parse', 'HEAD');
+  };
+  // From here, the slow poll: PR 2 isn't due for an hour on its own.
+  const inner = c as unknown as { d: { prPollMs: number }; prPolled: Map<number, number>; tipCheckedAt: number };
+  inner.d.prPollMs = 3_600_000;
+  inner.prPolled.set(prB.number, Date.now());
+  return { f, c, prA, prB, inner, conflictStarted: () => f.log.read(0, ['conflict_fix.started']).some((e) => (e.payload as { number: number }).number === prB.number) };
+}
+
+test('conflict fix: right after an auto-merge, the other open PRs are looked at again on the next pass, so a new conflict is fixed at once', { skip }, async () => {
+  const t = await twoPrs();
+  t.inner.tipCheckedAt = Date.now(); // only the merge itself may bring PR 2 back here
+  t.inner.prPolled.set(t.prA.number, 0);
+  t.f.backlog.setChecks(t.prA.head, passing);
+  await t.c.tick();
+  assert.ok(t.f.log.read(0, ['merge.done']).some((e) => (e.payload as { number: number }).number === t.prA.number), 'PR 1 auto-merged');
+  // GitHub now reports PR 2 as conflicting with the new main.
+  t.f.backlog.setPr(t.prB.number, { mergeableState: 'dirty' });
+  t.inner.tipCheckedAt = Date.now();
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(t.conflictStarted(), "PR 2's conflict fix started on the next pass, not after the hour-long poll");
+});
+
+test('conflict fix: when the default branch moves (anyone merged), the open PRs are looked at again within seconds', { skip }, async () => {
+  const t = await twoPrs();
+  t.inner.prPolled.set(t.prA.number, Date.now());
+  // Someone merges PR 1 by hand on GitHub: the harness didn't merge it, so only the branch tip shows it.
+  t.inner.tipCheckedAt = 0;
+  await t.c.tick(); // records main's current tip
+  const pr = t.f.backlog.prs().find((p) => p.number === t.prA.number)!;
+  t.f.backlog.mergeWith!({ number: t.prA.number, head: pr.head, headSha: t.prA.head, base: 'main' });
+  t.f.backlog.setPr(t.prB.number, { mergeableState: 'dirty' });
+  t.inner.tipCheckedAt = 0; // the 15 s since the last tip check have passed
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(t.conflictStarted(), "PR 2's conflict fix started once main's tip moved");
+});
+
 test('auto-merge stop: main red after an auto-merge (green before it) stops auto-merge, opens a revert PR that never auto-merges, and asks the owner; only the operator resumes it', { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
   realMerges(t);
