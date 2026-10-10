@@ -46,6 +46,15 @@ export interface Decision {
   canAnswer?: boolean;
 }
 
+/** One run of the coordinator's own checks on an issue (GET /api/checks?issue=n), newest first. */
+export interface CheckRun {
+  id: number;
+  at: string;
+  stage: string;
+  head: string;
+  checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped' | string; exitCode: number | null; tail: string | null }[];
+}
+
 export interface Activity { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }
 
 export interface State {

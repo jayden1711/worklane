@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import { api, type State } from '../api';
+import { api, type CheckRun, type State } from '../api';
 import { navigate, typing } from '../App';
 import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { DecisionCard } from './Decisions';
@@ -27,13 +27,63 @@ function check(d: Record<string, unknown>): string {
   return JSON.stringify(d);
 }
 
+const CHECK_TONE = { pass: 'ok', fail: 'danger', unavailable: 'warn', skipped: 'neutral' } as const;
+
+/** Every run of the coordinator's own checks, newest first; a failing check shows the end of its output. */
+function Checks({ runs }: { runs: CheckRun[] }) {
+  return (
+    <Card>
+      <div className="border-b px-4 py-2.5 text-sm font-medium">Checks run by the coordinator</div>
+      {runs.length ? (
+        <ol className="divide-y">
+          {runs.map((r, i) => (
+            <li key={r.id} className="px-4 py-2.5" data-check-run={r.id}>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">{r.stage}</span>
+                {r.head && <span className="font-mono">{r.head.slice(0, 8)}</span>}
+                <span title={r.at}>{ago(r.at)}</span>
+                {i === 0 && <Badge tone="info">latest</Badge>}
+              </div>
+              <ul className="mt-1.5 space-y-1">
+                {r.checks.map((c, j) => (
+                  <li key={j} className="text-sm">
+                    <div className="flex items-center gap-2">
+                      <Badge tone={CHECK_TONE[c.status as keyof typeof CHECK_TONE] ?? 'neutral'}>{c.status}</Badge>
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs" title={c.check}>
+                        {c.check}
+                      </span>
+                      {c.exitCode !== null && <span className="shrink-0 text-xs tabular-nums text-muted-foreground">exit {c.exitCode}</span>}
+                    </div>
+                    {c.tail && (
+                      <details className="mt-1" open={i === 0 && c.status === 'fail'}>
+                        <summary className="cursor-pointer text-xs text-muted-foreground">output (end)</summary>
+                        <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-2 font-mono text-[11px] leading-snug">{c.tail}</pre>
+                      </details>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div className="p-4 text-sm text-muted-foreground">No checks run yet.</div>
+      )}
+    </Card>
+  );
+}
+
 export function IssueDetail({ state, issue }: { state: State; issue: number }) {
   const t = state.tasks.find((x) => x.issue === issue);
   const [events, setEvents] = useState<RawEvent[]>([]);
+  const [checks, setChecks] = useState<CheckRun[]>([]);
   useEffect(() => {
     api<RawEvent[]>(`/api/events?issue=${issue}`)
       .then(setEvents)
       .catch(() => setEvents([]));
+    api<CheckRun[]>(`/api/checks?issue=${issue}`)
+      .then(setChecks)
+      .catch(() => setChecks([]));
   }, [issue, state.lastId]);
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -86,6 +136,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
               {t.verdict.advice && <div className="mt-2 text-sm text-muted-foreground">{t.verdict.advice}</div>}
             </Card>
           )}
+          <Checks runs={checks} />
           <Card>
             <div className="border-b px-4 py-2.5 text-sm font-medium">Timeline</div>
             {events.length ? (
