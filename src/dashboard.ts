@@ -20,6 +20,9 @@ import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { siteForInstance, siteForRoot } from './service.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
+import { healthView } from './health.js';
+import { cpuCount } from './os/index.js';
+import { machineStats, type MachineStats } from './os/stats.js';
 import { buildReport } from './reports.js';
 
 /**
@@ -62,6 +65,8 @@ export interface DashboardOptions {
   slotsDir?: string;
   /** The instance's policy file (its auto-merge kill switch); none for a checkout. */
   policyFile?: string | null;
+  /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
+  machineStats?: () => MachineStats | null;
 }
 
 /**
@@ -100,6 +105,15 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
   const logs = { unit: instance ? `${BRAND.cli}-${instance}.service` : null, file: join(s.stateDir, 'coordinator.log') };
   return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null };
+}
+
+/**
+ * What the health view reads: the OS adapter's snapshot of the machine, the
+ * harness's slice and this instance's service (when there is one), and the
+ * volumes of the checkout and the state dir.
+ */
+export function healthStats(o: { serviceUnit: string | null; root: string; stateDir: string }): MachineStats {
+  return machineStats({ units: [`${BRAND.cli}.slice`, ...(o.serviceUnit ? [o.serviceUnit] : [])], paths: [...new Set([o.root, o.stateDir])] });
 }
 
 /** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
@@ -358,6 +372,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
         if (url.pathname === '/api/prs' && req.method === 'GET') {
           return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
+        }
+        // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
+        if (url.pathname === '/api/health' && req.method === 'GET') {
+          let stats: MachineStats | null = null;
+          try {
+            stats = (opts.machineStats ?? (() => healthStats({ serviceUnit: opts.logs?.unit ?? null, root: opts.root, stateDir: opts.stateDir })))();
+          } catch {
+            // no stats: the view says unknown
+          }
+          return json(res, 200, healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }));
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
