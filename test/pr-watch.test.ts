@@ -136,5 +136,5 @@ test('GitHub jobLog: the log text; 403 is no Actions: read permission, 404 no lo
 test('GitHub requestReview: the reviewers on the PR', async () => {
   const g = github({ 'POST /repos/o/r/pulls/9/requested_reviewers': () => ({ status: 201, body: {} }) });
   await g.b.requestReview(9, ['owner-a']);
-  assert.deepEqual(g.calls[0]!.body, { reviewers: ['owner-a'] });
+  assert.deepEqual(g.calls.map((c) => [c.method, c.path, c.body]), [['POST', '/repos/o/r/pulls/9/requested_reviewers', { reviewers: ['owner-a'] }]]);
 });

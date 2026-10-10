@@ -811,6 +811,13 @@ test('PR watch: polls each PR at most once per interval', { skip }, async () => 
 
 // ---- CI fix runs
 
+/** The latest event of a type; a clear failure (not a TypeError) when there is none. */
+function lastOf(log: EventLog, type: Parameters<EventLog['read']>[1] extends (infer U)[] | undefined ? U : never): unknown {
+  const e = log.read(0, [type]).at(-1);
+  assert.ok(e, `no ${type} event (got: ${[...new Set(log.read().map((x) => x.type))].join(', ')})`);
+  return e.payload;
+}
+
 const failing = (id: number) => [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'failure', id }];
 const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
 
@@ -861,12 +868,13 @@ test('CI fix run: a failed required check gets a fix on the same branch, with th
   t.f.backlog.setJobLog(11, '2026-10-10T07:44:38.786Z FAILED test/price.test.js - expected 5, got 3\n');
   await t.c.tick();
   await t.c.idle();
-  const fixPrompt = t.runner.calls.find((r) => /CI fix run 1/.test(r.prompt))!.prompt;
+  const fixPrompt = t.runner.calls.find((r) => /CI fix run 1/.test(r.prompt))?.prompt ?? '';
+  assert.ok(fixPrompt, 'a CI fix run started');
   assert.match(fixPrompt, /FAILED test\/price\.test\.js - expected 5, got 3/, 'the brief carries the log');
   assert.doesNotMatch(fixPrompt, /2026-10-10T07:44/, 'without the runner timestamps');
   const started = t.f.log.read(0, ['ci_fix.started']).map((e) => e.payload as { head: string; checks: string[]; attempt: number });
   assert.deepEqual(started.map((s) => [s.head, s.checks, s.attempt]), [[t.opened.head, ['ci'], 1]]);
-  const done = t.f.log.read(0, ['ci_fix.finished']).at(-1)!.payload as { outcome: string; head: string };
+  const done = lastOf(t.f.log, 'ci_fix.finished') as { outcome: string; head: string };
   assert.equal(done.outcome, 'pushed');
   assert.equal(t.remoteHead(), done.head, 'pushed to the PR branch');
   assert.equal(git(t.f.repo, 'merge-base', '--is-ancestor', t.opened.head, done.head), '', 'added commits, history kept');
@@ -912,7 +920,7 @@ test("CI fix run: a log the credential can't read (no Actions: read) gives up wi
   await t.c.idle();
   assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 0, 'no run started');
   assert.ok(!t.runner.calls.some((r) => /CI fix run/.test(r.prompt)));
-  const gave = t.f.log.read(0, ['ci_fix.gave_up']).at(-1)!.payload as { reason: string };
+  const gave = lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string };
   assert.match(gave.reason, /no Actions: read permission, and a fix without the log would be a guess/);
   assert.ok(t.pr().labels.includes('ci-failing'));
   assert.deepEqual(t.pr().reviewers, ['example-owner']);
@@ -922,7 +930,7 @@ test('CI fix run: a check without a readable log (not an Actions job) also gives
   const t = await openPr({ worker: workerWith(fixer) });
   t.f.backlog.setChecks(t.opened.head, [{ name: 'ci', source: 'status', status: 'completed', conclusion: 'failure' }]);
   await t.c.tick();
-  assert.match((t.f.log.read(0, ['ci_fix.gave_up']).at(-1)!.payload as { reason: string }).reason, /has no job log the harness can read/);
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /has no job log the harness can read/);
 });
 
 test('CI fix run: never on a branch someone else pushed to', { skip }, async () => {
@@ -934,7 +942,7 @@ test('CI fix run: never on a branch someone else pushed to', { skip }, async () 
   await t.c.tick();
   await t.c.idle();
   assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 0);
-  assert.match((t.f.log.read(0, ['ci_fix.gave_up']).at(-1)!.payload as { reason: string }).reason, /someone else pushed to the branch/);
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /someone else pushed to the branch/);
 });
 
 test("CI fix run: the worker's evidence that the failure isn't caused by the change means no push, and the owner is asked", { skip }, async () => {
@@ -944,8 +952,8 @@ test("CI fix run: the worker's evidence that the failure isn't caused by the cha
   await t.c.tick();
   await t.c.idle();
   assert.equal(t.remoteHead(), t.opened.head, 'nothing pushed');
-  assert.equal((t.f.log.read(0, ['ci_fix.finished']).at(-1)!.payload as { outcome: string }).outcome, 'no_push');
-  assert.match((t.f.log.read(0, ['ci_fix.gave_up']).at(-1)!.payload as { reason: string }).reason, /isn't caused by this change: test\/flaky\.test\.js fails on main too/);
+  assert.equal((lastOf(t.f.log, 'ci_fix.finished') as { outcome: string }).outcome, 'no_push');
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /isn't caused by this change: test\/flaky\.test\.js fails on main too/);
   assert.ok(t.pr().comments.some((x) => /@example-owner .*fails on main too/.test(x.body)));
 });
 
@@ -972,7 +980,7 @@ test('CI fix run: if the branch moves while the fix runs, the push is refused (c
   await t.c.idle();
   assert.ok(human);
   assert.equal(t.remoteHead(), human, "the human's commit is still the branch head");
-  assert.match((t.f.log.read(0, ['ci_fix.gave_up']).at(-1)!.payload as { reason: string }).reason, /the branch moved while the fix ran/);
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /the branch moved while the fix ran/);
 });
 
 test('CI fix runs off (roles.ci_repair disabled): a failure asks the owner straight away', { skip }, async () => {
@@ -980,7 +988,7 @@ test('CI fix runs off (roles.ci_repair disabled): a failure asks the owner strai
   t.f.backlog.setChecks(t.opened.head, failing(71));
   await t.c.tick();
   assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 0);
-  assert.match((t.f.log.read(0, ['ci_fix.gave_up']).at(-1)!.payload as { reason: string }).reason, /CI fix runs are off/);
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /CI fix runs are off/);
 });
 
 test('a CI fix run cut off by a restart is recorded as interrupted and its claim released', async () => {
@@ -991,7 +999,7 @@ test('a CI fix run cut off by a restart is recorded as interrupted and its claim
   assert.ok(won.won);
   f.log.append('ci_fix.started', { issue: 7, number: 8, head: lease.base, checks: ['ci'], attempt: 1, lease: won.sha }, 'alice');
   await c.recover();
-  assert.deepEqual((f.log.read(0, ['ci_fix.finished']).at(-1)!.payload as { outcome: string }).outcome, 'interrupted');
+  assert.deepEqual((lastOf(f.log, 'ci_fix.finished') as { outcome: string }).outcome, 'interrupted');
   assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(7)), '', 'claim released');
   await c.recover();
   assert.equal(f.log.read(0, ['ci_fix.finished']).length, 1, 'once');
