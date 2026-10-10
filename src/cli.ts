@@ -21,7 +21,7 @@ import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
-import { startDashboard } from './dashboard.js';
+import { DEFAULT_WEB_DIR, startDashboard, webUiBuilt } from './dashboard.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
@@ -398,6 +398,7 @@ async function main(argv: string[]): Promise<number> {
       }
       const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: user || cfg.project.owners.default, port: portOpt ? Number(portOpt) : 4317 });
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}, as @${user}\n  ${d.url}\n(local only; Ctrl+C to stop)`);
+      if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
         const bin = desktopBinary();
         if (bin) {

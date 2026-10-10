@@ -18,12 +18,21 @@ git clone -q "$origin" "$work/src"
 git -C "$work/src" checkout -q --detach "$ref"
 sha="$(git -C "$work/src" rev-parse HEAD)"
 dest="/opt/worklane/$sha"
-if [ ! -f "$dest/dist/src/cli.js" ]; then
-  # --ignore-scripts: no dependency's install script runs as root; the build itself is plain tsc.
-  (cd "$work/src" && npm ci --ignore-scripts --no-audit --no-fund >/dev/null && npm run -s build)
+# An install is the CLI plus the dashboard's web UI (the dashboard serves dist/web next to dist/src).
+if [ ! -f "$dest/dist/src/cli.js" ] || [ ! -f "$dest/dist/web/index.html" ]; then
+  # --ignore-scripts: no dependency's install script runs as root; the builds are plain tsc and vite.
+  (cd "$work/src" && npm ci --ignore-scripts --no-audit --no-fund >/dev/null && npm run -s build && npm run -s build:web >/dev/null)
+  [ -f "$work/src/dist/web/index.html" ] || { echo "the web UI build wrote no dist/web/index.html" >&2; exit 1; }
   install -d -m 0755 /opt/worklane
-  rm -rf "$dest" && mv "$work/src" "$dest"
-  chown -R root:root "$dest" && chmod -R a+rX,go-w "$dest"
+  if [ -f "$dest/dist/src/cli.js" ]; then
+    # Installed earlier without the UI, maybe in use by a running service: add only the UI, renamed into place.
+    rm -rf "$dest/dist/.web.new" && mv "$work/src/dist/web" "$dest/dist/.web.new"
+    chown -R root:root "$dest/dist/.web.new" && chmod -R a+rX,go-w "$dest/dist/.web.new"
+    rm -rf "$dest/dist/web" && mv "$dest/dist/.web.new" "$dest/dist/web"
+  else
+    rm -rf "$dest" && mv "$work/src" "$dest"
+    chown -R root:root "$dest" && chmod -R a+rX,go-w "$dest"
+  fi
 fi
 ln -sfn "$dest" /opt/worklane/current
 chmod 0755 "$dest/dist/src/cli.js"
