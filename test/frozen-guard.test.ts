@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { runHook } from '../src/hook.js';
 import { agentReadableDir, writeAgentReadable } from '../src/os/index.js';
@@ -88,8 +88,18 @@ const other = 'nobody';
 const canSwitch = posix && spawnSync('sudo', ['-n', '-u', other, 'true']).status === 0;
 const cli = join(repoRoot, 'dist', 'src', 'cli.js');
 
+// A disposable CI runner may be changed: there, let the other user reach the engine (traverse only, o+x, on the
+// directories above it; a runner's home is 0750). Never on a developer's machine.
+const disposableCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true';
+function reachableBy(user: string, path: string): boolean {
+  const can = () => spawnSync('sudo', ['-n', '-u', user, 'test', '-r', path]).status === 0;
+  if (can() || !disposableCi) return can();
+  for (let d = dirname(path); d !== dirname(d); d = dirname(d)) if ((statSync(d).mode & 0o001) === 0) execFileSync('sudo', ['-n', 'chmod', 'o+x', d]);
+  return can();
+}
+
 test('acceptance: with separate users, the agent user can read its task file (so the guard holds) but not change it', { skip: !canSwitch && 'needs passwordless sudo to another user' }, (t) => {
-  if (spawnSync('sudo', ['-n', '-u', other, 'test', '-r', cli]).status !== 0) return t.skip(`${other} can't read the engine at ${cli}`);
+  if (!reachableBy(other, cli)) return t.skip(`${other} can't read the engine at ${cli}`);
   const { dir, stateDir } = exampleProject();
   execFileSync('chmod', ['-R', 'a+rX', join(dir, '..')]);
   const group = execFileSync('id', ['-gn', other], { encoding: 'utf8' }).trim();
