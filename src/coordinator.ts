@@ -614,6 +614,12 @@ export class Coordinator {
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
     const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
     const owner = this.ownerOf(n);
+    // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
+    if (r.transient) {
+      const said = r.detail.slice(0, 1500).replace(/`{3,}/g, "'''");
+      await this.block(n, owner, `claude kept failing to start on an auth or transient error (token refresh, rate limit, overload or network), not on this change, so no attempt was counted. Check the agent user's Claude login (\`claude auth status\`) and label it \`ready\` again. claude reported:\n\n\`\`\`\n${said}\n\`\`\``, r.reason !== 'rate_limited');
+      return { stop: true as const };
+    }
     if (r.reason === 'rate_limited' || r.reason === 'budget_exhausted' || r.reason === 'auth_mismatch') {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, false);
       return { stop: true as const };

@@ -49,6 +49,8 @@ export interface RunResult {
   turns: number;
   model: string;
   sessionId?: string;
+  /** The run kept failing on an auth or transient error (token refresh, rate limit, overload, network), not on the task. */
+  transient?: boolean;
 }
 
 export interface AgentRunner {
@@ -122,14 +124,69 @@ export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
 
 /** Which auth `claude` would use. The cli runtime refuses API-key billing it wasn't asked for. */
 export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): string {
+  return claudeAuthStatus(env, runAs, bin).method;
+}
+
+/** claude auth status: the auth method ('none' when signed out, 'unknown' when unreadable) and what it printed otherwise. */
+export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string } {
   const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
   const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string };
-    return j.loggedIn ? (j.authMethod ?? 'unknown') : 'none';
+    return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '' };
   } catch {
-    return 'unknown';
+    return { method: 'unknown', text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim().slice(-500) };
   }
+}
+
+/**
+ * Errors that say nothing about the task: the Claude login's token refresh, rate limits, overload,
+ * server errors and the network. Another attempt at the same moment fails the same way; waiting helps.
+ */
+export const TRANSIENT_ERROR = /failed to refresh oauth token|another claude code process is refreshing|exited mid-refresh|overloaded|\b529\b|rate.?limit|\b429\b|api error:? *5\d\d|\b50[234]\b|econnreset|etimedout|enotfound|eai_again|econnrefused|socket hang up|fetch failed|network error/i;
+
+/** Waits between tries after a transient error: 1 min, 2 min, then every 5 min. */
+export const TRANSIENT_BACKOFF_MS = [60_000, 120_000, 300_000];
+/** How long transient errors are retried before the run is reported as failed on them. */
+export const TRANSIENT_BUDGET_MS = 30 * 60_000;
+/** A failure this soon after starting (or within one turn) happened before the task began. */
+const STARTUP_WINDOW_MS = 90_000;
+
+/**
+ * One claude at a time per Claude login (CLAUDE_CONFIG_DIR): two processes on one login can refresh its
+ * token at the same moment, and the loser fails ("another Claude Code process is refreshing it").
+ */
+const loginLocks = new Map<string, Promise<unknown>>();
+export async function withLoginLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = loginLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => (release = r));
+  const tail = prev.then(() => mine);
+  loginLocks.set(key, tail);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (loginLocks.get(key) === tail) loginLocks.delete(key);
+  }
+}
+
+const sleepFor = (ms: number, signal?: AbortSignal) =>
+  new Promise<boolean>((resolve) => {
+    if (signal?.aborted) return resolve(false);
+    const t = setTimeout(() => resolve(true), ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(t);
+      resolve(false);
+    });
+  });
+
+export interface RetryOptions {
+  now?: () => number;
+  /** Resolves false when the run was canceled while waiting. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<boolean>;
+  budgetMs?: number;
 }
 
 /**
@@ -174,9 +231,44 @@ export class CliRunner implements AgentRunner {
     private lanes?: Record<string, { runAs?: RunAs; settings?: object }>,
     /** Agents' commits carry this identity, never one they pick. */
     private identity: CommitIdentity = DEFAULT_COMMIT_IDENTITY,
+    private retry: RetryOptions = {},
   ) {}
 
+  /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
+  private loginOf(req: RunRequest): string {
+    const lane = this.lanes?.[req.lane ?? 'default'];
+    const runAs = lane ? lane.runAs : this.runAs;
+    if (runAs) return runAs.claudeConfigDir ?? posix.join(runAs.home, '.claude');
+    return this.base.CLAUDE_CONFIG_DIR ?? join(this.base.HOME ?? this.base.USERPROFILE ?? '', '.claude');
+  }
+
+  /**
+   * One run, serialized per Claude login. A failure at startup on an auth or transient error is not
+   * the task's: it is retried after a wait (1 min, 2 min, then 5 min) for up to TRANSIENT_BUDGET_MS,
+   * and only then reported, marked transient.
+   */
   async run(req: RunRequest): Promise<RunResult> {
+    const now = this.retry.now ?? Date.now;
+    const sleep = this.retry.sleep ?? sleepFor;
+    const budget = this.retry.budgetMs ?? TRANSIENT_BUDGET_MS;
+    const first = now();
+    for (let tries = 1; ; tries++) {
+      const started = now();
+      const r = await withLoginLock(this.loginOf(req), () => this.runOnce(req));
+      const atStartup = now() - started < STARTUP_WINDOW_MS || r.turns <= 1;
+      const transient = atStartup && (r.reason === 'rate_limited' || ((r.reason === 'failed' || r.reason === 'auth_mismatch') && TRANSIENT_ERROR.test(r.detail)));
+      if (!transient) return r;
+      const wait = TRANSIENT_BACKOFF_MS[Math.min(tries - 1, TRANSIENT_BACKOFF_MS.length - 1)]!;
+      if (now() + wait - first > budget) {
+        const mins = Math.max(1, Math.round((now() - first) / 60_000));
+        return { ...r, reason: r.reason === 'auth_mismatch' ? 'failed' : r.reason, transient: true, detail: `${r.detail} (still failing after ${tries} tries over ${mins} min)` };
+      }
+      req.onActivity?.(`transient error, retrying in ${Math.round(wait / 1000)}s: ${r.detail.slice(0, 200)}`);
+      if (!(await sleep(wait, req.signal))) return { ...r, reason: 'canceled_by_reconciliation', detail: `canceled while waiting out a transient error: ${r.detail}` };
+    }
+  }
+
+  private async runOnce(req: RunRequest): Promise<RunResult> {
     const env = agentEnv(this.base, this.runtime, {
       ...safeProjectEnv(req.env),
       ...identityEnv(this.identity),
@@ -189,10 +281,13 @@ export class CliRunner implements AgentRunner {
     if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
     const runAs = lane ? lane.runAs : this.runAs;
     const runEnv = runAs ? runAsEnv(env, runAs) : env;
-    const auth = claudeAuthMethod(runEnv, runAs, this.bin);
+    // Preflight, inside the login lock: an unreadable status that mentions a token refresh (or any other
+    // transient error) is reported with its text, and run() waits it out instead of starting claude.
+    const status = claudeAuthStatus(runEnv, runAs, this.bin);
+    const auth = status.method;
     const want = this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
     if (!want.includes(auth)) {
-      return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
+      return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}${status.text ? `: ${status.text}` : ''}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
     // The role's system prompt, in a file the agent user can read (this process's /tmp, private to the
     // instance's service and its agents), removed when the run ends.

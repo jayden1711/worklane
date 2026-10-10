@@ -251,6 +251,27 @@ test('a worker run that fails at startup is reported with claude\'s error, not r
   assert.equal(f.log.read(0, ['run.startup_failed']).length, 1);
 });
 
+test('a run the runner reports as transient blocks once as auth or transient, not as a failed change', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const normal = agents();
+  let workers = 0;
+  const runner = new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return normal.run(req);
+    workers++;
+    return { reason: 'failed', transient: true, turns: 0, detail: 'error_during_execution: Failed to refresh OAuth token: another Claude Code process is refreshing it (still failing after 8 tries over 33 min)' };
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(workers, 1);
+  const blocked = (await f.backlog.comments(n)).map((x) => x.body).find((b) => /blocked:/.test(b)) ?? '';
+  assert.match(blocked, /@example-owner blocked: claude kept failing to start on an auth or transient error/);
+  assert.match(blocked, /not on this change/);
+  assert.match(blocked, /Failed to refresh OAuth token/);
+  assert.equal(f.log.read(0, ['run.startup_failed']).length, 0, 'not reported as a startup failure of the change');
+});
+
 test('a worker run that committed work before failing still gets its attempts', { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
