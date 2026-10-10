@@ -404,7 +404,7 @@ export class Coordinator {
         }
         const checks = await this.verify(n, path, head, doneWhen, repro);
         if (checks.some((c) => c.status !== 'pass')) {
-          feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
+          feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
           continue;
         }
         const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path));
@@ -604,7 +604,7 @@ export class Coordinator {
     this.git(path, 'reset', '-q', '--hard', base);
     this.git(path, 'clean', '-q', '-fd');
     const checks = await this.verify(n, path, base, doneWhen, repro);
-    const failing = checks.filter((c) => c.status !== 'pass');
+    const failing = checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped');
     if (!checks.length) return { confirmed: false, why: 'you reported no change needed, but done_when has no check the coordinator can run to confirm it' };
     if (failing.length) return { confirmed: false, why: `you reported no change needed, but on the unchanged base these checks don't pass:\n${failing.map((c) => `- ${c.check}: ${c.status}\n${c.tail}`).join('\n')}` };
     this.emit('issue.no_change', { issue: n, owner, base, why: why.slice(0, 2000), checks: checks.map(({ tail: _t, ...c }) => c) });
@@ -679,7 +679,7 @@ export class Coordinator {
 
   /** The coordinator's own run of the contract: it never trusts the agent's word. */
   private async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
-    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable'; exitCode: number | null; tail: string }[] = [];
+    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string }[] = [];
     const run = async (command: string) => {
       const r = await this.project(command, path);
       const busy = this.d.cfg.tests.stop_gate.busy_patterns.some((p) => new RegExp(p, 'm').test(r.out));
@@ -700,7 +700,13 @@ export class Coordinator {
       }
     }
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
-    for (const c of this.d.cfg.tests.checks) await run(c);
+    // The project's checks can be long (a full suite): once the issue's own checks have failed the attempt
+    // is rejected anyway, so they're recorded as skipped instead of run.
+    const failed = checks.some((c) => c.status !== 'pass');
+    for (const c of this.d.cfg.tests.checks) {
+      if (failed) checks.push({ check: c, status: 'skipped', exitCode: null, tail: '' });
+      else await run(c);
+    }
     this.emit('check.result', { issue: n, head, stage: 'verify', checks: checks.map(({ tail, ...c }) => ({ ...c, ...(c.status !== 'pass' && tail ? { tail: tail.slice(-1500) } : {}) })) });
     return checks;
   }
