@@ -5,6 +5,7 @@
 // together), and a cause seen often enough gets a proposed hard fix for the
 // owner to decide on. Pure: no I/O; nothing changes without the owner's answer.
 import type { StoredEvent } from './events/types.js';
+import type { MergeMetrics } from './merge-metrics.js';
 import type { RunRecord } from './run-record.js';
 
 export type Outcome =
@@ -322,6 +323,25 @@ export function failureModesMarkdown(f: FailureModes): string[] {
   if (f.proposals.length) {
     lines.push('', `**Fixes proposed** (${f.proposals.length}, waiting for your decision; nothing changes until you answer)`);
     for (const pr of f.proposals) lines.push(`- ${pr.question.replace(/\. Which fix\?$/, '')}: recommended ${pr.receipts.find((r) => r.startsWith(`${pr.recommendation}: `)) ?? pr.recommendation}`);
+  }
+  return lines;
+}
+
+const mins = (n: number) => `${Math.round(n * 10) / 10} min`;
+
+/** What conflict fixes, combined-state checks and hotspot holds cost this week, with tuning suggestions (never applied). */
+export function mergeCostMarkdown(m: MergeMetrics): string[] {
+  const lines: string[] = [`**Conflicts and merge waits, last 7 days** (${m.mergedPrs} merged PR(s))`];
+  const { conflicts: c, lightChecks: l, holds: h } = m;
+  if (!c.count && !l.count && !h.count) return [...lines, '- no conflict fixes, combined-state checks or hotspot holds'];
+  lines.push(`- Conflict fixes: ${c.count} PR(s)${c.medianMinutes !== null ? `, median ${mins(c.medianMinutes)} from conflict to merged` : ''}, ${c.needOwner} needed you; ~${mins(c.perMergedPr)} per merged PR`);
+  const outcomes = Object.entries(l.outcomes).map(([k, v]) => `${k} ${v}`).join(', ');
+  lines.push(`- Combined-state checks: ${l.count}, ${mins(l.minutesAdded)} added${outcomes ? ` (${outcomes})` : ''}; ~${mins(l.perMergedPr)} per merged PR`);
+  const top = h.byFile.slice(0, 3).map((f) => `${f.file} ${mins(f.minutes)}`).join(', ');
+  lines.push(`- Hotspot holds: ${h.count}, ${mins(h.minutesWaited)} waited${top ? ` (most on ${top})` : ''}; ~${mins(h.perMergedPr)} per merged PR`);
+  if (m.flags.length) {
+    lines.push('', '**Tuning suggestions** (nothing changes unless you change the config)');
+    for (const f of m.flags) lines.push(`- ${f}`);
   }
   return lines;
 }
