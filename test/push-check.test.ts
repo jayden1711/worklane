@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { checkedPush, DEFAULT_PUSH_LIMITS, pushProblems, type PushLimits } from '../src/push-check.js';
 import { repoRoot } from './helpers.js';
 
@@ -134,7 +134,7 @@ test('the engine pushes code only through checkedPush (lease refs and the demo s
       const p = join(dir, f);
       if (statSync(p).isDirectory()) walk(p);
       else if (p.endsWith('.ts')) {
-        const rel = relative(repoRoot, p);
+        const rel = relative(repoRoot, p).split(sep).join('/'); // the allow-list uses /, Windows paths use backslashes
         // 'push' as a git argument: ['push', ...] or git(cwd, 'push', ...).
         if (!allowed.has(rel) && /(\[|,)\s*['"]push['"]\s*[,)]/.test(readFileSync(p, 'utf8'))) offenders.push(rel);
       }
