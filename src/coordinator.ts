@@ -61,9 +61,9 @@ const COMMAND_TIMEOUT_MS = 2 * 3600_000;
  * in flight, a blocking test run would starve their output streams and trip
  * their stall timers. Output is capped; the tail is kept for reports.
  */
-function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs): Promise<{ code: number | null; tail: string; out: string }> {
+function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs, projectEnv: Record<string, string> = {}): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
-    const { file, args, env } = projectCommand(command, runAs);
+    const { file, args, env } = projectCommand(command, runAs, projectEnv);
     const child = spawn(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
     let out = '';
     const take = (d: Buffer) => {
@@ -111,12 +111,12 @@ export class Coordinator {
       },
     };
     this.remote = d.remote ?? 'origin';
-    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
   }
 
   /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
   private project(command: string, cwd: string) {
-    return sh(command, cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs);
+    return sh(command, cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, this.d.cfg.tests.env);
   }
 
   private get branch() {
@@ -443,6 +443,7 @@ export class Coordinator {
     const role = this.d.cfg.agents.roles.workers!;
     const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
     const r = await this.d.runner.run({
+      env: this.d.cfg.tests.env,
       role: 'investigator',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -492,6 +493,7 @@ export class Coordinator {
     try {
       const role = this.d.cfg.agents.roles.evaluator!;
       const r = await this.d.runner.run({
+        env: this.d.cfg.tests.env,
         role: 'evaluator-repro',
         stateDir: this.d.stateDir,
         prompt: issueBrief(issue, doneWhen),
@@ -549,6 +551,7 @@ export class Coordinator {
     ];
     let pid = -1;
     const r: RunResult = await this.d.runner.run({
+      env: this.d.cfg.tests.env,
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -712,6 +715,7 @@ export class Coordinator {
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
     ];
     const r = await this.d.runner.run({
+      env: this.d.cfg.tests.env,
       role: 'evaluator-verdict',
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, extra),

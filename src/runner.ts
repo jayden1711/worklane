@@ -8,6 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
+import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch';
@@ -33,6 +34,8 @@ export interface RunRequest {
   signal?: AbortSignal;
   /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
   lane?: string;
+  /** The project's own variables (tests.yaml env); never one the harness sets. */
+  env?: Record<string, string>;
 }
 
 export interface RunResult {
@@ -167,6 +170,7 @@ export class CliRunner implements AgentRunner {
 
   async run(req: RunRequest): Promise<RunResult> {
     const env = agentEnv(this.base, this.runtime, {
+      ...safeProjectEnv(req.env),
       ...identityEnv(this.identity),
       [`${BRAND.envPrefix}_ROLE`]: req.role,
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
