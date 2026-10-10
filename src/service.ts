@@ -17,6 +17,7 @@ import type { Backlog } from './backlog/types.js';
 import { loadConfig, type Config } from './config/load.js';
 import { Coordinator } from './coordinator.js';
 import { backup, dirStore } from './events/backup.js';
+import { tidyState } from './state-tidy.js';
 import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
@@ -145,13 +146,16 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     console.error(`another coordinator is running for this project (pid ${lock.holder?.pid})`);
     return 1;
   }
-  const log = new EventLog(site.logPath);
   // Agents run as their own user: their task files go beside the checkout (/srv/<cli>/<name>/tasks), in the group
   // the checkout shares with them, readable but not writable by them. The coordinator's own state stays private.
   const agentTasks = commandsAs ? { dir: join(dirname(root), 'tasks'), gid: statSync(root).gid } : undefined;
+  // Before anything reads or writes it: state/ as this engine keeps it, whatever an older engine left.
+  const tidied = tidyState(state, agentTasks ? { agentTasksDir: agentTasks.dir } : {});
+  const log = new EventLog(site.logPath);
   const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
+  if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());
   const requeued = await coordinator.recover();
   if (requeued.length) console.log(`recovered: requeued ${requeued.map((n) => `#${n}`).join(', ')}`);
   let stopping = false;

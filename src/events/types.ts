@@ -136,6 +136,8 @@ export const EventSchemas = {
   'guardrail.decision': z.strictObject({ decision: z.enum(['deny', 'ask']), rule: z.string(), agent: z.boolean() }),
   'secret.detected': z.strictObject({ source: z.string(), findings: z.number().int().nonnegative() }),
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
+  /** At start: state/ closed to other users (paths tightened, first 20 named) and old task files removed. */
+  'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
   'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable() }),
   'emergency.stop': z.strictObject({ by: z.string(), reason: z.string(), running: z.number().int() }),
