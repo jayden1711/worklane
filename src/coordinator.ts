@@ -17,11 +17,12 @@ import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { cpuCount, diskFree, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached } from './os/index.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
-import { INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
+import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
+import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { readiness, requiredOutcomes, type Readiness } from './pr-watch.js';
-import { mergeDecision, type MergeDecision } from './merge-policy.js';
+import { instructionEvalReasons, mergeDecision, type MergeDecision } from './merge-policy.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -448,6 +449,8 @@ export class Coordinator {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
+        // A change to the agents' own instructions is evaluated before it can land (the merge policy reads the result).
+        if (verdict.patch_correct) await this.instructionEvals(n, path, base, head, change.files.map((f) => f.path));
         const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
         const lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${verdict.unread.slice(0, 10).join(', ')}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
@@ -675,6 +678,64 @@ export class Coordinator {
 
   private get identity(): CommitIdentity {
     return this.d.commitIdentity ?? DEFAULT_COMMIT_IDENTITY;
+  }
+
+  /**
+   * Evals of the agents' instructions a change touches (a skill, AGENTS.md, a role prompt): the same cases on
+   * the instructions at the base and at the head, under the per-eval cost cap, through the runner like every
+   * run (the agent user, the subscription CLI). One instructions.eval event each; anything that keeps an eval
+   * from running is recorded as its error, and the merge policy waits on it.
+   */
+  private async instructionEvals(n: number, path: string, base: string, head: string, files: string[]) {
+    const targets = instructionTargets(files);
+    if (!targets.length) return;
+    const cfg = this.d.cfg.agents.instruction_evals;
+    const model = cfg.model ?? this.d.cfg.agents.roles.workers?.model ?? 'sonnet';
+    const judge = cfg.judge ?? this.d.cfg.agents.roles.evaluator?.model ?? 'opus';
+    const at = (rev: string, p: string): string | null => {
+      try {
+        return this.git(path, 'show', `${rev}:${p}`);
+      } catch {
+        return null;
+      }
+    };
+    const ask = runnerAsk(this.d.runner, (r) => this.cost(n, 'instruction-eval', r as RunResult), this.d.stateDir);
+    const none = { base: null, result: null, dropped: false, incomplete: true, changes: [], cost_usd: 0 };
+    for (const t of targets) {
+      const record = (p: Omit<EventPayload<'instructions.eval'>, 'issue' | 'head' | 'target'>) => this.emit('instructions.eval', { issue: n, head, target: t.target, ...p });
+      if (!cfg.enabled) {
+        record({ ...none, error: 'instruction evals are off (agents.yaml instruction_evals)' });
+        continue;
+      }
+      // A project role prompt that doesn't exist on one side is the engine's built-in one there.
+      const builtIn = t.role ? defaultRolePrompt(t.role) || null : null;
+      const baseText = at(base, t.file) ?? builtIn;
+      const headText = at(head, t.file) ?? builtIn;
+      if (headText === null) {
+        record({ ...none, error: `${t.file} is removed; nothing to evaluate` });
+        continue;
+      }
+      const casesMd = at(head, t.cases) ?? at(base, t.cases) ?? (t.role ? engineRoleCases(t.role) : null);
+      const cases = casesMd ? parseCases(casesMd) : [];
+      if (!cases.length) {
+        record({ ...none, error: `no eval cases (${t.cases})` });
+        continue;
+      }
+      try {
+        const c = await compareInstructions({ target: t.target, baseText, headText, cases, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
+        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd });
+      } catch (e) {
+        if (e instanceof Halted) throw e;
+        record({ ...none, error: (e as Error).message.slice(0, 500) });
+      }
+    }
+  }
+
+  /** The latest eval of each instruction target for an issue. */
+  private instructionResults(n: number): EventPayload<'instructions.eval'>[] {
+    const latest = new Map<string, EventPayload<'instructions.eval'>>();
+    for (const e of this.events(n)) if (e.type === 'instructions.eval') latest.set((e.payload as { target: string }).target, e.payload as EventPayload<'instructions.eval'>);
+    return [...latest.values()];
   }
 
   /** Each file the change base..head touches, with its line counts and added lines (for content checks). */
@@ -1147,6 +1208,7 @@ export class Coordinator {
       `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
       `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
       `**Checks run by the harness:** ${checks?.checks.map((c) => `${c.check} ${c.status}`).join(', ') || 'none'}`,
+      ...evalLines(this.instructionResults(n)),
     ].join('\n');
     let url: string;
     try {
@@ -1279,6 +1341,10 @@ export class Coordinator {
       ciFixRuns: this.d.log.read(0, ['ci_fix.started']).filter((e) => (e.payload as { number: number }).number === number).length,
       foreignPush: pr.headSha !== this.ourHead(number),
       pushLimitHit: this.events(n).some((e) => e.type === 'push.refused'),
+      instructionEvals: instructionEvalReasons(
+        instructionTargets(files.map((f) => f.path)).map((t) => t.target),
+        this.instructionResults(n),
+      ),
     });
   }
 
@@ -1665,6 +1731,21 @@ const DEFAULT_REVIEW = {
   },
   merge: { auto: true, max_lines: 400, max_files: 10, wait_categories: [] as string[] },
 };
+
+/** The PR body's lines for instruction evals: base and head scores, the cost, and every case that changed. */
+function evalLines(results: EventPayload<'instructions.eval'>[]): string[] {
+  if (!results.length) return [];
+  const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}/${s.total}` : 'new');
+  const total = results.reduce((s, r) => s + r.cost_usd, 0);
+  return [
+    `**Instruction evals** (base → head; ~$${total.toFixed(2)}, the CLI's cost estimate):`,
+    ...results.map((r) => {
+      const changed = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `case ${c.id} ${c.base} → ${c.head}`);
+      const what = r.error ? `not evaluated: ${r.error}` : `${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}`;
+      return `- ${r.target}: ${what} (~$${r.cost_usd.toFixed(2)})`;
+    }),
+  ];
+}
 
 /** The end of a CI job log, for a fix run's brief: the last lines, without the runner's per-line timestamps. */
 export function logTail(text: string, lines = 150, chars = 12_000): string {

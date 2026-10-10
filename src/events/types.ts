@@ -84,6 +84,19 @@ export const EventSchemas = {
   'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
   'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted']), head: sha.nullable(), detail: z.string() }),
+  /** An eval of instructions the change touches, base vs head (base null: new instructions). `error`: it couldn't run. */
+  'instructions.eval': z.strictObject({
+    issue,
+    head: sha,
+    target: z.string(),
+    base: z.strictObject({ passed: z.number().int(), total: z.number().int() }).nullable(),
+    result: z.strictObject({ passed: z.number().int(), total: z.number().int() }).nullable(),
+    dropped: z.boolean(),
+    incomplete: z.boolean(),
+    changes: z.array(z.strictObject({ id: z.string(), title: z.string(), base: z.string(), head: z.string() })),
+    cost_usd: z.number().nonnegative(),
+    error: z.string().optional(),
+  }),
   /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
   'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),
   /** Auto-merged: a merge commit `sha` of the evaluated `head`. */

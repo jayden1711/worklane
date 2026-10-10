@@ -6,3 +6,9 @@ roles:
   # PR mode: when a required check fails on a PR the harness opened, a fix run on that branch
   # (with the failing job's log; needs the App's Actions: read). Off: the owner is asked instead.
   ci_repair: { enabled: false, model: sonnet, max_fixes_per_pr: 2 }
+# A change to the agents' own instructions (.claude/skills/**, AGENTS.md, roles/*.md here) is
+# evaluated before it lands: its eval cases (a skill's evals/cases.md; evals/AGENTS.md and
+# evals/roles/<role>.md in this folder) at the base and at the head. A lower score, a cap hit
+# or no cases: the PR waits for you, with the per-case diff. The judge is never the model
+# under test (defaults: the workers' model under test, the evaluator's as judge).
+instruction_evals: { enabled: true, cap_usd: 5, samples: 1 }

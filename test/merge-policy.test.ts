@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { PolicyFile } from '../src/instance.js';
-import { mergeDecision, type MergeInput } from '../src/merge-policy.js';
+import { instructionEvalReasons, mergeDecision, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
 import { computeLevel } from '../src/review.js';
 import { rolePrompt, VERDICT_SCHEMA } from '../src/roles.js';
@@ -96,6 +96,19 @@ test('merge policy: any doubt waits', () => {
     assert.equal(d.auto, false, String(re));
     assert.match(d.reasons.join(), re);
   }
+});
+
+test('instruction evals: a drop waits with the per-case diff; a cap hit, an error or no eval waits; a clean eval does not', () => {
+  const r = (over: Partial<InstructionEvalResult>): InstructionEvalResult => ({ target: 'skill triage', base: { passed: 3, total: 3 }, result: { passed: 3, total: 3 }, dropped: false, incomplete: false, changes: [], cost_usd: 1.2, ...over });
+  assert.deepEqual(instructionEvalReasons(['skill triage'], [r({})]), []);
+  const drop = instructionEvalReasons(['skill triage'], [r({ result: { passed: 2, total: 3 }, dropped: true, changes: [{ id: '1', title: 'Alert', base: 'pass', head: 'pass' }, { id: '2', title: 'Handoff', base: 'pass', head: 'fail' }] })]);
+  assert.deepEqual(drop, ['eval: skill triage scored lower, 3/3 → 2/3 (~$1.20):\n  - case 2 "Handoff": pass → fail']);
+  assert.match(instructionEvalReasons(['skill triage'], [r({ incomplete: true })]).join(), /incomplete: the cost cap was reached \(~\$1\.20\)/);
+  assert.match(instructionEvalReasons(['skill triage'], [r({ error: 'no eval cases (x)' })]).join(), /was not evaluated: no eval cases \(x\)/);
+  assert.deepEqual(instructionEvalReasons(['AGENTS.md'], []), ['eval: AGENTS.md changed but was not evaluated']);
+  const d = mergeDecision(clean({ instructionEvals: drop }));
+  assert.equal(d.auto, false);
+  assert.deepEqual(d.reasons, drop);
 });
 
 test('the kill switch defaults to off in an instance policy', () => {
