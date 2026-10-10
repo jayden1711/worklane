@@ -93,6 +93,8 @@ export interface PrView {
   fixes: { attempt: number; at: string; checks: string[]; outcome: 'running' | 'pushed' | 'no_push' | 'interrupted'; detail: string }[];
   gaveUp: { at: string; reason: string } | null;
   decision: { at: string; head: string; auto: boolean; reasons: string[] } | null;
+  /** The merge policy's standing "wait for a person" reasons (empty when it didn't say wait, or the PR has moved on). */
+  waitReasons: string[];
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
@@ -240,11 +242,17 @@ export const token = readToken();
 export interface HubInfo {
   instances: { name: string; up: boolean; error: string | null }[];
 }
-export const hub: Promise<HubInfo | null> = inBrowser
-  ? fetch('/api/hub', { headers: { authorization: `Bearer ${token}` } })
-      .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
-      .catch(() => null)
-  : Promise.resolve(null);
+/**
+ * The hub's instances, asked for only when a hub served this page (it marks the page; see HUB_MARKER).
+ * An instance's or a checkout's own dashboard has no /api/hub, and asking would log a 404 on every page.
+ */
+export function probeHub(servedByHub: boolean, get: typeof fetch = fetch, auth = token): Promise<HubInfo | null> {
+  if (!servedByHub) return Promise.resolve(null);
+  return get('/api/hub', { headers: { authorization: `Bearer ${auth}` } })
+    .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
+    .catch(() => null);
+}
+export const hub: Promise<HubInfo | null> = inBrowser ? probeHub(!!document.querySelector('meta[name="dashboard-hub"]')) : Promise.resolve(null);
 
 /** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
 export const hubInstance: Promise<string | null> = hub.then((h) => {

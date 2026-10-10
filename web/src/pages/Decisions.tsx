@@ -26,7 +26,8 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
       setBusy(null);
     }
   };
-  const recommended = (o: string, i: number) => o === d.recommendation || (i === 0 && !d.options.includes(d.recommendation));
+  // Only the option the recommendation names; a free-text recommendation (in its pill above) marks none.
+  const recommended = (o: string) => o === d.recommendation;
   const receipts = d.receipts.filter(Boolean);
   return (
     <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
@@ -60,9 +61,9 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
           // destructive ones (reject, close) are red, the rest raised; each carries its key.
           <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
             {d.options.map((o, i) => (
-              <Button key={o} type="button" size="sm" data-option={o} variant={recommended(o, i) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o, i) ? 'recommended' : undefined}>
+              <Button key={o} type="button" size="sm" data-option={o} variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
                 {busy === o ? `${o}…` : o}
-                <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o, i) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
+                <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
               </Button>
             ))}
           </div>

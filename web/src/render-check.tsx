@@ -44,4 +44,5 @@ export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks r
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);
 export const renderInstances = (hub: HubInfo, current: string) => renderToStaticMarkup(<InstanceList hub={hub} current={current} onSelect={() => {}} />);
 export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsView view={view} />);
+export { probeHub } from './api';
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);

@@ -85,6 +85,28 @@ test('the PR view: where each PR stands, why it waits, its checks and fix runs, 
   assert.equal(v.stops[1]!.revert, 'https://example.test/pr/200');
 });
 
+test('regression: a CI fix that gave up, then a person\'s push the merge policy still leaves to a person, shows both reasons', () => {
+  // The coordinator's order: the fix flow gives up at the harness's head (#39); a person pushes; the watch
+  // sees the new head ready; the merge policy says wait, at that head (#42).
+  const dir = mkdtempSync(join(tmpdir(), 'dash-prs-'));
+  const log = new EventLog(join(dir, 'events.db'));
+  log.append('issue.seen', seen(21, 'Add the orders table'), 'c');
+  log.append('pr.opened', { issue: 21, number: 121, url: 'https://example.test/pr/121', head: sha('a'), draft: true }, 'c');
+  log.append('pr.status', { issue: 21, number: 121, head: sha('a'), ready: false, reasons: ['test failed'], checks: [{ name: 'test', outcome: 'fail' }] }, 'c');
+  log.append('ci_fix.started', { issue: 21, number: 121, head: sha('a'), checks: ['test'], attempt: 1, lease: sha('1') }, 'c');
+  log.append('ci_fix.finished', { issue: 21, number: 121, outcome: 'no_push', head: null, detail: 'the same test fails on main' }, 'c');
+  log.append('ci_fix.gave_up', { issue: 21, number: 121, head: sha('a'), reason: 'the failure is not caused by this change' }, 'c');
+  log.append('pr.status', { issue: 21, number: 121, head: sha('b'), ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] }, 'c');
+  log.append('pr.ready', { issue: 21, number: 121, head: sha('b') }, 'c');
+  log.append('merge.decided', { issue: 21, number: 121, head: sha('b'), auto: false, reasons: ['high-risk: migrations', 'a CI fix run happened'] }, 'c');
+  const pr = prsView(log.read()).prs[0]!;
+  assert.equal(pr.head, sha('b'), 'the PR is at the person\'s push');
+  assert.equal(pr.gaveUp?.reason, 'the failure is not caused by this change');
+  assert.deepEqual(pr.waitReasons, ['high-risk: migrations', 'a CI fix run happened'], 'the merge call at the current head stands');
+  assert.equal(pr.phase, 'gave_up');
+  log.close();
+});
+
 test('auto-merge state: the policy kill switch, the repo rule and the stop file, as the coordinator reads them', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dash-am-'));
   const policy = join(dir, 'policy.yaml');

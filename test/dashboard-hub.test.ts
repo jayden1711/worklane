@@ -63,7 +63,11 @@ test('the hub shows each instance through that instance\'s own dashboard, behind
       const body = await (await fetch(`${s.base}${p}`, { headers: s.hh })).text();
       for (const t of [s.a.d.token, s.b.d.token]) assert.ok(!body.includes(t), `${p} must not hand an instance token to the browser`);
     }
-    assert.match(await (await fetch(`${s.base}/issues/1`)).text(), /<title>hub/, 'serves the UI');
+    const page = await (await fetch(`${s.base}/issues/1`)).text();
+    assert.match(page, /<title>hub/, 'serves the UI');
+    assert.ok(page.includes('<meta name="dashboard-hub" content="1">'), 'marked as served by a hub, so the UI asks for its instances');
+    const own = await (await fetch(`${s.a.d.url.split('/?')[0]}/issues/1`)).text();
+    assert.ok(!own.includes('dashboard-hub'), 'an instance\'s own dashboard is not marked (its UI never asks for /api/hub)');
   } finally {
     await s.close();
   }

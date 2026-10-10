@@ -475,7 +475,7 @@ export interface PrView {
   title: string;
   url: string;
   openedAt: string;
-  /** The commit the PR is at now (opened, or the last fix pushed). */
+  /** The commit the PR is at now: as opened, the last fix pushed, or what the watch last saw (a person's push). */
   head: string;
   /** open, merged (by the harness or a person), or closed unmerged. */
   state: 'open' | 'merged' | 'closed';
@@ -490,6 +490,8 @@ export interface PrView {
   gaveUp: { at: string; reason: string } | null;
   /** The merge policy's last call: merged automatically, or waiting for a person, with its reasons. */
   decision: { at: string; head: string; auto: boolean; reasons: string[] } | null;
+  /** The merge policy's "wait for a person" reasons, while that call stands (the PR is still at the head it was made on). */
+  waitReasons: string[];
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   /** After an auto-merge: the default branch's required checks on the merge commit. */
@@ -521,10 +523,14 @@ export function prsView(events: StoredEvent[]): PrsView {
         titles.set(Number(p.issue), String(p.title));
         break;
       case 'pr.opened':
-        prs.set(n, { number: n, issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, url: String(p.url), openedAt: e.ts, head: String(p.head), state: 'open', draft: Boolean(p.draft), status: null, unready: null, fixes: [], gaveUp: null, decision: null, merged: null, mergeFailed: null, mainResult: null, phase: 'checks' });
+        prs.set(n, { number: n, issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, url: String(p.url), openedAt: e.ts, head: String(p.head), state: 'open', draft: Boolean(p.draft), status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, phase: 'checks' });
         break;
       case 'pr.status':
-        if (pr) pr.status = { head: String(p.head), at: e.ts, ready: Boolean(p.ready), reasons: p.reasons as string[], checks: p.checks as { name: string; outcome: string }[] };
+        if (pr) {
+          pr.status = { head: String(p.head), at: e.ts, ready: Boolean(p.ready), reasons: p.reasons as string[], checks: p.checks as { name: string; outcome: string }[] };
+          // The watch reads the PR's head on GitHub: after a person pushes, that's the PR's head, not the harness's last push.
+          pr.head = String(p.head);
+        }
         break;
       case 'pr.ready':
         if (pr) pr.draft = false;
@@ -580,7 +586,10 @@ export function prsView(events: StoredEvent[]): PrsView {
         break;
     }
   }
-  for (const pr of prs.values()) pr.phase = phaseOf(pr);
+  for (const pr of prs.values()) {
+    pr.waitReasons = pr.decision && !pr.decision.auto && pr.decision.head === pr.head ? pr.decision.reasons : [];
+    pr.phase = phaseOf(pr);
+  }
   return { prs: [...prs.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt) || b.number - a.number), refused: refused.reverse(), stops: stops.reverse() };
 }
 

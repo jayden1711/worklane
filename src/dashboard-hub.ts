@@ -113,7 +113,7 @@ export function startHub(opts: HubOptions): Promise<{ server: Server; url: strin
         }
         return json(res, 404, { error: 'not found: the hub serves /api/hub and /api/i/<instance>/...' });
       }
-      serveStatic(webDir, url, res);
+      serveStatic(webDir, url, res, { hub: true });
     } catch (e) {
       json(res, 500, { error: (e as Error).message });
     }
