@@ -38,8 +38,10 @@ put_unit() {
 
 say "the updater, root-owned"
 src="$(dirname "$0")/../machine/worklane-update.cjs"
-tmp=/usr/local/libexec/.worklane-update.tmp
+# The temp name ends in .cjs: node --check refuses an unknown extension such as .tmp.
+tmp=/usr/local/libexec/.worklane-update.tmp.cjs
 install -d -o root -g root -m 0755 /usr/local/libexec
+rm -f /usr/local/libexec/.worklane-update.tmp   # left by an earlier run that failed on that name
 install -o root -g root -m 0755 "$src" "$tmp"
 node --check "$tmp"
 mv -f "$tmp" /usr/local/libexec/worklane-update

@@ -27,8 +27,10 @@ command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; 
 
 say "the helper, root-owned"
 src="$(dirname "$0")/../machine/worklane-machine.cjs"
-tmp="$(dirname "$MACHINE_HELPER")/.worklane-machine.tmp"
+# The temp name ends in .cjs: node --check refuses an unknown extension such as .tmp.
+tmp="$(dirname "$MACHINE_HELPER")/.worklane-machine.tmp.cjs"
 install -d -o root -g root -m 0755 "$(dirname "$MACHINE_HELPER")"
+rm -f "$(dirname "$MACHINE_HELPER")/.worklane-machine.tmp"   # left by an earlier run that failed on that name
 install -o root -g root -m 0755 "$src" "$tmp"
 node --check "$tmp"
 mv -f "$tmp" "$MACHINE_HELPER"
