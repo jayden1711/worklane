@@ -16,7 +16,11 @@ land_mode: pr               # direct (fast-forward to the default branch) | pr
 # listed here passed on the exact commit the evaluator approved. Names as GitHub shows
 # them, e.g. ["test", "build (ubuntu-latest)"]. Empty: nothing is ever marked ready.
 required_checks: []
-os: auto                    # auto | macos | linux | windows-wsl
+# Files two tasks at once would both change and conflict on: such tasks never run together (the second
+# waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
+# changelogs, shared test helpers); [] turns holds off.
+# hotspots: ["**/package-lock.json", "src/plugins/registry.ts", "test/helpers.ts"]
+os: auto                   # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches
   writers: [your-github-handle] # only issues opened or approved by these accounts are actionable

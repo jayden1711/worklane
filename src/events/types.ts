@@ -143,6 +143,10 @@ export const EventSchemas = {
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
   'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
+  /** A ready task waits: it would change a hotspot file a running task changes too (`by`). Recorded once per wait. */
+  'hotspot.held': z.strictObject({ issue, by: issue, files: z.array(z.string()), reason: z.string() }),
+  /** A held task started (or stopped being ready): how long it waited, on which files. */
+  'hotspot.released': z.strictObject({ issue, waited_ms: z.number().int().nonnegative(), files: z.array(z.string()), started: z.boolean() }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
 } as const;
 

@@ -491,6 +491,55 @@ function parallelAgents(gate: Promise<void>, seen: { now: number; max: number })
   });
 }
 
+test('hotspots: a task that would change the same hotspot as a running one waits; other ready work takes the slot', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.hotspots = ['src/price.js'];
+  const a = f.backlog.open({ ...easyIssue('Add a.js', 'a.js'), body: `Add a.js and register it in src/price.js.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n` });
+  const b = f.backlog.open({ ...easyIssue('Add b.js', 'b.js'), body: `Add b.js and register it in \`src/price.js\`.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n` });
+  f.backlog.open(easyIssue('Add c.js', 'c.js'));
+  f.cfg.agents.roles.workers!.count = 2;
+  writeFileSync(join(f.slotsDir, 'config.json'), JSON.stringify({ max_agents: 2 }));
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const seen = { now: 0, max: 0 };
+  const runner = parallelAgents(gate, seen);
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  await c.tick();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.max, 2, 'both slots in use');
+  assert.deepEqual(f.log.read(0, ['hotspot.held']).map((e) => e.payload), [{ issue: b, by: a, files: ['src/price.js'], reason: `waits for #${a}: both change src/price.js` }]);
+  await c.tick(); // still held: recorded once, not every tick
+  assert.equal(f.log.read(0, ['hotspot.held']).length, 1);
+  open();
+  await c.idle();
+  await c.tick();
+  await c.idle();
+  const released = f.log.read(0, ['hotspot.released']).map((e) => e.payload as { issue: number; started: boolean; files: string[]; waited_ms: number });
+  assert.deepEqual(released.map((r) => [r.issue, r.started, r.files]), [[b, true, ['src/price.js']]]);
+  assert.ok(released[0]!.waited_ms >= 250, `waited ${released[0]!.waited_ms} ms`);
+  assert.equal(runner.calls.filter((r) => r.role === 'worker').length, 3, 'the held task ran once the slot and the file were free');
+});
+
+test('hotspots: tasks touching no hotspot run in parallel as before, and an empty list turns holds off', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.hotspots = [];
+  const body = `Add x and change src/price.js.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n`;
+  f.backlog.open({ ...easyIssue('Add a.js', 'a.js'), body: body.replace('Add x', 'Add a.js') });
+  f.backlog.open({ ...easyIssue('Add b.js', 'b.js'), body: body.replace('Add x', 'Add b.js') });
+  f.cfg.agents.roles.workers!.count = 2;
+  writeFileSync(join(f.slotsDir, 'config.json'), JSON.stringify({ max_agents: 2 }));
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => (open = r));
+  const seen = { now: 0, max: 0 };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: parallelAgents(gate, seen), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  await c.tick();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.max, 2);
+  assert.equal(f.log.read(0, ['hotspot.held']).length, 0);
+  open();
+  await c.idle();
+});
+
 test('parallel workers: several issues build at once, each in its own worktree, and all land', { skip }, async () => {
   const f = fixture();
   for (const name of ['a.js', 'b.js', 'c.js']) f.backlog.open(easyIssue(`Add ${name}`, name));
