@@ -43,20 +43,24 @@ Each user signs in to its own accounts. Worklane never creates, reads or copies 
   - Contents: read and write: fetch, push task branches, push lease refs under `refs/worklane/claims/`
   - Issues: read and write: the backlog (issues, labels, assignees, comments, label history)
   - Pull requests: read and write: open the PR for each change. Worklane never merges; a human does.
+  - Checks: read: CI results on the PRs it opened
   - Metadata: read: required by GitHub
+  - Actions: read (optional): CI fix runs read the failing job's log with it; without it they can't run
 
-  **Workflows is deliberately excluded.** GitHub refuses a push that changes `.github/workflows` without it, so such a change can't go out through the coordinator. Leave out Administration too.
+  **Workflows is deliberately excluded.** GitHub refuses a push that changes `.github/workflows` without it, so such a change can't go out through the coordinator. Leave out Administration too, and keep Actions at read: the harness never reruns or cancels jobs.
 
   Then run `bash scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>`. It:
   - installs the private key for `wl-<name>` only, mode 0400;
   - signs a JWT and mints an installation token;
-  - checks the installation reaches exactly `<owner/repo>`, without Workflows or Administration;
+  - checks the installation reaches exactly `<owner/repo>`, with the permissions above and without Workflows, Administration or Actions write;
   - offers to `shred` the copy you brought over.
+
+  After changing the App's permissions (and accepting them on the installation), `bash scripts/setup/credentials.sh <name> verify-app` runs the same check with the installed key, read-only.
 
   Delete the downloaded key elsewhere, too. In `credentials.yaml`: `github: { kind: app, app_id, installation_id, key_path }`.
   - **How it's used:** the coordinator mints hour-long installation tokens limited to the instance's repos. It caches them in its private state and renews them before they expire. API calls use them, and git gets them through a credential helper. `gh` has no login in App mode. Tokens never reach agents.
   - **Enforced at start**, and by `instance show`: the installation must reach exactly the instance's repos.
-  - **Required checks:** an App can post check runs. When Worklane posts its own gate check (planned), the App also needs Checks: read and write.
+  - **Required checks:** an App can post check runs. When Worklane posts its own gate check (planned), the App also needs Checks: write.
 - **Fallback: a fine-grained personal access token** (`credentials.sh <name> github`), only when an App isn't possible. Use a dedicated machine account with Write on the repo, never an admin: admins can bypass branch protection. The start-up check refuses:
   - personal logins (`gho_`), classic tokens (`ghp_`) and App user tokens (`ghu_`);
   - a token that reaches any other repo;
