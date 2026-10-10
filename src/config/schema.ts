@@ -171,6 +171,17 @@ export const GuardrailsConfig = z.strictObject({
   /** Tool credential stores no Claude session reads, agent or human (written as Read(...) deny rules). */
   credential_stores: z.array(z.string()).default([]),
   network: z.strictObject({ allow: z.array(z.string()).default([]) }).prefault({}),
+  /** Limits on every push of agent-written code (checked on each change, and again at the push). */
+  push: z
+    .strictObject({
+      /** Any file version in the pushed commits over this size is refused, including one added and later deleted. */
+      max_file_mb: z.number().positive().default(10),
+      /** Lines added plus removed across the change. */
+      max_changed_lines: z.number().int().positive().default(1500),
+      /** Paths never pushed, in any commit of the change (globs; `**` for any depth). */
+      refuse_paths: z.array(z.string()).default([]),
+    })
+    .prefault({}),
   pre_approved: z.array(z.string()).default([]),
   examples: z
     .strictObject({

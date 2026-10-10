@@ -63,6 +63,15 @@ credential_stores:
 network:
   allow: [docs.github.com, nodejs.org, registry.npmjs.org, developer.mozilla.org]
 
+# Limits on every push of agent-written code, checked on each change and again
+# at the push. Every commit counts: a file added and later deleted is still pushed.
+# Changes to .github/workflows/ are always refused (the harness's credential has
+# no Workflows permission); a human makes those.
+push:
+  max_file_mb: 10
+  max_changed_lines: 1500
+  refuse_paths: []   # e.g. [build/**, "**/*.ckpt"]
+
 # Commands agents may run without a permission prompt.
 pre_approved:
   - Bash(npm test:*)

@@ -725,6 +725,64 @@ test('land_mode pr: an approved change goes out as a PR on its own branch; the d
   assert.equal(f.backlog.prs().length, 1);
 });
 
+test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.guardrails.push.refuse_paths = ['data/**'];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const prompts: string[] = [];
+  const runner = agents({
+    worker: (req) => {
+      prompts.push(req.prompt);
+      // Fixes the bug, but also commits a data dump and then deletes it: still in the pushed history.
+      const p = join(req.cwd, 'src', 'price.js');
+      writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+      mkdirSync(join(req.cwd, 'data'), { recursive: true });
+      writeFileSync(join(req.cwd, 'data', 'dump.json'), '{}\n');
+      commitAll(req.cwd, 'fix, with a dump');
+      git(req.cwd, 'rm', '-q', 'data/dump.json');
+      commitAll(req.cwd, 'drop the dump');
+      return { summary: 'fixed' };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const refused = f.log.read(0, ['push.refused']).map((e) => e.payload as { stage: string; reasons: string[] });
+  assert.equal(refused.length, 3, 'once per attempt');
+  assert.ok(refused.every((r) => r.stage === 'change' && /data\/dump\.json/.test(r.reasons.join(''))));
+  assert.match(prompts[1]!, /can't be pushed: .*data\/dump\.json/, 'the next attempt is told why');
+  assert.equal(f.log.read(0, ['check.result']).length, 0, 'no checks spent on a change that cannot be pushed');
+  assert.equal(f.log.read(0, ['land.queued']).length, 0);
+  assert.equal(git(f.repo, 'ls-remote', 'origin', `refs/heads/${BRAND.cli}/issue-${n}`), '', 'nothing pushed');
+  const issue = await f.backlog.get(n);
+  assert.ok(issue.labels.includes('blocked'));
+  const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => /blocked/.test(b)) ?? '';
+  assert.match(comment, /the push was refused:\n- touches paths that are never pushed \(data\/dump\.json\)/);
+});
+
+test('push limits at the push: a pre-land step that adds a refused file stops the landing; main is untouched and the issue blocked', { skip }, async () => {
+  const f = fixture();
+  f.cfg.guardrails.push.refuse_paths = ['gen/**'];
+  f.cfg.tests.land.pre = ['mkdir -p gen && echo generated > gen/out.txt'];
+  const mainBefore = git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const refused = f.log.read(0, ['push.refused']).map((e) => e.payload as { issue: number; stage: string; reasons: string[] });
+  assert.equal(refused.length, 1, f.log.read().map((e) => e.type).join(', '));
+  assert.equal(refused[0]!.stage, 'push');
+  assert.equal(refused[0]!.issue, n);
+  assert.match(refused[0]!.reasons.join(''), /gen\/out\.txt/);
+  assert.equal((f.log.read(0, ['land.result']).at(-1)!.payload as { outcome: string }).outcome, 'rejected');
+  assert.equal(git(f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], mainBefore, 'main untouched');
+  assert.ok((await f.backlog.get(n)).labels.includes('blocked'));
+  assert.ok((await f.backlog.comments(n)).some((x) => /the push was refused:\n- touches paths that are never pushed \(gen\/out\.txt\)/.test(x.body)));
+});
+
 test('no change needed: confirmed by the coordinator\'s own checks on the clean base, reported with evidence, not retried', async () => {
   const f = fixture();
   const n = f.backlog.open({ title: 'Totals use cents', body: 'Make totals use integer cents.\n\n```done_when\n- command: grep -q totalCents src/price.js\n- manual: the dashboard shows cents\n```\n', author: 'example-owner', labels: ['ready'] });

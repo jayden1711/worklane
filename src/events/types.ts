@@ -40,6 +40,8 @@ export const EventSchemas = {
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),
   'change.proposed': z.strictObject({ issue, branch: z.string(), base: sha, head: sha, files: z.array(z.string()), lines: z.number().int().nonnegative(), patch_hash: z.string() }),
   'change.rejected': z.strictObject({ issue, why: z.string() }),
+  /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
+  'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
   'eval.verdict': z.strictObject({
     issue,
