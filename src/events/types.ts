@@ -12,6 +12,8 @@ const CheckRunSchema = z.strictObject({
   exitCode: z.number().nullable(),
   /** The end of a failing check's output: why it failed. */
   tail: z.string().max(2000).optional(),
+  /** How long the check ran (absent for one that didn't run, and in older events). */
+  duration_ms: z.number().int().nonnegative().optional(),
 });
 
 export const EventSchemas = {
@@ -35,6 +37,18 @@ export const EventSchemas = {
     issue,
     role: z.string(),
     reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch']),
+    detail: z.string(),
+  }),
+  /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
+  'run.lock_waited': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), wait_ms: z.number().int().nonnegative() }),
+  /** A run's try failed on a transient error and is retried after `wait_ms`; `cause` is the classified kind. */
+  'run.transient_retry': z.strictObject({
+    issue: issue.nullable(),
+    role: z.string(),
+    model: z.string(),
+    attempt: z.number().int().positive(),
+    cause: z.enum(['token_refresh', 'rate_limit', 'overloaded', 'server_error', 'network', 'other']),
+    wait_ms: z.number().int().nonnegative(),
     detail: z.string(),
   }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),

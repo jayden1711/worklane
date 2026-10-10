@@ -1412,6 +1412,40 @@ test('instruction evals: the spend cap bounds an eval; cut short, the PR waits',
   assert.ok(!t.pr.merged);
 });
 
+// ---- health data
+
+test('every check records how long it ran, at verify and at landing', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const results = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { status: string; duration_ms?: number }[] });
+  const verify = results.find((r) => r.stage === 'verify')!;
+  const land = results.find((r) => r.stage === 'land')!;
+  assert.ok(verify && land, results.map((r) => r.stage).join());
+  for (const ch of [...verify.checks, ...land.checks].filter((x) => x.status !== 'skipped')) assert.ok(Number.isInteger(ch.duration_ms) && ch.duration_ms! > 0, JSON.stringify(ch));
+});
+
+test('waits on the Claude login (a second or more) and transient retries are recorded with the run’s issue and role', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const base = agents();
+  const runner = new FakeRunner(async (req) => {
+    if (req.role === 'worker') {
+      req.onLockWait?.(4_200);
+      req.onTransientRetry?.({ attempt: 1, cause: 'rate_limit', waitMs: 60_000, detail: 'API Error: 429' });
+    } else req.onLockWait?.(12); // too short to record
+    return (await base.run(req)) as never;
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(f.log.read(0, ['run.lock_waited']).map((e) => e.payload), [{ issue: n, role: 'worker', model: 'sonnet', wait_ms: 4200 }]);
+  assert.deepEqual(f.log.read(0, ['run.transient_retry']).map((e) => e.payload), [{ issue: n, role: 'worker', model: 'sonnet', attempt: 1, cause: 'rate_limit', wait_ms: 60000, detail: 'API Error: 429' }]);
+});
+
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
@@ -1600,6 +1634,7 @@ test("the project's own variables reach its agents, its worktree setup and its c
   await c.idle();
   for (const role of ['evaluator-repro', 'worker', 'evaluator-verdict']) assert.deepEqual(runner.calls.find((r) => r.role === role)?.env, { PROJECT_PROBE: 'yes' }, role);
   const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string }[] }).find((p) => p.stage === 'verify')!;
-  assert.deepEqual(verify.checks.find((x) => x.check.includes('PROJECT_PROBE')), { check: 'test "$PROJECT_PROBE" = yes', status: 'pass', exitCode: 0 });
+  const { duration_ms: _ms, ...probe } = verify.checks.find((x) => x.check.includes('PROJECT_PROBE')) as { check: string; duration_ms?: number };
+  assert.deepEqual(probe, { check: 'test "$PROJECT_PROBE" = yes', status: 'pass', exitCode: 0 });
   assert.equal(f.log.read(0, ['coordinator.error']).length, 0, 'worktree setup saw the variable');
 });

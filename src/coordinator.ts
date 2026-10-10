@@ -21,6 +21,7 @@ import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, role
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
+import { runIssue } from './run-record.js';
 import { readiness, requiredOutcomes, type Readiness } from './pr-watch.js';
 import { instructionEvalReasons, mergeDecision, type MergeDecision } from './merge-policy.js';
 import { scanRange } from './scan/secrets.js';
@@ -64,6 +65,8 @@ export interface CoordinatorDeps {
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
+/** A wait on the Claude login shorter than this isn't worth an event. */
+const LOCK_WAIT_RECORDED_MS = 1_000;
 
 /**
  * Run a project command without blocking the event loop: with several agents
@@ -120,7 +123,20 @@ export class Coordinator {
       runner: {
         run: async (req) => {
           if (this.halt.signal.aborted) throw new Halted();
-          const r = await runner.run({ ...req, signal: req.signal ?? this.halt.signal });
+          // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
+          const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
+          const r = await runner.run({
+            ...req,
+            signal: req.signal ?? this.halt.signal,
+            onLockWait: (ms) => {
+              if (ms >= LOCK_WAIT_RECORDED_MS) this.emit('run.lock_waited', { ...who, wait_ms: Math.round(ms) });
+              req.onLockWait?.(ms);
+            },
+            onTransientRetry: (t) => {
+              this.emit('run.transient_retry', { ...who, attempt: t.attempt, cause: t.cause, wait_ms: Math.round(t.waitMs), detail: t.detail.slice(0, 300) });
+              req.onTransientRetry?.(t);
+            },
+          });
           if (this.halt.signal.aborted) throw new Halted();
           return r;
         },
@@ -806,20 +822,26 @@ export class Coordinator {
 
   /** The coordinator's own run of the contract: it never trusts the agent's word. */
   private async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
-    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string }[] = [];
-    const run = async (command: string) => {
+    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number }[] = [];
+    // Each check's wall time, so a project's test times can be followed over time.
+    const timed = async (command: string) => {
+      const t0 = Date.now();
       const r = await this.project(command, path);
+      return { r, duration_ms: Math.max(0, Date.now() - t0) };
+    };
+    const run = async (command: string) => {
+      const { r, duration_ms } = await timed(command);
       const busy = this.d.cfg.tests.stop_gate.busy_patterns.some((p) => new RegExp(p, 'm').test(r.out));
-      checks.push({ check: command, status: busy || r.code === null ? 'unavailable' : r.code === 0 ? 'pass' : 'fail', exitCode: r.code, tail: r.tail });
+      checks.push({ check: command, status: busy || r.code === null ? 'unavailable' : r.code === 0 ? 'pass' : 'fail', exitCode: r.code, tail: r.tail, duration_ms });
     };
     const one = this.d.cfg.tests.runner.one;
     for (const d of doneWhen) {
       if ('command' in d) await run(d.command);
       else if ('suite' in d) {
         const cmd = d.suite === 'full' ? this.d.cfg.tests.runner.full : this.d.cfg.tests.runner.changed;
-        const r = await this.project(cmd, path);
+        const { r, duration_ms } = await timed(cmd);
         const v = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
-        checks.push({ check: `${cmd} (baseline gate)`, status: v.outcome === 'pass' ? 'pass' : r.code === null ? 'unavailable' : 'fail', exitCode: r.code, tail: v.outcome === 'fail' ? `${v.note}${v.newFailures.length ? `: ${v.newFailures.join(', ')}` : ''}\n${r.tail}` : v.note });
+        checks.push({ check: `${cmd} (baseline gate)`, status: v.outcome === 'pass' ? 'pass' : r.code === null ? 'unavailable' : 'fail', exitCode: r.code, tail: v.outcome === 'fail' ? `${v.note}${v.newFailures.length ? `: ${v.newFailures.join(', ')}` : ''}\n${r.tail}` : v.note, duration_ms });
       }
       else if ('test' in d) {
         if (one) await run(one.replaceAll('{file}', d.test));
@@ -1045,8 +1067,10 @@ export class Coordinator {
   }
 
   /** Run the land gates: baseline-aware, a failure retried once (flake), exclusive tiers under the machine-wide lock. */
-  private async runGates(path: string, tiers: string[]): Promise<{ ok: true; notes: string[] } | { ok: false; deferred: boolean; note: string }> {
+  private async runGates(path: string, tiers: string[]): Promise<{ ok: true; notes: string[]; durations: number[] } | { ok: false; deferred: boolean; note: string }> {
     const notes: string[] = [];
+    /** Each tier's passing run, in ms (a flake's retry is the run that counts). */
+    const durations: number[] = [];
     for (const tier of tiers) {
       const { command, exclusive } = this.tierCommand(tier);
       let lock: { release(): void } | null = null;
@@ -1058,19 +1082,23 @@ export class Coordinator {
       try {
         let verdict = null as ReturnType<typeof baselineGate> | null;
         let tail = '';
+        let ms = 0;
         for (let attempt = 1; attempt <= 2; attempt++) {
+          const t0 = Date.now();
           const r = await this.project(command, path);
+          ms = Math.max(0, Date.now() - t0);
           verdict = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
           tail = r.tail;
           if (verdict.outcome === 'pass') break;
         }
         if (verdict!.outcome === 'fail') return { ok: false, deferred: false, note: `${tier}: ${verdict!.note}${verdict!.newFailures.length ? `: ${verdict!.newFailures.join(', ')}` : ''}\n${tail}` };
         notes.push(`${tier}: ${verdict!.note}`);
+        durations.push(ms);
       } finally {
         lock?.release();
       }
     }
-    return { ok: true, notes };
+    return { ok: true, notes, durations };
   }
 
   /**
@@ -1158,7 +1186,7 @@ export class Coordinator {
         for (const q of applied) result(q.issue, 'deferred', null, `push rejected (tip moved): ${push.error.split('\n').pop()}`);
         return;
       }
-      this.emit('check.result', { issue: applied[0]!.issue, head, stage: 'land', checks: gates.notes.map((note) => ({ check: note, status: 'pass' as const, exitCode: 0 })) });
+      this.emit('check.result', { issue: applied[0]!.issue, head, stage: 'land', checks: gates.notes.map((note, i) => ({ check: note, status: 'pass' as const, exitCode: 0, duration_ms: gates.durations[i] ?? 0 })) });
       this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'landed', detail: gates.notes.join('; ') });
       for (const q of applied) result(q.issue, 'landed', head, `landed on ${this.branch} (${gates.notes.join('; ')})`);
       for (const q of applied) await this.afterLand(q.issue, head, ownerOf(q.issue));
