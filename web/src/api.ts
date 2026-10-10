@@ -101,6 +101,32 @@ export interface PrView {
   phase: 'waiting' | 'fixing' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
 }
 
+/** The machine health view (GET /api/health): the OS adapter's snapshot, check times, usage per day, suggestions. */
+export interface HealthView {
+  instance: string | null;
+  machine: {
+    at: string;
+    platform: string;
+    memory: { totalBytes: number; availableBytes: number; swapTotalBytes: number; swapFreeBytes: number } | null;
+    load: [number, number, number] | null;
+    units: ({ unit: string; memoryCurrent: number | null; memoryMax: number | null; memorySwapCurrent: number | null; cpuUsageNSec: number | null; activeState: string | null } | { unit: string; error: string })[] | null;
+    disks: ({ path: string; freeBytes: number; totalBytes: number } | { path: string; error: string })[];
+    unavailable: string[];
+  } | null;
+  cores: number | null;
+  checks: {
+    timings: { check: string; runs: number; series: { at: string; ms: number; status: string }[]; recentMedianMs: number; priorMedianMs: number | null; regression: { slowerPct: number } | null }[];
+    slowest: string[];
+    regressions: string[];
+    rule: string;
+  };
+  usage: {
+    days: { day: string; runs: number; estimatedUsd: number; turns: number; rateLimited: number; authProblems: number; retries: Record<string, number>; retryWaitMs: number; lockWaits: number; lockWaitMs: number }[];
+    quotaNote: string;
+  };
+  suggestions: string[];
+}
+
 export interface PrsView {
   prs: PrView[];
   refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
@@ -280,6 +306,14 @@ export function selectInstance(name: string) {
 async function apiPath(path: string): Promise<string> {
   const inst = await hubInstance;
   return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
+}
+
+/** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
+export async function instanceApi<T>(name: string, path: string): Promise<T> {
+  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { headers: { authorization: `Bearer ${token}` } });
+  const body = (await res.json()) as T & { error?: string };
+  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+  return body;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
