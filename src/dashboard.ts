@@ -177,6 +177,29 @@ export const DEFAULT_WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url)
 /** Whether the web UI is built where the dashboard serves it. */
 export const webUiBuilt = (dir = DEFAULT_WEB_DIR) => existsSync(join(dir, 'index.html'));
 
+/** Whether a request carries this token (?t= or a bearer header), compared in constant time. */
+export function tokenGiven(req: IncomingMessage, url: URL, token: string): boolean {
+  const given = url.searchParams.get('t') ?? (req.headers.authorization ?? '').replace(/^Bearer /, '');
+  const a = Buffer.from(given);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** The built UI; anything unknown falls back to index.html (client-side routes). Never a file outside webDir. */
+export function serveStatic(webDir: string, url: URL, res: ServerResponse): void {
+  const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
+  let file = resolve(webDir, rel);
+  if (!file.startsWith(resolve(webDir) + sep) && file !== resolve(webDir)) return json(res, 403, { error: 'forbidden' });
+  if (!existsSync(file) || !extname(file)) file = join(webDir, 'index.html');
+  if (!existsSync(file)) {
+    res.writeHead(503, { 'content-type': 'text/plain' });
+    res.end('dashboard UI not built: run `npm run build:web` in the engine');
+    return;
+  }
+  res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': extname(file) === '.html' ? 'no-store' : 'max-age=3600' });
+  res.end(readFileSync(file));
+}
+
 export function dashboardToken(stateDir: string): string {
   const f = join(stateDir, 'dashboard-token');
   if (existsSync(f)) return readFileSync(f, 'utf8').trim();
@@ -197,7 +220,7 @@ function readEvents(dbPath: string, after = 0): StoredEvent[] {
   }
 }
 
-function json(res: ServerResponse, status: number, body: unknown) {
+export function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
   res.end(JSON.stringify(body));
 }
@@ -220,12 +243,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const clients = new Set<ServerResponse>();
   let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
 
-  const authed = (req: IncomingMessage, url: URL) => {
-    const given = url.searchParams.get('t') ?? (req.headers.authorization ?? '').replace(/^Bearer /, '');
-    const a = Buffer.from(given);
-    const b = Buffer.from(token);
-    return a.length === b.length && timingSafeEqual(a, b);
-  };
+  const authed = (req: IncomingMessage, url: URL) => tokenGiven(req, url, token);
 
   const state = () => {
     const events = readEvents(opts.eventsDb);
@@ -319,17 +337,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         return json(res, 404, { error: 'not found' });
       }
-      // Static UI; anything unknown falls back to index.html (client-side routes).
-      const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
-      let file = resolve(webDir, rel);
-      if (!file.startsWith(resolve(webDir) + sep) && file !== resolve(webDir)) return json(res, 403, { error: 'forbidden' });
-      if (!existsSync(file) || !extname(file)) file = join(webDir, 'index.html');
-      if (!existsSync(file)) {
-        res.writeHead(503, { 'content-type': 'text/plain' });
-        return res.end('dashboard UI not built: run `npm run build:web` in the engine');
-      }
-      res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': extname(file) === '.html' ? 'no-store' : 'max-age=3600' });
-      res.end(readFileSync(file));
+      serveStatic(webDir, url, res);
     } catch (e) {
       json(res, 500, { error: (e as Error).message });
     }

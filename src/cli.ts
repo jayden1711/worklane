@@ -21,12 +21,13 @@ import { latestBaseline, recordBaseline } from './baseline.js';
 import { runSkillEval, skillStatus } from './skilleval.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
-import { dashboardSite, DEFAULT_WEB_DIR, startDashboard, webUiBuilt } from './dashboard.js';
+import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
+import { HUB_PORT, parseHubArg, startHub } from './dashboard-hub.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
 import { installationTokens } from './github-app.js';
-import { openUrl } from './os/index.js';
+import { openUrl, stateDir } from './os/index.js';
 import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
@@ -72,6 +73,9 @@ usage: ${BRAND.cli} <command> [options]
   dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user)
+  dashboard --hub name=<state dir>[,...] [--port n] [--service]
+                                   one view over several instances' own dashboards; it forwards
+                                   to each, so writes stay with that instance's server and user
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -384,6 +388,20 @@ async function main(argv: string[]): Promise<number> {
     case 'dashboard': {
       // No subcommand here: options start right after the command.
       const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
+      // --service: run under a service manager: no browser, and the token stays in its file, out of the log.
+      const service = flag(opts, '--service');
+      const hubArg = option(opts, '--hub');
+      if (hubArg) {
+        // One view over several instances, each served by its own dashboard as its own user (dashboard-hub.ts).
+        const instances = parseHubArg(hubArg, instancePort);
+        const hubState = join(stateDir(), 'dashboard-hub');
+        const portOpt = option(opts, '--port');
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT });
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  ${service ? `${h.url.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.url}\n(local only)`);
+        if (!service && !flag(opts, '--no-open')) openUrl(h.url);
+        await new Promise(() => {});
+        return 0;
+      }
       const instance = instanceOpt;
       // An instance's log is readable only by its coordinator user: run this as that user.
       const site = dashboardSite(root, instance);
@@ -403,7 +421,7 @@ async function main(argv: string[]): Promise<number> {
       }
       user = user || cfg.project.owners.default;
       const d = await startDashboard({ root: site.root, logs: site.logs, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port });
-      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url}\n(local only; Ctrl+C to stop)`);
+      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
         const bin = desktopBinary();
@@ -415,7 +433,7 @@ async function main(argv: string[]): Promise<number> {
         }
         console.error(`desktop window not built (npm run build:desktop, or set ${BRAND.envPrefix}_DESKTOP); opening the browser instead`);
       }
-      if (!noOpen) openUrl(d.url);
+      if (!noOpen && !service) openUrl(d.url);
       await new Promise(() => {});
       return 0;
     }
