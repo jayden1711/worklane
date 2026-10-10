@@ -3,6 +3,7 @@
 // read-only, and pushes changes over one SSE stream. Its only write is a
 // human answering a decision, recorded as an event like the CLI does, and
 // only by that decision's owner or one of the project's writers.
+import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -12,6 +13,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
+import { redactString } from './events/redact.js';
 import type { StoredEvent } from './events/types.js';
 import { checkResults, inbox, project } from './projection.js';
 import { instancesDir, loadInstance } from './instance.js';
@@ -51,6 +53,10 @@ export interface DashboardOptions {
   port?: number;
   webDir?: string;
   pollMs?: number;
+  /** Where the coordinator's service log is (the Logs page); none when unset. */
+  logs?: LogSource;
+  /** Reads a unit's journal; journalctl as this user when unset. */
+  journalReader?: JournalReader;
   /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
   slotsDir?: string;
 }
@@ -85,9 +91,80 @@ const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number } {
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource } {
   const s = instance ? siteForInstance(loadInstance(instance, dir)) : siteForRoot(root);
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317 };
+  // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
+  const logs = { unit: instance ? `${BRAND.cli}-${instance}.service` : null, file: join(s.stateDir, 'coordinator.log') };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs };
+}
+
+/** Where the coordinator's service output is: its systemd unit's journal and/or the log file a launchd or user service writes. */
+export interface LogSource {
+  unit: string | null;
+  file: string | null;
+}
+
+export interface LogEntry {
+  at: string | null;
+  /** syslog priority (0 emergency .. 7 debug), when the journal gives one. */
+  priority: number | null;
+  message: string;
+}
+
+export interface ServiceLog {
+  source: 'journal' | 'file' | 'none';
+  unit: string | null;
+  entries: LogEntry[];
+  /** Why nothing could be read, and what fixes it. */
+  problem: string | null;
+}
+
+/** Reads a unit's journal as the current user. Injected in tests. */
+export type JournalReader = (unit: string, lines: number) => { status: number | null; stdout: string; stderr: string };
+
+const journalctl: JournalReader = (unit, lines) => {
+  const r = spawnSync('journalctl', ['--unit', unit, '--output', 'json', '--lines', String(lines), '--no-pager', '--quiet'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: `${r.stderr ?? ''}${r.error ? r.error.message : ''}` };
+};
+
+const clip = (s: string) => redactString(s.length > 2000 ? `${s.slice(0, 2000)} …` : s);
+
+/**
+ * The coordinator's service log, read-only, as the dashboard's user (the
+ * instance's coordinator user): its unit's journal, or else its log file.
+ * An unprivileged user reads only journal files it owns: with the journal
+ * kept on disk and split per user (systemd's default), that is exactly its
+ * own service's lines, and no other instance's.
+ */
+export function readServiceLog(src: LogSource, lines = 200, read: JournalReader = journalctl): ServiceLog {
+  let problem: string | null = null;
+  if (src.unit) {
+    const r = read(src.unit, lines);
+    if (r.status === 0) {
+      const entries: LogEntry[] = [];
+      for (const l of r.stdout.split('\n')) {
+        if (!l.trim()) continue;
+        try {
+          const j = JSON.parse(l) as { MESSAGE?: string | number[] | null; PRIORITY?: string; __REALTIME_TIMESTAMP?: string };
+          const msg = typeof j.MESSAGE === 'string' ? j.MESSAGE : Array.isArray(j.MESSAGE) ? Buffer.from(j.MESSAGE).toString('utf8') : '';
+          const us = Number(j.__REALTIME_TIMESTAMP);
+          entries.push({ at: Number.isFinite(us) && us > 0 ? new Date(us / 1000).toISOString() : null, priority: j.PRIORITY !== undefined && /^\d$/.test(j.PRIORITY) ? Number(j.PRIORITY) : null, message: clip(msg) });
+        } catch {
+          // not a journal record
+        }
+      }
+      if (entries.length) return { source: 'journal', unit: src.unit, entries, problem: null };
+      problem = `no lines of ${src.unit} this user can read. Either the service hasn't logged yet, or the journal isn't kept on disk split per user, so the service's own user can't read its lines: run scripts/setup/journal.sh on the machine (as an admin).`;
+    } else {
+      problem = `journalctl couldn't read ${src.unit}: ${(r.stderr || `exit ${r.status}`).trim().split('\n').pop()}`;
+    }
+  }
+  if (src.file && existsSync(src.file)) {
+    const text = readFileSync(src.file, 'utf8');
+    const entries = text.split('\n').filter((l) => l.trim()).slice(-lines).map((message) => ({ at: null, priority: null, message: clip(message) }));
+    return { source: 'file', unit: src.unit, entries, problem: entries.length ? null : problem };
+  }
+  return { source: 'none', unit: src.unit, entries: [], problem: problem ?? 'no service log found: the coordinator runs in the foreground or as a service without a log file' };
 }
 
 /** An instance's dashboard port, the same every time (so a tunnel to it can be set up once): 4400-4899, from its name. */
@@ -186,6 +263,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const issue = url.searchParams.get('issue');
           // One issue's whole history, or the recent tail of everything.
           return json(res, 200, issue ? evs.filter((e) => (e.payload as { issue?: number }).issue === Number(issue)) : evs.slice(-500));
+        }
+        if (url.pathname === '/api/logs' && req.method === 'GET') {
+          const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
+          return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
