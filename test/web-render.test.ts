@@ -23,6 +23,9 @@ interface Render {
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
+  renderInstanceSettings(data: unknown): string;
+  parseEntry(key: string, raw: string): unknown;
+  showValue(key: string, v: unknown): string;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   pages: Record<string, unknown>;
 }
@@ -239,6 +242,48 @@ test('the health panel: suggestions, machine figures, services, check times with
   assert.match(bare, /nothing to do/);
   assert.match(bare, /No timed check runs yet/);
   assert.doesNotMatch(bare, /data-testid="health-instances"/, 'no hub: no instances table');
+});
+
+test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    keys: ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows'],
+    available: true,
+    limits: { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 } },
+    limitsError: null,
+    ceilings: { max_workers: 3, daily_usd: 30 },
+    settings: [
+      { key: 'workers', value: 2, source: 'instance' },
+      { key: 'daily_budget_usd', value: 12, source: 'instance' },
+      { key: 'ci_repair.enabled', value: false, source: 'repo' },
+      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'repo' },
+      { key: 'run_windows', value: [{ from: '22:00', to: '06:00' }], source: 'instance' },
+    ],
+  };
+  const html = r.renderInstanceSettings(data);
+  assert.equal((html.match(/data-testid="setting-row"/g) ?? []).length, 5);
+  assert.match(html, /data-setting="workers"[\s\S]*?data-testid="setting-current"[^>]*>2<[\s\S]*?this instance(&#x27;|')s[\s\S]*?1–3 \(machine 1–4, policy max 3\)/, 'current value, source, bounds (the tighter of machine and policy)');
+  assert.match(html, /up to \$20 \(machine \$20, policy \$30\)/);
+  assert.match(html, /data-setting="run_windows"[\s\S]*?22:00-06:00/);
+  assert.match(html, /the repo(&#x27;|')s default/);
+  assert.equal((html.match(/data-testid="setting-review-button"/g) ?? []).length, 5, 'a review step for each, before anything is written');
+  assert.doesNotMatch(html, /data-testid="setting-confirm"/, 'confirm appears only after Review change');
+  assert.doesNotMatch(html, /data-testid="settings-read-only"/);
+  const theirs = r.renderInstanceSettings({ ...data, user: 'example-collaborator', canChange: false });
+  assert.match(theirs, /data-testid="settings-read-only"[^>]*>Only the owner, @example-owner, can change these; you are @example-collaborator\./);
+  assert.doesNotMatch(theirs, /data-testid="setting-input"|data-testid="setting-review-button"/, 'no inputs for anyone but the owner');
+  assert.match(r.renderInstanceSettings({ ...data, available: false, why: 'settings belong to an instance' }), /settings belong to an instance/);
+  // What's typed becomes a typed value, or says why it can't.
+  assert.deepEqual(r.parseEntry('workers', '3'), { value: 3 });
+  assert.deepEqual(r.parseEntry('workers', '2.5'), { error: 'a whole number' });
+  assert.deepEqual(r.parseEntry('daily_budget_usd', '12.5'), { value: 12.5 });
+  assert.deepEqual(r.parseEntry('ci_repair.enabled', 'on'), { value: true });
+  assert.deepEqual(r.parseEntry('run_windows', '22:00-06:00, 12:00 - 13:00'), { value: [{ from: '22:00', to: '06:00' }, { from: '12:00', to: '13:00' }] });
+  assert.deepEqual(r.parseEntry('run_windows', ''), { value: [] });
+  assert.match(String((r.parseEntry('run_windows', 'night') as { error: string }).error), /isn't HH:MM-HH:MM/);
+  assert.equal(r.showValue('run_windows', []), 'any time');
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {

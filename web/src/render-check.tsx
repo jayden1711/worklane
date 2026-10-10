@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { CheckRun, HealthView, HubInfo, PrsView, State } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { InstanceList, StopBanner } from './App';
+import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
 import { Decisions } from './pages/Decisions';
@@ -47,4 +48,6 @@ export const renderInstances = (hub: HubInfo, current: string) => renderToStatic
 export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsView view={view} />);
 export { probeHub } from './api';
 export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => renderToStaticMarkup(<HealthPanelView view={view} {...(instances ? { instances } : {})} />);
+export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
+export { boundsOf, parseEntry, showValue } from './components/InstanceSettings';
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);

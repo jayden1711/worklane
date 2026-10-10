@@ -5,7 +5,7 @@
 //   node scripts/dev/screenshots.mjs --out <dir> [--engine <checkout with dist/>] [--chrome <path>]
 // The engine checkout must be built (npm run build && npm run build:web).
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -82,6 +82,10 @@ async function serve(args) {
     };
     p.stdout.on('data', on);
     p.stderr.on('data', on);
+    p.on('exit', (code) => {
+      clearTimeout(t);
+      fail(new Error(`the dashboard exited (${code}): ${printed.trim().split('\n').slice(-2).join(' ')}`));
+    });
   });
   return { p, base: url.split('/?')[0], token: url.split('?t=')[1] };
 }
@@ -151,6 +155,27 @@ if (record?.RunRecorder && stateDir) {
   runId = r.id;
 }
 
+// The demo as an instance too, for what only an instance has (its settings): an instance of the
+// demo's checkout in the temporary state dir, its policy within the demo's config, one setting
+// changed by the owner through its server (so Activity shows it). Only where this engine has settings.
+let inst = null;
+if (existsSync(join(engine, 'dist', 'src', 'settings.js'))) {
+  const { userInfo, homedir } = await import('node:os');
+  const init = spawnSync(node, [cli, 'instance', 'init', 'shop', '--repo', root, '--github', 'example-org/example-shop', '--agent-user', userInfo().username], { encoding: 'utf8' });
+  const home = join(process.env.WORKLANE_STATE_DIR, 'instances', 'shop');
+  if (init.status === 0 && existsSync(join(home, 'instance.yaml'))) {
+    const yml = join(home, 'instance.yaml');
+    writeFileSync(yml, readFileSync(yml, 'utf8').replace(/^ {2}agent_home: .*$/m, `  agent_home: ${JSON.stringify(homedir())}`));
+    writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: direct\nsettings:\n  daily_budget_usd: 25\n');
+    try {
+      inst = await serve(['--instance', 'shop', '--user', 'example-owner', '--no-open', '--port', String(port + 2)]);
+      await fetch(`${inst.base}/api/instance-settings`, { method: 'POST', headers: { authorization: `Bearer ${inst.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'workers', value: 3 }) });
+    } catch (e) {
+      console.error(`no instance dashboard (${e.message.split('\n')[0]}); the instance settings shot is skipped`);
+    }
+  } else console.error(`instance init failed: ${(init.stderr || init.stdout).trim().split('\n').pop()}`);
+}
+
 let hub = null;
 if (hubMod && stateDir) {
   hub = await serve(['--hub', `shop=${stateDir}`, '--port', String(port + 1)]);
@@ -173,7 +198,11 @@ const pages = [
   ['settings', '/settings'],
   ...(runId ? [['run-detail', `/runs/${runId}`]] : []),
 ];
-const shots = [...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })), ...(hub ? [{ name: 'hub-overview', url: `${hub.base}/`, token: hub.token }] : [])];
+const shots = [
+  ...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })),
+  ...(hub ? [{ name: 'hub-overview', url: `${hub.base}/`, token: hub.token }] : []),
+  ...(inst ? [{ name: 'instance-settings', url: `${inst.base}/settings`, token: inst.token }, { name: 'instance-activity', url: `${inst.base}/activity`, token: inst.token }] : []),
+];
 
 /** One screenshot. Chrome keeps running while the live stream is open, so it's stopped once the PNG is written. */
 async function shoot(url, file, theme) {
@@ -225,5 +254,6 @@ for (const theme of ['light', 'dark']) {
 }
 main.p.kill();
 hub?.p.kill();
+inst?.p.kill();
 rmSync(work, { recursive: true, force: true, maxRetries: 3 });
 process.exit(failed ? 1 : 0);

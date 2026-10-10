@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { getSettings, useFetch } from '../api';
+import { InstanceSettings } from '../components/InstanceSettings';
 import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
 import { Header } from './Overview';
@@ -35,7 +36,10 @@ export function SettingsPage() {
     );
   return (
     <div data-testid="page-settings">
-      <Header title="Settings" sub={`read-only · change these in ${s.configDir}/ through a reviewed commit`} />
+      <Header title="Settings" sub={`the instance's settings, then the repo's config (read-only: change it in ${s.configDir}/ through a reviewed commit)`} />
+      <div className="px-6 pt-6">
+        <InstanceSettings />
+      </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <Section title="Project">
           <Row k="Name">{s.project.name}</Row>
