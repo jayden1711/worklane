@@ -1,17 +1,43 @@
 // Twice-daily reports, built only from the event log: what landed, what's
 // in review, decisions waiting (with owner), what's blocked and why, spend,
 // and governor holds. Short, no padding.
-import { statSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import type { StoredEvent } from './events/types.js';
+import { failureModes, failureModesMarkdown, type FailureProposal } from './failure-modes.js';
 import { project } from './projection.js';
+import { readRun, RUNS_DIR, type RunRecord } from './run-record.js';
 
 const fmtH = (h: number) => (h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(h < 10 ? 1 : 0)}h`);
 const money = (n: number) => `$${n.toFixed(2)}`;
 
 export interface Report {
   markdown: string;
+  /** Fixes proposed for repeated failures (weekly section only): for the owner to decide on. */
+  proposals: FailureProposal[];
+}
+
+/** Run records that ended at or after `since`, from an instance's state dir (none if unreadable). */
+export function recentRunRecords(stateDir: string, since: Date): RunRecord[] {
+  let files: string[] = [];
+  try {
+    files = readdirSync(join(stateDir, RUNS_DIR)).filter((f) => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const out: RunRecord[] = [];
+  for (const f of files) {
+    const r = readRun(stateDir, f.slice(0, -'.json'.length));
+    if (r && Date.parse(r.endedAt ?? r.startedAt) >= since.getTime()) out.push(r);
+  }
+  return out;
+}
+
+/** The weekly section goes in the first report of each Monday (and every preview, which has no slot). */
+export function weeklyDue(times: string[], slot: string | undefined, now: Date): boolean {
+  return !slot || (slot === [...times].sort()[0] && now.getDay() === 1);
 }
 
 /** A warning line for the coordinator's GitHub token: 7 days before it expires, or always if it never does. */
@@ -41,7 +67,7 @@ export function appKeyWarning(days: number | null): string | null {
   return `**GitHub App key installed ${days} days ago.** Rotate it: generate a new private key in the App's settings, install it with credentials.sh, then delete the old key there.`;
 }
 
-export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: Date; now?: Date; slot?: string; tokenExpiresAt?: string | null; appKeyPath?: string }): Report {
+export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: Date; now?: Date; slot?: string; tokenExpiresAt?: string | null; appKeyPath?: string; runRecords?: RunRecord[]; weekly?: boolean }): Report {
   const now = opts.now ?? new Date();
   const since = opts.since.getTime();
   const after = (e: StoredEvent) => Date.parse(e.ts) > since;
@@ -100,7 +126,15 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   const holds = events.filter((e) => after(e) && e.type === 'governor.hold').map((e) => (e.payload as { reason: string }).reason);
   if (holds.length) lines.push('', `**Machine**: dispatch held ${holds.length} time(s): ${[...new Set(holds)].slice(0, 3).join('; ')}.`);
 
-  return { markdown: lines.join('\n') };
+  // Weekly: how every run ended, the commonest causes, and fixes proposed for any cause seen 3+ times.
+  let proposals: FailureProposal[] = [];
+  if (opts.weekly ?? weeklyDue(cfg.project.reports.times, opts.slot, now)) {
+    const f = failureModes(events, { since: new Date(now.getTime() - 7 * 86_400_000), until: now, records: opts.runRecords ?? [] });
+    proposals = f.proposals;
+    lines.push('', ...failureModesMarkdown(f));
+  }
+
+  return { markdown: lines.join('\n'), proposals };
 }
 
 /** The report slot due now (latest configured time already passed today), or null. */
