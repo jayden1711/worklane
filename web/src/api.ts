@@ -82,6 +82,13 @@ export interface State {
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  /** The machine-wide emergency stop, read-only: in force now, and whether this coordinator has halted for it. */
+  emergency: {
+    inForce: { by: string; at: string; reason: string } | null;
+    halted: { at: string; running: number } | null;
+    lastStop: { at: string; by: string; reason: string; running: number } | null;
+    lastResume: string | null;
+  };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
 }
 

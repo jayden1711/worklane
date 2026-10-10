@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Bot, GitMerge, Gauge, History, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { useLiveState, type State } from './api';
-import { Kbd, cx } from './components/ui';
+import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
 import { InboxPage } from './pages/Inbox';
 import { Decisions } from './pages/Decisions';
@@ -264,8 +264,28 @@ export function App() {
           </button>
         </div>
       </aside>
-      <main className="min-w-0 flex-1 overflow-y-auto">{page}</main>
+      <main className="min-w-0 flex-1 overflow-y-auto">
+        {state && <StopBanner state={state} />}
+        {page}
+      </main>
       <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
+    </div>
+  );
+}
+
+/** Read-only: an emergency stop in force on this machine, shown on every page. It is lifted on the machine itself. */
+function StopBanner({ state }: { state: State }) {
+  const e = state.emergency;
+  if (!e?.inForce) return null;
+  return (
+    <div role="alert" className="border-b border-danger/40 bg-danger/10 px-6 py-2.5 text-sm" data-emergency-stop>
+      <span className="font-semibold text-danger">Emergency stop in force</span>
+      <span className="text-muted-foreground">
+        {' '}
+        since {e.inForce.at ? ago(e.inForce.at) : 'an unknown time'}, by {e.inForce.by}: {e.inForce.reason}.{' '}
+        {e.halted ? `This coordinator halted ${e.halted.running} running agent(s) ${ago(e.halted.at)} and starts none.` : "This coordinator hasn't confirmed it yet."} Agents on this
+        machine stay stopped until it's lifted on the machine with <code className="rounded bg-muted px-1 font-mono text-xs">{state.brand.cli} resume-all</code>.
+      </span>
     </div>
   );
 }

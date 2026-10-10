@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { request } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config/load.js';
-import { mayAnswer, settingsView, startDashboard } from '../src/dashboard.js';
+import { mayAnswer, settingsView, startDashboard, stopStatus } from '../src/dashboard.js';
+import { emergencyStop, resumeAll, stopAll } from '../src/slots.js';
 import { EventLog } from '../src/events/log.js';
 import { inbox, project } from '../src/projection.js';
 import { exampleProject } from './helpers.js';
@@ -119,7 +120,7 @@ test('settings show choices, never commands, fingerprints or deploy details', ()
   assert.match(shown, /"landMode"/);
 });
 
-async function server(withWeb = true, user = 'example-owner') {
+async function server(withWeb = true, user = 'example-owner', slotsDir?: string) {
   const { dir, log, db } = logWith();
   const { dir: root } = exampleProject();
   const web = join(dir, 'web');
@@ -127,7 +128,7 @@ async function server(withWeb = true, user = 'example-owner') {
     mkdirSync(web);
     writeFileSync(join(web, 'index.html'), '<!doctype html><title>ok</title>');
   }
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: join(dir, 'state'), user, webDir: web, pollMs: 50 });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: join(dir, 'state'), user, webDir: web, pollMs: 50, slotsDir: slotsDir ?? join(dir, 'slots') });
   const base = d.url.split('/?')[0]!;
   return { d, log, base, h: { authorization: `Bearer ${d.token}` } };
 }
@@ -307,4 +308,44 @@ test('an issue\'s check results, newest first, with each failure\'s output; serv
   } finally {
     await s.d.close();
   }
+});
+
+test('the emergency stop shows read-only: in force now, and whether this coordinator halted for it', async () => {
+  const slots = mkdtempSync(join(tmpdir(), 'dash-slots-'));
+  const s = await server(true, 'example-owner', slots);
+  type E = { inForce: { by: string; reason: string } | null; halted: { running: number } | null; lastStop: unknown; lastResume: string | null };
+  const emergency = async () => ((await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { emergency: E }).emergency;
+  try {
+    assert.deepEqual(await emergency(), { inForce: null, halted: null, lastStop: null, lastResume: null });
+    stopAll('ops@box', 'runaway spend', slots);
+    let e = await emergency();
+    assert.equal(e.inForce?.reason, 'runaway spend');
+    assert.equal(e.halted, null, 'not confirmed by this coordinator yet');
+    s.log.append('emergency.stop', { by: 'ops@box', reason: 'runaway spend', running: 2 }, 'c');
+    e = await emergency();
+    assert.equal(e.halted?.running, 2, 'this coordinator halted 2 runs');
+    resumeAll(slots);
+    s.log.append('emergency.resume', { instance: 'shop' }, 'c');
+    e = await emergency();
+    assert.equal(e.inForce, null);
+    assert.equal(e.halted, null);
+    assert.ok(e.lastResume);
+    // Read-only: there is no way to stop (or resume) from the dashboard.
+    for (const p of ['/api/stop', '/api/stop-all', '/api/resume', '/api/emergency']) {
+      assert.equal((await fetch(`${s.base}${p}`, { method: 'POST', headers: s.h, body: '{}' })).status, 404, p);
+    }
+    assert.equal(emergencyStop(slots), null, 'nothing the dashboard did started a stop');
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('a halt recorded before the current stop, or resumed since, is not this stop\'s confirmation', () => {
+  const now = { by: 'ops', at: '2026-01-02T10:00:00.000Z', reason: 'r' };
+  const earlier = { at: '2026-01-01T10:00:00.000Z', by: 'ops', reason: 'old', running: 1 };
+  assert.equal(stopStatus(now, { lastStop: earlier, lastResume: null }).halted, null, 'an older stop');
+  const after = { ...earlier, at: '2026-01-02T10:00:05.000Z' };
+  assert.deepEqual(stopStatus(now, { lastStop: after, lastResume: null }).halted, { at: after.at, running: 1 });
+  assert.equal(stopStatus(now, { lastStop: after, lastResume: '2026-01-02T10:01:00.000Z' }).halted, null, 'resumed since');
+  assert.equal(stopStatus(null, { lastStop: after, lastResume: null }).halted, null, 'nothing in force');
 });

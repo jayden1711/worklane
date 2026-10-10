@@ -86,6 +86,8 @@ export interface Projection {
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  /** This coordinator's own record of emergency stops: the last time it halted for one, and the last time it resumed. */
+  emergency: { lastStop: { at: string; by: string; reason: string; running: number } | null; lastResume: string | null };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
 }
 
@@ -187,6 +189,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
   const queue = new Map<number, Projection['landQueue'][number]>();
   const batches = new Map<string, Projection['batches'][number]>();
   let governor: Projection['governor'] = null;
+  const emergency: Projection['emergency'] = { lastStop: null, lastResume: null };
   const reports: Projection['reports'] = [];
 
   const task = (n: number, ts: string): Task => {
@@ -387,6 +390,12 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       case 'governor.release':
         governor = { held: false, reason: null, load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts };
         break;
+      case 'emergency.stop':
+        emergency.lastStop = { at: e.ts, by: String(p.by), reason: String(p.reason), running: Number(p.running) };
+        break;
+      case 'emergency.resume':
+        emergency.lastResume = e.ts;
+        break;
       case 'report.posted':
         reports.push({ day: String(p.day), slot: String(p.slot), issue: (p.issue as number | null) ?? null, at: e.ts });
         break;
@@ -415,6 +424,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
     landQueue: [...queue.values()].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt)),
     batches: [...batches.values()].slice(-30).reverse(),
     governor,
+    emergency,
     reports: reports.slice(-30).reverse(),
   };
 }
