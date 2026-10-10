@@ -12,6 +12,7 @@ import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator, logTail } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
+import type { StoredEvent } from '../src/events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
@@ -669,6 +670,47 @@ test('reports post once per slot to one report issue', { skip }, async () => {
   comments = await f.backlog.comments(reports[0]!.number);
   assert.equal(comments.length, 2, 'evening slot posts to the same issue');
 
+});
+
+test('the weekly report links run records and puts a fix for a repeated failure in the owner\'s Inbox, once', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.reports = { times: ['08:00', '18:00'], to: ['example-owner'] };
+  // Three worker runs that ended within seconds with nothing committed, on Monday morning after the 08:00 slot.
+  const t = (m: number, s: number) => new Date(2026, 9, 5, 8, m, s).toISOString();
+  let id = 0;
+  const ev = (ts: string, type: string, payload: object) => ({ id: --id, ts, type, actor: 'c', source: 'coordinator', payload }) as unknown as StoredEvent;
+  const history: StoredEvent[] = [];
+  mkdirSync(join(f.stateDir, 'runs'), { recursive: true });
+  for (const [i, m] of [30, 31, 32].entries()) {
+    history.push(ev(t(m, 0), 'run.started', { issue: 7, role: 'worker', model: 'm', worktree: 'w', pid: 1, pgid: 1, attempt: i + 1 }));
+    history.push(ev(t(m, 8), 'run.finished', { issue: 7, role: 'worker', reason: 'failed', detail: 'error_during_execution: ' }));
+    history.push(ev(t(m, 9), 'change.rejected', { issue: 7, why: 'no changes committed' }));
+    writeFileSync(join(f.stateDir, 'runs', `run-${i + 1}.json`), JSON.stringify({ v: 1, id: `run-${i + 1}`, issue: 7, role: 'worker', model: 'm', startedAt: t(m, 0), endedAt: t(m, 8), reason: 'failed', costUsd: 0, turns: 0, steps: [], files: [], otherTools: 0, final: '', truncated: false }));
+  }
+  history.push(ev(t(33, 0), 'issue.blocked', { issue: 7, owner: 'example-owner', why: 'no passing change after 3 attempts' }));
+  class WithHistory extends EventLog {
+    override read(afterId = 0, types?: Parameters<EventLog['read']>[1]) {
+      return [...history.filter((e) => !types || types.includes(e.type)), ...super.read(afterId, types)];
+    }
+  }
+  const log = new WithHistory(f.log.path);
+  const c = new Coordinator({ cfg: f.cfg, log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.maybeReport(new Date(2026, 9, 5, 9, 0)); // Monday, the first slot: the weekly section is due
+  const asked = () => log.read(0, ['decision.asked']).map((e) => e.payload as { owner: string; issue: number | null; question: string; options: string[]; recommendation: string; receipts: string[] });
+  assert.equal(asked().length, 1);
+  const d = asked()[0]!;
+  assert.equal(d.owner, f.cfg.project.owners.default);
+  assert.equal(d.issue, null, 'an Inbox decision, not tied to an issue');
+  assert.match(d.question, /^Repeated failure \(3 runs this week, startup failure\)/);
+  assert.deepEqual(d.options, ['make it impossible', 'test or lint', 'written rule', 'leave it']);
+  assert.equal(d.recommendation, 'make it impossible');
+  assert.ok(d.receipts[0]!.startsWith('key: failure-mode:startup failure:'));
+  assert.ok(d.receipts.some((r) => r.includes('/runs/run-1')), 'examples link their run records');
+  const report = (await f.backlog.comments((await f.backlog.list('report'))[0]!.number))[0]!.body;
+  assert.match(report, /\[#7 worker attempt 1 \(8s\)\]\(\/runs\/run-1\)/);
+  // A week later the same runs are still in the window: the report lists them, but the decision isn't asked again.
+  await c.maybeReport(new Date(2026, 9, 12, 8, 10));
+  assert.equal(asked().length, 1);
 });
 
 test('acceptance: two instances, each set to 4 workers, never run more than the shared cap together', { skip }, async () => {

@@ -26,7 +26,7 @@ import { instructionEvalReasons, mergeDecision, type MergeDecision } from './mer
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
-import { buildReport, dueSlot } from './reports.js';
+import { buildReport, dueSlot, recentRunRecords } from './reports.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -276,7 +276,15 @@ export class Coordinator {
     if (posted.some((e) => (e.payload as { day: string; slot: string }).day === day && (e.payload as { slot: string }).slot === slot)) return;
     const last = posted.at(-1);
     const since = last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000);
-    const report = buildReport(this.d.log.read(), this.d.cfg, { since, now, slot, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}), ...(this.d.appKeyPath ? { appKeyPath: this.d.appKeyPath } : {}) });
+    const events = this.d.log.read();
+    const runRecords = recentRunRecords(this.d.stateDir, new Date(now.getTime() - 7 * 86_400_000));
+    const report = buildReport(events, this.d.cfg, { since, now, slot, runRecords, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}), ...(this.d.appKeyPath ? { appKeyPath: this.d.appKeyPath } : {}) });
+    // A fix proposed for a repeated failure goes to the owner's Inbox once; it changes nothing until answered.
+    const asked = new Set(events.filter((e) => e.type === 'decision.asked').flatMap((e) => (e.payload as { receipts: string[] }).receipts));
+    for (const p of report.proposals) {
+      if (asked.has(`key: ${p.key}`)) continue;
+      await this.ask('question', null, this.d.cfg.project.owners.default, p.question, p.options, p.recommendation, [`key: ${p.key}`, ...p.receipts]);
+    }
     const to = this.d.cfg.project.reports.to.length ? this.d.cfg.project.reports.to : [this.d.cfg.project.owners.default];
     const mention = to.map((u) => `@${u}`).join(' ');
     let issue = (await this.d.backlog.list('report'))[0]?.number ?? null;
