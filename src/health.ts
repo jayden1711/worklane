@@ -60,11 +60,12 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
 };
 
-/** Each check's run times (check.result's duration_ms, recorded when it ran), oldest first, with the slowest and the ones that got slower. */
+/** Each check's run times (verify-stage check.result duration_ms, recorded when it ran), oldest first, with the slowest and the ones that got slower. */
 export function checkTimings(events: StoredEvent[], keep = 30): HealthView['checks'] {
   const by = new Map<string, { at: string; ms: number; status: string }[]>();
   for (const e of events) {
-    if (e.type !== 'check.result') continue;
+    // Verify-stage checks are the project's commands, the same each run; a landing's entries are notes about one batch.
+    if (e.type !== 'check.result' || (e.payload as { stage?: string }).stage !== 'verify') continue;
     for (const c of (e.payload as { checks: { check: string; status: string; duration_ms?: number }[] }).checks) {
       if (c.duration_ms === undefined) continue; // not run (skipped, busy) or recorded before durations were
       by.set(c.check, [...(by.get(c.check) ?? []), { at: e.ts, ms: c.duration_ms, status: c.status }]);

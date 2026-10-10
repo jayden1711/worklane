@@ -25,8 +25,11 @@ test('check times: the slowest first, and a check that got slower is flagged by 
   for (let i = 0; i < 5; i++) events.push(result(day(2, i), [['full suite', 90_000], ['lint', 1_600], ['unit', 10_500]]));
   // A check with too little history isn't judged; one that didn't run has no duration and isn't timed.
   for (let i = 0; i < 6; i++) events.push(result(day(3, i), [['new check', 5_000 + i * 10_000], ['unit', null, 'skipped']]));
+  // A landing's entries are notes about one batch (they name its commit), not commands that repeat: not timed.
+  events.push(ev('check.result', day(4), { issue: 1, head: 'a'.repeat(40), stage: 'land', checks: [{ check: 'changed: no new failures (1234abcd)', status: 'pass', exitCode: 0, duration_ms: 400 }] }));
   const t = checkTimings(events);
   const by = Object.fromEntries(t.timings.map((x) => [x.check, x]));
+  assert.ok(!t.timings.some((x) => x.check.startsWith('changed:')), 'land-stage entries are not timed');
   assert.deepEqual(t.regressions, ['full suite'], '+50% and 30 s slower; lint is +60% but under the 2 s floor; new check has no history');
   assert.deepEqual(by['full suite']!.regression, { slowerPct: 50 });
   assert.equal(by['full suite']!.recentMedianMs, 90_000);
