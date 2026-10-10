@@ -38,17 +38,22 @@ function codeRoutes(src: string): string[] {
 
 /** Sidebar rows: { to, label, chord } from the NAV list. */
 function navRows(src: string) {
-  return [...src.matchAll(/\{ to: '([^']+)', label: '([^']+)', icon: \w+, chord: '([^']+)' \}/g)].map((m) => ({ to: m[1]!, label: m[2]!, chord: m[3]! }));
+  return [...src.matchAll(/\{ to: '([^']+)', label: '([^']+)', icon: \w+, chord: '([^']+)'[^}]*\}/g)].map((m) => ({ to: m[1]!, label: m[2]!, chord: m[3]! }));
 }
 
 function files(dir: string): string[] {
   return readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : /\.tsx?$/.test(f) ? [join(dir, f)] : []));
 }
 
-/** Every test id the UI sets: data-testid="x", or a `testid` prop ("x" or the fixed prefix of a template). */
+/**
+ * Every test id the UI sets: data-testid="x", the components' testId / dataTestId props, and testId fields
+ * in lists like NAV. A template's fixed prefix ("pr-" of `pr-${n}`) is not an id of its own.
+ */
 function codeTestIds(): string[] {
   const ids = new Set<string>();
-  for (const f of files(web)) for (const m of readFileSync(f, 'utf8').matchAll(/\b(?:data-testid|testid)=\{?["'`]([^"'`$]+)/g)) ids.add(m[1]!);
+  for (const f of files(web)) {
+    for (const m of readFileSync(f, 'utf8').matchAll(/\b(?:data-testid|dataTestId|testid|testId)(?:=\{?|:\s*)["'`]([^"'`$]+)/g)) if (!m[1]!.endsWith('-')) ids.add(m[1]!);
+  }
   return [...ids];
 }
 
@@ -68,7 +73,10 @@ test('every page file is in the feature map, and every mapped file exists', () =
 
 test('the sidebar rows and their g shortcuts match the feature map', () => {
   const nav = navRows(app);
+  // Every row of the NAV list was read: a row in a shape the reader doesn't know would otherwise be skipped.
+  const listed = app.slice(app.indexOf('const NAV'), app.indexOf('];', app.indexOf('const NAV'))).match(/\{ to: '/g) ?? [];
   assert.ok(nav.length >= 10, 'the NAV list was found');
+  assert.equal(nav.length, listed.length, 'every NAV row was read');
   for (const n of nav) {
     const p = map.pages.find((x) => x.route === n.to);
     assert.ok(p, `sidebar row ${n.label} (${n.to}) is not a mapped page`);

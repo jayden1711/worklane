@@ -22,6 +22,7 @@ number, `<id>` a run id.
 | `issues` | `/issues` | `web/src/pages/Issues.tsx` | Issues | `g s` | `Issues` |
 | `issue-detail` | `/issues/<n>` | `web/src/pages/IssueDetail.tsx` | – | `Enter` on an issue row | `#<n>` |
 | `land` | `/land` | `web/src/pages/Landing.tsx` | Land queue | `g l` | `Land queue` |
+| `prs` | `/prs` | `web/src/pages/PullRequests.tsx` | Pull requests | `g p` | `Pull requests` |
 | `agents` | `/agents` | `web/src/pages/Agents.tsx` | Agents | `g a` | `Agents` |
 | `activity` | `/activity` | `web/src/pages/Activity.tsx` | Activity | `g e` | `Activity` |
 | `deploys` | `/deploys` | `web/src/pages/Deploys.tsx` | Deploys | `g y` | `Deploys` |
@@ -37,6 +38,7 @@ Any other path shows Overview.
 | Feature | Where | How a person reaches it | Keys | Selector |
 |---|---|---|---|---|
 | Sidebar navigation | every page | the left column; the current page is highlighted | `g` then the page's key (table above) | `aside nav a[href="<route>"]` |
+| Pull requests row | every page | its sidebar row, with a count of PRs waiting for you | `g p` | `[data-testid="nav-prs"]` |
 | Command menu | every page | the sidebar's Search field | `⌘K` / `Ctrl+K` | `[cmdk-root]` |
 | Theme toggle | every page | sun/moon button at the bottom of the sidebar | – | `button[aria-label="Toggle theme"]` |
 | Live indicator | every page | dot and event count at the bottom of the sidebar | – | `aside` footer text `Live` |
@@ -52,3 +54,14 @@ Any other path shows Overview.
 | Checks run by the coordinator | `issue-detail` | the checks card, newest run first | – | checks card |
 | Agent runs of an issue | `issue-detail` | the runs card; a row opens `run-detail` | – | runs card rows |
 | Next report preview | `reports` | the preview card | – | preview card |
+| Pull requests page | `prs` | the page itself | – | `[data-testid="prs-page"]` |
+| Auto-merge state | `prs` | the card at the top: on or off, why, the kill switch and the repo's setting | – | `[data-testid="prs-auto-merge"]`, `[data-testid="prs-auto-merge-state"]`, `[data-testid="prs-auto-merge-why"]` |
+| Last auto-merge stop and its revert | `prs` | the auto-merge card's last line, after a stop | – | `[data-testid="prs-revert-link"]` |
+| PRs waiting for you | `prs` | the "Waiting for you" section: one card per PR | – | `[data-testid="prs-waiting"]`, `[data-testid="pr-wait-card"]` |
+| Why a PR waits | `prs` | the reasons on a waiting card | – | `[data-testid="pr-wait-reasons"]` |
+| A PR's links | `prs` | the PR number, its issue, and Review on GitHub | – | `[data-testid="pr-link"]`, `[data-testid="pr-issue-link"]`, `[data-testid="pr-review-link"]` |
+| A PR's checks and fix runs | `prs` | the check pills and the fix-run count on a card or row | – | `[data-testid="pr-checks"]`, `[data-testid="pr-fixes"]` |
+| PRs in progress | `prs` | the "In progress" list; a row expands | – | `[data-testid="prs-in-progress"]`, `[data-testid="pr-row"]`, `[data-testid="pr-github-link"]` |
+| Auto-merged PRs | `prs` | the "Auto-merged" table: merge commit, main afterwards, why it merged | – | `[data-testid="prs-auto-merged"]`, `[data-testid="prs-auto-merged-table"]`, `[data-testid="pr-merged-row"]`, `[data-testid="pr-merge-commit-link"]`, `[data-testid="pr-merge-reasons"]` |
+| Closed without merging | `prs` | the "Closed" list | – | `[data-testid="prs-closed"]` |
+| Refused pushes | `prs` | the "Pushes the harness refused" table | – | `[data-testid="prs-refused"]`, `[data-testid="prs-refused-table"]`, `[data-testid="refused-row"]`, `[data-testid="refused-issue-link"]` |
