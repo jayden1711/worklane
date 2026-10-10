@@ -3,3 +3,6 @@ daily_budget_usd: 40        # usage guard on estimated cost, whichever runtime i
 roles:
   workers:   { enabled: true, count: 1, max: 4, model: sonnet, hard_issues_model: opus }
   evaluator: { enabled: true, model: opus }
+  # PR mode: when a required check fails on a PR the harness opened, a fix run on that branch
+  # (with the failing job's log; needs the App's Actions: read). Off: the owner is asked instead.
+  ci_repair: { enabled: false, model: sonnet, max_fixes_per_pr: 2 }

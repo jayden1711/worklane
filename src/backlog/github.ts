@@ -30,7 +30,8 @@ export class GitHubBacklog implements Backlog {
     private api = 'https://api.github.com',
   ) {}
 
-  private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /** `raw`: the response body as text (a log), not JSON. */
+  private async req<T>(method: string, path: string, body?: unknown, raw = false): Promise<T> {
     const res = await this.fetchImpl(`${this.api}${path}`, {
       method,
       headers: {
@@ -43,7 +44,14 @@ export class GitHubBacklog implements Backlog {
     });
     if (res.status === 204) return undefined as T;
     const text = await res.text();
-    const json = text ? (JSON.parse(text) as unknown) : undefined;
+    if (raw && res.ok) return text as T;
+    let json: unknown;
+    try {
+      json = text ? (JSON.parse(text) as unknown) : undefined;
+    } catch {
+      if (res.ok) throw new GitHubError(res.status, 'bad_response', `not JSON: ${text.slice(0, 200)}`);
+      json = text;
+    }
     if (!res.ok) {
       const c = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), json);
       // A validation failure says why in errors[] ("Validation Failed" alone says nothing).
@@ -155,6 +163,21 @@ export class GitHubBacklog implements Backlog {
       out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}) });
     }
     return out;
+  }
+
+  async requestReview(n: number, logins: string[]) {
+    await this.req('POST', `/repos/${this.repo}/pulls/${n}/requested_reviewers`, { reviewers: logins });
+  }
+
+  async jobLog(id: number): Promise<{ ok: true; text: string } | { ok: false; why: 'forbidden' | 'not_found' }> {
+    // GitHub answers with a redirect to the log file; fetch follows it (and drops the token on the way).
+    try {
+      return { ok: true, text: await this.req<string>('GET', `/repos/${this.repo}/actions/jobs/${id}/logs`, undefined, true) };
+    } catch (e) {
+      if (e instanceof GitHubError && e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited') return { ok: false, why: 'forbidden' };
+      if (e instanceof GitHubError && (e.status === 404 || e.status === 410)) return { ok: false, why: 'not_found' };
+      throw e;
+    }
   }
 
   async markReady(n: number) {

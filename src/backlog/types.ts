@@ -36,6 +36,13 @@ export interface Backlog {
   checks(sha: string): Promise<CommitCheck[]>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
+  /** Ask these people to review a PR (GitHub notifies them). */
+  requestReview(n: number, logins: string[]): Promise<void>;
+  /**
+   * The log of a check run's job (an Actions job: its id is the check run's). `forbidden`: the credential can't
+   * read Actions logs; `not_found`: there is no such log (not an Actions job, or expired).
+   */
+  jobLog(id: number): Promise<{ ok: true; text: string } | { ok: false; why: 'forbidden' | 'not_found' }>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
 }
 
@@ -71,6 +78,7 @@ export const LABELS = [
   { name: 'money-path', color: '5319e7', description: 'Touches money-path code: extra verification' },
   { name: 'blocked', color: '000000', description: 'Cannot proceed; see the latest comment' },
   { name: 'merge-ready', color: '0e8a16', description: 'Required checks passed on the commit the evaluator approved' },
+  { name: 'ci-failing', color: 'b60205', description: 'A required check fails and CI fix runs stopped; see the latest comment' },
   { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
   { name: 'report', color: 'bfdadc', description: 'Scheduled reports are posted here' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },

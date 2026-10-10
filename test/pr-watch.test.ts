@@ -122,3 +122,19 @@ test('GitHub pullRequest: merged, closed and open states, head branch and sha', 
   assert.equal((await g({ state: 'closed', merged: true })).state, 'merged');
   assert.equal((await g({ state: 'closed', merged: false })).state, 'closed');
 });
+
+test('GitHub jobLog: the log text; 403 is no Actions: read permission, 404 no log, a rate limit is an error to retry', async () => {
+  const log = (status: number, body: string, headers: Record<string, string> = {}) =>
+    new GitHubBacklog('o/r', () => 't', (async () => new Response(body, { status, headers })) as typeof fetch).jobLog(11);
+  assert.deepEqual(await log(200, '2026-01-01T00:00:00Z FAILED x\n'), { ok: true, text: '2026-01-01T00:00:00Z FAILED x\n' });
+  assert.deepEqual(await log(403, JSON.stringify({ message: 'Resource not accessible by integration' })), { ok: false, why: 'forbidden' });
+  assert.deepEqual(await log(404, JSON.stringify({ message: 'Not Found' })), { ok: false, why: 'not_found' });
+  assert.deepEqual(await log(410, 'gone'), { ok: false, why: 'not_found' });
+  await assert.rejects(log(403, JSON.stringify({ message: 'API rate limit exceeded' }), { 'x-ratelimit-remaining': '0' }));
+});
+
+test('GitHub requestReview: the reviewers on the PR', async () => {
+  const g = github({ 'POST /repos/o/r/pulls/9/requested_reviewers': () => ({ status: 201, body: {} }) });
+  await g.b.requestReview(9, ['owner-a']);
+  assert.deepEqual(g.calls.map((c) => [c.method, c.path, c.body]), [['POST', '/repos/o/r/pulls/9/requested_reviewers', { reviewers: ['owner-a'] }]]);
+});

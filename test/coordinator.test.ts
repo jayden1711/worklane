@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import { BRAND } from '../src/brand.js';
-import { claimRef } from '../src/claims.js';
+import { claim, claimRef } from '../src/claims.js';
 import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
-import { Coordinator } from '../src/coordinator.js';
+import { Coordinator, logTail } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
@@ -807,6 +807,207 @@ test('PR watch: polls each PR at most once per interval', { skip }, async () => 
   await c.tick();
   await c.tick();
   assert.equal(polls, 1);
+});
+
+// ---- CI fix runs
+
+/** The latest event of a type; a clear failure (not a TypeError) when there is none. */
+function lastOf(log: EventLog, type: Parameters<EventLog['read']>[1] extends (infer U)[] | undefined ? U : never): unknown {
+  const e = log.read(0, [type]).at(-1);
+  assert.ok(e, `no ${type} event (got: ${[...new Set(log.read().map((x) => x.type))].join(', ')})`);
+  return e.payload;
+}
+
+const failing = (id: number) => [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'failure', id }];
+const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
+
+/** PR mode with one required check and fix runs on; runs the task until its PR is open. */
+async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean } = {}) {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  if (opts.fixes !== false) f.cfg.agents.roles.ci_repair = { enabled: true, model: 'sonnet', max_fixes_per_pr: 2 };
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const runner = agents(over);
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0 });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const opened = f.log.read(0, ['pr.opened']).at(-1)!.payload as { number: number; head: string };
+  const remoteHead = () => git(f.repo, 'ls-remote', 'origin', `refs/heads/${BRAND.cli}/issue-${n}`).split('\t')[0]!;
+  const pr = () => f.backlog.prs().find((p) => p.number === opened.number)!;
+  /** What GitHub would do after a push: the PR's head follows the branch. */
+  const sync = () => f.backlog.setPr(opened.number, { headSha: remoteHead() });
+  return { f, n, c, runner, opened, remoteHead, pr, sync };
+}
+
+/** A fix-run worker that commits a small real change and says what it did. */
+const fixer = (req: RunRequest) => {
+  if (!/CI fix run/.test(req.prompt)) return null;
+  const p = join(req.cwd, 'src', 'price.js');
+  writeFileSync(p, `${readFileSync(p, 'utf8')}// checked by CI fix\n`);
+  commitAll(req.cwd, 'Fix the CI failure');
+  return { summary: 'fixed the failing check' };
+};
+
+/** The default worker for the first run, the fixer for fix runs. */
+function workerWith(fix: (req: RunRequest) => object | null) {
+  return (req: RunRequest) => {
+    const out = fix(req);
+    if (out) return out;
+    const p = join(req.cwd, 'src', 'price.js');
+    writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+    commitAll(req.cwd, 'Ignore non-positive quantities in totals');
+    return { summary: 'fixed' };
+  };
+}
+
+test('CI fix run: a failed required check gets a fix on the same branch, with the job log; re-verified and re-evaluated; never merged', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(fixer) });
+  t.f.backlog.setChecks(t.opened.head, failing(11));
+  t.f.backlog.setJobLog(11, '2026-10-10T07:44:38.786Z FAILED test/price.test.js - expected 5, got 3\n');
+  await t.c.tick();
+  await t.c.idle();
+  const fixPrompt = t.runner.calls.find((r) => /CI fix run 1/.test(r.prompt))?.prompt ?? '';
+  assert.ok(fixPrompt, 'a CI fix run started');
+  assert.match(fixPrompt, /FAILED test\/price\.test\.js - expected 5, got 3/, 'the brief carries the log');
+  assert.doesNotMatch(fixPrompt, /2026-10-10T07:44/, 'without the runner timestamps');
+  const started = t.f.log.read(0, ['ci_fix.started']).map((e) => e.payload as { head: string; checks: string[]; attempt: number });
+  assert.deepEqual(started.map((s) => [s.head, s.checks, s.attempt]), [[t.opened.head, ['ci'], 1]]);
+  const done = lastOf(t.f.log, 'ci_fix.finished') as { outcome: string; head: string };
+  assert.equal(done.outcome, 'pushed');
+  assert.equal(t.remoteHead(), done.head, 'pushed to the PR branch');
+  assert.equal(git(t.f.repo, 'merge-base', '--is-ancestor', t.opened.head, done.head), '', 'added commits, history kept');
+  const verdicts = t.f.log.read(0, ['eval.verdict']).map((e) => (e.payload as { head: string }).head);
+  assert.ok(verdicts.includes(done.head), 'the evaluator judged the fixed head');
+  assert.ok(t.f.log.read(0, ['check.result']).some((e) => (e.payload as { head: string }).head === done.head), 'the coordinator re-ran its checks on it');
+  assert.ok(t.pr().comments.some((x) => /CI fix run 1 pushed/.test(x.body)));
+  assert.equal(git(t.f.repo, 'ls-remote', 'origin', claimRef(t.n)), '', 'claim released');
+  // GitHub moves the PR head; CI passes on the fix: ready, and still nothing merged.
+  t.sync();
+  t.f.backlog.setChecks(done.head, passing);
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['pr.ready']).length, 1);
+  assert.equal(t.pr().merged, false);
+  assert.equal(t.f.log.read(0, ['ci_fix.gave_up']).length, 0);
+});
+
+test('CI fix runs stop at max_fixes_per_pr, then ask the owner: comment, ci-failing label, review request', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(fixer) });
+  for (let i = 0; i < 3; i++) {
+    t.f.backlog.setChecks(t.pr().headSha, failing(20 + i));
+    t.f.backlog.setJobLog(20 + i, `still red ${i}\n`);
+    await t.c.tick();
+    await t.c.idle();
+    t.sync();
+  }
+  assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 2, 'two fix runs, not three');
+  const gave = t.f.log.read(0, ['ci_fix.gave_up']).map((e) => e.payload as { reason: string });
+  assert.equal(gave.length, 1);
+  assert.match(gave[0]!.reason, /2 fix run\(s\) already, the limit/);
+  assert.ok(t.pr().labels.includes('ci-failing'));
+  assert.deepEqual(t.pr().reviewers, ['example-owner']);
+  assert.ok(t.pr().comments.some((x) => /^\[[^\]]+\] @example-owner required check\(s\) failing .*No more CI fix runs on this PR: 2 fix run/.test(x.body)));
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['ci_fix.gave_up']).length, 1, 'asked once');
+});
+
+test("CI fix run: a log the credential can't read (no Actions: read) gives up with that reason instead of guessing", { skip }, async () => {
+  const t = await openPr({ worker: workerWith(fixer) });
+  t.f.backlog.setChecks(t.opened.head, failing(31));
+  t.f.backlog.setJobLog(31, 403);
+  await t.c.tick();
+  await t.c.idle();
+  assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 0, 'no run started');
+  assert.ok(!t.runner.calls.some((r) => /CI fix run/.test(r.prompt)));
+  const gave = lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string };
+  assert.match(gave.reason, /no Actions: read permission, and a fix without the log would be a guess/);
+  assert.ok(t.pr().labels.includes('ci-failing'));
+  assert.deepEqual(t.pr().reviewers, ['example-owner']);
+});
+
+test('CI fix run: a check without a readable log (not an Actions job) also gives up', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(fixer) });
+  t.f.backlog.setChecks(t.opened.head, [{ name: 'ci', source: 'status', status: 'completed', conclusion: 'failure' }]);
+  await t.c.tick();
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /has no job log the harness can read/);
+});
+
+test('CI fix run: never on a branch someone else pushed to', { skip }, async () => {
+  const t = await openPr({ worker: workerWith(fixer) });
+  const theirs = 'c'.repeat(40);
+  t.f.backlog.setPr(t.opened.number, { headSha: theirs });
+  t.f.backlog.setChecks(theirs, failing(41));
+  t.f.backlog.setJobLog(41, 'red\n');
+  await t.c.tick();
+  await t.c.idle();
+  assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 0);
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /someone else pushed to the branch/);
+});
+
+test("CI fix run: the worker's evidence that the failure isn't caused by the change means no push, and the owner is asked", { skip }, async () => {
+  const t = await openPr({ worker: workerWith((req) => (/CI fix run/.test(req.prompt) ? { summary: 'looked', no_change_needed: 'test/flaky.test.js fails on main too (run it on the base: same error)' } : null)) });
+  t.f.backlog.setChecks(t.opened.head, failing(51));
+  t.f.backlog.setJobLog(51, 'flaky\n');
+  await t.c.tick();
+  await t.c.idle();
+  assert.equal(t.remoteHead(), t.opened.head, 'nothing pushed');
+  assert.equal((lastOf(t.f.log, 'ci_fix.finished') as { outcome: string }).outcome, 'no_push');
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /isn't caused by this change: test\/flaky\.test\.js fails on main too/);
+  assert.ok(t.pr().comments.some((x) => /@example-owner .*fails on main too/.test(x.body)));
+});
+
+test('CI fix run: if the branch moves while the fix runs, the push is refused (compare-and-swap) and the human commit stays', { skip }, async () => {
+  let human = '';
+  const t = await openPr({
+    worker: workerWith((req) => {
+      if (!/CI fix run/.test(req.prompt)) return null;
+      // Someone pushes to the PR branch meanwhile, from their own clone.
+      const other = mkdtempSync(join(tmpdir(), 'human-'));
+      const branch = /branch (\S+), head/.exec(req.prompt)![1]!;
+      git(other, 'clone', '-q', '-b', branch, git(req.cwd, 'remote', 'get-url', 'origin'), 'c');
+      writeFileSync(join(other, 'c', 'NOTES.md'), 'mine\n');
+      git(join(other, 'c'), 'add', 'NOTES.md');
+      git(join(other, 'c'), '-c', 'user.email=h@example.com', '-c', 'user.name=H', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'human');
+      git(join(other, 'c'), 'push', '-q', 'origin', branch);
+      human = git(join(other, 'c'), 'rev-parse', 'HEAD');
+      return fixer(req);
+    }),
+  });
+  t.f.backlog.setChecks(t.opened.head, failing(61));
+  t.f.backlog.setJobLog(61, 'red\n');
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(human);
+  assert.equal(t.remoteHead(), human, "the human's commit is still the branch head");
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /the branch moved while the fix ran/);
+});
+
+test('CI fix runs off (roles.ci_repair disabled): a failure asks the owner straight away', { skip }, async () => {
+  const t = await openPr({}, { fixes: false });
+  t.f.backlog.setChecks(t.opened.head, failing(71));
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['ci_fix.started']).length, 0);
+  assert.match((lastOf(t.f.log, 'ci_fix.gave_up') as { reason: string }).reason, /CI fix runs are off/);
+});
+
+test('a CI fix run cut off by a restart is recorded as interrupted and its claim released', async () => {
+  const f = fixture();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const lease = { instance: 'alice', run_id: 'r', issue: 7, expires_at: new Date(Date.now() + 3600_000).toISOString(), base: git(f.repo, 'rev-parse', 'HEAD') };
+  const won = claim(lease, { repo: f.repo });
+  assert.ok(won.won);
+  f.log.append('ci_fix.started', { issue: 7, number: 8, head: lease.base, checks: ['ci'], attempt: 1, lease: won.sha }, 'alice');
+  await c.recover();
+  assert.deepEqual((lastOf(f.log, 'ci_fix.finished') as { outcome: string }).outcome, 'interrupted');
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(7)), '', 'claim released');
+  await c.recover();
+  assert.equal(f.log.read(0, ['ci_fix.finished']).length, 1, 'once');
+});
+
+test('logTail: the last lines of a job log, runner timestamps stripped, bounded', () => {
+  assert.equal(logTail('2026-10-10T07:44:38.7864502Z a\r\n2026-10-10T07:44:38.7Z b\nc', 2), 'b\nc');
+  assert.equal(logTail('x'.repeat(50), 150, 10).length, 10);
 });
 
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {

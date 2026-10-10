@@ -9,7 +9,7 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
-import { actionable, ownerFor, parseContract, type Backlog, type CommitCheck, type DoneWhenList, type Issue } from './backlog/types.js';
+import { actionable, ownerFor, parseContract, type Backlog, type CommitCheck, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -183,6 +183,13 @@ export class Coordinator {
    * landings and open decisions resume from the log on their own.
    */
   async recover(): Promise<number[]> {
+    // A CI fix run cut off by a restart: release its claim and record it; the PR watch decides what's next.
+    for (const e of this.d.log.read(0, ['ci_fix.started'])) {
+      const p = e.payload as EventPayload<'ci_fix.started'>;
+      if (this.active.has(p.issue) || this.d.log.read(e.id, ['ci_fix.finished']).some((f) => (f.payload as { number: number }).number === p.number)) continue;
+      release(p.issue, p.lease, { repo: this.d.repo, remote: this.remote });
+      this.emit('ci_fix.finished', { issue: p.issue, number: p.number, outcome: 'interrupted', head: null, detail: 'coordinator restarted mid-run' });
+    }
     const requeued: number[] = [];
     for (const e of this.d.log.read(0, ['issue.claimed'])) {
       const n = (e.payload as { issue: number }).issue;
@@ -1172,11 +1179,199 @@ export class Coordinator {
     if (r.ready && markedHead !== pr.headSha) {
       if (pr.draft) await this.d.backlog.markReady(number);
       await this.d.backlog.addLabels(number, ['merge-ready']);
+      if (this.fixGaveUp(number)) await this.d.backlog.removeLabel(number, 'ci-failing');
       this.emit('pr.ready', { issue: n, number, head: pr.headSha });
     } else if (!r.ready && markedHead) {
       await this.d.backlog.removeLabel(number, 'merge-ready');
       this.emit('pr.unready', { issue: n, number, head: pr.headSha, why: r.reasons.join('; ').slice(0, 1000) });
     }
+    if (!r.ready && r.failed.length) await this.maybeFix(w, pr, r);
+  }
+
+  // ---------------------------------------------------------------- CI fix runs
+
+  private fixGaveUp(number: number): boolean {
+    return this.d.log.read(0, ['ci_fix.gave_up']).some((e) => (e.payload as { number: number }).number === number);
+  }
+
+  /** The last commit the harness itself put on a PR's branch: the head it opened with, or its latest pushed fix. */
+  private ourHead(number: number): string | null {
+    let head: string | null = null;
+    for (const e of this.d.log.read(0, ['pr.opened', 'ci_fix.finished'])) {
+      const p = e.payload as { number: number; head: string | null; outcome?: string };
+      if (p.number === number && (e.type === 'pr.opened' || p.outcome === 'pushed')) head = p.head;
+    }
+    return head;
+  }
+
+  /**
+   * A required check failed on a watched PR: start a fix run on its branch, within the cap, or give up and ask
+   * the owner. Never on a branch someone else pushed to, and never without the failing job's log (a fix that
+   * can't see why CI failed would be a guess).
+   */
+  private async maybeFix(w: EventPayload<'pr.opened'>, pr: PullRequest, r: Readiness) {
+    const { issue: n, number } = w;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.fixGaveUp(number)) return;
+    const failed = r.failed.map((c) => c.name);
+    const give = (reason: string) => this.giveUpFix(w, pr.headSha, reason, failed);
+    const ours = this.ourHead(number);
+    if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
+    const role = this.d.cfg.agents.roles.ci_repair;
+    if (!role?.enabled) return give('CI fix runs are off (agents.yaml roles.ci_repair)');
+    const runs = this.d.log.read(0, ['ci_fix.started']).filter((e) => (e.payload as { number: number }).number === number).length;
+    const cap = role.max_fixes_per_pr ?? 2;
+    if (runs >= cap) return give(`${runs} fix run(s) already, the limit (agents.yaml roles.ci_repair.max_fixes_per_pr: ${cap})`);
+    const hold = this.governorHold();
+    this.noteHold(hold);
+    if (hold) return;
+    const logs: string[] = [];
+    for (const c of r.failed) {
+      if (c.id === undefined) return give(`${c.name} has no job log the harness can read (it isn't a check run), so a fix would be a guess`);
+      const log = await this.d.backlog.jobLog(c.id);
+      if (!log.ok)
+        return give(log.why === 'forbidden' ? `can't read the log of ${c.name}: the GitHub credential has no Actions: read permission, and a fix without the log would be a guess` : `the log of ${c.name} isn't available (not a GitHub Actions job, or expired), so a fix would be a guess`);
+      logs.push(`### ${c.name}\n${logTail(log.text)}`);
+    }
+    const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${n} CI fix`, this.d.slotsDir);
+    if (!slot) {
+      this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+      return;
+    }
+    const p = this.fixRun(w, pr, failed, logs, runs + 1)
+      .catch((e: Error) => {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `CI fix #${n}`, kind: 'error', message: e.message.slice(0, 500) });
+      })
+      .finally(() => {
+        slot.release();
+        this.active.delete(n);
+      });
+    this.active.set(n, p);
+  }
+
+  /** No more fix runs on this PR: say why on it, label it, and ask the owner to review. */
+  private async giveUpFix(w: EventPayload<'pr.opened'>, head: string, reason: string, failed: string[]) {
+    const owner = this.ownerOf(w.issue);
+    this.emit('ci_fix.gave_up', { issue: w.issue, number: w.number, head, reason: reason.slice(0, 2000) });
+    await this.d.backlog.addLabels(w.number, ['ci-failing']);
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} required check(s) failing on \`${head.slice(0, 8)}\`: ${failed.join(', ')}. No more CI fix runs on this PR: ${reason}. It needs you; nothing here merges it.`);
+    try {
+      await this.d.backlog.requestReview(w.number, [owner]);
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${w.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
+  }
+
+  /**
+   * One fix run: reclaim the issue, a worktree at the PR's head, a worker with the failing logs, then the
+   * usual inspect, verify and evaluate on the whole change, and a push to the same branch only if it is still
+   * at the head the run started from. Anything short of that gives up and asks the owner.
+   */
+  private async fixRun(w: EventPayload<'pr.opened'>, pr: PullRequest, failed: string[], logs: string[], attempt: number) {
+    const { issue: n, number } = w;
+    const last = <T>(type: StoredEvent['type']) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
+    const claimed = last<EventPayload<'issue.claimed'>>('issue.claimed')!;
+    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
+    const frozen = last<EventPayload<'repro.frozen'>>('repro.frozen');
+    const repro = frozen ? { path: frozen.path, hash: frozen.hash } : null;
+    const issue = await this.d.backlog.get(n);
+    this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
+    const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
+    const won = claim(lease, { repo: this.d.repo, remote: this.remote });
+    if (!won.won) return; // held elsewhere; the next poll tries again
+    let leaseSha = won.sha;
+    this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
+    const heartbeat = setInterval(() => {
+      const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
+      if (next) leaseSha = next;
+    }, 20 * 60_000);
+    heartbeat.unref();
+    const { name, branch, taskFile } = this.paths(n);
+    let finished: { outcome: 'pushed' | 'no_push'; head: string | null; detail: string } = { outcome: 'no_push', head: null, detail: '' };
+    const give = async (reason: string) => {
+      finished = { outcome: 'no_push', head: null, detail: reason.slice(0, 1000) };
+      await this.giveUpFix(w, pr.headSha, reason, failed);
+    };
+    try {
+      const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
+      if (setupErrors.length) return await give(`the fix worktree's setup failed: ${setupErrors.join('; ')}`);
+      mkdirSync(dirname(taskFile), { recursive: true });
+      writeFileSync(taskFile, JSON.stringify({ id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) }));
+      const s = await this.fixAgent(issue, doneWhen, path, taskFile, repro, pr, logs, attempt);
+      if ('ended' in s) return await give(s.ended);
+      removeSandboxPlaceholders(path);
+      const head = this.git(path, 'rev-parse', 'HEAD');
+      if (s.no_change_needed || head === pr.headSha) return await give(`the fix run found the failure isn't caused by this change: ${s.no_change_needed ?? `it made no commit (${s.summary})`}`);
+      if (spawnSync('git', ['merge-base', '--is-ancestor', pr.headSha, head], { cwd: path }).status !== 0) return await give('the fix run rewrote the branch history instead of adding commits');
+      const change = await this.inspect(n, path, claimed.base, head, repro);
+      if ('rejected' in change) return await give(`the fix was rejected: ${change.rejected}`);
+      const checks = await this.verify(n, path, head, doneWhen, repro);
+      const red = checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped');
+      if (red.length) return await give(`the fix doesn't pass the coordinator's own checks: ${red.map((c) => `${c.check} ${c.status}`).join(', ')}`);
+      const verdict = await this.evaluate(issue, doneWhen, path, claimed.base, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path));
+      if (!verdict.patch_correct) return await give(`the evaluator rejected the fix: ${verdict.advice || 'no reason given'}`);
+      const push = checkedPush({ cwd: path, remote: this.remote, base: claimed.base, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, expect: pr.headSha });
+      if (!push.ok && 'refused' in push) {
+        this.emit('push.refused', { issue: n, head, stage: 'push', reasons: push.refused });
+        return await give(pushRefusal(push.refused));
+      }
+      if (!push.ok) return await give(`the branch moved while the fix ran (someone pushed), so the harness didn't push over it: ${push.error.split('\n').pop()}`);
+      finished = { outcome: 'pushed', head, detail: s.summary.slice(0, 1000) };
+      await this.d.backlog.comment(number, `[${BRAND.cli}] ${failed.join(', ')} failed on \`${pr.headSha.slice(0, 8)}\`. CI fix run ${attempt} pushed \`${head.slice(0, 8)}\`: ${s.summary}`);
+    } catch (e) {
+      if (!(e instanceof Halted)) throw e;
+      finished = { outcome: 'no_push', head: null, detail: 'stopped by an emergency stop' };
+    } finally {
+      clearInterval(heartbeat);
+      release(n, leaseSha, { repo: this.d.repo, remote: this.remote });
+      try {
+        removeWorktree(this.wt, name);
+      } catch {
+        // already gone
+      }
+      this.emit('ci_fix.finished', { issue: n, number, ...finished });
+    }
+  }
+
+  /** The fix run's worker: the issue's brief plus the failing logs. Ends with its answer, or why it stopped. */
+  private async fixAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, logs: string[], attempt: number): Promise<{ summary: string; no_change_needed?: string } | { ended: string }> {
+    const n = issue.number;
+    const workers = this.d.cfg.agents.roles.workers!;
+    const role = this.d.cfg.agents.roles.ci_repair!;
+    const model = role.model || workers.model;
+    const { runner, checks } = this.d.cfg.tests;
+    const extra = [
+      `CI fix run ${attempt}: this issue's pull request (${pr.url}, branch ${pr.head}, head ${pr.headSha}) failed a required check on GitHub. The end of each failing job's log:`,
+      ...logs.map((l) => `\`\`\`\n${l}\n\`\`\``),
+      'Fix the failure with new commits on this branch; never rewrite its history. When you finish, the coordinator re-runs the done_when checks' + (checks.length ? ` and ${checks.join('; ')}` : '') + ', the evaluator judges the whole change, and the coordinator pushes your commits to the pull request.',
+      "If the failure isn't caused by this change (for example a test that also fails on the default branch, or a flaky one), commit nothing and put your evidence in no_change_needed.",
+      `Fast tests to run while you work: ${runner.changed}`,
+      ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
+    ];
+    const r = await this.d.runner.run({
+      env: this.d.cfg.tests.env,
+      role: 'worker',
+      ...laneOf(issue),
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, extra),
+      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
+      cwd: path,
+      model,
+      allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
+      maxTurns: 200,
+      maxBudgetUsd: Math.min(role.budget_usd ?? workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+      jsonSchema: WORKER_SCHEMA,
+      taskFile,
+      stallMs: 20 * 60_000,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'ci-fix', model, worktree: path, pid: p, pgid: p, attempt }),
+    });
+    this.cost(n, 'ci-fix', r);
+    this.emit('run.finished', { issue: n, role: 'ci-fix', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string } };
+    if (r.reason !== 'succeeded') return { ended: `the fix run ended: ${r.reason} (${r.detail.slice(0, 300)})` };
+    if (s.blocked) return { ended: `the fix run was blocked: ${s.blocked}` };
+    if (s.ask) return { ended: `the fix run has a question for you: ${s.ask.question}` };
+    return { summary: s.summary ?? '', ...(s.no_change_needed ? { no_change_needed: s.no_change_needed } : {}) };
   }
 
   /** The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue. */
@@ -1251,6 +1446,17 @@ const DEFAULT_REVIEW = {
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
 };
+
+/** The end of a CI job log, for a fix run's brief: the last lines, without the runner's per-line timestamps. */
+export function logTail(text: string, lines = 150, chars = 12_000): string {
+  const out = text
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((l) => l.replace(/^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z /, ''))
+    .slice(-lines)
+    .join('\n');
+  return out.length > chars ? out.slice(-chars) : out;
+}
 
 /** The blocked comment for a refused push: every reason, one per line. */
 function pushRefusal(reasons: string[]): string {
