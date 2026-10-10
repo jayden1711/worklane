@@ -83,10 +83,12 @@ test('the reader picks up a changed policy without a restart, and refuses bad se
   const i = instance(`${POLICY}settings: { workers: 2 }\n`);
   const read = settingsReader(i.policyPath, i.limitsPath);
   assert.deepEqual(read(), { settings: { workers: 2 }, error: null });
+  // Every write keeps the same mtime, and the edits below keep the same size where they can: a change must be
+  // seen from the content alone (on Windows two quick writes often share a timestamp).
+  const pinned = statSync(i.policyPath).mtimeMs / 1000;
   const bump = (text: string) => {
     writeFileSync(i.policyPath, text);
-    const t = statSync(i.policyPath).mtimeMs / 1000 + 5;
-    utimesSync(i.policyPath, t, t);
+    utimesSync(i.policyPath, pinned, pinned);
   };
   bump(`${POLICY}settings: { workers: 3 }\n`);
   assert.deepEqual(read(), { settings: { workers: 3 }, error: null });

@@ -4,7 +4,7 @@
 // the instance's dashboard changes them through changeSetting, which only the
 // owner may call. Bounds come from a machine-wide, root-owned limits file the
 // dashboard can't write; a value outside them is refused, never clamped.
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
@@ -86,8 +86,9 @@ export function inRunWindow(windows: { from: string; to: string }[], now = new D
 }
 
 /**
- * A reader of an instance's settings that re-reads policy.yaml only when it changed (mtime or size), for the
- * coordinator's every tick. An unreadable or invalid file, or settings out of bounds: the error, and no
+ * A reader of an instance's settings for the coordinator's every tick: it parses policy.yaml again only when the
+ * text of it (or of the limits file) changed. Compared by content, not mtime and size: an edit of the same length
+ * within one timestamp tick (workers 2 -> 3) would otherwise go unseen. Both files are a few hundred bytes. An unreadable or invalid file, or settings out of bounds: the error, and no
  * settings (the repo's values apply) until it's fixed.
  */
 export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): () => { settings: InstanceSettings; error: string | null } {
@@ -96,9 +97,7 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
   return () => {
     let stamp = '';
     try {
-      const st = statSync(policyPath);
-      const lt = existsSync(limitsPath) ? statSync(limitsPath) : null;
-      stamp = `${st.mtimeMs}:${st.size}:${lt?.mtimeMs ?? ''}:${lt?.size ?? ''}`;
+      stamp = `${readFileSync(policyPath, 'utf8')}\0${existsSync(limitsPath) ? readFileSync(limitsPath, 'utf8') : ''}`;
     } catch (e) {
       return { settings: {}, error: `policy unreadable: ${(e as Error).message}` };
     }
