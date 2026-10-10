@@ -11,7 +11,7 @@ export function Deploys({ state }: { state: State }) {
   const waiting = state.tasks.filter((t) => t.landed && !t.deployed);
   const issueFor = (sha: string) => state.tasks.find((t) => t.landed === sha);
   return (
-    <div>
+    <div data-testid="page-deploys">
       <Header title="Deploys" sub="what each environment is serving, as verified" />
       <div className="space-y-6 p-6">
         {latest.length ? (

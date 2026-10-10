@@ -17,7 +17,7 @@ function IssueLink({ n }: { n: number }) {
 export function Landing({ state }: { state: State }) {
   const review = state.tasks.filter((t) => REVIEW.has(t.status));
   return (
-    <div>
+    <div data-testid="page-land">
       <Header title="Land queue" sub={`land mode ${state.project.landMode} · changes land in tested batches`} />
       <div className="space-y-6 p-6">
         <Card className="overflow-hidden">

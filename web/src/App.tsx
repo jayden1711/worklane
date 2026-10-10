@@ -73,18 +73,18 @@ export function pageKey(e: KeyboardEvent) {
 }
 
 const NAV = [
-  { to: '/', label: 'Overview', icon: Gauge, chord: 'o' },
-  { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i' },
-  { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd' },
-  { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's' },
-  { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l' },
+  { to: '/', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
+  { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i', testId: 'nav-inbox' },
+  { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd', testId: 'nav-decisions' },
+  { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's', testId: 'nav-issues' },
+  { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l', testId: 'nav-land' },
   { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
-  { to: '/agents', label: 'Agents', icon: Bot, chord: 'a' },
-  { to: '/activity', label: 'Activity', icon: History, chord: 'e' },
-  { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y' },
-  { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r' },
-  { to: '/logs', label: 'Logs', icon: ScrollText, chord: 'j' },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',' },
+  { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents' },
+  { to: '/activity', label: 'Activity', icon: History, chord: 'e', testId: 'nav-activity' },
+  { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
+  { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
+  { to: '/logs', label: 'Logs', icon: ScrollText, chord: 'j', testId: 'nav-logs' },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',', testId: 'nav-settings' },
 ];
 
 function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; setOpen: (v: boolean) => void; state: State | null; toggleTheme: () => void }) {
@@ -98,7 +98,7 @@ function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; set
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/20" />
         <Dialog.Content className="fixed left-1/2 top-[18%] z-50 w-[min(640px,calc(100vw-32px))] -translate-x-1/2 overflow-hidden rounded-window bg-surface shadow-overlay" style={{ animation: 'pop-in 160ms cubic-bezier(0.23,1,0.32,1) both' }} aria-describedby={undefined}>
           <Dialog.Title className="sr-only">Command menu</Dialog.Title>
-          <Command label="Command menu" className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-3">
+          <Command label="Command menu" data-testid="command-menu" className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-3">
             <div className="flex items-center gap-2 border-b border-line px-3">
               <Search className="size-4 text-ink-3" />
               <Command.Input autoFocus placeholder="Go to a page, an issue, or run an action…" className="h-11 w-full bg-transparent text-[13.5px] font-medium text-ink outline-none placeholder:text-ink-3" />
@@ -242,7 +242,7 @@ export function App() {
           </div>
         </div>
         <InstanceSwitcher />
-        <button onClick={() => setMenu(true)} className="mx-2 mt-2 flex h-8 items-center gap-2 rounded-control bg-surface px-2 text-[12.5px] text-ink-3 shadow-btn transition-colors hover:text-ink">
+        <button data-testid="search-button" onClick={() => setMenu(true)} className="mx-2 mt-2 flex h-8 items-center gap-2 rounded-control bg-surface px-2 text-[12.5px] text-ink-3 shadow-btn transition-colors hover:text-ink">
           <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
         </button>
         <nav className="mt-3 flex flex-col gap-px px-2" aria-label="Pages">
@@ -256,17 +256,17 @@ export function App() {
               countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
               active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
               onSelect={() => navigate(n.to)}
-              {...('testId' in n ? { testId: n.testId } : {})}
+              testId={n.testId}
             />
           ))}
         </nav>
         <div className="mx-2 mt-auto mb-2 flex items-center gap-2 border-t border-line px-2 pt-3 text-[11.5px] text-ink-3">
-          <span className={cx('inline-block size-2 rounded-full', live ? 'bg-green' : 'bg-red')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
+          <span data-testid="live-indicator" className={cx('inline-block size-2 rounded-full', live ? 'bg-green' : 'bg-red')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
           {live ? 'Live' : 'Reconnecting'}
           <span className="ml-auto flex items-center gap-1 tabular-nums">
             <Activity className="size-3" /> {state?.lastId ?? 0}
           </span>
-          <button onClick={toggleTheme} className="primitive-icon-button size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" title="Toggle theme" aria-label="Toggle theme">
+          <button data-testid="theme-toggle" onClick={toggleTheme} className="primitive-icon-button size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" title="Toggle theme" aria-label="Toggle theme">
             {theme === 'dark' ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
           </button>
         </div>
@@ -283,7 +283,7 @@ export function App() {
 /** On a hub: its instances as sidebar rows; the current one is active, one that isn't answering is marked and can't be picked. */
 export function InstanceList({ hub: info, current, onSelect }: { hub: HubInfo; current: string; onSelect: (name: string) => void }) {
   return (
-    <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher>
+    <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher data-testid="instance-switcher">
       <div className="px-2 pt-1 pb-1 text-[11.5px] font-medium text-ink-3">Instances</div>
       {info.instances.map((i) => (
         <SidebarRow
@@ -294,6 +294,7 @@ export function InstanceList({ hub: info, current, onSelect }: { hub: HubInfo; c
           active={i.name === current}
           disabled={!i.up && i.name !== current}
           onSelect={() => i.name !== current && onSelect(i.name)}
+          testId="instance-row"
         />
       ))}
     </nav>
@@ -315,7 +316,7 @@ export function StopBanner({ state }: { state: State }) {
   const e = state.emergency;
   if (!e?.inForce) return null;
   return (
-    <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-emergency-stop>
+    <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-emergency-stop data-testid="emergency-stop">
       <span className="font-semibold text-red">Emergency stop in force</span>
       <span className="text-ink-2">
         {' '}

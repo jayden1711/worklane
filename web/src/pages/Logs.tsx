@@ -30,7 +30,7 @@ export function LogsPage() {
   }, []);
   const sub = !log ? 'loading…' : log.source === 'journal' ? `journal of ${log.unit}` : log.source === 'file' ? 'coordinator log file' : 'no log';
   return (
-    <div>
+    <div data-testid="page-logs">
       <Header title="Logs" sub={`${sub} · read-only`} />
       <div className="space-y-3 p-6">
         {err && <div className="text-sm text-danger">Can't load: {err}</div>}

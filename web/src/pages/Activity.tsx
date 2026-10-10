@@ -22,7 +22,7 @@ export function ActivityPage({ state }: { state: State }) {
     return state.activity.filter((a) => GROUPS[group]!(a.type) && (!q || `${a.summary} ${a.actor} ${a.type} #${a.issue ?? ''}`.toLowerCase().includes(q)));
   }, [state.activity, group, text]);
   return (
-    <div>
+    <div data-testid="page-activity">
       <Header title="Activity" sub="every event from the log, newest first">
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter…" className="h-7 w-48 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]" />
       </Header>

@@ -34,7 +34,7 @@ export function SettingsPage() {
       </div>
     );
   return (
-    <div>
+    <div data-testid="page-settings">
       <Header title="Settings" sub={`read-only · change these in ${s.configDir}/ through a reviewed commit`} />
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <Section title="Project">

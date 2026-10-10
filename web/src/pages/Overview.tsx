@@ -6,7 +6,7 @@ import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../component
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
     <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b border-line bg-page/90 px-6 backdrop-blur">
-      <h1 className="text-[14px] font-semibold tracking-tight text-ink">{title}</h1>
+      <h1 className="text-[14px] font-semibold tracking-tight text-ink" data-testid="page-title">{title}</h1>
       {sub && <span className="truncate text-[12.5px] text-ink-3">{sub}</span>}
       <div className="ml-auto flex items-center gap-2">{children}</div>
     </header>
@@ -27,7 +27,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
   const stale = state.coordinator?.lastTick ? Date.now() - Date.parse(state.coordinator.lastTick) > 5 * 60_000 : true;
 
   return (
-    <div>
+    <div data-testid="page-overview">
       <Header title="Overview" sub={`${state.project.repo} · land mode ${state.project.landMode}`} />
       <div className="space-y-6 p-6">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">

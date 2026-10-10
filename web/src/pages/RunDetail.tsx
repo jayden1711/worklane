@@ -17,7 +17,7 @@ export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
       .catch(() => setRuns([]));
   }, [issue, lastId]);
   return (
-    <Card className="overflow-hidden">
+    <Card className="overflow-hidden" data-testid="runs-card">
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Agent runs</div>
       {runs.length ? (
         <div>
@@ -26,6 +26,7 @@ export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
               key={r.id}
               index={i}
               testId={r.id}
+              dataTestId="run-row"
               mark={<StatusMark state={markFor(r.reason)} />}
               label={
                 <>
@@ -65,7 +66,7 @@ export function RunDetail({ id }: { id: string }) {
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
   const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
   return (
-    <div>
+    <div data-testid="page-run-detail">
       <Header title={run ? `${run.role} run` : 'Run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : ''}>
         <button onClick={() => navigate(back)} className="flex items-center gap-1 text-[12px] text-ink-3 hover:text-ink">
           <ArrowLeft className="size-3.5" /> Back
@@ -91,7 +92,7 @@ export function RunDetail({ id }: { id: string }) {
                 </span>
               </div>
               {run.steps.length ? (
-                <div className="mt-2 flex flex-col gap-1">
+                <div className="mt-2 flex flex-col gap-1" data-testid="run-steps">
                   {run.steps.map((s, i) => (
                     <ToolRow
                       key={i}
@@ -114,7 +115,7 @@ export function RunDetail({ id }: { id: string }) {
                 </div>
               )}
             </Card>
-            <Card className="primitive-card-pad">
+            <Card className="primitive-card-pad" data-testid="run-final">
               <div className="text-[12px] font-medium text-ink-3">Final message</div>
               <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{run.final || <span className="text-ink-3">none</span>}</div>
             </Card>

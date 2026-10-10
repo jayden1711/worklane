@@ -52,8 +52,8 @@ function checkSummary(pr: PrView): string {
 function WaitingCard({ pr }: { pr: PrView }) {
   // Both can apply: a CI fix gave up, then (after a person's push) the merge policy still left it to a person.
   const groups = [
-    ...(pr.gaveUp ? [{ title: 'Why the CI fix stopped', reasons: [pr.gaveUp.reason], id: 'pr-gave-up-reasons' }] : []),
-    ...((pr.waitReasons ?? []).length ? [{ title: 'Why it waits for you', reasons: pr.waitReasons, id: 'pr-wait-reasons' }] : []),
+    ...(pr.gaveUp ? [{ title: 'Why the CI fix stopped', reasons: [pr.gaveUp.reason], testId: 'pr-gave-up-reasons' }] : []),
+    ...((pr.waitReasons ?? []).length ? [{ title: 'Why it waits for you', reasons: pr.waitReasons, testId: 'pr-wait-reasons' }] : []),
   ];
   return (
     <div className="overflow-hidden rounded-card bg-surface shadow-card" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-wait-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
@@ -71,9 +71,9 @@ function WaitingCard({ pr }: { pr: PrView }) {
         <div data-pr-reasons={pr.number}>
           {groups.length ? (
             groups.map((g) => (
-              <div key={g.id}>
+              <div key={g.testId}>
                 <div className="mt-1.5 text-[12px] font-medium text-ink-3">{g.title}</div>
-                <ul className="mt-1 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink shadow-hairline" data-testid={g.id}>
+                <ul className="mt-1 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink shadow-hairline" data-testid={g.testId}>
                   {g.reasons.map((r, i) => (
                     <li key={i}>{r}</li>
                   ))}
@@ -289,7 +289,7 @@ export function PullRequests({ state }: { state: State }) {
   const { data, error } = useFetch(() => api<PrsView>('/api/prs'), state.lastId);
   const c = state.prCounts;
   return (
-    <div>
+    <div data-testid="page-prs">
       <Header title="Pull requests" sub={c ? `${c.open} open · ${c.needYou} need you` : undefined} />
       {error ? <div className="p-8 text-[13px] text-red">Can't load pull requests: {error}</div> : data ? <PullRequestsView view={data} /> : <Loading />}
     </div>

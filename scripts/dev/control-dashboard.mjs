@@ -300,6 +300,8 @@ class Controller {
     await this.cdp.send('Page.navigate', { url });
     this.opened = true;
     const want = readyText(found.page, params);
+    // A page with a root test id is ready once that element is there and its heading reads right.
+    if (found.page.root) await until(`the ${found.page.id} page's root ${found.page.root}`, () => this.eval(`!!document.querySelector(${JSON.stringify(found.page.root)})`));
     const heading = await until(`the ${found.page.id} page's heading "${want}"`, async () => {
       const h = await this.eval(`document.querySelector('main header h1')?.innerText.trim() ?? ''`);
       return h && h.includes(want) ? h : null;
