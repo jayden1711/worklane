@@ -69,6 +69,13 @@ export class FileBacklog implements Backlog {
     return number;
   }
 
+  /** Test helper: a human edits an issue's body. */
+  editBody(n: number, body: string) {
+    this.edit(n, (i) => {
+      i.body = body;
+    });
+  }
+
   /** Test helper: a human comments on an issue. */
   humanComment(n: number, author: string, body: string) {
     this.edit(n, (i) => i.comments.push({ author, body }));

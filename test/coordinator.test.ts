@@ -5,6 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
+import { parseContract } from '../src/backlog/types.js';
 import { BRAND } from '../src/brand.js';
 import { claim, claimRef } from '../src/claims.js';
 import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
@@ -187,6 +188,45 @@ test('issues without a contract, or from outsiders, are never started', { skip }
   const before = f.log.read(0, ['issue.seen']).length;
   for (let i = 0; i < 3; i++) await c.tick();
   assert.equal(f.log.read(0, ['issue.seen']).length, before);
+});
+
+test('a refused issue is judged again when its done_when is edited: still invalid gets the new error; valid is claimed', { skip }, async () => {
+  const f = fixture();
+  const body = (yaml: string) => `Orders with a zero quantity are counted.\r\n\r\n\`\`\`done_when\r\n${yaml}\r\n\`\`\`\r\n`;
+  const n = f.backlog.open({ title: 'edited contract', body: body('- command: a: b'), author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const refusals = async () => (await f.backlog.comments(n)).map((x) => x.body).filter((b) => /not starting/i.test(b));
+  await c.tick();
+  await c.idle();
+  assert.equal((await refusals()).length, 1);
+  assert.match((await refusals())[0]!, /Not starting: done_when is not valid YAML/);
+  // Edited, still invalid with a different error: a fresh comment with the new error.
+  f.backlog.editBody(n, body('- nonsense: 1'));
+  await c.tick();
+  await c.idle();
+  assert.equal((await refusals()).length, 2);
+  assert.match((await refusals())[1]!, /Still not starting after the edit: done_when invalid/);
+  // Not edited again: nothing new, however many polls.
+  for (let i = 0; i < 3; i++) await c.tick();
+  assert.equal((await refusals()).length, 2);
+  assert.equal(runner.calls.length, 0);
+  // Edited to a valid contract: the next poll claims it.
+  f.backlog.editBody(n, BUG);
+  await c.tick();
+  await c.idle();
+  assert.ok(f.log.read(0, ['issue.claimed']).some((e) => (e.payload as { issue: number }).issue === n), 'claimed after the fix');
+  assert.ok(runner.calls.length > 0);
+});
+
+test('a refusal recorded before block hashes existed is not repeated for an unchanged issue', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'old refusal', body: 'make it better', author: 'example-owner', labels: ['ready'] });
+  const why = (parseContract('make it better') as { why: string }).why;
+  f.log.append('contract.missing', { issue: n, why }, 'coordinator');
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  for (let i = 0; i < 3; i++) await c.tick();
+  assert.equal((await f.backlog.comments(n)).length, 0);
 });
 
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {

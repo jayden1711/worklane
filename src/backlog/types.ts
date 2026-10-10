@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { DoneWhen } from '../contract.js';
 import type { z } from 'zod';
@@ -101,6 +102,12 @@ export const LABELS = [
 export type DoneWhenList = z.infer<typeof DoneWhen>;
 
 /** The ```done_when fenced block in an issue body, validated. */
+/** Identifies the ```done_when block an intake decision was about: a hash of its text, or "none". */
+export function contractKey(body: string): string {
+  const m = body.match(/```done_when\s*\n([\s\S]*?)\n```/);
+  return m ? createHash('sha256').update(m[1]!.replace(/\r\n/g, '\n')).digest('hex').slice(0, 16) : 'none';
+}
+
 export function parseContract(body: string): { ok: true; done_when: DoneWhenList } | { ok: false; why: string } {
   const m = body.match(/```done_when\s*\n([\s\S]*?)\n```/);
   if (!m) return { ok: false, why: 'no ```done_when block in the issue body' };
