@@ -84,6 +84,8 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/worklane coordinator run --instance $name
 Restart=on-failure
 RestartSec=30
+# Nothing the coordinator writes is for users outside its group (the process also sets this itself).
+UMask=0007
 Slice=worklane.slice
 MemoryHigh=$memory_high
 MemoryMax=$memory_max

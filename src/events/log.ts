@@ -1,7 +1,7 @@
 // The append-only event log (SQLite via node:sqlite). Append-only is
 // enforced by the database: triggers reject UPDATE and DELETE, so no code
 // path can rewrite history. Payloads are validated and redacted on write.
-import { mkdirSync } from 'node:fs';
+import { groupOnly, groupOnlyDir } from '../os/index.js';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { EventSchemas, type EventPayload, type EventType, type StoredEvent } from './types.js';
@@ -26,10 +26,12 @@ export class EventLog {
   private listeners = new Set<(e: StoredEvent) => void>();
 
   constructor(readonly path: string) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    if (path !== ':memory:') groupOnlyDir(dirname(path));
     this.db = new DatabaseSync(path);
+    if (path !== ':memory:') groupOnly(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
+    if (path !== ':memory:') groupOnly(path, `${path}-wal`, `${path}-shm`);
   }
 
   append<T extends EventType>(type: T, payload: EventPayload<T>, actor: string, source: StoredEvent['source'] = 'coordinator'): StoredEvent<T> {

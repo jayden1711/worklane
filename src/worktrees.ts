@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { projectCommand } from './os/index.js';
+import { groupOnlyDir, projectCommand, writeGroupOnly } from './os/index.js';
 
 export interface WorktreeOptions {
   repo: string;
@@ -28,8 +28,8 @@ function owned(o: WorktreeOptions): string[] {
   }
 }
 function setOwned(o: WorktreeOptions, list: string[]) {
-  mkdirSync(o.stateDir, { recursive: true });
-  writeFileSync(ownedFile(o), JSON.stringify([...new Set(list)], null, 2));
+  groupOnlyDir(o.stateDir);
+  writeGroupOnly(ownedFile(o), JSON.stringify([...new Set(list)], null, 2));
 }
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { availableParallelism, homedir, loadavg } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -9,6 +9,36 @@ import { safeProjectEnv } from '../project-env.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
+
+/**
+ * The coordinator's state is for its own user and group only, never anyone else on the machine:
+ * directories 0770, files 0660 (files kept 0600, like the dashboard token, are left as they are).
+ * No-op on Windows, where access is by ACL, not mode bits.
+ */
+export function groupOnly(...paths: string[]): void {
+  if (process.platform === 'win32') return;
+  for (const p of paths) {
+    try {
+      const st = statSync(p);
+      const want = st.isDirectory() ? 0o770 : (st.mode & 0o777) === 0o600 ? 0o600 : 0o660;
+      if ((st.mode & 0o777) !== want) chmodSync(p, want);
+    } catch {
+      // not there (yet)
+    }
+  }
+}
+
+/** mkdir -p, then groupOnly on the directory itself. */
+export function groupOnlyDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o770 });
+  groupOnly(dir);
+}
+
+/** Write a state file readable by the coordinator's user and group only. */
+export function writeGroupOnly(file: string, data: string | Uint8Array): void {
+  writeFileSync(file, data, { mode: 0o660 });
+  groupOnly(file);
+}
 
 export function detectOs(setting: OsSetting = 'auto'): OsKind {
   if (setting !== 'auto') return setting;

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
@@ -268,6 +268,23 @@ test('a worker run that committed work before failing still gets its attempts', 
   await c.idle();
   assert.equal(f.log.read(0, ['run.startup_failed']).length, 0);
   assert.ok(workers > 1, 'retried');
+});
+
+test('task files the coordinator writes into its state are closed to others, whatever the umask', { skip: skip || (process.platform === 'win32' && 'POSIX modes') }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const old = process.umask(0o022);
+  try {
+    const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+    await c.tick();
+    await c.idle();
+  } finally {
+    process.umask(old);
+  }
+  const task = join(f.stateDir, 'tasks', `issue-${n}.json`);
+  assert.ok(existsSync(task));
+  assert.equal(statSync(task).mode & 0o007, 0, `task file is ${(statSync(task).mode & 0o777).toString(8)}`);
+  assert.equal(statSync(join(f.stateDir, 'tasks')).mode & 0o007, 0, 'tasks/ too');
 });
 
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {
