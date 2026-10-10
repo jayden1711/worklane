@@ -15,8 +15,8 @@ import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import type { StoredEvent } from './events/types.js';
-import { checkResults, inbox, project } from './projection.js';
-import { instancesDir, loadInstance } from './instance.js';
+import { checkResults, inbox, prsView, project } from './projection.js';
+import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { siteForInstance, siteForRoot } from './service.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
@@ -60,6 +60,8 @@ export interface DashboardOptions {
   journalReader?: JournalReader;
   /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
   slotsDir?: string;
+  /** The instance's policy file (its auto-merge kill switch); none for a checkout. */
+  policyFile?: string | null;
 }
 
 /**
@@ -92,11 +94,58 @@ const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource } {
-  const s = instance ? siteForInstance(loadInstance(instance, dir)) : siteForRoot(root);
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null } {
+  const i = instance ? loadInstance(instance, dir) : null;
+  const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
   const logs = { unit: instance ? `${BRAND.cli}-${instance}.service` : null, file: join(s.stateDir, 'coordinator.log') };
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null };
+}
+
+/** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
+export const prCounts = (prs: { state: string; phase: string }[]) => ({
+  open: prs.filter((p) => p.state === 'open').length,
+  needYou: prs.filter((p) => p.phase === 'waiting' || p.phase === 'gave_up').length,
+});
+
+/**
+ * Whether this instance merges its own PRs now, read-only, from the same three
+ * places the coordinator reads: the instance policy's kill switch (auto_merge,
+ * re-read every time), the repo's review.yaml merge.auto, and the stop file a
+ * red main after an auto-merge leaves until the operator clears it. Without an
+ * instance (a checkout) there is no policy, so nothing auto-merges.
+ */
+export function autoMergeState(o: { policyFile: string | null; repoAuto: boolean | null; stateDir: string }) {
+  let policy: boolean | null = null;
+  let policyProblem: string | null = null;
+  if (o.policyFile) {
+    const r = readPolicy(o.policyFile);
+    if (r.policy) policy = r.policy.auto_merge;
+    else {
+      policy = false;
+      policyProblem = `the instance policy can't be read (${r.errors.map((e) => e.message).join('; ') || 'unreadable'}), so auto-merge counts as off`;
+    }
+  }
+  const stopFile = join(o.stateDir, 'auto-merge-stopped.json');
+  let stopped: string | null = null;
+  if (existsSync(stopFile)) {
+    try {
+      stopped = String((JSON.parse(readFileSync(stopFile, 'utf8')) as { reason?: string }).reason ?? 'stopped');
+    } catch {
+      stopped = 'the stop file is unreadable';
+    }
+  }
+  const on = policy === true && o.repoAuto !== false && !stopped;
+  const why = !o.policyFile
+    ? 'no instance: only an instance merges its own PRs'
+    : policy !== true
+      ? (policyProblem ?? "the instance policy's kill switch (auto_merge) is off")
+      : o.repoAuto === false
+        ? "the repo's review.yaml turns auto-merge off"
+        : stopped
+          ? `stopped: ${stopped}; the operator clears it`
+          : 'on: PRs the merge rules allow merge themselves';
+  return { on, policy, repo: o.repoAuto, stopped, why };
 }
 
 /** Where the coordinator's service output is: its systemd unit's journal and/or the log file a launchd or user service writes. */
@@ -262,6 +311,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
       inbox: inbox(p, opts.user),
+      // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
+      prCounts: prCounts(prsView(events).prs),
     };
   };
 
@@ -296,6 +347,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
           return run ? json(res, 200, run) : json(res, 404, { error: 'no such run' });
+        }
+        // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
+        if (url.pathname === '/api/prs' && req.method === 'GET') {
+          return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));

@@ -86,6 +86,42 @@ async function serve(args) {
   return { p, base: url.split('/?')[0], token: url.split('?t=')[1] };
 }
 
+// Pull requests for the PR page (the demo lands directly, so it opens none): one waiting for a
+// person, one whose CI fix gave up, one being fixed, one auto-merged; a refused push. Only where
+// this engine knows the PR events.
+const eventsMod = await optional('events/log.js');
+if (eventsMod?.EventLog && ctx?.projectStateDir) {
+  const log = new eventsMod.EventLog(join(ctx.projectStateDir(root), 'events.db'));
+  const s = (c) => c.repeat(40);
+  const add = (type, payload) => log.append(type, payload, 'screenshots');
+  try {
+    const open = (issue, number, head) => add('pr.opened', { issue, number, url: `https://github.com/example-org/example-shop/pull/${number}`, head, draft: true });
+    open(1, 41, s('a'));
+    add('pr.status', { issue: 1, number: 41, head: s('a'), ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }, { name: 'lint', outcome: 'pass' }] });
+    add('pr.ready', { issue: 1, number: 41, head: s('a') });
+    add('merge.decided', { issue: 1, number: 41, head: s('a'), auto: false, reasons: ['touches money-path: src/totals.js (L3)', '512 changed lines, over the 400 limit'] });
+    open(2, 42, s('b'));
+    add('pr.status', { issue: 2, number: 42, head: s('b'), ready: false, reasons: ['test failed'], checks: [{ name: 'test', outcome: 'fail' }, { name: 'lint', outcome: 'pass' }] });
+    add('ci_fix.started', { issue: 2, number: 42, head: s('b'), checks: ['test'], attempt: 1, lease: s('1') });
+    add('ci_fix.finished', { issue: 2, number: 42, outcome: 'no_push', head: null, detail: 'the failing test also fails on main' });
+    add('ci_fix.gave_up', { issue: 2, number: 42, head: s('b'), reason: 'the failure is not caused by this change: the same test fails on main' });
+    open(3, 43, s('c'));
+    add('pr.status', { issue: 3, number: 43, head: s('c'), ready: false, reasons: ['lint failed'], checks: [{ name: 'test', outcome: 'pass' }, { name: 'lint', outcome: 'fail' }] });
+    add('ci_fix.started', { issue: 3, number: 43, head: s('c'), checks: ['lint'], attempt: 1, lease: s('2') });
+    open(4, 44, s('d'));
+    add('pr.ready', { issue: 4, number: 44, head: s('d') });
+    add('merge.decided', { issue: 4, number: 44, head: s('d'), auto: true, reasons: ['docs only, 18 changed lines', 'evaluator approved with high confidence'] });
+    add('merge.done', { issue: 4, number: 44, head: s('d'), sha: s('e'), url: 'https://github.com/example-org/example-shop/commit/eeeeeeee', title: 'Document the discount rounding rule' });
+    add('merge.main_result', { issue: 4, number: 44, sha: s('e'), outcome: 'green', failed: [] });
+    add('pr.closed', { issue: 4, number: 44, merged: true });
+    add('push.refused', { issue: 5, head: s('f'), stage: 'push', reasons: ['data/export.csv: under a refused path (data/**)'] });
+  } catch (e) {
+    console.error(`no PR events in this engine (${e.message.split('\n')[0]}); the PR page stays empty`);
+  } finally {
+    log.close();
+  }
+}
+
 // The hub forwards to an instance's own port, so with a hub to show, the demo's dashboard listens there.
 const port = hubMod && dash?.instancePort ? dash.instancePort('shop') : 4300 + Math.floor(Math.random() * 90);
 const main = await serve(['--root', root, '--user', 'example-owner', '--no-open', '--port', String(port)]);
@@ -124,6 +160,7 @@ const pages = [
   ['issues-board', '/issues?view=board'],
   ['issue-detail', `/issues/${issue}`],
   ['land', '/land'],
+  ['pull-requests', '/prs'],
   ['agents', '/agents'],
   ['activity', '/activity'],
   ['deploys', '/deploys'],
