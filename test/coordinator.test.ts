@@ -1240,6 +1240,99 @@ test('auto-merge: main green after it is recorded and nothing stops', { skip }, 
   assert.equal(t.f.log.read(0, ['merge.stopped']).length, 0);
 });
 
+// ---- instruction evals
+
+const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the ledger.\n\n**Correct**\n- Reads the alert row first.\n\n**Wrong**\n- Edits the ledger by hand.\n';
+
+/**
+ * PR mode with auto-merge on, where the change also rewrites AGENTS.md. `base` is AGENTS.md on main
+ * before the task (with its eval cases unless `cases` is false). The scripted model under test plans
+ * badly when its instructions say BAD; the judge passes only a good plan.
+ */
+async function instructionsPr(o: { base: string | null; head: string; cases?: boolean; enabled?: boolean; cap?: number }) {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  if (o.enabled === false) f.cfg.agents.instruction_evals.enabled = false;
+  if (o.cap) f.cfg.agents.instruction_evals.cap_usd = o.cap;
+  if (o.base !== null) writeFileSync(join(f.repo, 'AGENTS.md'), o.base);
+  if (o.cases !== false) {
+    mkdirSync(join(f.repo, BRAND.configDir, 'evals'), { recursive: true });
+    writeFileSync(join(f.repo, BRAND.configDir, 'evals', 'AGENTS.md'), AGENTS_CASES);
+  }
+  if (o.base !== null || o.cases !== false) {
+    git(f.repo, 'add', '-A');
+    git(f.repo, 'commit', '-q', '-m', 'agent instructions and their evals');
+    git(f.repo, 'push', '-q', 'origin', 'main');
+  }
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const runner = agents({
+    worker: workerWith((req) => {
+      writeFileSync(join(req.cwd, 'AGENTS.md'), o.head);
+      return null;
+    }),
+    'evaluator-verdict': approve(),
+    'instruction-eval': (req) => {
+      if ('plan' in ((req.jsonSchema as { properties: object }).properties ?? {})) return { plan: req.appendSystemPrompt?.includes('BAD') ? 'edit the ledger by hand' : 'read the alert row first' };
+      const good = /<plan>\nread the alert row/.test(req.prompt);
+      return { notes: '', correct: [good], wrong: [!good] };
+    },
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const opened = lastOf(f.log, 'pr.opened') as { number: number; head: string };
+  f.backlog.setChecks(opened.head, passing);
+  await c.tick();
+  const pr = f.backlog.prs().find((p) => p.number === opened.number)!;
+  return { f, n, runner, opened, pr, decided: lastOf(f.log, 'merge.decided') as { auto: boolean; reasons: string[] } };
+}
+
+test('instruction evals: a change that makes AGENTS.md score lower waits for the owner, with the per-case diff and the cost', { skip }, async () => {
+  const t = await instructionsPr({ base: 'Read before you act.\n', head: 'BAD: act first.\n' });
+  const e = lastOf(t.f.log, 'instructions.eval') as { target: string; base: object; result: object; dropped: boolean; changes: object[]; cost_usd: number };
+  assert.deepEqual([e.target, e.base, e.result, e.dropped], ['AGENTS.md', { passed: 1, total: 1 }, { passed: 0, total: 1 }, true]);
+  assert.deepEqual(e.changes, [{ id: '1', title: 'Ledger alert', base: 'pass', head: 'fail' }]);
+  assert.ok(e.cost_usd > 0);
+  assert.equal(t.decided.auto, false);
+  assert.deepEqual(t.decided.reasons, [`eval: AGENTS.md scored lower, 1/1 → 0/1 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
+  assert.ok(!t.pr.merged);
+  assert.ok(t.pr.comments.some((x) => /waits for you[\s\S]*case 1 "Ledger alert": pass → fail/.test(x.body)), 'the waiting comment carries the diff');
+  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: 1\/1 → 0\/1, \*\*lower\*\*; case 1 pass → fail/);
+  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'instruction-eval').length, 4, 'base and head, each a plan and a judgement');
+  // The agent under test never saw the rubric, and was a different model from the judge.
+  const evalRuns = t.runner.calls.filter((r) => r.role === 'instruction-eval');
+  const underTest = evalRuns.filter((r) => r.appendSystemPrompt);
+  assert.ok(underTest.length === 2 && underTest.every((r) => !/Reads the alert row first|Edits the ledger by hand/.test(r.prompt) && r.model === 'sonnet'));
+  assert.ok(evalRuns.filter((r) => !r.appendSystemPrompt).every((r) => r.model === 'opus'));
+});
+
+test('instruction evals: no drop, no reason: the change auto-merges', { skip }, async () => {
+  const t = await instructionsPr({ base: 'Read before you act.\n', head: 'Read the alert, then act.\n' });
+  assert.equal((lastOf(t.f.log, 'instructions.eval') as { dropped: boolean }).dropped, false);
+  assert.equal(t.decided.auto, true, t.decided.reasons.join('; '));
+  assert.ok(t.pr.merged);
+});
+
+test('instruction evals: instructions without eval cases, or evals turned off, wait for the owner (fail closed)', { skip }, async () => {
+  const none = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', cases: false });
+  assert.deepEqual(none.decided.reasons, [`eval: AGENTS.md was not evaluated: no eval cases (${BRAND.configDir}/evals/AGENTS.md)`]);
+  assert.ok(!none.runner.calls.some((r) => r.role === 'instruction-eval'), 'nothing to run');
+  const off = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', enabled: false });
+  assert.deepEqual(off.decided.reasons, ['eval: AGENTS.md was not evaluated: instruction evals are off (agents.yaml instruction_evals)']);
+});
+
+test('instruction evals: the spend cap bounds an eval; cut short, the PR waits', { skip }, async () => {
+  // Each scripted call costs $0.01: a $0.015 cap stops it inside the base run.
+  const t = await instructionsPr({ base: 'Read before you act.\n', head: 'Read the alert, then act.\n', cap: 0.015 });
+  const e = lastOf(t.f.log, 'instructions.eval') as { incomplete: boolean; cost_usd: number };
+  assert.equal(e.incomplete, true);
+  assert.ok(e.cost_usd <= 0.015 + 0.01 + 1e-9, `${e.cost_usd}: never more than one call past the cap`);
+  assert.match(t.decided.reasons.join(), /incomplete: the cost cap was reached/);
+  assert.ok(!t.pr.merged);
+});
+
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';

@@ -105,6 +105,11 @@ const DEFAULTS: Record<string, string> = {
 - Be specific in advice. Do not edit anything.`,
 };
 
+/** The engine's built-in prompt for a role ('' for an unknown role). */
+export function defaultRolePrompt(role: string): string {
+  return DEFAULTS[role] ?? '';
+}
+
 export function rolePrompt(projectDir: string, role: string): string {
   const custom = join(projectDir, 'roles', `${role}.md`);
   return existsSync(custom) ? readFileSync(custom, 'utf8') : DEFAULTS[role] ?? '';

@@ -37,6 +37,39 @@ export interface MergeInput {
   foreignPush: boolean;
   /** The change ever hit a push limit. */
   pushLimitHit: boolean;
+  /** Why the evals of instructions the change touches don't clear it (instructionEvalReasons); empty: they do. */
+  instructionEvals?: string[];
+}
+
+export interface InstructionEvalResult {
+  target: string;
+  base: { passed: number; total: number } | null;
+  result: { passed: number; total: number } | null;
+  dropped: boolean;
+  incomplete: boolean;
+  changes: { id: string; title: string; base: string; head: string }[];
+  cost_usd: number;
+  error?: string | undefined;
+}
+
+/**
+ * For each instructions target the change touches: a reason to wait unless its eval ran to the end without
+ * a drop. A drop lists every case whose outcome changed, so the owner sees what got worse.
+ */
+export function instructionEvalReasons(targets: string[], results: InstructionEvalResult[]): string[] {
+  const out: string[] = [];
+  const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}/${s.total}` : 'new');
+  for (const t of targets) {
+    const r = results.find((x) => x.target === t);
+    if (!r) out.push(`eval: ${t} changed but was not evaluated`);
+    else if (r.error) out.push(`eval: ${t} was not evaluated: ${r.error}`);
+    else if (r.incomplete) out.push(`eval: ${t} is incomplete: the cost cap was reached (~$${r.cost_usd.toFixed(2)}), ${score(r.base)} → ${score(r.result)} on the cases that ran`);
+    else if (r.dropped) {
+      const diff = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - case ${c.id} "${c.title}": ${c.base} → ${c.head}`);
+      out.push([`eval: ${t} scored lower, ${score(r.base)} → ${score(r.result)} (~$${r.cost_usd.toFixed(2)}):`, ...diff].join('\n'));
+    }
+  }
+  return out;
 }
 
 export interface MergeDecision {
@@ -82,5 +115,6 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   if (i.ciFixRuns) reasons.push(`doubt: ${i.ciFixRuns} CI fix run(s) on this PR`);
   if (i.foreignPush) reasons.push('doubt: someone other than the harness pushed to the branch');
   if (i.pushLimitHit) reasons.push('doubt: the change hit a push limit');
+  reasons.push(...(i.instructionEvals ?? []));
   return { auto: reasons.length === 0, reasons };
 }
