@@ -46,6 +46,14 @@ export interface Decision {
   canAnswer?: boolean;
 }
 
+/** The coordinator's service log (GET /api/logs), read-only. */
+export interface ServiceLog {
+  source: 'journal' | 'file' | 'none';
+  unit: string | null;
+  entries: { at: string | null; priority: number | null; message: string }[];
+  problem: string | null;
+}
+
 /** One run of the coordinator's own checks on an issue (GET /api/checks?issue=n), newest first. */
 export interface CheckRun {
   id: number;

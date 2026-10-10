@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, Gauge, History, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
+import { Activity, BarChart3, Bot, GitMerge, Gauge, History, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { useLiveState, type State } from './api';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
@@ -15,6 +15,7 @@ import { ActivityPage } from './pages/Activity';
 import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
+import { LogsPage } from './pages/Logs';
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -78,6 +79,7 @@ const NAV = [
   { to: '/activity', label: 'Activity', icon: History, chord: 'e' },
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y' },
   { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r' },
+  { to: '/logs', label: 'Logs', icon: ScrollText, chord: 'j' },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',' },
 ];
 
@@ -218,6 +220,7 @@ export function App() {
   else if (path === '/deploys') page = <Deploys state={state} />;
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
   else if (path === '/settings') page = <SettingsPage />;
+  else if (path === '/logs') page = <LogsPage />;
   else page = <Overview state={state} pulse={pulse} />;
 
   return (
