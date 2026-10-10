@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import type { ReviewConfig } from './config/schema.js';
-import { actionable, ownerFor, parseContract, type Backlog, type CommitCheck, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
+import { actionable, contractKey, ownerFor, parseContract, type Backlog, type CommitCheck, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -333,10 +333,19 @@ export class Coordinator {
       if (!prev || JSON.stringify(prev) !== JSON.stringify(seen)) this.emit('issue.seen', seen);
       if (!act.actionable) continue;
       if (!contract.ok) {
-        const seen = this.events(issue.number).some((e) => e.type === 'contract.missing');
-        if (!seen) {
-          this.emit('contract.missing', { issue: issue.number, why: contract.why });
-          await this.d.backlog.comment(issue.number, `[${BRAND.cli}] Not starting: ${contract.why}. Add a \`\`\`done_when block (no contract, no build).`);
+        // Judged again whenever the done_when block changes: an edit that is still invalid gets the new error.
+        // (A refusal recorded before block hashes existed is compared by its error instead.)
+        const key = contractKey(issue.body);
+        const last = this.events(issue.number).filter((e) => e.type === 'contract.missing').at(-1)?.payload as EventPayload<'contract.missing'> | undefined;
+        const edited = !!last && (last.block_hash !== undefined ? last.block_hash !== key : last.why !== contract.why);
+        if (!last || edited) {
+          this.emit('contract.missing', { issue: issue.number, why: contract.why, block_hash: key });
+          await this.d.backlog.comment(
+            issue.number,
+            edited
+              ? `[${BRAND.cli}] Still not starting after the edit: ${contract.why}. Fix the \`\`\`done_when block; each edit is checked again.`
+              : `[${BRAND.cli}] Not starting: ${contract.why}. Add a \`\`\`done_when block (no contract, no build).`,
+          );
         }
         continue;
       }
