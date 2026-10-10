@@ -23,6 +23,7 @@ interface Render {
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
+  renderMachine(data: unknown): string;
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
@@ -284,6 +285,36 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.deepEqual(r.parseEntry('run_windows', ''), { value: [] });
   assert.match(String((r.parseEntry('run_windows', 'night') as { error: string }).error), /isn't HH:MM-HH:MM/);
   assert.equal(r.showValue('run_windows', []), 'any time');
+});
+
+test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    helper: '/usr/local/libexec/harness-machine',
+    slots: { cap: 3, running: 1, min: 1, max: 16 },
+    updates: { configured: true, enabled: true, branch: 'main', requiredChecks: ['test'] },
+    changes: [{ at: new Date().toISOString(), by: 'wl-site', what: 'slots', from: 2, to: 3 }],
+    history: [
+      { at: new Date().toISOString(), event: 'rolled_back', from: 'b'.repeat(40), to: 'c'.repeat(40), failed: ['harness-site.service'], back: 'b'.repeat(40) },
+      { at: new Date().toISOString(), event: 'installed', from: 'a'.repeat(40), to: 'b'.repeat(40), units: ['harness-site.service'] },
+    ],
+  };
+  const html = r.renderMachine(data);
+  for (const id of ['machine-settings', 'machine-setting-row', 'machine-setting-current', 'machine-setting-input', 'machine-setting-review-button', 'updates-history', 'updates-history-table', 'update-row', 'machine-changes', 'machine-changes-table', 'machine-change-row']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-setting="slots"[\s\S]*?>3<[\s\S]*?1–16; 1 in use now/);
+  assert.match(html, /data-setting="updates"[\s\S]*?>on</);
+  assert.doesNotMatch(html, /data-testid="machine-setting-confirm"/, 'confirm only after Review change');
+  assert.match(html, /data-testid="update-row"[^>]*style="background:var\(--red-tint\)"[\s\S]*rolled back[\s\S]*bbbbbbbb → cccccccc[\s\S]*back to bbbbbbbb[\s\S]*failed: harness-site\.service/);
+  assert.match(html, /installed[\s\S]*restarted: harness-site\.service/);
+  assert.match(html, /data-testid="machine-change-row"[\s\S]*wl-site[\s\S]*slots[\s\S]*2 → 3/);
+  const theirs = r.renderMachine({ ...data, user: 'example-collaborator', canChange: false });
+  assert.match(theirs, /data-testid="machine-read-only"[^>]*>Only the owner, @example-owner, can change these; you are @example-collaborator\./);
+  assert.doesNotMatch(theirs, /data-testid="machine-setting-input"/);
+  const noUpdater = r.renderMachine({ ...data, updates: { configured: false, enabled: null }, history: [] });
+  assert.match(noUpdater, /data-setting="updates"[\s\S]*?not set up/);
+  assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {
