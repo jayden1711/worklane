@@ -17,7 +17,7 @@ Replace `<name>` with the instance name throughout. Every command marked **root*
 | Group | Members | For |
 |---|---|---|
 | `wl-<name>-work` | all of the instance's users | the repo checkout and worktrees |
-| `agent-slots` | every coordinator user on the machine | the shared slot directory (`/var/lib/worklane/agent-slots`) and its config (`/etc/worklane/slots.json`) |
+| `agent-slots` | every coordinator user on the machine | the shared slot directory (`/var/lib/worklane/agent-slots`); its config (`/etc/worklane/slots.json`) is root-owned and readable by all, and changes only through the machine helper |
 
 ## Setup
 
@@ -28,6 +28,7 @@ Setup ships as scripts in `scripts/setup/`, reviewed like any other change. Run 
 | `node.sh <version>` | once per machine | Downloads Node.js and that release's `SHASUMS256.txt` from nodejs.org, verifies the tarball, installs it to `/opt`, links it from `/usr/local/bin`. Refuses if another `node` is already on PATH. |
 | `machine.sh [--cap N]` | once per machine | Creates `/srv/worklane`, `/var/lib/worklane`, `/etc/worklane`; the `agent-slots` group, the slot directory and `/etc/worklane/slots.json` (a fixed cap, default 2; an existing file is kept). Installs `bubblewrap` and `socat`. If user namespaces are restricted, loads the distribution's `bwrap-userns-restrict` profile, or else a profile that lets only `/usr/bin/bwrap` create them; the machine-wide restriction stays on. |
 | `instance.sh <name> [--eval]` | per instance | Creates `wl-<name>` (coordinator), `wl-<name>-agent` and optionally `wl-<name>-eval`, with private homes; the `wl-<name>-work` group; `/srv/worklane/<name>` (group-writable, setgid); lingering for the coordinator's service; and the sudoers rule. The rule is written to a dotted temp name (which sudo ignores), checked with `visudo -cf`, and only then moved into place. |
+| `machine-helper.sh <name> [<name>...]` | once per machine, with every instance | Installs `/usr/local/libexec/worklane-machine` (root-owned), which accepts exactly `set-slots <1..16>` and `set-updates on\|off`, writes atomically and logs each change to `/var/lib/worklane/machine-changes.jsonl` and the journal. Lets each `wl-<name>` run exactly those 18 commands as root (listed one by one in sudoers; `wl-dash` gets none). Makes `slots.json` `root:root 0644`. |
 | `check.sh <name> [<other>]` | after setup | Read-only checks: the coordinator can run as its agent user and not as another instance's; the agent can't list the coordinator's home; bwrap works for the agent; the slots are writable; the sudoers file is valid. |
 
 What the sudoers rule says:
