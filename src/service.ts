@@ -3,13 +3,13 @@
 // Claude session. It recovers on start, ticks, and backs up the log hourly
 // with verified read-back.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { checkRepoScope } from './github-scope.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { fileURLToPath } from 'node:url';
 import { appKeyAge, appKeyWarning, tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
@@ -145,7 +145,10 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     return 1;
   }
   const log = new EventLog(site.logPath);
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}) });
+  // Agents run as their own user: their task files go beside the checkout (/srv/<cli>/<name>/tasks), in the group
+  // the checkout shares with them, readable but not writable by them. The coordinator's own state stays private.
+  const agentTasks = commandsAs ? { dir: join(dirname(root), 'tasks'), gid: statSync(root).gid } : undefined;
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   const requeued = await coordinator.recover();

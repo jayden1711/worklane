@@ -50,13 +50,17 @@ function log(root: string, file: string, entry: object) {
 
 const isAgent = (env: NodeJS.ProcessEnv) => env[`${BRAND.envPrefix}_AGENT`] === '1';
 
-function withFrozen(g: Config['guardrails'], taskFile: string | undefined): Config['guardrails'] {
-  if (!taskFile) return g;
+/**
+ * The guardrails with the task's frozen paths added. A task file that is named but can't be read or parsed is
+ * an error, never "no frozen paths": the caller refuses the call rather than run without the guard.
+ */
+function withFrozen(g: Config['guardrails'], taskFile: string | undefined): { guardrails: Config['guardrails'] } | { error: string } {
+  if (!taskFile) return { guardrails: g };
   try {
     const frozen = TaskFile.parse(JSON.parse(readFileSync(taskFile, 'utf8'))).frozen;
-    return frozen.length ? { ...g, protected_paths: [...g.protected_paths, ...frozen] } : g;
-  } catch {
-    return g;
+    return { guardrails: frozen.length ? { ...g, protected_paths: [...g.protected_paths, ...frozen] } : g };
+  } catch (e) {
+    return { error: (e as Error).message.split('\n')[0]!.slice(0, 200) };
   }
 }
 
@@ -76,7 +80,13 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     return decide(isAgent(env) ? 'deny' : 'ask', `guardrails can't load, so this call can't be checked: ${msg}`);
   }
   // An agent's task can freeze files (a reproduction test): treat them as protected for this run.
-  const guardrails = isAgent(env) ? withFrozen(cfg.guardrails, env[`${BRAND.envPrefix}_TASK_FILE`]) : cfg.guardrails;
+  let guardrails = cfg.guardrails;
+  if (isAgent(env)) {
+    const taskFile = env[`${BRAND.envPrefix}_TASK_FILE`];
+    const g = withFrozen(cfg.guardrails, taskFile);
+    if ('error' in g) return decide('deny', `the task file ${taskFile} can't be read (${g.error}), so the task's frozen files can't be protected; refusing every call until it can`);
+    guardrails = g.guardrails;
+  }
   const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
   if (v.decision === 'none') {
     // Agents: every commit is secret-scanned first. Humans opt in with a git pre-commit hook.
