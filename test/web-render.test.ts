@@ -21,6 +21,7 @@ interface Render {
   renderRunList(issue: number): string;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
+  renderPrs(view: unknown): string;
   pages: Record<string, unknown>;
 }
 
@@ -119,6 +120,36 @@ test('decisions are answerable only where the server allows it (canAnswer)', () 
   const theirs = r.renderPage('decisions', asOther);
   assert.equal((theirs.match(/data-option=/g) ?? []).length, 0, 'no option buttons for someone who can\'t answer');
   assert.match(theirs, /Waiting on @example-owner/);
+});
+
+test('the PR page: what waits for you and exactly why, what is moving, what auto-merged (with links and reasons), refused pushes, the auto-merge state', () => {
+  const pr = (number: number, phase: string, extra: Record<string, unknown> = {}) => ({ number, issue: number - 100, title: `Change ${number}`, url: `https://example.test/pr/${number}`, openedAt: new Date().toISOString(), head: 'a'.repeat(40), state: 'open', draft: true, status: null, unready: null, fixes: [], gaveUp: null, decision: null, merged: null, mergeFailed: null, mainResult: null, phase, ...extra });
+  const view = {
+    prs: [
+      pr(101, 'waiting', { draft: false, decision: { at: '', head: 'a'.repeat(40), auto: false, reasons: ['touches a migration (L3)'] }, status: { head: 'a'.repeat(40), at: '', ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] } }),
+      pr(102, 'gave_up', { gaveUp: { at: '', reason: 'a flaky test, not this change' } }),
+      pr(103, 'fixing', { fixes: [{ attempt: 1, at: new Date().toISOString(), checks: ['lint'], outcome: 'running', detail: '' }] }),
+      pr(104, 'auto_merged', { state: 'merged', decision: { at: '', head: 'a'.repeat(40), auto: true, reasons: ['docs only, 12 lines'] }, merged: { at: new Date().toISOString(), sha: 'f'.repeat(40), url: 'https://example.test/commit/f', auto: true }, mainResult: { at: '', outcome: 'green', failed: [] } }),
+    ],
+    refused: [{ at: new Date().toISOString(), issue: 18, title: 'Too big', head: 'b'.repeat(40), stage: 'push', reasons: ['900 changed lines, over the 800 limit'] }],
+    stops: [{ at: new Date().toISOString(), kind: 'stopped', reason: 'main went red', number: 104, revert: 'https://example.test/pr/200' }],
+    autoMerge: { on: false, policy: true, repo: true, stopped: 'main went red', why: 'stopped: main went red; the operator clears it' },
+  };
+  const html = r.renderPrs(view);
+  assert.match(html, /data-auto-merge="stopped"/);
+  assert.match(html, /stopped: main went red; the operator clears it/);
+  assert.match(html, /href="https:\/\/example.test\/pr\/200"/, 'the revert PR is linked');
+  assert.match(html, /data-pr-reasons="101"[^>]*>[\s\S]*touches a migration \(L3\)/, 'exactly why it waits');
+  assert.match(html, /data-pr-reasons="102"[^>]*>[\s\S]*a flaky test, not this change/, 'why the CI fix gave up');
+  assert.match(html, /data-pr-checks="101"[\s\S]*test: pass/, 'checks on the current head');
+  assert.match(html, /data-task-row="pr-103"[\s\S]*fixing CI/);
+  assert.match(html, /data-pr="104" data-phase="auto_merged"[\s\S]*href="https:\/\/example.test\/commit\/f"[\s\S]*docs only, 12 lines/, 'auto-merged: the merge commit linked, and why');
+  assert.match(html, /data-refused="18"[\s\S]*900 changed lines, over the 800 limit/);
+  assert.match(r.renderPage('prs', asOwner), /<h1[^>]*>Pull requests/);
+  // Stable hooks for every section and action on the page (kebab-case data-testid).
+  for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
+    assert.match(html, new RegExp(`data-testid="${id}"`), `data-testid ${id}`);
+  }
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {

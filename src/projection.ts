@@ -467,3 +467,129 @@ export function checkResults(events: StoredEvent[], issue: number): CheckRunView
   }
   return out.reverse();
 }
+
+/** One pull request the harness opened, as the PR page shows it: from its pr.*, ci_fix.* and merge.* events. */
+export interface PrView {
+  number: number;
+  issue: number;
+  title: string;
+  url: string;
+  openedAt: string;
+  /** The commit the PR is at now (opened, or the last fix pushed). */
+  head: string;
+  /** open, merged (by the harness or a person), or closed unmerged. */
+  state: 'open' | 'merged' | 'closed';
+  /** Draft until the harness marks it ready (required checks green on the evaluated commit). */
+  draft: boolean;
+  /** The watch's last look at the current head: each required check's outcome, and why it isn't ready yet. */
+  status: { head: string; at: string; ready: boolean; reasons: string[]; checks: { name: string; outcome: string }[] } | null;
+  /** The last time it was marked not ready, and why. */
+  unready: { at: string; why: string } | null;
+  fixes: { attempt: number; at: string; checks: string[]; outcome: 'running' | 'pushed' | 'no_push' | 'interrupted'; detail: string }[];
+  /** No more fix runs; the owner was asked to look. */
+  gaveUp: { at: string; reason: string } | null;
+  /** The merge policy's last call: merged automatically, or waiting for a person, with its reasons. */
+  decision: { at: string; head: string; auto: boolean; reasons: string[] } | null;
+  merged: { at: string; sha: string; url: string; auto: boolean } | null;
+  mergeFailed: { at: string; why: string } | null;
+  /** After an auto-merge: the default branch's required checks on the merge commit. */
+  mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
+  /** Where it stands, for grouping: waiting for a person, being fixed, checks running, gave up, auto-merged, merged, closed. */
+  phase: 'waiting' | 'fixing' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
+}
+
+export interface PrsView {
+  prs: PrView[];
+  /** Pushes the harness refused before they left (size, protected paths, ...), newest first. */
+  refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
+  /** This instance's auto-merge stops and resumes, newest first. */
+  stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
+}
+
+/** Every PR the harness opened, newest first, with what happened to it; plus refused pushes and auto-merge stops. */
+export function prsView(events: StoredEvent[]): PrsView {
+  const titles = new Map<number, string>();
+  const prs = new Map<number, PrView>();
+  const refused: PrsView['refused'] = [];
+  const stops: PrsView['stops'] = [];
+  for (const e of events) {
+    const p = e.payload as Record<string, unknown>;
+    const n = Number(p.number);
+    const pr = prs.get(n);
+    switch (e.type) {
+      case 'issue.seen':
+        titles.set(Number(p.issue), String(p.title));
+        break;
+      case 'pr.opened':
+        prs.set(n, { number: n, issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, url: String(p.url), openedAt: e.ts, head: String(p.head), state: 'open', draft: Boolean(p.draft), status: null, unready: null, fixes: [], gaveUp: null, decision: null, merged: null, mergeFailed: null, mainResult: null, phase: 'checks' });
+        break;
+      case 'pr.status':
+        if (pr) pr.status = { head: String(p.head), at: e.ts, ready: Boolean(p.ready), reasons: p.reasons as string[], checks: p.checks as { name: string; outcome: string }[] };
+        break;
+      case 'pr.ready':
+        if (pr) pr.draft = false;
+        break;
+      case 'pr.unready':
+        if (pr) {
+          pr.draft = true;
+          pr.unready = { at: e.ts, why: String(p.why) };
+        }
+        break;
+      case 'ci_fix.started':
+        if (pr) pr.fixes.push({ attempt: Number(p.attempt), at: e.ts, checks: p.checks as string[], outcome: 'running', detail: '' });
+        break;
+      case 'ci_fix.finished':
+        if (pr) {
+          const f = pr.fixes.at(-1);
+          if (f && f.outcome === 'running') Object.assign(f, { outcome: p.outcome, detail: String(p.detail) });
+          if (p.outcome === 'pushed' && p.head) pr.head = String(p.head);
+        }
+        break;
+      case 'ci_fix.gave_up':
+        if (pr) pr.gaveUp = { at: e.ts, reason: String(p.reason) };
+        break;
+      case 'merge.decided':
+        if (pr) pr.decision = { at: e.ts, head: String(p.head), auto: Boolean(p.auto), reasons: p.reasons as string[] };
+        break;
+      case 'merge.done':
+        if (pr) {
+          pr.merged = { at: e.ts, sha: String(p.sha), url: String(p.url), auto: true };
+          pr.state = 'merged';
+        }
+        break;
+      case 'merge.failed':
+        if (pr) pr.mergeFailed = { at: e.ts, why: String(p.why) };
+        break;
+      case 'merge.main_result':
+        if (pr) pr.mainResult = { at: e.ts, outcome: p.outcome as 'green' | 'red', failed: p.failed as string[] };
+        break;
+      case 'pr.closed':
+        if (pr) {
+          pr.state = p.merged ? 'merged' : 'closed';
+          if (p.merged && !pr.merged) pr.merged = { at: e.ts, sha: '', url: pr.url, auto: false };
+        }
+        break;
+      case 'push.refused':
+        refused.push({ at: e.ts, issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, head: String(p.head), stage: String(p.stage), reasons: p.reasons as string[] });
+        break;
+      case 'merge.stopped':
+        stops.push({ at: e.ts, kind: 'stopped', reason: String(p.reason), number: (p.number as number | null) ?? null, revert: (p.revert as string | null) ?? null });
+        break;
+      case 'merge.resumed':
+        stops.push({ at: e.ts, kind: 'resumed', reason: String(p.detail), number: null, revert: null });
+        break;
+    }
+  }
+  for (const pr of prs.values()) pr.phase = phaseOf(pr);
+  return { prs: [...prs.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt) || b.number - a.number), refused: refused.reverse(), stops: stops.reverse() };
+}
+
+function phaseOf(pr: PrView): PrView['phase'] {
+  if (pr.state === 'merged') return pr.merged?.auto ? 'auto_merged' : 'merged';
+  if (pr.state === 'closed') return 'closed';
+  if (pr.fixes.at(-1)?.outcome === 'running') return 'fixing';
+  if (pr.gaveUp) return 'gave_up';
+  // A "wait for a person" call stands while the PR is still at the head it was made on.
+  if (pr.decision && !pr.decision.auto && pr.decision.head === pr.head) return 'waiting';
+  return pr.draft ? 'checks' : 'ready';
+}

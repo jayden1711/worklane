@@ -78,6 +78,35 @@ export interface RunRecord {
 export type RunSummary = Omit<RunRecord, 'steps' | 'otherTools' | 'final'> & { commands: number; failedCommands: number };
 
 /** The coordinator's service log (GET /api/logs), read-only. */
+/** A pull request the harness opened (GET /api/prs), with its checks, fix runs and merge calls. */
+export interface PrView {
+  number: number;
+  issue: number;
+  title: string;
+  url: string;
+  openedAt: string;
+  head: string;
+  state: 'open' | 'merged' | 'closed';
+  draft: boolean;
+  status: { head: string; at: string; ready: boolean; reasons: string[]; checks: { name: string; outcome: string }[] } | null;
+  unready: { at: string; why: string } | null;
+  fixes: { attempt: number; at: string; checks: string[]; outcome: 'running' | 'pushed' | 'no_push' | 'interrupted'; detail: string }[];
+  gaveUp: { at: string; reason: string } | null;
+  decision: { at: string; head: string; auto: boolean; reasons: string[] } | null;
+  merged: { at: string; sha: string; url: string; auto: boolean } | null;
+  mergeFailed: { at: string; why: string } | null;
+  mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
+  phase: 'waiting' | 'fixing' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
+}
+
+export interface PrsView {
+  prs: PrView[];
+  refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
+  stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
+  /** Whether this instance merges its own PRs now, and why (or why not). */
+  autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
+}
+
 export interface ServiceLog {
   source: 'journal' | 'file' | 'none';
   unit: string | null;
@@ -122,6 +151,8 @@ export interface State {
   batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
   /** The machine-wide emergency stop, read-only: in force now, and whether this coordinator has halted for it. */
+  /** Open PRs, and those needing a person (waiting on review, or a CI fix that gave up). */
+  prCounts?: { open: number; needYou: number };
   emergency: {
     inForce: { by: string; at: string; reason: string } | null;
     halted: { at: string; running: number } | null;

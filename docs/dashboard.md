@@ -56,6 +56,17 @@ ssh -N -L 4399:127.0.0.1:4399 <you>@<always-on-host>
 
 Then open the hub URL the script printed. After adding an instance, run the script again with the full list.
 
+## Pull requests
+
+In PR mode, the **Pull requests** page (`g p`) shows every PR the harness opened, from its own events:
+- **Auto-merge on this instance:** on, off or stopped, and why. It reads the same three things the coordinator reads: the instance policy's `auto_merge` kill switch (re-read each time), the repo's `review.yaml` `merge.auto`, and the stop file a red main leaves after an auto-merge, with its revert PR. The operator clears that file.
+- **Waiting for you:** PRs the merge rules left to a person, and PRs whose CI fix runs gave up. Each one lists exactly why, with its checks on the current head and a link to review it.
+- **In progress:** drafts whose checks are running, CI fix runs in flight, ready PRs. Expand one for its checks, why it isn't ready, and its fix attempts.
+- **Auto-merged:** each PR, its merge commit, whether main stayed green, and the policy's reasons for merging it.
+- PRs merged by a person or closed, and pushes the harness refused before they left (size, protected or refused paths).
+
+The sidebar counts the PRs that need you. Through the hub, this is per instance.
+
 ## Look and feel
 
 The pages use [Beautiful UI](https://www.beautifului.dev/)'s palette and patterns (MIT; see `THIRD_PARTY_NOTICES.md`), adapted to the dashboard's data:

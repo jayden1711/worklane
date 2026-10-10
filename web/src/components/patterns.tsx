@@ -48,11 +48,11 @@ export function StatusMark({ state, children }: { state: MarkState; children?: R
 }
 
 /** One row of work: its mark, a label, a quiet amount, an optional pill; clickable (to open it) or expandable. */
-export function TaskRow({ mark, label, amount, pill, onClick, details, index = 0, testId }: { mark: ReactNode; label: ReactNode; amount?: ReactNode; pill?: ReactNode; onClick?: () => void; details?: ReactNode; index?: number; testId?: string }) {
+export function TaskRow({ mark, label, amount, pill, onClick, details, index = 0, testId, dataTestId }: { mark: ReactNode; label: ReactNode; amount?: ReactNode; pill?: ReactNode; onClick?: () => void; details?: ReactNode; index?: number; testId?: string; dataTestId?: string }) {
   const [open, setOpen] = useState(false);
   const expandable = !onClick && !!details;
   return (
-    <div className="overflow-hidden border-b border-line transition-colors duration-200 last:border-0 hover:bg-inset" style={{ animation: `fade-up 450ms cubic-bezier(0.23,1,0.32,1) ${Math.min(index, 8) * 60}ms both` }} data-task-row={testId}>
+    <div className="overflow-hidden border-b border-line transition-colors duration-200 last:border-0 hover:bg-inset" style={{ animation: `fade-up 450ms cubic-bezier(0.23,1,0.32,1) ${Math.min(index, 8) * 60}ms both` }} data-task-row={testId} data-testid={dataTestId}>
       <button type="button" aria-expanded={expandable ? open : undefined} onClick={onClick ?? (expandable ? () => setOpen((o) => !o) : undefined)} className="flex h-11 w-full items-center gap-2.5 px-3 text-left">
         <span className="flex size-6 shrink-0 items-center justify-center">{mark}</span>
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{label}</span>
@@ -159,9 +159,9 @@ export function Meter({ signal, tone }: { signal: number; tone: string }) {
 }
 
 /** A records table on a card: a quiet header row, hairline rows. */
-export function RecordsTable({ head, children, footer, className }: { head: ReactNode[]; children: ReactNode; footer?: ReactNode; className?: string }) {
+export function RecordsTable({ head, children, footer, className, testId }: { head: ReactNode[]; children: ReactNode; footer?: ReactNode; className?: string; testId?: string }) {
   return (
-    <div className={cx('overflow-hidden rounded-card bg-surface shadow-card', className)}>
+    <div className={cx('overflow-hidden rounded-card bg-surface shadow-card', className)} data-testid={testId}>
       <table className="w-full table-fixed border-collapse text-left">
         <thead>
           <tr className="border-b border-line bg-inset">
@@ -191,7 +191,7 @@ export function DotPill({ tone, children }: { tone: 'green' | 'red' | 'orange' |
 }
 
 /** A sidebar row: icon, label, count; the active one sits on a soft fill. */
-export function SidebarRow({ icon, label, count, countTone, active, href, onSelect, title, disabled }: { icon: ReactNode; label: ReactNode; count?: number; countTone?: 'warn'; active: boolean; href?: string; onSelect: () => void; title?: string; disabled?: boolean }) {
+export function SidebarRow({ icon, label, count, countTone, active, href, onSelect, title, disabled, testId }: { icon: ReactNode; label: ReactNode; count?: number; countTone?: 'warn'; active: boolean; href?: string; onSelect: () => void; title?: string; disabled?: boolean; testId?: string }) {
   const cls = cx('relative flex h-8 items-center rounded-control px-2 text-left transition-[background-color,color,transform] duration-150 active:scale-[0.98]', active ? 'bg-hover-2' : 'hover:bg-hover', disabled && 'pointer-events-none opacity-50');
   const body = (
     <>
@@ -204,6 +204,7 @@ export function SidebarRow({ icon, label, count, countTone, active, href, onSele
     <a
       href={href}
       title={title}
+      data-testid={testId}
       aria-current={active ? 'page' : undefined}
       onClick={(e) => {
         e.preventDefault();

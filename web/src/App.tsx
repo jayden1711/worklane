@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, Gauge, History, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { hub, hubInstance, selectInstance, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ago, Kbd, cx } from './components/ui';
@@ -18,6 +18,7 @@ import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { LogsPage } from './pages/Logs';
 import { RunDetail } from './pages/RunDetail';
+import { PullRequests } from './pages/PullRequests';
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -77,6 +78,7 @@ const NAV = [
   { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd' },
   { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's' },
   { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l' },
+  { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
   { to: '/agents', label: 'Agents', icon: Bot, chord: 'a' },
   { to: '/activity', label: 'Activity', icon: History, chord: 'e' },
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y' },
@@ -204,6 +206,7 @@ export function App() {
       '/decisions': state?.decisions.filter((d) => !d.answer).length ?? 0,
       '/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
       '/land': state?.landQueue.length ?? 0,
+      '/prs': state?.prCounts?.needYou ?? 0,
       '/agents': state?.runs.active.length ?? 0,
     }),
     [state],
@@ -219,6 +222,7 @@ export function App() {
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
   else if (path.startsWith('/issues')) page = <Issues state={state} />;
   else if (path === '/land') page = <Landing state={state} />;
+  else if (path === '/prs') page = <PullRequests state={state} />;
   else if (path === '/agents') page = <Agents state={state} />;
   else if (path === '/activity') page = <ActivityPage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;
@@ -249,9 +253,10 @@ export function App() {
               icon={<n.icon className="size-4" />}
               label={n.label}
               count={counts[n.to as keyof typeof counts]}
-              countTone={n.to === '/decisions' || n.to === '/inbox' ? 'warn' : undefined}
+              countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
               active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
               onSelect={() => navigate(n.to)}
+              {...('testId' in n ? { testId: n.testId } : {})}
             />
           ))}
         </nav>
