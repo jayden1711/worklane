@@ -21,6 +21,7 @@ import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, role
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
 import { checkedPush, pushProblems } from './push-check.js';
+import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { runIssue } from './run-record.js';
 import { applySettings, inRunWindow } from './settings.js';
 import type { InstanceSettings } from './instance.js';
@@ -117,6 +118,9 @@ export class Coordinator {
   private readonly remote: string;
   private readonly wt: WorktreeOptions;
   private active = new Map<number, Promise<void>>();
+  /** The hotspot files each running task is expected to change. */
+  private taskHotspots = new Map<number, string[]>();
+  private fileIx: { key: string; ix: FileIndex } | null = null;
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
   /** The repo's own config: the defaults the instance's settings apply over. */
@@ -380,6 +384,10 @@ export class Coordinator {
     }
     let started = 0;
     const ready = await this.d.backlog.list('ready');
+    // Hotspots: a task that would change a file a running task changes too waits; the loop goes on to the
+    // next ready task, so the slot is used meanwhile. The files come from a cheap guess, never an agent run.
+    const globs = this.d.cfg.project.hotspots ?? DEFAULT_HOTSPOTS;
+    const files = globs.length && ready.length ? this.repoFileIndex(globs) : null;
     // Fill free capacity this tick: one pass over the ready issues, one start per free worker.
     for (const issue of ready) {
       if (this.active.size >= (workers.count ?? 1)) break;
@@ -411,11 +419,19 @@ export class Coordinator {
         }
         continue;
       }
+      const hotspots = files ? hotspotsIn(estimateFiles(`${issue.title}\n${issue.body}`, files, globs), globs) : [];
+      const clash = pickDispatch([{ issue: issue.number, hotspots }], [...this.taskHotspots].map(([n, h]) => ({ issue: n, hotspots: h })), 1).held[0];
+      if (clash) {
+        this.noteHotspotHold(clash);
+        continue;
+      }
       const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${issue.number}`, this.d.slotsDir);
       if (!slot) {
         this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
         break; // try again next tick
       }
+      this.endHotspotHold(issue.number, true);
+      this.taskHotspots.set(issue.number, hotspots);
       const p = this.runTask(issue, contract.done_when)
         .catch((e: Error) => {
           this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}`, kind: 'error', message: e.message.slice(0, 500) });
@@ -423,11 +439,42 @@ export class Coordinator {
         .finally(() => {
           slot.release();
           this.active.delete(issue.number);
+          this.taskHotspots.delete(issue.number);
         });
       this.active.set(issue.number, p);
       started++;
     }
+    // A held task that is no longer ready (closed, relabeled) stops waiting.
+    const stillReady = new Set(ready.map((i) => i.number));
+    for (const n of this.heldOn()) if (!stillReady.has(n)) this.endHotspotHold(n, false);
     return started;
+  }
+
+  /** The checkout's file list, indexed for hotspot estimates; rebuilt only when the checkout's commit or the globs change. */
+  private repoFileIndex(globs: string[]): FileIndex {
+    const key = `${this.git(this.d.repo, 'rev-parse', 'HEAD')} ${globs.join('\n')}`;
+    if (this.fileIx?.key !== key) this.fileIx = { key, ix: fileIndex(this.git(this.d.repo, 'ls-files').split('\n').filter(Boolean), globs) };
+    return this.fileIx.ix;
+  }
+
+  /** Tasks whose latest hotspot event is a hold (from the log, so a restart doesn't count a wait twice). */
+  private heldOn(): number[] {
+    const last = new Map<number, string>();
+    for (const e of this.d.log.read(0, ['hotspot.held', 'hotspot.released'])) last.set((e.payload as { issue: number }).issue, e.type);
+    return [...last].filter(([, t]) => t === 'hotspot.held').map(([n]) => n);
+  }
+
+  private noteHotspotHold(h: Hold) {
+    const last = this.events(h.issue).filter((e) => e.type === 'hotspot.held' || e.type === 'hotspot.released').at(-1);
+    if (last?.type === 'hotspot.held') return; // already waiting: recorded once
+    this.emit('hotspot.held', { issue: h.issue, by: h.by, files: h.files, reason: holdReason(h) });
+  }
+
+  private endHotspotHold(issue: number, started: boolean) {
+    const last = this.events(issue).filter((e) => e.type === 'hotspot.held' || e.type === 'hotspot.released').at(-1);
+    if (last?.type !== 'hotspot.held') return;
+    const since = Date.parse(last.ts);
+    this.emit('hotspot.released', { issue, waited_ms: Math.max(0, Math.round(Date.now() - since)), files: (last.payload as { files: string[] }).files, started });
   }
 
   // ---------------------------------------------------------------- task pipeline
