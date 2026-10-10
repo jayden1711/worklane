@@ -32,6 +32,10 @@ export interface RunRequest {
   timeoutMs: number;
   onStart?: (pid: number) => void;
   onActivity?: (note: string) => void;
+  /** Once the run holds its Claude login's lock: how long it waited for it (another run on the same login), in ms. */
+  onLockWait?: (ms: number) => void;
+  /** Before each wait on a transient error: which try failed, why (classified), and how long until the next. */
+  onTransientRetry?: (r: TransientRetry) => void;
   signal?: AbortSignal;
   /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
   lane?: string;
@@ -145,6 +149,26 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
  */
 export const TRANSIENT_ERROR = /failed to refresh oauth token|another claude code process is refreshing|exited mid-refresh|overloaded|\b529\b|rate.?limit|\b429\b|api error:? *5\d\d|\b50[234]\b|econnreset|etimedout|enotfound|eai_again|econnrefused|socket hang up|fetch failed|network error/i;
 
+export type TransientCause = 'token_refresh' | 'rate_limit' | 'overloaded' | 'server_error' | 'network' | 'other';
+
+export interface TransientRetry {
+  /** The try that failed (1 = the first). */
+  attempt: number;
+  cause: TransientCause;
+  waitMs: number;
+  detail: string;
+}
+
+/** What a transient failure was about, for the record (the retry itself treats them all alike). */
+export function classifyTransient(reason: string, detail: string): TransientCause {
+  if (/failed to refresh oauth token|another claude code process is refreshing|exited mid-refresh/i.test(detail)) return 'token_refresh';
+  if (reason === 'rate_limited' || /rate.?limit|\b429\b/i.test(detail)) return 'rate_limit';
+  if (/overloaded|\b529\b/i.test(detail)) return 'overloaded';
+  if (/api error:? *5\d\d|\b50[234]\b/i.test(detail)) return 'server_error';
+  if (/econnreset|etimedout|enotfound|eai_again|econnrefused|socket hang up|fetch failed|network error/i.test(detail)) return 'network';
+  return 'other';
+}
+
 /** Waits between tries after a transient error: 1 min, 2 min, then every 5 min. */
 export const TRANSIENT_BACKOFF_MS = [60_000, 120_000, 300_000];
 /** How long transient errors are retried before the run is reported as failed on them. */
@@ -254,7 +278,10 @@ export class CliRunner implements AgentRunner {
     const first = now();
     for (let tries = 1; ; tries++) {
       const started = now();
-      const r = await withLoginLock(this.loginOf(req), () => this.runOnce(req));
+      const r = await withLoginLock(this.loginOf(req), () => {
+        req.onLockWait?.(Math.max(0, now() - started));
+        return this.runOnce(req);
+      });
       const atStartup = now() - started < STARTUP_WINDOW_MS || r.turns <= 1;
       const transient = atStartup && (r.reason === 'rate_limited' || ((r.reason === 'failed' || r.reason === 'auth_mismatch') && TRANSIENT_ERROR.test(r.detail)));
       if (!transient) return r;
@@ -263,6 +290,7 @@ export class CliRunner implements AgentRunner {
         const mins = Math.max(1, Math.round((now() - first) / 60_000));
         return { ...r, reason: r.reason === 'auth_mismatch' ? 'failed' : r.reason, transient: true, detail: `${r.detail} (still failing after ${tries} tries over ${mins} min)` };
       }
+      req.onTransientRetry?.({ attempt: tries, cause: classifyTransient(r.reason, r.detail), waitMs: wait, detail: r.detail.slice(0, 300) });
       req.onActivity?.(`transient error, retrying in ${Math.round(wait / 1000)}s: ${r.detail.slice(0, 200)}`);
       if (!(await sleep(wait, req.signal))) return { ...r, reason: 'canceled_by_reconciliation', detail: `canceled while waiting out a transient error: ${r.detail}` };
     }
