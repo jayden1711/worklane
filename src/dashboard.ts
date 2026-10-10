@@ -59,6 +59,12 @@ export function mayAnswer(owner: string, user: string, owners: { writers: string
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
+/** Where the built web UI is served from: dist/web next to this module's dist/src (`npm run build:web` writes it there). */
+export const DEFAULT_WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
+
+/** Whether the web UI is built where the dashboard serves it. */
+export const webUiBuilt = (dir = DEFAULT_WEB_DIR) => existsSync(join(dir, 'index.html'));
+
 export function dashboardToken(stateDir: string): string {
   const f = join(stateDir, 'dashboard-token');
   if (existsSync(f)) return readFileSync(f, 'utf8').trim();
@@ -97,7 +103,7 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; token: string; close: () => Promise<void> }> {
   const token = dashboardToken(opts.stateDir);
-  const webDir = opts.webDir ?? fileURLToPath(new URL('../web/', import.meta.url));
+  const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   const clients = new Set<ServerResponse>();
   let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
