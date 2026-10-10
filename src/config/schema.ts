@@ -61,6 +61,13 @@ export const ProjectConfig = z.strictObject({
    * resolve the conflicted hunks, then the usual checks and evaluator. `max_fixes_per_pr` caps the runs (a
    * run a restart cut short counts). Only merging is supported; rebasing (which rewrites the branch) is not.
    */
+  /**
+   * PR mode, before an auto-merge: if the default branch moved since the PR's checks ran and its new commits
+   * touch what the PR touches (or what those files import), merge them into the PR head in a scratch
+   * worktree and run the fast tier (tests.yaml runner.changed) there. Passing: the unchanged, already-green
+   * head merges. The PR is never pushed to for this, and the full tier keeps running on the default branch.
+   */
+  combined_check: z.boolean().default(true),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),

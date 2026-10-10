@@ -1369,6 +1369,64 @@ test("auto-merge: GitHub's merge check decides too: still computing waits a poll
   assert.ok(!t.pr().merged);
 });
 
+// ---- combined-state check
+
+/** Someone else's change lands on main (no conflict with the PR). */
+function changeOnMain(t: Awaited<ReturnType<typeof openPr>>, file: string, edit: (text: string) => string) {
+  const dir = join(mkdtempSync(join(tmpdir(), 'other-')), 'c');
+  git(t.f.base, 'clone', '-q', t.f.remote, dir);
+  writeFileSync(join(dir, file), edit(existsSync(join(dir, file)) ? readFileSync(join(dir, file), 'utf8') : ''));
+  git(dir, 'add', '-A');
+  git(dir, '-c', 'user.email=o@example.com', '-c', 'user.name=Other', '-c', 'commit.gpgsign=false', 'commit', '-qm', `Change ${file} on main`);
+  git(dir, 'push', '-q', 'origin', 'main');
+  return git(dir, 'rev-parse', 'HEAD');
+}
+
+/** The combined-state check runs in the background: wait for its result. */
+async function lightDone(t: Awaited<ReturnType<typeof openPr>>) {
+  for (let i = 0; i < 200 && !t.f.log.read(0, ['light_check.finished']).length; i++) await new Promise((r) => setTimeout(r, 50));
+  return lastOf(t.f.log, 'light_check.finished') as { outcome: string; overlap: string[]; main_sha: string; head: string; detail: string };
+}
+
+test('combined check: main moved, but not on anything the PR touches or imports: the PR merges at once', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  changeOnMain(t, 'README.md', (s) => `${s}\nA note.\n`);
+  await green(t);
+  assert.ok(t.pr().merged);
+  assert.equal(t.f.log.read(0, ['light_check.started']).length, 0, 'no extra test run');
+});
+
+test('combined check: main changed a file the PR changes: the fast tier runs on the combination off the PR, then the unchanged green head merges', { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  const mainSha = changeOnMain(t, 'src/price.js', (s) => `${s}\n// a note from main\n`);
+  await green(t);
+  assert.ok(!t.pr().merged, 'not before the combination is checked');
+  const done = await lightDone(t);
+  assert.deepEqual([done.outcome, done.overlap, done.main_sha, done.head], ['merge', ['src/price.js'], mainSha, t.opened.head]);
+  await t.c.tick();
+  assert.ok(t.pr().merged);
+  assert.equal((lastOf(t.f.log, 'merge.done') as { head: string }).head, t.opened.head, 'the head that passed CI, unchanged');
+  assert.equal(t.remoteHead(), t.opened.head, 'nothing was pushed to the PR');
+});
+
+test("combined check: main's change breaks the fast tests together with the PR: it waits for the owner with the failure; off, it merges at once", { skip }, async () => {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  changeOnMain(t, 'src/price.js', (s) => s.replace('return Math.round(cents * (100 - pct) / 100);', 'return cents;'));
+  await green(t);
+  const done = await lightDone(t);
+  assert.equal(done.outcome, 'hold');
+  await t.c.tick();
+  assert.equal(reasonsOf(t).auto, false);
+  assert.match(reasonsOf(t).reasons.join(), /^combined with main at [0-9a-f]{8} \(which changed src\/price\.js\), the fast tests fail: /);
+  assert.ok(!t.pr().merged);
+
+  const off = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.project.combined_check = false) });
+  changeOnMain(off, 'src/price.js', (s) => s.replace('return Math.round(cents * (100 - pct) / 100);', 'return cents;'));
+  await green(off);
+  assert.ok(off.pr().merged);
+  assert.equal(off.f.log.read(0, ['light_check.started']).length, 0);
+});
+
 // ---- conflict fix runs
 
 /** Someone else's change lands on main on the very line the PR changed: a real conflict for the PR. */
