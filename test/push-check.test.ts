@@ -126,6 +126,19 @@ test('checkedPush without force is compare-and-swap: a moved remote branch is an
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], a);
 });
 
+test('checkedPush with expect: updates the branch only while it is still at that commit', () => {
+  const r = repo();
+  const a = r.commit({ 'a': '1\n' });
+  git(r.work, 'push', '-q', 'origin', `${a}:refs/heads/task`);
+  const b = r.commit({ 'b': '1\n' });
+  assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: b, ref: 'refs/heads/task', limits: limits(), expect: a }), { ok: true });
+  assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task').split('\t')[0], b);
+  const c = r.commit({ 'c': '1\n' });
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: c, ref: 'refs/heads/task', limits: limits(), expect: a });
+  assert.ok(!res.ok && 'error' in res, 'the branch is at b, not a: refused');
+  assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task').split('\t')[0], b);
+});
+
 test('the engine pushes code only through checkedPush (lease refs and the demo seed are the only other pushes)', () => {
   const allowed = new Set(['src/push-check.ts', 'src/claims.ts', 'src/demo.ts']);
   const offenders: string[] = [];

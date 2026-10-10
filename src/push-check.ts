@@ -68,13 +68,15 @@ export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok:
 
 /**
  * The only way the coordinator pushes code: the limits first, then the push.
- * `force` replaces the branch (a task branch the harness owns); without it the
- * push succeeds only if the remote hasn't moved (compare-and-swap).
+ * `force` replaces the branch (a task branch the harness owns); `expect` updates
+ * it only if the remote is still exactly at that commit (never over someone
+ * else's push); with neither, the push succeeds only as a fast-forward.
  */
-export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; force?: boolean }): PushResult {
+export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; force?: boolean; expect?: string }): PushResult {
   const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
   if (refused.length) return { ok: false, refused };
-  const push = spawnSync('git', ['push', o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
+  const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
+  const push = spawnSync('git', ['push', ...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
   if (push.status !== 0) return { ok: false, error: (push.stderr || '').trim() };
   return { ok: true };
 }

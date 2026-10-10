@@ -12,6 +12,7 @@ interface FilePr {
   headSha: string;
   draft: boolean;
   merged: boolean;
+  reviewers?: string[];
 }
 
 interface FileState {
@@ -20,6 +21,8 @@ interface FileState {
   labels: string[];
   /** Checks per commit sha (tests set them). */
   checks?: Record<string, CommitCheck[]>;
+  /** Job logs by check run id (tests set them); 403 = the credential can't read them. */
+  logs?: Record<string, string | 403>;
 }
 
 export class FileBacklog implements Backlog {
@@ -126,11 +129,28 @@ export class FileBacklog implements Backlog {
       if (i.pr) i.pr.draft = false;
     });
   }
+  async requestReview(n: number, logins: string[]) {
+    this.edit(n, (i) => {
+      if (i.pr) i.pr.reviewers = [...new Set([...(i.pr.reviewers ?? []), ...logins])];
+    });
+  }
+  async jobLog(id: number): Promise<{ ok: true; text: string } | { ok: false; why: 'forbidden' | 'not_found' }> {
+    const log = this.load().logs?.[String(id)];
+    if (log === undefined) return { ok: false, why: 'not_found' };
+    if (log === 403) return { ok: false, why: 'forbidden' };
+    return { ok: true, text: log };
+  }
+  /** Test helper: a job's log, or 403 for a credential that can't read Actions logs. */
+  setJobLog(id: number, log: string | 403) {
+    const s = this.load();
+    (s.logs ??= {})[String(id)] = log;
+    this.save(s);
+  }
   /** Test helper: the pull requests, oldest first. */
   prs() {
     return this.load()
       .issues.filter((i) => i.pr)
-      .map((i) => ({ number: i.number, title: i.title, body: i.body, labels: i.labels, state: i.state, ...i.pr! }));
+      .map((i) => ({ number: i.number, title: i.title, body: i.body, labels: i.labels, state: i.state, comments: i.comments, ...i.pr! }));
   }
   /** Test helper: change a pull request as GitHub would (a push moves headSha; a merge or close ends it). */
   setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged'>> & { state?: 'open' | 'closed' }) {
