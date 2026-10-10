@@ -22,6 +22,7 @@ interface Render {
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
+  probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   pages: Record<string, unknown>;
 }
 
@@ -110,11 +111,21 @@ test('decisions are answerable only where the server allows it (canAnswer)', () 
   for (const [tag] of buttons) assert.match(tag, /type="button"/);
   assert.equal((mine.match(/data-option=/g) ?? []).length, options, 'nothing but buttons carries an option');
   assert.doesNotMatch(mine, /type="radio"|role="radio"/);
+  // Only an option equal to the recommendation is primary; a free-text recommendation marks none.
+  let freeText = 0;
   for (const d of open) {
-    const rec = d.options.includes((d as { recommendation?: string }).recommendation ?? '') ? (d as { recommendation?: string }).recommendation! : d.options[0]!;
-    const tag = buttons.find(([, o]) => o === rec)?.[0] ?? '';
-    assert.match(tag, /bg-ink/, `the recommended option "${rec}" is the primary button`);
+    const rec = (d as { recommendation?: string }).recommendation ?? '';
+    if (!d.options.includes(rec)) freeText++;
+    for (const o of d.options) {
+      const tag = buttons.find(([, x]) => x === o)?.[0] ?? '';
+      if (o === rec) assert.match(tag, /bg-ink/, `"${o}" is the recommendation: the primary button`);
+      else {
+        assert.doesNotMatch(tag, /\bbg-ink\b/, `"${o}" isn't the recommendation ("${rec}"): not primary`);
+        assert.doesNotMatch(tag, /title="recommended"/, `"${o}" isn't marked recommended`);
+      }
+    }
   }
+  assert.ok(freeText >= 1, 'the demo has a decision whose recommendation is free text');
   for (const [tag, o] of buttons) if (/reject|close/.test(o!)) assert.match(tag, /text-red/, `"${o}" is marked destructive`);
   assert.ok(asOther.decisions.every((d) => d.canAnswer === false), 'the server says another user may not answer');
   const theirs = r.renderPage('decisions', asOther);
@@ -123,10 +134,12 @@ test('decisions are answerable only where the server allows it (canAnswer)', () 
 });
 
 test('the PR page: what waits for you and exactly why, what is moving, what auto-merged (with links and reasons), refused pushes, the auto-merge state', () => {
-  const pr = (number: number, phase: string, extra: Record<string, unknown> = {}) => ({ number, issue: number - 100, title: `Change ${number}`, url: `https://example.test/pr/${number}`, openedAt: new Date().toISOString(), head: 'a'.repeat(40), state: 'open', draft: true, status: null, unready: null, fixes: [], gaveUp: null, decision: null, merged: null, mergeFailed: null, mainResult: null, phase, ...extra });
+  const pr = (number: number, phase: string, extra: Record<string, unknown> = {}) => ({ number, issue: number - 100, title: `Change ${number}`, url: `https://example.test/pr/${number}`, openedAt: new Date().toISOString(), head: 'a'.repeat(40), state: 'open', draft: true, status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, phase, ...extra });
   const view = {
     prs: [
-      pr(101, 'waiting', { draft: false, decision: { at: '', head: 'a'.repeat(40), auto: false, reasons: ['touches a migration (L3)'] }, status: { head: 'a'.repeat(40), at: '', ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] } }),
+      // A CI fix gave up, then (after a person's push) the merge policy still left it to a person: both reasons show.
+      pr(108, 'gave_up', { gaveUp: { at: '', reason: 'gave up: the same test fails on main' }, waitReasons: ['high-risk: migrations'] }),
+      pr(101, 'waiting', { draft: false, waitReasons: ['touches a migration (L3)'], decision: { at: '', head: 'a'.repeat(40), auto: false, reasons: ['touches a migration (L3)'] }, status: { head: 'a'.repeat(40), at: '', ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] } }),
       pr(102, 'gave_up', { gaveUp: { at: '', reason: 'a flaky test, not this change' } }),
       pr(103, 'fixing', { fixes: [{ attempt: 1, at: new Date().toISOString(), checks: ['lint'], outcome: 'running', detail: '' }] }),
       pr(104, 'auto_merged', { state: 'merged', decision: { at: '', head: 'a'.repeat(40), auto: true, reasons: ['docs only, 12 lines'] }, merged: { at: new Date().toISOString(), sha: 'f'.repeat(40), url: 'https://example.test/commit/f', auto: true }, mainResult: { at: '', outcome: 'green', failed: [] } }),
@@ -141,15 +154,28 @@ test('the PR page: what waits for you and exactly why, what is moving, what auto
   assert.match(html, /href="https:\/\/example.test\/pr\/200"/, 'the revert PR is linked');
   assert.match(html, /data-pr-reasons="101"[^>]*>[\s\S]*touches a migration \(L3\)/, 'exactly why it waits');
   assert.match(html, /data-pr-reasons="102"[^>]*>[\s\S]*a flaky test, not this change/, 'why the CI fix gave up');
+  // Both reasons, each under its own heading, on one card.
+  const card108 = html.slice(html.indexOf('data-pr="108"'), html.indexOf('data-pr="101"'));
+  assert.match(card108, /Why the CI fix stopped[\s\S]*data-testid="pr-gave-up-reasons"[\s\S]*gave up: the same test fails on main/);
+  assert.match(card108, /Why it waits for you[\s\S]*data-testid="pr-wait-reasons"[\s\S]*high-risk: migrations/);
   assert.match(html, /data-pr-checks="101"[\s\S]*test: pass/, 'checks on the current head');
   assert.match(html, /data-task-row="pr-103"[\s\S]*fixing CI/);
   assert.match(html, /data-pr="104" data-phase="auto_merged"[\s\S]*href="https:\/\/example.test\/commit\/f"[\s\S]*docs only, 12 lines/, 'auto-merged: the merge commit linked, and why');
   assert.match(html, /data-refused="18"[\s\S]*900 changed lines, over the 800 limit/);
   assert.match(r.renderPage('prs', asOwner), /<h1[^>]*>Pull requests/);
   // Stable hooks for every section and action on the page (kebab-case data-testid).
-  for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
+  for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-gave-up-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
     assert.match(html, new RegExp(`data-testid="${id}"`), `data-testid ${id}`);
   }
+});
+
+test('the UI asks for hub instances only when a hub served the page (no 404 on an instance\'s own dashboard)', async () => {
+  const asked: string[] = [];
+  const get = async (url: string) => (asked.push(url), { ok: true, json: async () => ({ instances: [{ name: 'a', up: true, error: null }] }) });
+  assert.equal(await r.probeHub(false, get), null);
+  assert.deepEqual(asked, [], 'not served by a hub: no request at all');
+  assert.deepEqual(await r.probeHub(true, get, 't'), { instances: [{ name: 'a', up: true, error: null }] });
+  assert.deepEqual(asked, ['/api/hub']);
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {

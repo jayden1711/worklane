@@ -50,7 +50,11 @@ function checkSummary(pr: PrView): string {
 
 /** A PR waiting for a person, as a recommendation-style card: what it is, exactly why it waits, its checks, and where to act. */
 function WaitingCard({ pr }: { pr: PrView }) {
-  const reasons = pr.phase === 'gave_up' ? [pr.gaveUp!.reason] : (pr.decision?.reasons ?? []);
+  // Both can apply: a CI fix gave up, then (after a person's push) the merge policy still left it to a person.
+  const groups = [
+    ...(pr.gaveUp ? [{ title: 'Why the CI fix stopped', reasons: [pr.gaveUp.reason], id: 'pr-gave-up-reasons' }] : []),
+    ...((pr.waitReasons ?? []).length ? [{ title: 'Why it waits for you', reasons: pr.waitReasons, id: 'pr-wait-reasons' }] : []),
+  ];
   return (
     <div className="overflow-hidden rounded-card bg-surface shadow-card" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-wait-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
       <div className="primitive-card-pad">
@@ -64,10 +68,24 @@ function WaitingCard({ pr }: { pr: PrView }) {
           <span>· opened {ago(pr.openedAt)}</span>
         </div>
         <div className="mt-2 text-[14px] font-medium text-ink">{pr.title}</div>
-        <div className="mt-1.5 text-[12px] font-medium text-ink-3">{pr.phase === 'gave_up' ? 'Why the CI fix stopped' : 'Why it waits for you'}</div>
-        <ul className="mt-1 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink shadow-hairline" data-pr-reasons={pr.number} data-testid="pr-wait-reasons">
-          {reasons.length ? reasons.map((r, i) => <li key={i}>{r}</li>) : <li className="text-ink-3">no reason recorded</li>}
-        </ul>
+        <div data-pr-reasons={pr.number}>
+          {groups.length ? (
+            groups.map((g) => (
+              <div key={g.id}>
+                <div className="mt-1.5 text-[12px] font-medium text-ink-3">{g.title}</div>
+                <ul className="mt-1 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink shadow-hairline" data-testid={g.id}>
+                  {g.reasons.map((r, i) => (
+                    <li key={i}>{r}</li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          ) : (
+            <div className="mt-1.5 text-[12px] text-ink-3" data-testid="pr-wait-reasons">
+              no reason recorded
+            </div>
+          )}
+        </div>
         <div className="mt-2.5">
           <Checks pr={pr} />
         </div>

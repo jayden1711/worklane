@@ -235,7 +235,10 @@ export function tokenGiven(req: IncomingMessage, url: URL, token: string): boole
 }
 
 /** The built UI; anything unknown falls back to index.html (client-side routes). Never a file outside webDir. */
-export function serveStatic(webDir: string, url: URL, res: ServerResponse): void {
+/** The marker a hub puts on the page it serves, so the UI asks for the hub's instances only there (else /api/hub is a 404). */
+export const HUB_MARKER = '<meta name="dashboard-hub" content="1">';
+
+export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts: { hub?: boolean } = {}): void {
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
   let file = resolve(webDir, rel);
   if (!file.startsWith(resolve(webDir) + sep) && file !== resolve(webDir)) return json(res, 403, { error: 'forbidden' });
@@ -246,6 +249,10 @@ export function serveStatic(webDir: string, url: URL, res: ServerResponse): void
     return;
   }
   res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': extname(file) === '.html' ? 'no-store' : 'max-age=3600' });
+  if (opts.hub && extname(file) === '.html') {
+    const html = readFileSync(file, 'utf8');
+    return void res.end(html.includes('</head>') ? html.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${html}`);
+  }
   res.end(readFileSync(file));
 }
 

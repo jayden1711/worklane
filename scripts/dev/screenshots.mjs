@@ -105,6 +105,10 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('ci_fix.started', { issue: 2, number: 42, head: s('b'), checks: ['test'], attempt: 1, lease: s('1') });
     add('ci_fix.finished', { issue: 2, number: 42, outcome: 'no_push', head: null, detail: 'the failing test also fails on main' });
     add('ci_fix.gave_up', { issue: 2, number: 42, head: s('b'), reason: 'the failure is not caused by this change: the same test fails on main' });
+    // Then a person pushes a fix; it's ready, and the merge policy still leaves it to a person: both reasons show.
+    add('pr.status', { issue: 2, number: 42, head: s('9'), ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }, { name: 'lint', outcome: 'pass' }] });
+    add('pr.ready', { issue: 2, number: 42, head: s('9') });
+    add('merge.decided', { issue: 2, number: 42, head: s('9'), auto: false, reasons: ['high-risk: migrations', 'a CI fix run happened on this PR'] });
     open(3, 43, s('c'));
     add('pr.status', { issue: 3, number: 43, head: s('c'), ready: false, reasons: ['lint failed'], checks: [{ name: 'test', outcome: 'pass' }, { name: 'lint', outcome: 'fail' }] });
     add('ci_fix.started', { issue: 3, number: 43, head: s('c'), checks: ['lint'], attempt: 1, lease: s('2') });
