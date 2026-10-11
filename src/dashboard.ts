@@ -19,7 +19,7 @@ import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceTokens, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
-import type { Backlog } from './backlog/types.js';
+import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
@@ -99,11 +99,7 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
   };
 }
 
-/** Who may answer a decision from the dashboard: its owner, or one of the project's writers. GitHub logins are case-insensitive. */
-export function mayAnswer(owner: string, user: string, owners: { writers: string[] }): boolean {
-  const u = user.toLowerCase();
-  return !!u && (owner.toLowerCase() === u || owners.writers.some((w) => w.toLowerCase() === u));
-}
+export { mayAnswer };
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 

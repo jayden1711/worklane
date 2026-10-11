@@ -9,6 +9,7 @@ import { childEnv, shellCommand } from './os/index.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { hostOf, RESEARCH_ROOT_ENV, researchCallRefusal, researchModeRefusal } from './research.js';
+import { INTAKE_ROLE, INTAKE_TOOLS } from './intake/run.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
 import { TaskFile } from './contract.js';
@@ -72,8 +73,11 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   // A research run without repo access: its hook comes with its lane (not the project's settings; its directory is
   // a bundle with no config), and only the research rules apply.
   const researchRoot = env[RESEARCH_ROOT_ENV];
-  if (isAgent(env) && env[`${BRAND.envPrefix}_ROLE`] === 'researcher' && researchRoot) {
-    const why = researchModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, researchRoot);
+  const role = env[`${BRAND.envPrefix}_ROLE`];
+  // An intake run reads untrusted report text: its read tools only, whatever lane or settings it runs under.
+  const intakeRefusal = (tool: string) => (isAgent(env) && role === INTAKE_ROLE && !(INTAKE_TOOLS as readonly string[]).includes(tool) ? `intake runs may only use ${INTAKE_TOOLS.join(', ')}; ${tool} is refused` : null);
+  if (isAgent(env) && (role === 'researcher' || role === INTAKE_ROLE) && researchRoot) {
+    const why = intakeRefusal(input.tool_name ?? '') ?? researchModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, researchRoot);
     return why ? { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${why}` } }), exitCode: 0 } : { exitCode: 0 };
   }
   const root = env.CLAUDE_PROJECT_DIR && existsSync(join(env.CLAUDE_PROJECT_DIR, BRAND.configDir)) ? env.CLAUDE_PROJECT_DIR : findProjectRoot(cwd);
@@ -82,6 +86,8 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     exitCode: 0,
   });
   if (!root) return isAgent(env) ? decide('deny', `no ${BRAND.configDir}/ found above ${cwd}`) : { exitCode: 0 };
+  const intakeWhy = intakeRefusal(input.tool_name ?? '');
+  if (intakeWhy) return decide('deny', intakeWhy);
   let cfg: Config;
   try {
     cfg = loadConfig(root);

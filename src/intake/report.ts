@@ -26,6 +26,13 @@ export interface IncomingReport {
   thread?: { kind: 'channel' | 'dm' | 'sms' | 'group'; id: string };
 }
 
+/** A source as the coordinator uses it: new reports since the last take, and a reply into a report's thread. */
+export interface IntakeSource {
+  name: Source;
+  take(): Promise<IncomingReport[]>;
+  reply(thread: NonNullable<IncomingReport['thread']>, text: string): Promise<boolean>;
+}
+
 /** Intake's daily caps. The instance settings win; these (or the intake config's) are the defaults. */
 export interface IntakeCaps {
   reports_per_sender_per_day: number;

@@ -279,6 +279,22 @@ test('decisions: trusted bugs are filed ready, everyone else\'s go to the Inbox;
   assert.match(statusReply('deployed', true, 'https://example.invalid/i/1'), /https/);
 });
 
+test('a draft that fails checkDraft is needs_info, whatever kind the agent chose: the polite request, never an issue (#107)', () => {
+  const bad = [
+    { title: 'Totals ignore discounts', body: 'No contract at all.' },
+    { title: 'Totals ignore discounts', body: '```done_when\n- command: npm test\n```\n' },
+    { title: 'Totals ignore discounts', body: '```done_when\n- command: |\n    npm test\n- bogus: 1\n```\n' },
+  ];
+  for (const draft of bad)
+    for (const kind of ['bug', 'feature'] as const)
+      for (const trusted of [true, false]) {
+        const a = decide({ report: report(), redacted: 'checkout total is wrong', triage: triage({ kind, draft }), trusted, shown: [] });
+        assert.equal(a.action, 'reply', `${kind} ${trusted ? 'trusted' : 'untrusted'}: ${draft.body}`);
+        assert.equal((a as { text: string }).text, NEEDS_INFO_REPLY, 'the fixed request for details, no internal detail');
+        assert.ok((a as { refused?: string }).refused, 'why is kept for the log');
+      }
+});
+
 // ---------- report text is untrusted ----------
 
 const INJECTION =
