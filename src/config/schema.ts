@@ -308,6 +308,19 @@ export const TestsConfig = z.strictObject({
       }
     })
     .default({}),
+  /**
+   * The core budget: `{cores}` in an env value or a command is replaced by this task's share of the machine's
+   * cores (cores minus `reserve`, split over the agents running, within min..max), so parallel test runs never
+   * oversubscribe the machine.
+   */
+  cores: z
+    .strictObject({
+      reserve: z.number().int().min(0).max(256).default(0),
+      min: z.number().int().min(1).max(256).default(1),
+      max: z.number().int().min(1).max(256).optional(),
+    })
+    .refine((c) => c.max === undefined || c.max >= c.min, 'max must be at least min')
+    .prefault({}),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
   checks: z.array(z.string()).default([]),
   tiers: z
