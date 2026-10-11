@@ -79,7 +79,10 @@ test('the chat runs read-only: file reading tools only, no shell, no network, no
   // The history lives in the instance's state, under the home every lane's sandbox denies.
   const home = join(s.base, 'home');
   const deny = sandboxSettings({ lane: { allowedDomains: [] }, denyRead: [home] }).permissions.deny;
-  assert.ok(deny.some((d) => join(s.opts.stateDir, CHAT_HISTORY).startsWith(d.slice('Read(/'.length, -'/**)'.length))));
+  // Deny rules are written as absolute paths (Read(//abs/path/**)); compare without the leading slashes and with
+  // one separator, so the check reads the same on Windows (D:\\...) as on POSIX.
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/^\/+/, '');
+  assert.ok(deny.some((d) => norm(join(s.opts.stateDir, CHAT_HISTORY)).startsWith(norm(d.slice('Read('.length, -'/**)'.length)))));
 });
 
 test('answers cite events, runs, PRs and issues as links; citations to nothing are dropped', async () => {
