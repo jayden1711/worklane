@@ -5,7 +5,7 @@
 // branch in their own worktree; everything outward-facing happens here.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
@@ -43,6 +43,8 @@ import { buildReport, dueSlot, recentRunRecords } from './reports.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { refillPool, takeFromPool } from './worktree-pool.js';
+import { prepareDepCache } from './dep-cache.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -61,6 +63,11 @@ export interface CoordinatorDeps {
    * write (group `gid`, 2750; files 0640), outside the worktree. Without it, task files stay in stateDir.
    */
   agentTasks?: { dir: string; gid: number };
+  /**
+   * The instance's root (beside its checkout), where its dependency cache lives, and the agents' group: set only
+   * when agents run as their own user. Without it there is no shared cache.
+   */
+  depCacheRoot?: { dir: string; gid: number };
   /** The OS user project commands run as (checks, gates, setup, full runs): the agent user, never the coordinator's. */
   commandsAs?: RunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
@@ -86,6 +93,8 @@ export interface CoordinatorDeps {
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
+/** How often the worktree pool is checked against main's tip. */
+const POOL_CHECK_MS = 5 * 60_000;
 /** When GitHub is still computing whether a PR can merge, look again this soon. */
 const MERGEABLE_RECHECK_MS = 10_000;
 /** How often the default branch's tip is checked for a merge (which can make open PRs conflict). */
@@ -132,7 +141,8 @@ export class Coordinator {
   /** Where task worktrees go and how they're set up; the project's env is filled in when each one is made. */
   private readonly wtBase: WorktreeOptions;
   private get wt(): WorktreeOptions {
-    return { ...this.wtBase, env: this.projectEnv() };
+    const cacheEnv = this.depCacheEnv();
+    return { ...this.wtBase, env: this.projectEnv(), ...(cacheEnv ? { cacheEnv } : {}) };
   }
   private active = new Map<number, Promise<void>>();
   /** The hotspot files each running task is expected to change. */
@@ -296,6 +306,7 @@ export class Coordinator {
     await step('prs', () => this.watchPrs(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
+    await step('pool', () => this.maybeRefillPool(), undefined);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
 
@@ -340,6 +351,7 @@ export class Coordinator {
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
     await this.chatQueue;
+    await this.poolRefill;
   }
 
   /**
@@ -674,7 +686,62 @@ export class Coordinator {
   // ---------------------------------------------------------------- task pipeline
 
   private paths(issue: number) {
-    return { name: `issue-${issue}`, branch: `${BRAND.cli}/issue-${issue}`, taskFile: join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `issue-${issue}.json`) };
+    return { name: this.pooledName(issue) ?? `issue-${issue}`, branch: `${BRAND.cli}/issue-${issue}`, taskFile: join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `issue-${issue}.json`) };
+  }
+
+  /** The pooled worktree this claim of the issue runs in, if it took one (recorded, so a restart still finds it). */
+  private pooledName(issue: number): string | null {
+    const ev = this.events(issue);
+    const claim = ev.map((e) => e.type).lastIndexOf('issue.claimed');
+    const p = ev.slice(claim + 1).filter((e) => e.type === 'worktree.pooled').at(-1);
+    return p ? String((p.payload as { name: string }).name) : null;
+  }
+
+  /**
+   * The instance's dependency cache (pip, uv, npm, pnpm, yarn) for worktree setup: only for an instance whose
+   * agents run as their own user (the cache lives beside its checkout), and when the project keeps it on.
+   * Not for agent sessions: their sandbox writes only inside the worktree, so a cache outside it fails there.
+   */
+  private depCacheEnv(): Record<string, string> | undefined {
+    const root = this.d.depCacheRoot;
+    if (!root || !this.d.cfg.tests.worktree.dep_cache) return undefined;
+    if (this.cacheEnv === undefined) {
+      try {
+        this.cacheEnv = prepareDepCache(root.dir, root.gid).env;
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: 'dep-cache', kind: 'error', message: (e as Error).message.slice(0, 500) });
+        this.cacheEnv = null;
+      }
+    }
+    return this.cacheEnv ?? undefined;
+  }
+  private cacheEnv: Record<string, string> | null | undefined;
+
+  private poolBusy = false;
+  private poolCheckedAt = 0;
+  private poolRefill: Promise<void> = Promise.resolve();
+
+  /**
+   * Keep the worktree pool on main's tip, in the background: at most one refill at a time, checked every
+   * few minutes, so a slow setup never holds the coordinator's tick.
+   */
+  private maybeRefillPool(now = Date.now()) {
+    const size = this.d.cfg.tests.worktree.pool;
+    if (size <= 0 || this.poolBusy || this.stopped || now - this.poolCheckedAt < POOL_CHECK_MS) return;
+    this.poolCheckedAt = now;
+    this.poolBusy = true;
+    this.poolRefill = (async () => {
+      try {
+        spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
+        const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+        const r = await refillPool(this.wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb });
+        if (r.created.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree pool', kind: 'error', message: (e as Error).message.slice(0, 500) });
+      } finally {
+        this.poolBusy = false;
+      }
+    })();
   }
 
   async runTask(issue: Issue, doneWhen: DoneWhenList): Promise<void> {
@@ -703,7 +770,10 @@ export class Coordinator {
 
     const { name, branch, taskFile } = this.paths(n);
     try {
-      const { path, setupErrors } = createWorktree(this.wt, name, branch, base);
+      // A worktree already set up on this base, from the pool, when there is one; else a fresh one.
+      const pooled = this.d.cfg.tests.worktree.pool > 0 ? takeFromPool(this.wt, base, branch) : null;
+      if (pooled) this.emit('worktree.pooled', { issue: n, name: pooled.name });
+      const { path, setupErrors } = pooled ? { path: pooled.path, setupErrors: [] as string[] } : createWorktree(this.wt, name, branch, base);
       if (setupErrors.length) throw new Error(`worktree setup failed: ${setupErrors.join('; ')}`);
       this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen });
 

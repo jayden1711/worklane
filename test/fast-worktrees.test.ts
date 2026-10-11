@@ -60,11 +60,11 @@ test('the pool fits only what leaves the free-disk floor', () => {
   assert.equal(poolFits(2, 40, 100), 0);
 });
 
-test('a pool on main: filled, taken where it stands on the task\'s branch, refreshed after a merge', () => {
+test('a pool on main: filled, taken where it stands on the task\'s branch, refreshed after a merge', async () => {
   const r = repo();
   const o = opts(r.dir, { setup: [`node -e "require('fs').writeFileSync('installed.txt', 'yes')"`] });
   const base = r.head();
-  const first = refillPool(o, { size: 2, base, estSizeGb: 1, freeGb: () => 100 });
+  const first = await refillPool(o, { size: 2, base, estSizeGb: 1, freeGb: () => 100 });
   assert.equal(first.created.length, 2);
   assert.equal(readPool(o).length, 2);
   // A task at main takes one: same place, setup already done, now on the task's branch.
@@ -79,28 +79,28 @@ test('a pool on main: filled, taken where it stands on the task\'s branch, refre
   // A merge moves main: the stale one goes, two new ones come.
   writeFileSync(join(r.dir, 'a.txt'), 'two\n');
   r.git('commit', '-q', '-am', 'two');
-  const again = refillPool(o, { size: 2, base: r.head(), estSizeGb: 1, freeGb: () => 100 });
+  const again = await refillPool(o, { size: 2, base: r.head(), estSizeGb: 1, freeGb: () => 100 });
   assert.equal(again.removed.length, 1);
   assert.equal(again.created.length, 2);
   assert.ok(readPool(o).every((e) => e.base === r.head()));
 });
 
-test('the pool never grows past the free disk, and a setup failure stops it', () => {
+test('the pool never grows past the free disk, and a setup failure stops it', async () => {
   const r = repo();
   const o = opts(r.dir);
-  assert.equal(refillPool(o, { size: 3, base: r.head(), estSizeGb: 1, freeGb: () => 10.5 }).created.length, 0);
+  assert.equal((await refillPool(o, { size: 3, base: r.head(), estSizeGb: 1, freeGb: () => 10.5 })).created.length, 0);
   const bad = opts(r.dir, { setup: ['node -e "process.exit(3)"'] });
-  const out = refillPool(bad, { size: 3, base: r.head(), estSizeGb: 1, freeGb: () => 100 });
+  const out = await refillPool(bad, { size: 3, base: r.head(), estSizeGb: 1, freeGb: () => 100 });
   assert.equal(out.created.length, 0);
   assert.equal(out.errors.length, 1, 'one failure, not three tries');
   assert.equal(readPool(bad).length, 0);
 });
 
-test('a pooled worktree that changed since it was pooled is removed, never handed to a task', () => {
+test('a pooled worktree that changed since it was pooled is removed, never handed to a task', async () => {
   const r = repo();
   const o = opts(r.dir);
   const base = r.head();
-  refillPool(o, { size: 1, base, estSizeGb: 1, freeGb: () => 100 });
+  await refillPool(o, { size: 1, base, estSizeGb: 1, freeGb: () => 100 });
   writeFileSync(join(readPool(o)[0]!.path, 'a.txt'), 'tampered\n');
   assert.equal(takeFromPool(o, base, 'worklane/issue-8'), null);
   assert.equal(readPool(o).length, 0);

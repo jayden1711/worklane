@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import { diskFree, groupOnlyDir, writeGroupOnly } from './os/index.js';
-import { createWorktree, removeWorktree, worktreePath, type WorktreeOptions } from './worktrees.js';
+import { createWorktreeAsync, removeWorktree, worktreePath, type WorktreeOptions } from './worktrees.js';
 
 export interface PoolEntry {
   name: string;
@@ -46,10 +46,10 @@ export function poolFits(want: number, estSizeGb: number, freeGb: number): numbe
  * Bring the pool to `size` worktrees on `base` (main's tip): stale ones (an older base, gone from disk) are
  * removed first; new ones are created with the project's setup, and one whose setup fails is removed again.
  */
-export function refillPool(
+export async function refillPool(
   o: WorktreeOptions,
   p: { size: number; base: string; estSizeGb: number; freeGb?: () => number },
-): { created: string[]; removed: string[]; errors: string[] } {
+): Promise<{ created: string[]; removed: string[]; errors: string[] }> {
   const removed: string[] = [];
   const errors: string[] = [];
   const keep: PoolEntry[] = [];
@@ -72,7 +72,7 @@ export function refillPool(
   while (keep.length < Math.floor(p.size) && poolFits(1, p.estSizeGb, free()) === 1) {
     const name = `pool-${Date.now().toString(36)}-${keep.length}`;
     const branch = `${BRAND.cli}/${name}`;
-    const { path, setupErrors } = createWorktree(o, name, branch, p.base);
+    const { path, setupErrors } = await createWorktreeAsync(o, name, branch, p.base);
     if (setupErrors.length) {
       errors.push(`${name}: ${setupErrors.join('; ')}`);
       try {

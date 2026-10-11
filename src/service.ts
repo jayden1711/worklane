@@ -152,7 +152,9 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   // Before anything reads or writes it: state/ as this engine keeps it, whatever an older engine left.
   const tidied = tidyState(state, agentTasks ? { agentTasksDir: agentTasks.dir } : {});
   const log = new EventLog(site.logPath);
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}) });
+  // The same instance root keeps its dependency cache, in the group its agents share.
+  const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());

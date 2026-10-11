@@ -211,6 +211,50 @@ test('the core budget: {cores} is filled in for the coordinator\'s checks (env a
   assert.equal(worker?.env?.WORKERS, '2', 'the agent session too');
 });
 
+test('worktree setup gets the instance\'s dependency cache, and only an instance with its own root has one', { skip }, async () => {
+  const f = fixture();
+  const seen = join(mkdtempSync(join(tmpdir(), 'cache-')), 'seen.txt');
+  f.cfg.tests.worktree.setup = [`node -e "require('fs').writeFileSync(process.argv[1], process.env.PIP_CACHE_DIR || 'none')" ${JSON.stringify(seen)}`];
+  const root = mkdtempSync(join(tmpdir(), 'inst-'));
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, depCacheRoot: { dir: root, gid: process.getgid?.() ?? 0 } });
+  await c.tick();
+  await c.idle();
+  assert.equal(readFileSync(seen, 'utf8'), join(root, 'cache', 'pip'));
+  assert.ok(existsSync(join(root, 'cache', 'npm')));
+  // Without an instance root (a single-user checkout), no cache appears anywhere beside the repo.
+  const g = fixture();
+  g.cfg.tests.worktree.setup = f.cfg.tests.worktree.setup;
+  g.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const d = new Coordinator({ cfg: g.cfg, log: g.log, backlog: g.backlog, runner: agents(), repo: g.repo, instance: 'alice', stateDir: g.stateDir, slotsDir: g.slotsDir, machine: g.machine });
+  await d.tick();
+  await d.idle();
+  assert.equal(readFileSync(seen, 'utf8'), 'none');
+  assert.ok(!existsSync(join(g.repo, '..', 'cache')));
+});
+
+test('a worktree pool on main: refilled in the background, a task starts in a pooled worktree, which is removed after it', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.worktree.pool = 1;
+  f.cfg.tests.worktree.est_size_gb = 0.01;
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  const refilled = f.log.read(0, ['worktree.pool_refilled']).map((e) => e.payload as { created: string[] });
+  assert.equal(refilled.length, 1);
+  assert.equal(refilled[0]!.created.length, 1);
+  const pooledName = refilled[0]!.created[0]!;
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(f.log.read(0, ['worktree.pooled']).map((e) => e.payload), [{ issue: n, name: pooledName }], 'the task took the ready worktree');
+  await c.tick(); // lands what the first tick queued
+  await c.idle();
+  assert.ok(f.log.read(0, ['land.result']).some((e) => (e.payload as { issue: number; outcome: string }).issue === n && (e.payload as { outcome: string }).outcome === 'landed'), 'and finished');
+  const worktrees = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: f.repo, encoding: 'utf8' });
+  assert.ok(!worktrees.includes(pooledName), 'the pooled worktree is removed after the task, under its own name');
+});
+
 test('a refused issue is judged again when its done_when is edited: still invalid gets the new error; valid is claimed', { skip }, async () => {
   const f = fixture();
   const body = (yaml: string) => `Orders with a zero quantity are counted.\r\n\r\n\`\`\`done_when\r\n${yaml}\r\n\`\`\`\r\n`;
