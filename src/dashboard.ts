@@ -19,7 +19,7 @@ import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceTokens, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
-import type { Backlog } from './backlog/types.js';
+import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
@@ -27,7 +27,7 @@ import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
-import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError } from './settings.js';
+import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
@@ -100,11 +100,7 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
   };
 }
 
-/** Who may answer a decision from the dashboard: its owner, or one of the project's writers. GitHub logins are case-insensitive. */
-export function mayAnswer(owner: string, user: string, owners: { writers: string[] }): boolean {
-  const u = user.toLowerCase();
-  return !!u && (owner.toLowerCase() === u || owners.writers.some((w) => w.toLowerCase() === u));
-}
+export { mayAnswer };
 
 /**
  * Who may read agent runs (every route under /api/runs: a run's record, its live feed, a research run's
@@ -181,8 +177,64 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
 }
 
 /**
+ * Where each instance setting lives in the repo's config, or null when the repo's config can't set it.
+ * Every setting key must say (a Record over SettingKey): a new key without a place doesn't compile.
+ */
+const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = {
+  workers: { file: 'agents.yaml', path: ['roles', 'workers', 'count'] },
+  daily_budget_usd: { file: 'agents.yaml', path: ['daily_budget_usd'] },
+  'ci_repair.enabled': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'enabled'] },
+  'ci_repair.max_fixes_per_pr': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'max_fixes_per_pr'] },
+  run_windows: { file: 'config.yaml', path: ['agent_runtime', 'run_windows'] },
+  'research.max_searches_per_day': null,
+  'research.max_fetches_per_day': null,
+  'research.max_usd_per_day': null,
+  'research.repo_access': null,
+  // Intake's caps default from intake.yaml in the instance home, never from the repo's config.
+  'intake.reports_per_sender_per_day': null,
+  'intake.drafts_per_day': null,
+  'intake.max_usd_per_day': null,
+};
+
+const defines = (obj: unknown, path: string[]): boolean => {
+  let at = obj;
+  for (const k of path) {
+    if (at === null || typeof at !== 'object' || !Object.hasOwn(at, k)) return false;
+    at = (at as Record<string, unknown>)[k];
+  }
+  return at !== undefined && at !== null;
+};
+
+/** The repo's config files as written, before the schema's defaults: what the repo itself defines. Unreadable: none. */
+export function repoConfigFiles(dir: string): (file: string) => unknown {
+  const cache = new Map<string, unknown>();
+  return (file) => {
+    if (!cache.has(file)) {
+      let raw: unknown;
+      try {
+        raw = parseDocument(readFileSync(join(dir, file), 'utf8')).toJS();
+      } catch {
+        raw = undefined;
+      }
+      cache.set(file, raw);
+    }
+    return cache.get(file);
+  };
+}
+
+/**
+ * Where a setting's value in effect comes from: the instance's policy when it sets the key (its dotted path),
+ * else the repo's config when that defines it, else the engine's own default.
+ */
+export function settingSource(key: SettingKey, instance: unknown, repo: (file: string) => unknown): 'instance' | 'repo' | 'engine' {
+  if (defines(instance, key.split('.'))) return 'instance';
+  const place = REPO_PLACE[key];
+  return place && defines(repo(place.file), place.path) ? 'repo' : 'engine';
+}
+
+/**
  * The Settings page's instance section: each setting's value in effect and where it comes from (the
- * instance's policy, or the repo's default), the bounds a new value must keep (the machine's limits and
+ * instance's policy, the repo's config, or the engine's default), the bounds a new value must keep (the machine's limits and
  * the policy's own ceilings), and whether this dashboard's user, the owner, may change them.
  */
 export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'cfg' | 'user' | 'limitsPath'>) {
@@ -203,13 +255,7 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     return { ...base, canChange: false, available: false as const, why: `the instance policy can't be read: ${(e as Error).message.split('\n')[0]}` };
   }
   const s = policy.settings;
-  const set: Record<string, boolean> = {
-    workers: s.workers !== undefined,
-    daily_budget_usd: s.daily_budget_usd !== undefined,
-    'ci_repair.enabled': s.ci_repair?.enabled !== undefined,
-    'ci_repair.max_fixes_per_pr': s.ci_repair?.max_fixes_per_pr !== undefined,
-    run_windows: s.run_windows !== undefined,
-  };
+  const repo = repoConfigFiles(o.cfg.dir);
   return {
     ...base,
     canChange: base.canChange && !limitsError,
@@ -217,7 +263,7 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     limits,
     limitsError,
     ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
-    settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: set[key] ? ('instance' as const) : ('repo' as const) })),
+    settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: settingSource(key, s, repo) })),
   };
 }
 
@@ -485,9 +531,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
         // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string };
+          const body = (await readBody(req)) as { question?: string; key?: unknown };
           try {
-            return json(res, 200, askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: opts.user }));
+            // `key`: the client's request key, so a retried POST is the same question, not a second turn.
+            return json(res, 200, askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: opts.user, ...(body.key !== undefined ? { key: String(body.key) } : {}) }));
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
             throw e;

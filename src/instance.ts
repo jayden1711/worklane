@@ -63,6 +63,14 @@ export const InstanceSettings = z.strictObject({
       repo_access: z.boolean().optional(),
     })
     .optional(),
+  /** Daily caps on work intake (reports per sender, drafts, estimated spend). Absent: the intake config's values. */
+  intake: z
+    .strictObject({
+      reports_per_sender_per_day: z.number().int().min(1).optional(),
+      drafts_per_day: z.number().int().min(1).optional(),
+      max_usd_per_day: z.number().min(0).optional(),
+    })
+    .optional(),
 });
 export type InstanceSettings = z.infer<typeof InstanceSettings>;
 
@@ -117,6 +125,18 @@ export const CredentialsFile = z.strictObject({
   claude: z.strictObject({ config_dir: path }).optional(),
   /** An API key file for eval lanes: owned by the eval user, unreadable to every other. */
   eval_key: path.optional(),
+  /**
+   * Work intake's credentials, each a file only the coordinator user can read (0400), installed with
+   * credentials.sh: the chat bot's token, the SMS provider's auth token (with its account and number), and the
+   * secret shared with the SMS relay. No agent can read any of them.
+   */
+  intake: z
+    .strictObject({
+      discord_token: path.optional(),
+      twilio: z.strictObject({ account_sid: z.string().regex(/^AC[0-9a-f]{32}$/), auth_token: path, number: z.string().regex(/^\+[1-9]\d{6,14}$/) }).optional(),
+      relay_secret: path.optional(),
+    })
+    .optional(),
 });
 
 export type PolicyFile = z.infer<typeof PolicyFile>;
@@ -209,6 +229,9 @@ export function credentialProblems(c: CredentialsFile): string[] {
   if (c.github.kind === 'gh-config-dir') need(c.github.path, 'GitHub: gh config dir');
   else need(c.github.key_path, 'GitHub: App private key');
   if (c.claude) need(c.claude.config_dir, 'Claude: config dir');
+  if (c.intake?.discord_token) need(c.intake.discord_token, 'Intake: chat bot token');
+  if (c.intake?.twilio) need(c.intake.twilio.auth_token, 'Intake: SMS auth token');
+  if (c.intake?.relay_secret) need(c.intake.relay_secret, 'Intake: relay secret');
   return out;
 }
 

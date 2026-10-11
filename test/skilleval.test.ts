@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { EventLog } from '../src/events/log.js';
+import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compareInstructions, comparisonDiff, comparisonLine, engineRoleCases, evalInstructions, instructionTargets, parseCases, runnerAsk, skillStatus, type Ask, type AskRequest } from '../src/skilleval.js';
+import { assertJudgeDiffers, compareInstructions, comparisonDiff, comparisonLine, engineRoleCases, evalInstructions, instructionTargets, parseCases, runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus, type Ask, type AskRequest } from '../src/skilleval.js';
 import { FakeRunner } from '../src/runner.js';
 import { BRAND } from '../src/brand.js';
 import { createHash } from 'node:crypto';
@@ -54,6 +57,69 @@ test('a skill is a draft until its evals pass for its exact text', () => {
   assert.equal(skillStatus(dir), 'evaluated');
   writeFileSync(join(dir, 'SKILL.md'), 'v2: edited');
   assert.equal(skillStatus(dir), 'stale', 'editing the skill invalidates its eval');
+});
+
+// ---- skill eval (the CLI)
+
+test('skill eval: the default judge differs from the default model', () => {
+  assert.deepEqual([SKILL_EVAL_DEFAULTS.model, SKILL_EVAL_DEFAULTS.judge], ['sonnet', 'opus']);
+  assert.doesNotThrow(() => assertJudgeDiffers(SKILL_EVAL_DEFAULTS.model, SKILL_EVAL_DEFAULTS.judge));
+});
+
+function skillDir() {
+  const dir = mkdtempSync(join(tmpdir(), 'skill-'));
+  mkdirSync(join(dir, 'evals'));
+  writeFileSync(join(dir, 'SKILL.md'), 'Read the alert row before anything else.');
+  writeFileSync(join(dir, 'evals', 'cases.md'), '## 1. Alert\n**Situation**\n- An alert fires.\n\n**Correct**\n- Reads the alert row.\n\n**Wrong**\n- Edits the ledger.\n');
+  return dir;
+}
+
+test('skill eval: every model call goes through the given ask (the runner), the judge on its own model; results are written', async () => {
+  const dir = skillDir();
+  const calls: AskRequest[] = [];
+  const ask: Ask = async (req) => {
+    calls.push(req);
+    return { structured: 'plan' in (req.schema as { properties: object }).properties ? { plan: 'read the alert row' } : { notes: '', correct: [true], wrong: [false] }, costUsd: 0.01 };
+  };
+  const r = await runSkillEval(dir, { model: 'sonnet', judge: 'opus', samples: 1, ask });
+  assert.deepEqual([r.passed, r.total, r.judge], [1, 1, 'opus']);
+  assert.deepEqual(calls.map((c) => c.model), ['sonnet', 'opus']);
+  assert.equal(calls[0]!.system, 'Read the alert row before anything else.');
+  assert.equal(skillStatus(dir), 'evaluated');
+  await assert.rejects(runSkillEval(dir, { model: 'sonnet', judge: 'sonnet', ask }), /must be a different model/);
+});
+
+test('skill eval CLI: runs with its defaults through the runner (stream-json, auth checked), each call\'s cost recorded', { skip: process.platform === 'win32' && 'POSIX stand-in for claude' }, () => {
+  const { dir: project, stateDir } = exampleProject();
+  const skill = skillDir();
+  const bin = mkdtempSync(join(tmpdir(), 'bin-'));
+  const log = join(bin, 'calls.jsonl');
+  writeFileSync(
+    join(bin, 'claude'),
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'auth') { fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ auth: true }) + '\\n'); console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
+const first = JSON.parse(${STDIN_LINE});
+const model = args[args.indexOf('--model') + 1];
+const schema = args[args.indexOf('--json-schema') + 1] || '';
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ model, input: first.type, streamJson: args.includes('--input-format') }) + '\\n');
+const structured = schema.includes('"plan"') ? { plan: 'read the alert row' } : { notes: '', correct: [true], wrong: [false] };
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', structured_output: structured, num_turns: 1, total_cost_usd: 0.02 }));
+`,
+  );
+  chmodSync(join(bin, 'claude'), 0o755);
+  const out = execFileSync(process.execPath, [engineCli, 'skill', 'eval', skill, '--samples', '1'], { cwd: project, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: stateDir, ANTHROPIC_API_KEY: '' } });
+  assert.match(out, /1\/1 passed \(model sonnet, judge opus\)/);
+  const calls = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { auth?: boolean; model?: string; input?: string; streamJson?: boolean });
+  const runs = calls.filter((c) => c.model);
+  assert.deepEqual(runs.map((c) => c.model), ['sonnet', 'opus']);
+  assert.ok(runs.every((c) => c.streamJson && c.input === 'user'), "the runner's stream-json session, not a one-shot spawn");
+  assert.ok(calls.some((c) => c.auth), "the runner's auth preflight ran");
+  const events = new EventLog(join(stateDir, 'events.db'));
+  const costs = events.read(0, ['run.cost']).map((e) => [(e.payload as { role: string }).role, (e.payload as { usd: number }).usd]);
+  events.close();
+  assert.deepEqual(costs, [['skill-eval', 0.02], ['skill-eval', 0.02]]);
 });
 
 // ---- instruction evals

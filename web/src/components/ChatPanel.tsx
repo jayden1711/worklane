@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { MessageCircle, X } from 'lucide-react';
-import { askChat, chatAnswer, fileChatDraft, hub, hubInstance, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatCitation, type HubInfo } from '../api';
+import { askChat, chatAnswer, fileChatDraft, hub, hubInstance, requestKey, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatCitation, type HubInfo } from '../api';
 import { navigate } from '../App';
 import { Badge, Button, cx } from './ui';
 
@@ -291,12 +291,14 @@ export function ChatPanel({ cli }: { cli: string }) {
     const question = q.trim();
     if (!question || question.length > MAX) return;
     setBusy(true);
+    // One key per question: a retried POST is the same ask, never a second turn.
+    const key = requestKey();
     // On a hub: the chosen instance, or each one that answers; elsewhere this page's own server.
     const targets: (string | null)[] = !hubInfo ? [null] : target === '*' ? hubInfo.hub.instances.filter((i) => i.up).map((i) => i.name) : [target];
     const asks = await Promise.all(
       targets.map(async (instance) => {
         try {
-          const { id } = await askChat(instance, question);
+          const { id } = await askChat(instance, question, key);
           return { instance, id, f: pendingFile(id) };
         } catch (e) {
           return { instance, id: null, f: { state: 'error' as const, why: (e as Error).message } };

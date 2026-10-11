@@ -8,7 +8,7 @@
 // cases, run against the instructions at the base and at the head, with a cost cap, compared
 // case by case. The agent under test only ever sees the instructions and the situation (never
 // the rubric), in a neutrally named directory, and a judge on a different model grades it.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -70,48 +70,22 @@ export interface EvalResults {
   cases: CaseResult[];
 }
 
-function claude(prompt: string, model: string, schema?: object): { text: string; structured?: unknown } {
-  const cwd = neutralDir();
-  const args = ['-p', prompt, '--model', model, '--output-format', 'json', '--max-turns', '3', '--setting-sources', '', '--strict-mcp-config', '--disallowedTools', 'Bash', 'Edit', 'Write', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'];
-  if (schema) args.push('--json-schema', JSON.stringify(schema));
-  const r = spawnSync('claude', args, { cwd, encoding: 'utf8', env: agentEnv(process.env, 'cli'), timeout: 600_000, maxBuffer: 32 * 1024 * 1024 });
-  const out = JSON.parse(r.stdout || '{}') as { result?: string; structured_output?: unknown; is_error?: boolean };
-  if (r.status !== 0 || out.is_error) throw new Error(`claude failed: ${(r.stderr || out.result || '').slice(0, 300)}`);
-  return { text: out.result ?? '', ...(out.structured_output !== undefined ? { structured: out.structured_output } : {}) };
-}
-
 export const CORRECT_THRESHOLD = 0.8;
 
-export function runSkillEval(skillDir: string, opts: { model: string; judge: string; only?: string[]; samples?: number }): EvalResults {
+/** `skill eval`'s defaults: the judge is a different model from the one under test. */
+export const SKILL_EVAL_DEFAULTS = { model: 'sonnet', judge: 'opus', samples: 3, capUsd: 20 } as const;
+
+/**
+ * A skill's evals, every model call through `ask` (the CLI passes the runner's: one claude per login, the
+ * subscription CLI, each call's cost recorded). The same cases, prompts and judging as instruction evals.
+ */
+export async function runSkillEval(skillDir: string, opts: { model: string; judge: string; ask: Ask; only?: string[]; samples?: number; capUsd?: number }): Promise<EvalResults> {
   assertJudgeDiffers(opts.model, opts.judge);
-  const k = opts.samples ?? 3;
   const skill = readFileSync(join(skillDir, 'SKILL.md'), 'utf8');
   const cases = parseCases(readFileSync(join(skillDir, 'evals', 'cases.md'), 'utf8')).filter((c) => !opts.only?.length || opts.only.includes(c.id));
-  const results: CaseResult[] = [];
-  for (const c of cases) {
-    const runs = Array.from({ length: k }, () => sampleCase(skill, c, opts.model, opts.judge));
-    const passed = runs.filter((r) => r.pass);
-    const best = passed[0] ?? runs[0]!;
-    results.push({ ...best, pass: passed.length * 2 > k, samples: `${passed.length}/${k}` });
-  }
+  const r = await evalInstructions({ instructions: skill, cases, model: opts.model, judge: opts.judge, samples: opts.samples ?? SKILL_EVAL_DEFAULTS.samples, ask: opts.ask, spend: { usd: 0, cap: opts.capUsd ?? SKILL_EVAL_DEFAULTS.capUsd } });
+  const results: CaseResult[] = r.cases.map((c) => ({ id: c.id, title: c.title, pass: c.outcome === 'pass', samples: c.samples ?? '0/0', correct: c.correct ?? '', wrongDone: c.wrongDone ?? [], notes: c.outcome === 'not run' ? 'not run: the cost cap was reached' : '' }));
   return finish(skillDir, skill, opts, results);
-}
-
-function sampleCase(skill: string, c: EvalCase, model: string, judge: string): Omit<CaseResult, 'samples'> {
-  {
-    const plan = claude(
-      `You are an agent working under this skill:\n\n<skill>\n${skill}\n</skill>\n\nSituation:\n${c.situation}\n\nYou cannot run anything right now. Write, in order, exactly what you would do (commands, queries, files to read) and what you would report or decide. Be concrete.`,
-      model,
-    ).text;
-    const verdict = claude(
-      `Grade an agent's plan against an eval case. Judge actions and claims, not wording. A WRONG item counts as done if the plan would do it in the situation as described, including offering it as an acceptable option. Doing something only under different conditions the case doesn't describe (e.g. "only once the machine is quiet") is not the wrong action.\n\nSituation:\n${c.situation}\n\nCORRECT (in order):\n${c.correct.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nWRONG (in order):\n${c.wrong.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n<plan>\n${plan}\n</plan>`,
-      judge,
-      JUDGE_SCHEMA,
-    ).structured as { correct: boolean[]; wrong: boolean[]; notes: string };
-    const hits = verdict.correct.filter(Boolean).length;
-    const wrongDone = c.wrong.filter((_, i) => verdict.wrong[i]);
-    return { id: c.id, title: c.title, pass: !wrongDone.length && hits >= Math.ceil(c.correct.length * CORRECT_THRESHOLD), correct: `${hits}/${c.correct.length}`, wrongDone, notes: verdict.notes.slice(0, 600) };
-  }
 }
 
 function finish(skillDir: string, skill: string, opts: { model: string; judge: string; only?: string[] }, results: CaseResult[]): EvalResults {
