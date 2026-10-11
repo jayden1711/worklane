@@ -195,7 +195,9 @@ test('the installed updater\'s paths are fixed in its source', () => {
 
 test('setup: off by default, units validated before they\'re installed, a timer every 10 minutes', () => {
   const s = readFileSync(join(repoRoot, 'scripts', 'setup', 'updates.sh'), 'utf8');
-  assert.match(s, /enabled: false/);
+  // The config it writes (off) is built by lib.sh's updates_config_json, which updates.sh calls.
+  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8'), /updates_config_json\(\) \{[\s\S]*?enabled: false/);
+  assert.match(s, /updates_config_json "\$origin"/);
   assert.match(s, /systemd-analyze verify "\$check"/);
   assert.match(s, /mv -f "\$tmp" "\/etc\/systemd\/system\/\$file"/);
   assert.match(s, /OnUnitActiveSec=10min/);
