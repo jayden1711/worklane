@@ -257,10 +257,12 @@ roles:
 | evaluator | 2 | **fresh context, read-only**, clean worktree at `base_sha` | frozen repro test, verdict `{patch_correct, test_correct, confidence, advice}` |
 | pm | 2 | read-only + issue tools | issues with done_when, size, dedupe |
 | chief_of_staff | 5 | read-only, the event log | routing, reports, decisions (only real ones) |
-| researcher | 5 | read + allowlisted web, capped per day | notes linked to issues |
+| researcher | 5 | open web (WebSearch/WebFetch only) minus a domain blocklist, daily caps; no repo access unless the instance's owner turns it on (then read-only) | a report with every source linked, as an issue comment or a docs/research/ PR |
 | red_attributor | 7 (first job: green main) | read + test runner | culprit commit via bisect over the baseline |
 | security | 7 | read-only, `money-path` changes | verdict, blocks landing until clean |
 | ci_repair, qa_playtester, monitor, release_prep | 7 | per role | per role |
+
+**Researcher** (changed from the allowlisted web above, by the owner's decision). The web is open through Claude Code's WebSearch and WebFetch only: no Bash (so no shell network), no write tools, no MCP, no credentials. A per-repo domain blocklist (`config.yaml` `research.domain_blocklist`) refuses fetches; daily caps on searches, fetches and estimated spend are instance settings. Every search and fetch is recorded and shown on the run page. Web content is untrusted data: a run's tools are fixed before it starts, and its output is taken only as a report and its sources (anything else it returns is dropped). Repo access is an instance setting, **off by default**: off, the run's working directory is a per-run context bundle the coordinator writes (the issue text and questions, redacted; beside the checkout, readable by the agents' group only), and its lane denies every read of the checkout, its worktrees and the instance's task and chat files (sandbox and Read/Glob/Grep rules, plus the engine hook in research mode); on (meant for public repos), it reads the repo read-only. Triggered by a `type:research` or `type:investigation` label, or a ```research block in an issue.
 
 **Evaluator flow** (Agentless + AutoCodeRover/SpecRover + ECC tdd-workflow):
 1. Without seeing the patch, write K candidate reproduction tests (3 to start).

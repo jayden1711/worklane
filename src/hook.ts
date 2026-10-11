@@ -6,6 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
+import { hostOf, RESEARCH_ROOT_ENV, researchCallRefusal, researchModeRefusal } from './research.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
 import { TaskFile } from './contract.js';
@@ -66,6 +67,13 @@ function withFrozen(g: Config['guardrails'], taskFile: string | undefined): { gu
 
 function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   const cwd = input.cwd ?? process.cwd();
+  // A research run without repo access: its hook comes with its lane (not the project's settings; its directory is
+  // a bundle with no config), and only the research rules apply.
+  const researchRoot = env[RESEARCH_ROOT_ENV];
+  if (isAgent(env) && env[`${BRAND.envPrefix}_ROLE`] === 'researcher' && researchRoot) {
+    const why = researchModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, researchRoot);
+    return why ? { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${why}` } }), exitCode: 0 } : { exitCode: 0 };
+  }
   const root = env.CLAUDE_PROJECT_DIR && existsSync(join(env.CLAUDE_PROJECT_DIR, BRAND.configDir)) ? env.CLAUDE_PROJECT_DIR : findProjectRoot(cwd);
   const decide = (permissionDecision: 'deny' | 'ask', reason: string): HookOutput => ({
     stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision, permissionDecisionReason: `[${BRAND.cli}] ${reason}` } }),
@@ -79,6 +87,15 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const msg = e instanceof ConfigInvalid ? e.message : (e as Error).message;
     return decide(isAgent(env) ? 'deny' : 'ask', `guardrails can't load, so this call can't be checked: ${msg}`);
   }
+  // A research run may only read and use the web, and never fetch a blocklisted domain: refused here, before the
+  // call runs, whatever the run was told by a page it read (its tools were fixed before it started, too).
+  if (isAgent(env) && env[`${BRAND.envPrefix}_ROLE`] === 'researcher') {
+    const why = researchCallRefusal(input.tool_name ?? '', input.tool_input ?? {}, cfg.project.research.domain_blocklist);
+    if (why) {
+      log(root, 'guardrails.jsonl', { decision: 'deny', rule: 'research', tool: input.tool_name, agent: true, session: input.session_id });
+      return decide('deny', why);
+    }
+  }
   // An agent's task can freeze files (a reproduction test): treat them as protected for this run.
   let guardrails = cfg.guardrails;
   if (isAgent(env)) {
@@ -86,6 +103,10 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const g = withFrozen(cfg.guardrails, taskFile);
     if ('error' in g) return decide('deny', `the task file ${taskFile} can't be read (${g.error}), so the task's frozen files can't be protected; refusing every call until it can`);
     guardrails = g.guardrails;
+    // A research run's web is the open web minus the research blocklist (checked above), not the network
+    // allowlist other agents are held to: let this one fetch's host through; every other guardrail still applies.
+    const host = env[`${BRAND.envPrefix}_ROLE`] === 'researcher' && input.tool_name === 'WebFetch' ? hostOf(String(input.tool_input?.url ?? '')) : null;
+    if (host) guardrails = { ...guardrails, network: { ...guardrails.network, allow: [...guardrails.network.allow, host] } };
   }
   const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
   if (v.decision === 'none') {

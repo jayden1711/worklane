@@ -6,7 +6,7 @@
 // The repo's own config folder keeps project behavior (tests, review levels,
 // skills) and is reviewed like code; it may only tighten the instance policy.
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
@@ -14,6 +14,11 @@ import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './conf
 import { stateDir, userExists } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
+import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
+import { fileURLToPath } from 'node:url';
+
+/** The engine's CLI, for hooks a lane adds itself (dist/src/cli.js beside this file). */
+const ENGINE_CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 
 const name = z.string().regex(/^[a-z][a-z0-9-]{0,40}$/, 'lowercase letters, digits and dashes');
 
@@ -48,6 +53,16 @@ export const InstanceSettings = z.strictObject({
   daily_budget_usd: z.number().positive().optional(),
   ci_repair: z.strictObject({ enabled: z.boolean().optional(), max_fixes_per_pr: z.number().int().min(0).optional() }).optional(),
   run_windows: z.array(z.strictObject({ from: hhmm, to: hhmm })).optional(),
+  /** Daily caps on research runs (web searches, page fetches, estimated spend). Absent: the engine's defaults. */
+  research: z
+    .strictObject({
+      max_searches_per_day: z.number().int().min(0).optional(),
+      max_fetches_per_day: z.number().int().min(0).optional(),
+      max_usd_per_day: z.number().min(0).optional(),
+      /** May research runs read the repo (read-only)? Off unless the owner turns it on: meant for public repos. */
+      repo_access: z.boolean().optional(),
+    })
+    .optional(),
 });
 export type InstanceSettings = z.infer<typeof InstanceSettings>;
 
@@ -279,6 +294,40 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
     out[name] = { ...(runAs ? { runAs } : {}), ...(i.policy.sandbox ? { settings: sandboxSettings({ lane: { allowedDomains: lane.allowed_domains }, denyRead }) } : {}) };
   }
   return out;
+}
+
+/** A research lane's settings: Read/Glob/Grep deny rules, the research-mode hook, and the sandbox when the policy has it on. */
+export interface ResearchLaneSettings {
+  permissions: { deny: string[] };
+  hooks?: object;
+  sandbox?: ReturnType<typeof sandboxSettings>['sandbox'];
+}
+
+/**
+ * The two research lanes, as the default lane's user. `research` (no repo access) denies every read of the checkout
+ * (and so its worktrees), and of the instance's task and chat files, in the sandbox and in Read rules, and adds the
+ * engine's hook in research mode, which refuses any file read outside the research bundles: its working directory
+ * is a bundle with no project settings, so the project's own hook doesn't run there. `research-repo` may read
+ * the repo like any agent. Both get their settings whether or not the policy's sandbox is on.
+ */
+export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined): Record<string, { runAs?: RunAs; settings: ResearchLaneSettings }> {
+  const root = dirname(i.repo.path);
+  const researchRoot = join(root, RESEARCH_DIR);
+  const runAs = base?.runAs;
+  const home = runAs?.home ?? process.env.HOME ?? '';
+  const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude?.config_dir ?? join(home, '.claude'));
+  const always = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(i.credentials.eval_key ? [i.credentials.eval_key] : [])];
+  const noRepo = [...always, i.repo.path, join(root, 'tasks'), join(root, 'chat')];
+  const settingsFor = (denyRead: string[], hook: boolean): ResearchLaneSettings => {
+    const s = sandboxSettings({ lane: { allowedDomains: [] }, denyRead });
+    const deny = [...s.permissions.deny, ...denyRead.map((p) => `Glob(/${p.startsWith('/') ? p : `/${p}`}/**)`), ...denyRead.map((p) => `Grep(/${p.startsWith('/') ? p : `/${p}`}/**)`)];
+    const hooks = hook ? { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `${RESEARCH_ROOT_ENV}=${JSON.stringify(researchRoot)} node ${JSON.stringify(ENGINE_CLI)} hook pre-tool-use || exit 2`, timeout: 30 }] }] } } : {};
+    return { ...(i.policy.sandbox ? { sandbox: s.sandbox } : {}), permissions: { deny }, ...hooks };
+  };
+  return {
+    [RESEARCH_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(noRepo, true) },
+    [RESEARCH_REPO_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(always, false) },
+  };
 }
 
 /** Only an instance's credential references: for the git credential helper, which must work before the repo is cloned. */
