@@ -22,6 +22,9 @@ interface Render {
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
+  renderLiveFeed(items: unknown[], ended: boolean): string;
+  renderConsole(data: unknown): string;
+  renderAgents(state: State, live: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
   renderMachine(data: unknown): string;
   renderInstanceSettings(data: unknown): string;
@@ -315,6 +318,46 @@ test('the machine settings: the owner gets the slot cap and engine updates with 
   const noUpdater = r.renderMachine({ ...data, updates: { configured: false, enabled: null }, history: [] });
   assert.match(noUpdater, /data-setting="updates"[\s\S]*?not set up/);
   assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
+});
+
+test('the live run: text, thinking, tool calls with their results, diffs, messages, the end; the owner\'s console; agents link to it', () => {
+  const at = new Date().toISOString();
+  const items = [
+    { seq: 0, at, kind: 'start', run: 'r', issue: 7, role: 'worker', model: 'sonnet' },
+    { seq: 1, at, kind: 'thinking', text: 'the total rounds down' },
+    { seq: 2, at, kind: 'text', text: 'Looking at the totals.' },
+    { seq: 3, at, kind: 'tool', id: 't1', tool: 'Bash', input: '{"command":"npm test"}' },
+    { seq: 4, at, kind: 'tool_result', id: 't1', status: 'error', output: 'not ok 3 - rounds to the cent' },
+    { seq: 5, at, kind: 'tool', id: 't2', tool: 'Edit', input: '{"file_path":"src/totals.js"}' },
+    { seq: 6, at, kind: 'diff', id: 't2', tool: 'Edit', file: 'src/totals.js', diff: '-Math.floor(x)\n+Math.round(x)' },
+    { seq: 7, at, kind: 'message', id: 'm1', state: 'queued', text: 'also update the README' },
+  ];
+  const running = r.renderLiveFeed(items, false);
+  assert.match(running, /data-testid="live-thinking"[\s\S]*Thinking[\s\S]*the total rounds down/);
+  assert.match(running, /data-testid="live-text"[^>]*>Looking at the totals\.</);
+  assert.match(running, /data-tool="Bash"[\s\S]*?npm test[\s\S]*?>error</, 'a tool call with its input and how it ended');
+  assert.match(running, /data-tool="Edit"[\s\S]*?src\/totals\.js[\s\S]*?running/, 'a write still running');
+  assert.match(running, /data-testid="live-diff"[\s\S]*?src\/totals\.js[\s\S]*?bg-red-tint[^>]*>-Math\.floor\(x\)[\s\S]*?bg-green-tint[^>]*>\+Math\.round\(x\)/);
+  assert.match(running, /data-testid="live-message" data-state="queued"[\s\S]*also update the README[\s\S]*held until the current turn ends/);
+  assert.match(running, /data-testid="live-working"/);
+  const done = r.renderLiveFeed([...items, { seq: 8, at, kind: 'truncated', why: 'lines' }, { seq: 9, at, kind: 'end', reason: 'succeeded', costUsd: 0.3, turns: 4 }], true);
+  assert.match(done, /data-testid="live-truncated"[^>]*>The feed reached its line cap/);
+  assert.match(done, /data-testid="live-end"[\s\S]*Run ended: succeeded[\s\S]*4 turn\(s\)[\s\S]*~\$0\.30/);
+  assert.doesNotMatch(done, /data-testid="live-working"/);
+
+  const con = { owner: 'example-owner', canControl: true, live: true, pending: [{ id: 'm1', text: 'also update the README', by: 'example-owner', at }], held: [], events: [] };
+  const panel = r.renderConsole(con);
+  for (const id of ['console-panel', 'console-input', 'console-send', 'console-stop', 'console-pending', 'console-pending-item']) assert.match(panel, new RegExp(`data-testid="${id}"`), id);
+  assert.match(panel, /data-testid="console-pending-item"[\s\S]*held[\s\S]*also update the README/);
+  assert.doesNotMatch(panel, /data-testid="console-stop-confirm"/, 'stop needs a second click');
+  assert.match(r.renderConsole({ ...con, canControl: false }), /data-testid="console-read-only"[^>]*>Only the owner, @example-owner, can message or stop this run\./);
+  assert.equal(r.renderConsole({ ...con, live: false }), '', 'nothing to control once the run has ended');
+
+  const run = { issue: asOwner.tasks[0]!.issue, role: 'worker', model: 'sonnet', pid: 1, attempt: 1, startedAt: at, lastHeartbeat: null, note: null, finishedAt: null, reason: null, costUsd: 0 };
+  const state = { ...asOwner, runs: { active: [run], recent: [] } } as unknown as State;
+  const agents = r.renderAgents(state, { canControl: true, runs: [{ run: 'run-1', issue: run.issue, role: 'worker', model: 'sonnet', startedAt: at, pending: [] }] });
+  assert.match(agents, /data-testid="agent-live-link" data-run="run-1"[\s\S]*live view/);
+  assert.doesNotMatch(r.renderAgents(state, { canControl: true, runs: [] }), /agent-live-link/, 'no live view listed: no link');
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {

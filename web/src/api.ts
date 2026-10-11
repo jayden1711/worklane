@@ -303,7 +303,7 @@ export function selectInstance(name: string) {
 }
 
 /** An API path as this page reaches it: on a hub, through the selected instance's own server. */
-async function apiPath(path: string): Promise<string> {
+export async function apiPath(path: string): Promise<string> {
   const inst = await hubInstance;
   return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
 }

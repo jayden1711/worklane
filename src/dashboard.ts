@@ -21,6 +21,8 @@ import { siteForInstance, siteForRoot } from './service.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
+import { ConsoleError, liveRuns, runFeed, sendMessage, stopRun } from './console.js';
+import type { FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
@@ -144,6 +146,43 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
   };
+}
+
+/** The runs live now, for the Agents page; their held messages' text only for the owner, who may control them. */
+export function liveView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>) {
+  const owner = o.cfg.project.owners.default;
+  const canControl = !!o.user && o.user.toLowerCase() === owner.toLowerCase();
+  return { owner, canControl, runs: liveRuns(o.stateDir).map((r) => ({ ...r, pending: canControl ? r.pending : r.pending.map((m) => ({ id: m.id, by: m.by, at: m.at, text: '' })) })) };
+}
+
+/** A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error). */
+function feedOrWait(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>, run: string, after: number): { items: FeedItem[]; ended: boolean } {
+  try {
+    return runFeed({ stateDir: o.stateDir, cfg: o.cfg, run, by: o.user, after });
+  } catch (e) {
+    if (e instanceof ConsoleError && /no feed/.test(e.message) && liveRuns(o.stateDir).some((r) => r.run === run)) return { items: [], ended: false };
+    throw e;
+  }
+}
+
+/**
+ * What the run page's console needs: whether the run is live, whether this user (the owner) may message or
+ * stop it, its messages held until the agent's turn ends, and the console's events for it (queued, delivered,
+ * dropped, stopped, refused), oldest first.
+ */
+export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user' | 'eventsDb'>, run: string) {
+  const owner = o.cfg.project.owners.default;
+  const canControl = !!o.user && o.user.toLowerCase() === owner.toLowerCase();
+  const live = liveRuns(o.stateDir).find((r) => r.run === run) ?? null;
+  const events = readEvents(o.eventsDb)
+    .filter((e) => e.type.startsWith('console.') && ((e.payload as { run?: string }).run === run))
+    .map((e) => {
+      const p = e.payload as Record<string, unknown>;
+      return { at: e.ts, type: e.type.slice('console.'.length), id: (p.id as string | undefined) ?? null, by: (p.by as string | undefined) ?? null, text: canControl ? ((p.text as string | undefined) ?? null) : null, why: (p.why as string | undefined) ?? null };
+    });
+  const settled = new Set(events.filter((e) => e.type === 'message_delivered' || e.type === 'message_dropped').map((e) => e.id));
+  const held = events.filter((e) => e.type === 'message_queued' && !settled.has(e.id));
+  return { owner, canControl, live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
 }
 
 /**
@@ -435,6 +474,74 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
           return json(res, 200, runsForIssue(opts.stateDir, issue));
+        }
+        // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
+        if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView(opts));
+        const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
+        if (con) {
+          const [, run, what] = con as unknown as [string, string, string];
+          const consoleError = (e: unknown) => {
+            if (!(e instanceof ConsoleError)) throw e;
+            return json(res, /only the owner/.test(e.message) ? 403 : /isn't live|no feed/.test(e.message) ? 404 : 400, { error: e.message });
+          };
+          if (what === 'console' && req.method === 'GET') return json(res, 200, consoleView(opts, run));
+          if (what === 'feed' && req.method === 'GET') {
+            try {
+              return json(res, 200, feedOrWait(opts, run, Number(url.searchParams.get('after') ?? -1)));
+            } catch (e) {
+              return consoleError(e);
+            }
+          }
+          if (what === 'live' && req.method === 'GET') {
+            let after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? -1);
+            if (!Number.isInteger(after)) after = -1;
+            try {
+              feedOrWait(opts, run, after); // owner only, and the run must have a feed or be live
+            } catch (e) {
+              return consoleError(e);
+            }
+            res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+            res.write('retry: 2000\nevent: hello\ndata: {}\n\n');
+            let done = false;
+            const tick = () => {
+              if (done) return;
+              let f: { items: FeedItem[]; ended: boolean };
+              try {
+                f = feedOrWait(opts, run, after);
+              } catch {
+                return;
+              }
+              for (const it of f.items) {
+                res.write(`id: ${it.seq}\nevent: item\ndata: ${JSON.stringify(it)}\n\n`);
+                after = it.seq;
+              }
+              if (f.ended) {
+                done = true;
+                clearInterval(poll);
+                clearInterval(keep);
+                res.write('event: end\ndata: {}\n\n');
+                res.end();
+              }
+            };
+            const poll = setInterval(tick, opts.pollMs ?? 500);
+            const keep = setInterval(() => !done && res.write(': ping\n\n'), 25_000);
+            req.on('close', () => {
+              done = true;
+              clearInterval(poll);
+              clearInterval(keep);
+            });
+            tick();
+            return;
+          }
+          if ((what === 'message' || what === 'stop') && req.method === 'POST') {
+            const body = (await readBody(req)) as { text?: string };
+            try {
+              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: opts.user }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: opts.user });
+              return json(res, 200, { ok: true, ...r });
+            } catch (e) {
+              return consoleError(e);
+            }
+          }
         }
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
