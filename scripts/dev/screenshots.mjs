@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { exitCleanup } from './children.mjs';
 
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(name);
@@ -46,6 +47,9 @@ if (!chrome) {
 }
 
 const work = mkdtempSync(join(tmpdir(), 'dash-shots-'));
+// Every dashboard and Chrome this starts is stopped, and the demo removed, however the script ends.
+const cleanup = exitCleanup();
+cleanup.finally(() => rmSync(work, { recursive: true, force: true, maxRetries: 3 }));
 // Everything the demo, its dashboard and the hub keep goes under the temporary dir, not your own state.
 process.env.WORKLANE_STATE_DIR = join(work, 'state');
 const node = process.execPath;
@@ -65,10 +69,11 @@ const dash = await optional('dashboard.js');
 const ctx = await optional('guardrails/context.js');
 const record = await optional('run-record.js');
 const hubMod = await optional('dashboard-hub.js');
+const chat = await optional('chat.js');
 
 /** Start a dashboard process and wait for the URL it prints (with its token). */
 async function serve(args) {
-  const p = spawn(node, [cli, 'dashboard', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = cleanup.track(spawn(node, [cli, 'dashboard', ...args], { stdio: ['ignore', 'pipe', 'pipe'] }));
   let printed = '';
   const url = await new Promise((done, fail) => {
     const t = setTimeout(() => fail(new Error(`no dashboard URL after 20 s:\n${printed}`)), 20_000);
@@ -176,6 +181,36 @@ if (existsSync(join(engine, 'dist', 'src', 'settings.js'))) {
   } else console.error(`instance init failed: ${(init.stderr || init.stdout).trim().split('\n').pop()}`);
 }
 
+// A chat question its coordinator answered, for the Ask panel (opened by ?chat=<id>): citations, a draft, proposals.
+let chatId = null;
+if (chat?.writeChatAnswer && stateDir) {
+  chatId = chat.askChat({ stateDir, question: `Why is issue ${issue} stuck?`, by: 'example-owner' }).id;
+  const ev = state.activity[0]?.id;
+  const decision = state.decisions.find((d) => !d.answer);
+  const body = 'Totals floor instead of rounding to the cent.\n\n```done_when\n- test: test/totals.test.js\n```\n';
+  chat.writeChatAnswer(stateDir, chatId, {
+    answer: {
+      turn: 'shot',
+      instance: 'shop',
+      answer: `Issue #${issue} is waiting on your decision: the worker's run fixed the rounding, and the evaluator wants you to approve the change to the totals before it lands.\n\nThe same floor-instead-of-round bug is in the invoice totals, which no issue covers yet.`,
+      citations: [
+        { kind: 'issue', id: String(issue), instance: 'shop', label: `issue #${issue}`, href: `https://github.com/example-org/example-shop/issues/${issue}` },
+        ...(runId ? [{ kind: 'run', id: runId, instance: 'shop', label: 'run', href: `/runs/${runId}` }] : []),
+        ...(ev ? [{ kind: 'event', id: String(ev), instance: 'shop', label: `event ${ev}`, href: `/events/${ev}` }] : []),
+      ],
+      unknownCitations: [],
+      issueDraft: { ok: true, title: 'Round invoice totals to the cent', body, labels: ['ready'] },
+      actions: [
+        ...(decision ? [{ kind: 'decision', id: decision.id, answer: decision.options[0], confirm: 'decision.answer', why: 'the evaluator recommends it' }] : []),
+        { kind: 'settings', key: 'workers', value: 3, confirm: 'settings.change', why: 'three ready issues wait' },
+      ],
+      refusedActions: [],
+      readOnly: false,
+      costUsd: 0.08,
+    },
+  });
+}
+
 let hub = null;
 if (hubMod && stateDir) {
   hub = await serve(['--hub', `shop=${stateDir}`, '--port', String(port + 1)]);
@@ -197,10 +232,12 @@ const pages = [
   ['logs', '/logs'],
   ['settings', '/settings'],
   ...(runId ? [['run-detail', `/runs/${runId}`]] : []),
+  ...(chatId ? [['chat', `/issues?chat=${chatId}`]] : []),
 ];
 const shots = [
   ...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })),
   ...(hub ? [{ name: 'hub-overview', url: `${hub.base}/`, token: hub.token }] : []),
+  ...(hub && chatId ? [{ name: 'hub-chat', url: `${hub.base}/?chat=${chatId}`, token: hub.token }] : []),
   ...(inst ? [{ name: 'instance-settings', url: `${inst.base}/settings`, token: inst.token }, { name: 'instance-activity', url: `${inst.base}/activity`, token: inst.token }] : []),
 ];
 
@@ -208,7 +245,7 @@ const shots = [
 async function shoot(url, file, theme) {
   const profile = mkdtempSync(join(tmpdir(), 'dash-chrome-'));
   rmSync(file, { force: true });
-  const c = spawn(chrome, [
+  const c = cleanup.track(spawn(chrome, [
     '--headless=new',
     '--disable-gpu',
     '--hide-scrollbars',
@@ -223,7 +260,7 @@ async function shoot(url, file, theme) {
     ...(theme === 'dark' ? ['--force-dark-mode', '--blink-settings=preferredColorScheme=0'] : ['--blink-settings=preferredColorScheme=1']),
     `--screenshot=${file}`,
     url,
-  ], { stdio: 'ignore' });
+  ], { stdio: 'ignore' }));
   const exited = new Promise((r) => c.on('exit', r));
   let last = -1;
   for (let i = 0; i < 120; i++) {
@@ -252,8 +289,4 @@ for (const theme of ['light', 'dark']) {
     }
   }
 }
-main.p.kill();
-hub?.p.kill();
-inst?.p.kill();
-rmSync(work, { recursive: true, force: true, maxRetries: 3 });
 process.exit(failed ? 1 : 0);

@@ -78,8 +78,8 @@ export function parseEntry(key: string, raw: string): { value: unknown } | { err
 
 const entryOf = (key: string, v: unknown) => (key === 'ci_repair.enabled' ? (v ? 'on' : 'off') : key === 'run_windows' ? (Array.isArray(v) ? (v as Windows).map((w) => `${w.from}-${w.to}`).join(', ') : '') : String(v));
 
-function SettingRow({ s, d, onChanged }: { s: { key: string; value: unknown; source: 'instance' | 'repo' }; d: InstanceSettingsData; onChanged: () => void }) {
-  const [entry, setEntry] = useState(entryOf(s.key, s.value));
+function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: unknown; source: 'instance' | 'repo' }; d: InstanceSettingsData; onChanged: () => void; proposed?: { value: unknown } }) {
+  const [entry, setEntry] = useState(entryOf(s.key, proposed ? proposed.value : s.value));
   const [review, setReview] = useState<{ value: unknown } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -101,7 +101,7 @@ function SettingRow({ s, d, onChanged }: { s: { key: string; value: unknown; sou
     }
   };
   return (
-    <tr className="border-b border-line align-top last:border-0" data-testid="setting-row" data-setting={s.key}>
+    <tr className={cx('border-b border-line align-top last:border-0', proposed && 'bg-blue-tint')} data-testid="setting-row" data-setting={s.key} {...(proposed ? { 'data-proposed': '' } : {})}>
       <td className="primitive-table-cell">
         <div className="text-[13px] font-medium text-ink">{LABEL[s.key] ?? s.key}</div>
         <div className="font-mono text-[11.5px] text-ink-3">{s.key}</div>
@@ -169,7 +169,7 @@ function SettingRow({ s, d, onChanged }: { s: { key: string; value: unknown; sou
 }
 
 /** The section from its data (also what the render checks render). */
-export function InstanceSettingsView({ data, onChanged = () => {} }: { data: InstanceSettingsData; onChanged?: () => void }) {
+export function InstanceSettingsView({ data, onChanged = () => {}, proposed }: { data: InstanceSettingsData; onChanged?: () => void; proposed?: { key: string; value: unknown } | null }) {
   if (!data.available) {
     return (
       <Card className="p-4 text-[13px] text-ink-3" data-testid="instance-settings">
@@ -184,6 +184,11 @@ export function InstanceSettingsView({ data, onChanged = () => {} }: { data: Ins
         <span className="text-[13px] font-medium text-ink">Instance settings</span>
         <span className="text-[12px] text-ink-3">this instance's policy wins over the repo's defaults; each change is recorded on Activity</span>
       </div>
+      {proposed && data.canChange && (data.settings ?? []).some((s) => s.key === proposed.key) && (
+        <div className="rounded-control bg-blue-tint px-2.5 py-2 text-[12.5px] text-ink-2" data-testid="setting-proposed">
+          The chat proposed {proposed.key} = {showValue(proposed.key, proposed.value)}; it's filled in below. Review it and confirm to change it, or leave it.
+        </div>
+      )}
       {!data.canChange && (
         <div className="rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink-2 shadow-hairline" data-testid="settings-read-only">
           {data.limitsError ? `Changes are off: ${data.limitsError}` : `Only the owner, @${data.owner}, can change these; you are @${data.user}.`}
@@ -202,13 +207,26 @@ export function InstanceSettingsView({ data, onChanged = () => {} }: { data: Ins
           </thead>
           <tbody>
             {(data.settings ?? []).map((s) => (
-              <SettingRow key={`${s.key}:${JSON.stringify(s.value)}`} s={s} d={data} onChanged={onChanged} />
+              <SettingRow key={`${s.key}:${JSON.stringify(s.value)}`} s={s} d={data} onChanged={onChanged} {...(data.canChange && proposed?.key === s.key ? { proposed } : {})} />
             ))}
           </tbody>
         </table>
       </div>
     </section>
   );
+}
+
+/** A change the chat proposed, from the page's address (`?set=<key>&to=<JSON value>`); null when none or unreadable. */
+export function proposedSetting(search: string): { key: string; value: unknown } | null {
+  const q = new URLSearchParams(search);
+  const key = q.get('set');
+  const to = q.get('to');
+  if (!key || to === null) return null;
+  try {
+    return { key, value: JSON.parse(to) as unknown };
+  } catch {
+    return null;
+  }
 }
 
 export function InstanceSettings() {
@@ -222,5 +240,5 @@ export function InstanceSettings() {
   }, [n]);
   if (error) return <div className="text-[13px] text-red" data-testid="instance-settings">Can't load the instance settings: {error}</div>;
   if (!data) return null;
-  return <InstanceSettingsView data={data} onChanged={() => setN((x) => x + 1)} />;
+  return <InstanceSettingsView data={data} onChanged={() => setN((x) => x + 1)} proposed={n === 0 ? proposedSetting(window.location.search) : null} />;
 }
