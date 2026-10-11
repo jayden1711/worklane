@@ -39,6 +39,8 @@ export interface MergeInput {
   pushLimitHit: boolean;
   /** Why the evals of instructions the change touches don't clear it (instructionEvalReasons); empty: they do. */
   instructionEvals?: string[];
+  /** A planned task: high-risk or design-level paths changed outside its approved plan (outsidePlanReasons). */
+  outsidePlan?: string[];
 }
 
 export interface InstructionEvalResult {
@@ -103,6 +105,17 @@ export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: st
   return reasons;
 }
 
+/**
+ * A planned task's PR: the high-risk and design-level paths it changes that its approved plan didn't list.
+ * The same matchers as riskAndDesignReasons (the change's own categories), with the planned files taken out.
+ */
+export function outsidePlanReasons(o: { planFiles: string[]; level: LevelResult; waitCategories: string[]; newTopLevel: string[] }): string[] {
+  const planned = new Set(o.planFiles.map((p) => p.replace(/^\.\//, '')));
+  const level: LevelResult = { ...o.level, categories: Object.fromEntries(Object.entries(o.level.categories).map(([c, ps]) => [c, ps.filter((p) => !planned.has(p))])) };
+  const newTopLevel = o.newTopLevel.filter((d) => ![...planned].some((p) => p.startsWith(d)));
+  return riskAndDesignReasons({ level, waitCategories: o.waitCategories, newTopLevel }).map((r) => `not in the approved plan: ${r}`);
+}
+
 export function mergeDecision(i: MergeInput): MergeDecision {
   const reasons: string[] = [];
   if (!i.policyOn) reasons.push('auto-merge is off for this instance (policy.yaml auto_merge)');
@@ -131,5 +144,6 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   if (i.foreignPush) reasons.push('doubt: someone other than the harness pushed to the branch');
   if (i.pushLimitHit) reasons.push('doubt: the change hit a push limit');
   reasons.push(...(i.instructionEvals ?? []));
+  reasons.push(...(i.outsidePlan ?? []));
   return { auto: reasons.length === 0, reasons };
 }

@@ -11,6 +11,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
+import { SETTING_KEYS } from '../src/settings.js';
 import { repoRoot } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
@@ -25,11 +26,16 @@ interface Render {
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
+  renderLiveFeed(items: unknown[], ended: boolean): string;
+  renderConsole(data: unknown): string;
+  renderAgents(state: State, live: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
   renderMachine(data: unknown): string;
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
+  boundsOf(key: string, d: unknown): string;
+  LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   renderChatAnswer(f: unknown, cli: string): string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
@@ -267,7 +273,7 @@ test('the instance settings: the owner gets a new-value input and a review step 
       { key: 'workers', value: 2, source: 'instance' },
       { key: 'daily_budget_usd', value: 12, source: 'instance' },
       { key: 'ci_repair.enabled', value: false, source: 'repo' },
-      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'repo' },
+      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'engine' },
       { key: 'run_windows', value: [{ from: '22:00', to: '06:00' }], source: 'instance' },
     ],
   };
@@ -277,6 +283,7 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.match(html, /up to \$20 \(machine \$20, policy \$30\)/);
   assert.match(html, /data-setting="run_windows"[\s\S]*?22:00-06:00/);
   assert.match(html, /the repo(&#x27;|')s default/);
+  assert.match(html, /data-setting="ci_repair.max_fixes_per_pr"[\s\S]*?>engine default</, 'a key the repo\'s config doesn\'t define: the engine\'s own default');
   assert.equal((html.match(/data-testid="setting-review-button"/g) ?? []).length, 5, 'a review step for each, before anything is written');
   assert.doesNotMatch(html, /data-testid="setting-confirm"/, 'confirm appears only after Review change');
   assert.doesNotMatch(html, /data-testid="settings-read-only"/);
@@ -293,6 +300,46 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.deepEqual(r.parseEntry('run_windows', ''), { value: [] });
   assert.match(String((r.parseEntry('run_windows', 'night') as { error: string }).error), /isn't HH:MM-HH:MM/);
   assert.equal(r.showValue('run_windows', []), 'any time');
+});
+
+test('the research settings: readable names, bounds from the machine\'s limits, the repo access as an on/off switch, and a name for every setting key', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    keys: [...SETTING_KEYS],
+    available: true,
+    limits: { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 }, research: { max_searches_per_day: 200, max_fetches_per_day: 500, max_usd_per_day: 20 } },
+    limitsError: null,
+    ceilings: { max_workers: 3, daily_usd: 30 },
+    settings: [
+      { key: 'research.max_searches_per_day', value: 20, source: 'instance' },
+      { key: 'research.max_fetches_per_day', value: 40, source: 'repo' },
+      { key: 'research.max_usd_per_day', value: 2.5, source: 'instance' },
+      { key: 'research.repo_access', value: false, source: 'repo' },
+    ],
+  };
+  const html = r.renderInstanceSettings(data);
+  const row = (key: string) => html.match(new RegExp(`<tr[^>]*data-setting="${key.replace('.', '\\.')}"[\\s\\S]*?</tr>`))?.[0] ?? '';
+  assert.match(row('research.max_searches_per_day'), />Research searches per day</);
+  assert.match(row('research.max_searches_per_day'), /data-testid="setting-bounds"[^>]*>0–200 \(machine limit\)</);
+  assert.match(row('research.max_fetches_per_day'), />Research page fetches per day</);
+  assert.match(row('research.max_fetches_per_day'), /data-testid="setting-bounds"[^>]*>0–500 \(machine limit\)</);
+  assert.match(row('research.max_usd_per_day'), />Research spend per day \(estimated, USD\)</);
+  assert.match(row('research.max_usd_per_day'), /data-testid="setting-current"[^>]*>\$2\.5</, 'money, with its $');
+  assert.match(row('research.max_usd_per_day'), /data-testid="setting-bounds"[^>]*>up to \$20 \(machine limit\)</);
+  assert.match(row('research.repo_access'), />Research runs may read the repo</);
+  assert.match(row('research.repo_access'), /data-testid="setting-current"[^>]*>off</);
+  assert.equal((row('research.repo_access').match(/<button[^>]*data-testid="setting-input"/g) ?? []).length, 2, 'two buttons, on and off, not a text box');
+  for (const k of ['research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day']) assert.doesNotMatch(row(k), /on or off/, `${k} is a number, not a switch`);
+  // What can be entered: whole caps, a cent amount for the spend cap, on or off for the access.
+  assert.deepEqual(r.parseEntry('research.max_searches_per_day', '50'), { value: 50 });
+  assert.deepEqual(r.parseEntry('research.max_fetches_per_day', '1.5'), { error: 'a whole number' });
+  assert.deepEqual(r.parseEntry('research.max_usd_per_day', '2.75'), { value: 2.75 });
+  assert.deepEqual(r.parseEntry('research.repo_access', 'on'), { value: true });
+  assert.equal(r.boundsOf('research.max_usd_per_day', { ...data, limits: { ...data.limits, research: undefined } }), '', 'no research limits sent: no bounds line, not a wrong one');
+  // Every setting key the server has gets a readable name, so a new one never shows as its raw key.
+  assert.deepEqual(SETTING_KEYS.filter((k) => !r.LABEL[k]), []);
 });
 
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {
@@ -367,6 +414,46 @@ test('merge flow on the PR page and in the health panel: conflict fixes, light c
   assert.match(h, /data-measure="light-checks"[\s\S]*?>3<[\s\S]*?9 added[\s\S]*?2\.3 min[\s\S]*?merge 2 · hold 1/);
   assert.match(h, /data-measure="holds"[\s\S]*?15 waited[\s\S]*?3\.8 min[\s\S]*?most on src\/totals\.js/);
   assert.match(h, /data-testid="health-suggestion"[^>]*>Consider listing src\/totals\.js as hotspots/);
+});
+
+test('the live run: text, thinking, tool calls with their results, diffs, messages, the end; the owner\'s console; agents link to it', () => {
+  const at = new Date().toISOString();
+  const items = [
+    { seq: 0, at, kind: 'start', run: 'r', issue: 7, role: 'worker', model: 'sonnet' },
+    { seq: 1, at, kind: 'thinking', text: 'the total rounds down' },
+    { seq: 2, at, kind: 'text', text: 'Looking at the totals.' },
+    { seq: 3, at, kind: 'tool', id: 't1', tool: 'Bash', input: '{"command":"npm test"}' },
+    { seq: 4, at, kind: 'tool_result', id: 't1', status: 'error', output: 'not ok 3 - rounds to the cent' },
+    { seq: 5, at, kind: 'tool', id: 't2', tool: 'Edit', input: '{"file_path":"src/totals.js"}' },
+    { seq: 6, at, kind: 'diff', id: 't2', tool: 'Edit', file: 'src/totals.js', diff: '-Math.floor(x)\n+Math.round(x)' },
+    { seq: 7, at, kind: 'message', id: 'm1', state: 'queued', text: 'also update the README' },
+  ];
+  const running = r.renderLiveFeed(items, false);
+  assert.match(running, /data-testid="live-thinking"[\s\S]*Thinking[\s\S]*the total rounds down/);
+  assert.match(running, /data-testid="live-text"[^>]*>Looking at the totals\.</);
+  assert.match(running, /data-tool="Bash"[\s\S]*?npm test[\s\S]*?>error</, 'a tool call with its input and how it ended');
+  assert.match(running, /data-tool="Edit"[\s\S]*?src\/totals\.js[\s\S]*?running/, 'a write still running');
+  assert.match(running, /data-testid="live-diff"[\s\S]*?src\/totals\.js[\s\S]*?bg-red-tint[^>]*>-Math\.floor\(x\)[\s\S]*?bg-green-tint[^>]*>\+Math\.round\(x\)/);
+  assert.match(running, /data-testid="live-message" data-state="queued"[\s\S]*also update the README[\s\S]*held until the current turn ends/);
+  assert.match(running, /data-testid="live-working"/);
+  const done = r.renderLiveFeed([...items, { seq: 8, at, kind: 'truncated', why: 'lines' }, { seq: 9, at, kind: 'end', reason: 'succeeded', costUsd: 0.3, turns: 4 }], true);
+  assert.match(done, /data-testid="live-truncated"[^>]*>The feed reached its line cap/);
+  assert.match(done, /data-testid="live-end"[\s\S]*Run ended: succeeded[\s\S]*4 turn\(s\)[\s\S]*~\$0\.30/);
+  assert.doesNotMatch(done, /data-testid="live-working"/);
+
+  const con = { owner: 'example-owner', canControl: true, live: true, pending: [{ id: 'm1', text: 'also update the README', by: 'example-owner', at }], held: [], events: [] };
+  const panel = r.renderConsole(con);
+  for (const id of ['console-panel', 'console-input', 'console-send', 'console-stop', 'console-pending', 'console-pending-item']) assert.match(panel, new RegExp(`data-testid="${id}"`), id);
+  assert.match(panel, /data-testid="console-pending-item"[\s\S]*held[\s\S]*also update the README/);
+  assert.doesNotMatch(panel, /data-testid="console-stop-confirm"/, 'stop needs a second click');
+  assert.match(r.renderConsole({ ...con, canControl: false }), /data-testid="console-read-only"[^>]*>Only the owner, @example-owner, can message or stop this run\./);
+  assert.equal(r.renderConsole({ ...con, live: false }), '', 'nothing to control once the run has ended');
+
+  const run = { issue: asOwner.tasks[0]!.issue, role: 'worker', model: 'sonnet', pid: 1, attempt: 1, startedAt: at, lastHeartbeat: null, note: null, finishedAt: null, reason: null, costUsd: 0 };
+  const state = { ...asOwner, runs: { active: [run], recent: [] } } as unknown as State;
+  const agents = r.renderAgents(state, { canControl: true, runs: [{ run: 'run-1', issue: run.issue, role: 'worker', model: 'sonnet', startedAt: at, pending: [] }] });
+  assert.match(agents, /data-testid="agent-live-link" data-run="run-1"[\s\S]*live view/);
+  assert.doesNotMatch(r.renderAgents(state, { canControl: true, runs: [] }), /agent-live-link/, 'no live view listed: no link');
 });
 
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {
