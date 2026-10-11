@@ -74,6 +74,72 @@ export function Sparkline({ series }: { series: { at: string; ms: number; status
   );
 }
 
+const hrs = (h: number) => (h < 1 ? `${Math.round(h * 60)} min` : `${Math.round(h)} h`);
+
+/**
+ * The off-machine backup: not set up (and where the docs say how), or the last copy that was verified by
+ * reading it back (when, where, which), with a red warning when it is over a day old or none ever was.
+ */
+export function OffsiteBackup({ status: o, docs }: { status: HealthView['offsiteBackup']; docs: string | null }) {
+  const doc = docs ? (
+    <a href={docs} target="_blank" rel="noreferrer" className="text-blue-ink hover:underline" data-testid="health-offsite-docs">
+      docs/backups.md
+    </a>
+  ) : (
+    <code className="font-mono text-[12px]">docs/backups.md</code>
+  );
+  return (
+    <section className="overflow-hidden rounded-card bg-surface shadow-card" aria-label="Off-machine backup" data-testid="health-offsite">
+      <div className="primitive-card-pad">
+        <div className="flex items-center gap-2">
+          <span className="text-[13px] font-medium text-ink">Off-machine backup</span>
+          {!o ? <Badge>not set up</Badge> : o.stale ? <Badge tone="danger">stale</Badge> : <Badge tone="ok">verified {hrs(o.ageHours!)} ago</Badge>}
+        </div>
+        {!o ? (
+          <div className="mt-1.5 text-[13px] leading-relaxed text-ink-2" data-testid="health-offsite-none">
+            Nothing is copied off this machine: the event log's backups stay on its disk. To turn it on, put <code className="font-mono text-[12px]">offsite-backup.yaml</code> in the instance home; {doc} says what goes in it.
+          </div>
+        ) : (
+          <>
+            {o.stale && (
+              <div role="alert" className="mt-2 rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-offsite-stale">
+                <span className="font-semibold text-red">{o.lastOkAt ? `The last verified copy is ${hrs(o.ageHours!)} old.` : 'No copy has been verified yet.'}</span>
+                {o.lastError && (
+                  <div className="mt-1">
+                    The latest attempt, {ago(o.lastAttemptAt)}, failed: <code className="font-mono text-[12px] break-all" data-testid="health-offsite-error">{o.lastError.slice(0, 300)}</code>
+                  </div>
+                )}
+                <div className="mt-1">Check the commands in the instance&apos;s offsite-backup.yaml ({doc}).</div>
+              </div>
+            )}
+            <dl className="mt-2 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[12.5px]">
+              <dt className="text-ink-3">Last verified copy</dt>
+              <dd className="tabular-nums text-ink" data-testid="health-offsite-last" title={o.lastOkAt ?? undefined}>
+                {o.lastOkAt ? `${ago(o.lastOkAt)} (${new Date(o.lastOkAt).toISOString().replace('T', ' ').slice(0, 16)} UTC)` : 'never'}
+              </dd>
+              <dt className="text-ink-3">Destination</dt>
+              <dd className="text-ink" data-testid="health-offsite-destination">
+                {o.destination}
+              </dd>
+              {o.lastOkKey && (
+                <>
+                  <dt className="text-ink-3">Copy</dt>
+                  <dd className="truncate font-mono text-[12px] text-ink-2" data-testid="health-offsite-key">
+                    {o.lastOkKey}
+                  </dd>
+                </>
+              )}
+              <dt className="text-ink-3">Last attempt</dt>
+              <dd className="text-ink-2">{o.lastError ? `${ago(o.lastAttemptAt)}, failed` : ago(o.lastAttemptAt)}</dd>
+            </dl>
+          </>
+        )}
+      </div>
+      <div className="primitive-card-footer border-t border-line text-[12px] text-ink-3">A copy counts only once it has been fetched back, decrypted and matched against the snapshot.</div>
+    </section>
+  );
+}
+
 export interface InstanceHealth {
   name: string;
   view: HealthView | null;
@@ -110,6 +176,8 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
         </div>
         <div className="primitive-card-footer border-t border-line text-[12px] text-ink-3">Suggestions only: nothing is changed for you.</div>
       </div>
+
+      <OffsiteBackup status={view.offsiteBackup ?? null} docs={view.docs?.backups ?? null} />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4" data-testid="health-machine">
         {m?.memory ? (
@@ -168,7 +236,7 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
       )}
 
       {instances && instances.length > 0 && (
-        <RecordsTable testId="health-instances" head={['Instance', 'Service memory', 'Runs today', 'Est. cost today', 'Usage limit hits', 'Suggestions']} className="[&_th:nth-child(3)]:w-24 [&_th:nth-child(5)]:w-28">
+        <RecordsTable testId="health-instances" head={['Instance', 'Service memory', 'Runs today', 'Est. cost today', 'Usage limit hits', 'Off-machine backup', 'Suggestions']} className="[&_th:nth-child(3)]:w-24 [&_th:nth-child(5)]:w-28">
           {instances.map((i) => {
             const t = i.view?.usage.days.find((d) => d.day === today);
             const svc = (i.view?.machine?.units ?? []).filter(isOk).find((u) => u.unit.endsWith('.service'));
@@ -184,10 +252,13 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
                       {estUsd(t?.estimatedUsd ?? 0)}
                     </td>
                     <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{t?.rateLimited ?? 0}</td>
+                    <td className="primitive-table-cell text-[12.5px]" data-testid="health-instance-offsite">
+                      {!i.view.offsiteBackup ? <span className="text-ink-3">not set up</span> : i.view.offsiteBackup.stale ? <Badge tone="danger">{i.view.offsiteBackup.lastOkAt ? `stale, ${hrs(i.view.offsiteBackup.ageHours!)}` : 'never verified'}</Badge> : <span className="text-ink-2">{hrs(i.view.offsiteBackup.ageHours!)} ago</span>}
+                    </td>
                     <td className="primitive-table-cell">{n ? <Badge tone="warn">{n} to consider</Badge> : <Badge tone="ok">none</Badge>}</td>
                   </>
                 ) : (
-                  <td colSpan={5} className="primitive-table-cell text-[12px] text-red">
+                  <td colSpan={6} className="primitive-table-cell text-[12px] text-red">
                     not answering: {i.error}
                   </td>
                 )}

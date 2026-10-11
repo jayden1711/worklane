@@ -256,6 +256,41 @@ test('the health panel: suggestions, machine figures, services, check times with
   assert.doesNotMatch(bare, /data-testid="health-instances"/, 'no hub: no instances table');
 });
 
+test('the off-machine backup on the health panel: not set up with the docs link; the last verified copy; stale in red with the latest error; per instance on a hub', () => {
+  const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, suggestions: ['Nothing to suggest.'] };
+  const docs = { backups: 'https://example.org/acme/engine/blob/main/docs/backups.md' };
+  const none = r.renderHealth({ ...base, offsiteBackup: null, docs });
+  assert.match(none, /data-testid="health-offsite"[\s\S]*not set up/);
+  assert.match(none, /data-testid="health-offsite-none"[\s\S]*Nothing is copied off this machine[\s\S]*offsite-backup\.yaml/);
+  assert.match(none, /href="https:\/\/example\.org\/acme\/engine\/blob\/main\/docs\/backups\.md"[^>]*data-testid="health-offsite-docs"/);
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null }), /<code[^>]*>docs\/backups\.md<\/code>/, 'no repository: the doc is named, not linked');
+  const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
+  const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });
+  assert.match(ok, /verified 3 h ago/);
+  assert.match(ok, new RegExp(`data-testid="health-offsite-last"[^>]*>3h ago \\(${at.slice(0, 10)} ${at.slice(11, 16)} UTC\\)`));
+  assert.match(ok, /data-testid="health-offsite-destination"[^>]*>rclone remote, backups bucket</);
+  assert.match(ok, /data-testid="health-offsite-key"[^>]*>events-41\.db\.age</);
+  assert.doesNotMatch(ok, /data-testid="health-offsite-stale"/);
+  const old = new Date(Date.now() - 30 * 3_600_000).toISOString();
+  const stale = r.renderHealth({ ...base, offsiteBackup: { ...fresh, lastOkAt: old, ageHours: 30, lastAttemptAt: new Date().toISOString(), lastError: 'put exited 1: remote unreachable', stale: true }, docs });
+  assert.match(stale, />stale</);
+  assert.match(stale, /role="alert"[^>]*data-testid="health-offsite-stale"[\s\S]*text-red[^>]*>The last verified copy is 30 h old\./);
+  assert.match(stale, /data-testid="health-offsite-error"[^>]*>put exited 1: remote unreachable</);
+  const never = r.renderHealth({ ...base, offsiteBackup: { ...fresh, lastOkAt: null, lastOkKey: null, ageHours: null, lastError: 'encrypt left the snapshot readable', stale: true }, docs });
+  assert.match(never, /No copy has been verified yet\./);
+  assert.match(never, /data-testid="health-offsite-last"[^>]*>never</);
+  assert.doesNotMatch(never, /data-testid="health-offsite-key"/);
+  // On a hub, each instance's backup in the side-by-side table.
+  const hubHtml = r.renderHealth({ ...base, offsiteBackup: fresh }, [
+    { name: 'shop', view: { ...base, offsiteBackup: fresh }, error: null },
+    { name: 'site', view: { ...base, offsiteBackup: null }, error: null },
+    { name: 'code', view: { ...base, offsiteBackup: { ...fresh, lastOkAt: null, ageHours: null, stale: true } }, error: null },
+  ]);
+  const cells = [...hubHtml.matchAll(/data-testid="health-instance-offsite">([\s\S]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ''));
+  assert.deepEqual(cells, ['3 h ago', 'not set up', 'never verified']);
+});
+
 test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
   const data = {
     owner: 'example-owner',
