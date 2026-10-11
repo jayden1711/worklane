@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bundleFiles, chatHistory, chatTurn, CHAT_HISTORY, CHAT_TOOLS, contextFromEvents, hubChat, validateDraft, type ChatContext } from '../src/chat.js';
+import { askChat, bundleFiles, chatAnswer, chatHistory, chatTurn, CHAT_HISTORY, CHAT_TOOLS, contextFromEvents, hubChat, takeChatRequests, validateDraft, writeChatAnswer, type ChatContext } from '../src/chat.js';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { CHAT_SCHEMA } from '../src/roles.js';
@@ -150,6 +150,23 @@ test('spend: each turn reports its cost (run.cost role chat) and is capped by wh
   await chatTurn({ ...s.opts, remainingUsd: 0.3, question: 'q', by: owner });
   assert.deepEqual(s.costs, [0.12]);
   assert.equal(s.runner.calls[0]!.maxBudgetUsd, 0.3);
+});
+
+test('request/answer files: a question is a request the coordinator takes once; the answer is pending until written', () => {
+  const s = mkdtempSync(join(tmpdir(), 'chat-files-'));
+  assert.throws(() => askChat({ stateDir: s, question: '  ', by: owner }), /empty/);
+  assert.throws(() => askChat({ stateDir: s, question: 'x'.repeat(4001), by: owner }), /over 4000/);
+  assert.throws(() => askChat({ stateDir: s, question: 'q', by: '' }), /unknown/);
+  const { id } = askChat({ stateDir: s, question: ` what about ${TOKEN}? `, by: owner, now: new Date('2026-10-10T12:00:00Z') });
+  assert.deepEqual(chatAnswer(s, id), { v: 1, id, at: '2026-10-10T12:00:00.000Z', state: 'pending' });
+  const reqs = takeChatRequests(s);
+  assert.deepEqual(reqs.map((r) => [r.id, r.by]), [[id, owner]]);
+  assert.ok(!reqs[0]!.question.includes(TOKEN), 'redacted on the way in');
+  assert.deepEqual(takeChatRequests(s), [], 'taken once');
+  writeChatAnswer(s, id, { refused: 'chat is off' }, new Date('2026-10-10T12:00:05Z'));
+  assert.deepEqual(chatAnswer(s, id), { v: 1, id, at: '2026-10-10T12:00:05.000Z', state: 'refused', why: 'chat is off' });
+  assert.equal(chatAnswer(s, '../../etc/passwd'), null, 'never a path outside');
+  if (process.platform !== 'win32') assert.equal(statSync(join(s, 'chat', 'answers', `${id}.json`)).mode & 0o777, 0o600);
 });
 
 test('hub: a cross-instance question is answered from each selected instance, each its own run and bundle', async () => {

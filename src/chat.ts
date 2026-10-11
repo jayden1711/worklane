@@ -9,7 +9,7 @@
 // reference to an existing confirm flow (a settings change, a decision answer,
 // pause/resume). Anyone who isn't the owner gets a read-only answer. Turns are
 // kept per instance in its state (0600, redacted).
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseContract } from './backlog/types.js';
@@ -276,6 +276,83 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------- the dashboard's request/answer files
+//
+// The dashboard can't run agents (no sudo to the agent user; and one claude per login is enforced in the
+// coordinator), so a question is a request file the coordinator takes, and the answer a file it writes:
+//   <state>/chat/requests/<id>.json   { v: 1, id, at, by, question }        written by askChat
+//   <state>/chat/answers/<id>.json    { v: 1, id, at, state: 'pending' | 'answered' | 'refused', answer?, why? }
+
+export class ChatError extends Error {}
+export const MAX_QUESTION = 4000;
+const CHAT_ID = /^[0-9]+-[a-f0-9]+$/;
+
+export interface ChatRequest {
+  v: 1;
+  id: string;
+  at: string;
+  by: string;
+  question: string;
+}
+
+export type ChatAnswerFile = { v: 1; id: string; at: string } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
+
+const chatDirs = (stateDir: string) => ({ requests: join(stateDir, 'chat', 'requests'), answers: join(stateDir, 'chat', 'answers') });
+
+function writeJson(dir: string, id: string, v: unknown) {
+  groupOnlyDir(dir);
+  const tmp = join(dir, `.${id}.${randomBytes(3).toString('hex')}.tmp`);
+  writeFileSync(tmp, JSON.stringify(redact(v)), { mode: 0o600 });
+  renameSync(tmp, join(dir, `${id}.json`));
+}
+
+/** Ask the chat (anyone with dashboard access; only the owner gets drafts and proposals). Returns the request id. */
+export function askChat(o: { stateDir: string; question: string; by: string; now?: Date }): { id: string } {
+  const question = o.question.trim();
+  if (!question) throw new ChatError('the question is empty');
+  if (question.length > MAX_QUESTION) throw new ChatError(`the question is over ${MAX_QUESTION} characters`);
+  if (!o.by) throw new ChatError('who is asking is unknown');
+  const now = o.now ?? new Date();
+  const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
+  const d = chatDirs(o.stateDir);
+  writeJson(d.answers, id, { v: 1, id, at: now.toISOString(), state: 'pending' });
+  writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question });
+  return { id };
+}
+
+/** The answer file for a request (pending until the coordinator has run the turn), or null. */
+export function chatAnswer(stateDir: string, id: string): ChatAnswerFile | null {
+  if (!CHAT_ID.test(id)) return null;
+  try {
+    return JSON.parse(readFileSync(join(chatDirs(stateDir).answers, `${id}.json`), 'utf8')) as ChatAnswerFile;
+  } catch {
+    return null;
+  }
+}
+
+/** The coordinator's side: requests waiting, oldest first; each removed as it's taken (a malformed one too). */
+export function takeChatRequests(stateDir: string): ChatRequest[] {
+  const d = chatDirs(stateDir).requests;
+  if (!existsSync(d)) return [];
+  const out: ChatRequest[] = [];
+  for (const f of readdirSync(d).filter((x) => x.endsWith('.json')).sort()) {
+    const p = join(d, f);
+    try {
+      const r = JSON.parse(readFileSync(p, 'utf8')) as ChatRequest;
+      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string') out.push(r);
+    } catch {
+      // unreadable: dropped
+    }
+    rmSync(p, { force: true });
+  }
+  return out;
+}
+
+/** The coordinator's side: the answer (or refusal) where the dashboard reads it. */
+export function writeChatAnswer(stateDir: string, id: string, a: { answer: ChatAnswer } | { refused: string }, now = new Date()): void {
+  writeJson(chatDirs(stateDir).answers, id, 'answer' in a ? { v: 1, id, at: now.toISOString(), state: 'answered', answer: a.answer } : { v: 1, id, at: now.toISOString(), state: 'refused', why: a.refused });
 }
 
 /** A hub question: one turn per selected instance, each from its own bundle, as its own agent user. */
