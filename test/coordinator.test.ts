@@ -703,8 +703,9 @@ test('an investigation posts findings with evidence, lands nothing, and asks the
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
-  assert.deepEqual(runner.calls.map((r) => r.role), ['investigator']);
-  assert.ok(runner.calls[0]!.disallowedTools?.includes('Edit'), 'edits are disallowed');
+  // Research runs first for an investigation; this one returns no report, so the investigation goes on without it.
+  assert.deepEqual(runner.calls.map((r) => r.role), ['researcher', 'investigator']);
+  assert.ok(runner.calls.find((r) => r.role === 'investigator')!.disallowedTools?.includes('Edit'), 'edits are disallowed');
   const comments = (await f.backlog.comments(n)).map((x) => x.body).join('\n');
   assert.match(comments, /Investigation findings[\s\S]*src\/price\.js:3[\s\S]*Recommendation/);
   assert.match(comments, /modified files despite being read-only; those changes were discarded/);
