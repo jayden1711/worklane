@@ -113,6 +113,20 @@ export function groupOnlyDir(dir: string): void {
 }
 
 /** Write a state file readable by the coordinator's user and group only. */
+/** A directory only this user can enter (0700): for data no group member may read, such as raw intake reports. */
+export function ownerOnlyDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') chmodSync(dir, 0o700);
+}
+
+/** Write a file only this user can read (0600), atomically (a temp file in the same directory, then a rename). */
+export function writeOwnerOnly(file: string, data: string): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, data, { mode: 0o600 });
+  if (process.platform !== 'win32') chmodSync(tmp, 0o600);
+  renameSync(tmp, file);
+}
+
 export function writeGroupOnly(file: string, data: string | Uint8Array): void {
   writeFileSync(file, data, { mode: 0o660 });
   groupOnly(file);

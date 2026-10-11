@@ -52,7 +52,7 @@ export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsVi
 export { probeHub } from './api';
 export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => renderToStaticMarkup(<HealthPanelView view={view} {...(instances ? { instances } : {})} />);
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
-export { boundsOf, parseEntry, showValue } from './components/InstanceSettings';
+export { boundsOf, LABEL, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
 export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToStaticMarkup(<LiveFeedView items={items} ended={ended} />);
 export const renderConsole = (data: ConsoleData) => renderToStaticMarkup(<ConsolePanel data={data} run="r" />);

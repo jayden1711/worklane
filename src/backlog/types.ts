@@ -154,3 +154,9 @@ export function ownerFor(issue: Issue, paths: string[], owners: { default: strin
   }
   return owners.default;
 }
+
+/** Who may answer a decision: its owner, or one of the project's writers. GitHub logins are case-insensitive. */
+export function mayAnswer(owner: string, user: string, owners: { writers: string[] }): boolean {
+  const u = user.toLowerCase();
+  return !!u && (owner.toLowerCase() === u || owners.writers.some((w) => w.toLowerCase() === u));
+}

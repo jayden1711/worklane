@@ -14,26 +14,42 @@ export interface InstanceSettingsData {
   keys: string[];
   available: boolean;
   why?: string;
-  limits?: { workers: { min: number; max: number }; daily_budget_usd: { max: number }; max_fixes_per_pr: { max: number } } | null;
+  limits?: { workers: { min: number; max: number }; daily_budget_usd: { max: number }; max_fixes_per_pr: { max: number }; research?: { max_searches_per_day: number; max_fetches_per_day: number; max_usd_per_day: number }; intake?: { reports_per_sender_per_day: number; drafts_per_day: number; max_usd_per_day: number } } | null;
   limitsError?: string | null;
   ceilings?: { max_workers: number; daily_usd: number };
-  settings?: { key: string; value: unknown; source: 'instance' | 'repo' }[];
+  settings?: { key: string; value: unknown; source: Source }[];
 }
 
 type Windows = { from: string; to: string }[];
+/** Where a value in effect comes from: the instance's policy, the repo's config, or the engine's own default. */
+export type Source = 'instance' | 'repo' | 'engine';
+export const SOURCE_LABEL: Record<Source, string> = { instance: "this instance's", repo: "the repo's default", engine: 'engine default' };
 
-const LABEL: Record<string, string> = {
+/** A readable name for each setting key the server sends (a test checks every key has one). */
+export const LABEL: Record<string, string> = {
   workers: 'Workers at once',
   daily_budget_usd: 'Daily budget (estimated, USD)',
   'ci_repair.enabled': 'CI fix runs',
   'ci_repair.max_fixes_per_pr': 'CI fix runs per PR',
   run_windows: 'Run windows',
+  'research.max_searches_per_day': 'Research searches per day',
+  'research.max_fetches_per_day': 'Research page fetches per day',
+  'research.max_usd_per_day': 'Research spend per day (estimated, USD)',
+  'research.repo_access': 'Research runs may read the repo',
+  'intake.reports_per_sender_per_day': 'Reports per sender per day',
+  'intake.drafts_per_day': 'Intake drafts per day',
+  'intake.max_usd_per_day': 'Intake spend per day (estimated, USD)',
 };
 
+/** On/off settings: picked from two buttons, never typed. */
+const SWITCHES = new Set(['ci_repair.enabled', 'research.repo_access']);
+/** Amounts of (estimated) money: shown with $, and may have cents. */
+const MONEY = new Set(['daily_budget_usd', 'research.max_usd_per_day', 'intake.max_usd_per_day']);
+
 export const showValue = (key: string, v: unknown): string => {
-  if (key === 'ci_repair.enabled') return v ? 'on' : 'off';
+  if (SWITCHES.has(key)) return v ? 'on' : 'off';
   if (key === 'run_windows') return Array.isArray(v) && v.length ? (v as Windows).map((w) => `${w.from}-${w.to}`).join(', ') : 'any time';
-  if (key === 'daily_budget_usd') return `$${v}`;
+  if (MONEY.has(key)) return `$${v}`;
   return String(v);
 };
 
@@ -51,15 +67,27 @@ export function boundsOf(key: string, d: InstanceSettingsData): string {
       return `0–${l.max_fixes_per_pr.max} (machine limit)`;
     case 'run_windows':
       return 'HH:MM-HH:MM, comma-separated; empty for any time';
+    case 'research.max_searches_per_day':
+    case 'research.max_fetches_per_day':
+      return l.research ? `0–${l.research[key.slice('research.'.length) as 'max_searches_per_day' | 'max_fetches_per_day']} (machine limit)` : '';
+    case 'research.max_usd_per_day':
+      return l.research ? `up to $${l.research.max_usd_per_day} (machine limit)` : '';
+    case 'research.repo_access':
+      return 'on or off; off keeps research runs to the web';
+    case 'intake.reports_per_sender_per_day':
+    case 'intake.drafts_per_day':
+      return l.intake ? `1–${l.intake[key.slice('intake.'.length) as 'reports_per_sender_per_day' | 'drafts_per_day']} (machine limit)` : '';
+    case 'intake.max_usd_per_day':
+      return l.intake ? `up to $${l.intake.max_usd_per_day} (machine limit)` : '';
     default:
-      return 'on or off';
+      return SWITCHES.has(key) ? 'on or off' : '';
   }
 }
 
 /** A typed value from what was entered, or why it can't be one. */
 export function parseEntry(key: string, raw: string): { value: unknown } | { error: string } {
   const t = raw.trim();
-  if (key === 'ci_repair.enabled') return t === 'on' ? { value: true } : t === 'off' ? { value: false } : { error: 'on or off' };
+  if (SWITCHES.has(key)) return t === 'on' ? { value: true } : t === 'off' ? { value: false } : { error: 'on or off' };
   if (key === 'run_windows') {
     if (!t) return { value: [] };
     const out: Windows = [];
@@ -72,13 +100,13 @@ export function parseEntry(key: string, raw: string): { value: unknown } | { err
   }
   const n = Number(t);
   if (!t || !Number.isFinite(n)) return { error: 'a number' };
-  if (key !== 'daily_budget_usd' && !Number.isInteger(n)) return { error: 'a whole number' };
+  if (!MONEY.has(key) && !Number.isInteger(n)) return { error: 'a whole number' };
   return { value: n };
 }
 
-const entryOf = (key: string, v: unknown) => (key === 'ci_repair.enabled' ? (v ? 'on' : 'off') : key === 'run_windows' ? (Array.isArray(v) ? (v as Windows).map((w) => `${w.from}-${w.to}`).join(', ') : '') : String(v));
+const entryOf = (key: string, v: unknown) => (SWITCHES.has(key) ? (v ? 'on' : 'off') : key === 'run_windows' ? (Array.isArray(v) ? (v as Windows).map((w) => `${w.from}-${w.to}`).join(', ') : '') : String(v));
 
-function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: unknown; source: 'instance' | 'repo' }; d: InstanceSettingsData; onChanged: () => void; proposed?: { value: unknown } }) {
+function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: unknown; source: Source }; d: InstanceSettingsData; onChanged: () => void; proposed?: { value: unknown } }) {
   const [entry, setEntry] = useState(entryOf(s.key, proposed ? proposed.value : s.value));
   const [review, setReview] = useState<{ value: unknown } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -111,13 +139,13 @@ function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: un
           {showValue(s.key, s.value)}
         </div>
         <div className="mt-0.5">
-          <Badge tone={s.source === 'instance' ? 'info' : 'neutral'}>{s.source === 'instance' ? "this instance's" : "the repo's default"}</Badge>
+          <Badge tone={s.source === 'instance' ? 'info' : 'neutral'}>{SOURCE_LABEL[s.source] ?? s.source}</Badge>
         </div>
       </td>
       <td className="primitive-table-cell">
         {d.canChange ? (
           <div className="space-y-1.5">
-            {s.key === 'ci_repair.enabled' ? (
+            {SWITCHES.has(s.key) ? (
               <div className="flex gap-1" role="group" aria-label={`${s.key} new value`}>
                 {['on', 'off'].map((o) => (
                   <button key={o} type="button" onClick={() => (setEntry(o), setReview(null))} className={cx('h-7 rounded-full px-3 text-[12.5px]', entry === o ? 'bg-ink text-surface' : 'text-ink-2 shadow-hairline hover:bg-hover-2')} data-testid="setting-input">
@@ -182,7 +210,7 @@ export function InstanceSettingsView({ data, onChanged = () => {}, proposed }: {
     <section className="space-y-2" aria-label="Instance settings" data-testid="instance-settings">
       <div className="flex flex-wrap items-baseline gap-2">
         <span className="text-[13px] font-medium text-ink">Instance settings</span>
-        <span className="text-[12px] text-ink-3">this instance's policy wins over the repo's defaults; each change is recorded on Activity</span>
+        <span className="text-[12px] text-ink-3">this instance's policy wins over the repo's config, which wins over the engine's defaults; each change is recorded on Activity</span>
       </div>
       {proposed && data.canChange && (data.settings ?? []).some((s) => s.key === proposed.key) && (
         <div className="rounded-control bg-blue-tint px-2.5 py-2 text-[12.5px] text-ink-2" data-testid="setting-proposed">

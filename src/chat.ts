@@ -11,7 +11,7 @@
 // kept per instance in its state (0600, redacted).
 import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { parseContract } from './backlog/types.js';
 import { writeBundle } from './bundle.js';
 import type { Config } from './config/load.js';
@@ -317,7 +317,7 @@ export interface ChatRequest {
 
 export type ChatAnswerFile = { v: 1; id: string; at: string } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
 
-const chatDirs = (stateDir: string) => ({ requests: join(stateDir, 'chat', 'requests'), answers: join(stateDir, 'chat', 'answers') });
+const chatDirs = (stateDir: string) => ({ requests: join(stateDir, 'chat', 'requests'), answers: join(stateDir, 'chat', 'answers'), keys: join(stateDir, 'chat', 'keys') });
 
 function writeJson(dir: string, id: string, v: unknown) {
   groupOnlyDir(dir);
@@ -326,18 +326,52 @@ function writeJson(dir: string, id: string, v: unknown) {
   renameSync(tmp, join(dir, `${id}.json`));
 }
 
-/** Ask the chat (anyone with dashboard access; only the owner gets drafts and proposals). Returns the request id. */
-export function askChat(o: { stateDir: string; question: string; by: string; now?: Date }): { id: string } {
+/** A client's request key: the same (asker, key) is one question, however often it is sent. */
+export const CHAT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
+
+/**
+ * Ask the chat (anyone with dashboard access; only the owner gets drafts and proposals). Returns the request id.
+ * With a `key`, a retried or double-submitted ask returns the first one's id and runs no second turn.
+ */
+export function askChat(o: { stateDir: string; question: string; by: string; key?: string; now?: Date }): { id: string } {
   const question = o.question.trim();
   if (!question) throw new ChatError('the question is empty');
   if (question.length > MAX_QUESTION) throw new ChatError(`the question is over ${MAX_QUESTION} characters`);
   if (!o.by) throw new ChatError('who is asking is unknown');
+  if (o.key !== undefined && !CHAT_KEY.test(o.key)) throw new ChatError('the request key must be 8-128 letters, digits, _ or -');
+  const d = chatDirs(o.stateDir);
+  const keyName = o.key === undefined ? null : createHash('sha256').update(`${o.by.toLowerCase()}\0${o.key}`).digest('hex').slice(0, 32);
+  if (keyName) {
+    try {
+      const prior = (JSON.parse(readFileSync(join(d.keys, `${keyName}.json`), 'utf8')) as { id?: string }).id;
+      if (typeof prior === 'string' && chatAnswer(o.stateDir, prior)) return { id: prior };
+    } catch {
+      // not asked before
+    }
+  }
   const now = o.now ?? new Date();
   const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
-  const d = chatDirs(o.stateDir);
   writeJson(d.answers, id, { v: 1, id, at: now.toISOString(), state: 'pending' });
+  if (keyName) writeJson(d.keys, keyName, { id });
   writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question });
   return { id };
+}
+
+/**
+ * At start-up: a question whose turn was cut off by a restart (its request was taken, its answer still pending) is
+ * refused once, never run again. Returns the ids refused.
+ */
+export function refuseInterruptedChats(stateDir: string, now = new Date()): string[] {
+  const d = chatDirs(stateDir);
+  if (!existsSync(d.answers)) return [];
+  const out: string[] = [];
+  for (const f of readdirSync(d.answers).filter((x) => x.endsWith('.json'))) {
+    const id = f.slice(0, -'.json'.length);
+    if (!CHAT_ID.test(id) || chatAnswer(stateDir, id)?.state !== 'pending' || existsSync(join(d.requests, f))) continue;
+    writeChatAnswer(stateDir, id, { refused: 'interrupted: the coordinator restarted during this turn; ask again' }, now);
+    out.push(id);
+  }
+  return out;
 }
 
 /** The answer file for a request (pending until the coordinator has run the turn), or null. */
