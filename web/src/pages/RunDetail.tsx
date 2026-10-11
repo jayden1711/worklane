@@ -4,6 +4,7 @@ import { api, type RunRecord, type RunSummary, type State } from '../api';
 import { navigate } from '../App';
 import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
+import { LiveRun } from '../components/LiveRun';
 import { Header } from './Overview';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
@@ -81,25 +82,36 @@ export function RunList({ issue, lastId, refused: known = null }: { issue: numbe
 export function RunDetail({ id, refused: known = null }: { id: string; refused?: string | null }) {
   const [run, setRun] = useState<RunRecord | null | undefined>(known ? null : undefined);
   const [fromServer, setRefused] = useState<string | null>(null);
-  useEffect(() => {
-    if (known) return;
+  // Live while the coordinator runs it (its record is written when it ends); the stored record afterwards.
+  const [live, setLive] = useState<boolean | undefined>(known ? false : undefined);
+  const loadRecord = () =>
     api<RunRecord>(`/api/runs/${encodeURIComponent(id)}`)
       .then(setRun)
       .catch((e: Error) => (setRun(null), setRefused(runsRefused(e.message))));
+  useEffect(() => {
+    // Refused up front (the state says so): neither the record nor the console is asked for.
+    if (known) return;
+    void loadRecord();
+    api<{ live: boolean }>(`/api/runs/${encodeURIComponent(id)}/console`)
+      .then((c) => setLive(c.live))
+      .catch(() => setLive(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, known]);
   const refused = known ?? fromServer;
+  const showLive = live === true && !run;
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
   const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
   return (
     <div data-testid="page-run-detail">
-      <Header title={run ? `${run.role} run` : 'Agent run'}sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : ''}>
+      <Header title={run ? `${run.role} run` : showLive ? 'Live run' : 'Agent run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : showLive ? 'live: what the agent does, as it does it' : ''}>
         <button onClick={() => navigate(back)} className="flex items-center gap-1 text-[12px] text-ink-3 hover:text-ink">
           <ArrowLeft className="size-3.5" /> Back
         </button>
       </Header>
       <div className="mx-auto max-w-4xl space-y-4 p-6">
-        {run === undefined && <Loading />}
-        {run === null && (refused ? <Card><RunsRefused message={refused} /></Card> : <Empty title="No such run" hint="Runs are kept for the most recent 500." />)}
+        {showLive && <LiveRun run={id} onEnded={() => void loadRecord()} />}
+        {!showLive && (run === undefined || live === undefined) && <Loading />}
+        {!showLive && run === null && live === false && (refused ? <Card><RunsRefused message={refused} /></Card> : <Empty title="No such run" hint="Runs are kept for the most recent 500." />)}
         {run && (
           <>
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
