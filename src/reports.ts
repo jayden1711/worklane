@@ -8,6 +8,7 @@ import type { Config } from './config/load.js';
 import type { StoredEvent } from './events/types.js';
 import { failureModes, failureModesMarkdown, mergeCostMarkdown, type FailureProposal } from './failure-modes.js';
 import { mergeMetrics } from './merge-metrics.js';
+import { offsiteLine, offsiteStatus } from './offsite-backup.js';
 import { project } from './projection.js';
 import { readRun, RUNS_DIR, type RunRecord } from './run-record.js';
 
@@ -130,6 +131,10 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
 
   const holds = events.filter((e) => after(e) && e.type === 'governor.hold').map((e) => (e.payload as { reason: string }).reason);
   if (holds.length) lines.push('', `**Machine**: dispatch held ${holds.length} time(s): ${[...new Set(holds)].slice(0, 3).join('; ')}.`);
+
+  // Off-machine backup (once set up): when the last verified copy was made; a warning once it's over a day old.
+  const offsite = offsiteLine(offsiteStatus(events, now));
+  if (offsite) lines.push('', offsite);
 
   // Weekly: how every run ended, the commonest causes, and fixes proposed for any cause seen 3+ times.
   let proposals: FailureProposal[] = [];

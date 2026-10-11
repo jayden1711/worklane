@@ -6,6 +6,7 @@
 // Anything the stats couldn't read stays null here, never guessed.
 import type { StoredEvent } from './events/types.js';
 import type { MachineStats } from './os/stats.js';
+import { offsiteLine, offsiteStatus, type OffsiteStatus } from './offsite-backup.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -48,6 +49,8 @@ export interface HealthView {
   cores: number | null;
   checks: { timings: CheckTiming[]; slowest: string[]; regressions: string[]; rule: string };
   usage: { days: UsageDay[]; quotaNote: string };
+  /** The last off-machine backup verified by reading the remote copy back; null when off-machine backups aren't set up. */
+  offsiteBackup: OffsiteStatus | null;
   suggestions: string[];
 }
 
@@ -140,7 +143,7 @@ const secs = (ms: number) => `${Math.round(ms / 1000)} s`;
 export const THRESHOLDS = { memoryAvailablePct: 10, swapUsedPct: 25, unitMemoryPct: 90, diskFreePct: 10, diskFreeGb: 10, rateLimitsPerDay: 3, lockWaitMinPerDay: 30, loadPerCore: 1.5 } as const;
 
 /** Suggestions only, each a "consider", never a change made; one line saying so when there's nothing to suggest. */
-export function suggestions(v: Omit<HealthView, 'suggestions'>, o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
+export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup'> & { offsiteBackup?: OffsiteStatus | null }, o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
   const today = o.today ?? new Date().toISOString().slice(0, 10);
   const out: string[] = [];
   const m = v.machine;
@@ -170,12 +173,13 @@ export function suggestions(v: Omit<HealthView, 'suggestions'>, o: { today?: str
     const c = v.checks.timings.find((x) => x.check === name)!;
     out.push(`Consider looking at why "${name}" got slower: a median of ${secs(c.recentMedianMs)} over its last ${REGRESSION.recent} runs, against ${secs(c.priorMedianMs!)} before (+${c.regression!.slowerPct}%).`);
   }
+  if (v.offsiteBackup?.stale) out.push(offsiteLine(v.offsiteBackup)!.replaceAll('**', ''));
   return out.length ? out : ['Nothing to suggest: memory, disk, load, usage and check times are within the usual limits.'];
 }
 
 /** The whole health view. */
-export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string> } = {}): HealthView {
+export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string>; now?: Date } = {}): HealthView {
   const started = [...events].reverse().find((e) => e.type === 'coordinator.started')?.payload as { instance?: string } | undefined;
-  const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE } };
+  const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now) };
   return { ...base, suggestions: suggestions(base, o) };
 }
