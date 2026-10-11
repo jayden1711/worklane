@@ -26,7 +26,8 @@ import { HUB_PORT, parseHubArg, startHub } from './dashboard-hub.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
-import { installationTokens } from './github-app.js';
+import { appBotIdentity, installationTokens } from './github-app.js';
+import { tune } from './tune.js';
 import { openUrl, stateDir } from './os/index.js';
 import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { checkRepoScope } from './github-scope.js';
@@ -79,6 +80,9 @@ usage: ${BRAND.cli} <command> [options]
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
+  tune <instance> [--full] [--dry-run]
+                                   profile the test suite at 1/2/4/all cores' workers and open a PR
+                                   with the recommended worker settings (run as the coordinator user)
   status                           what's running, waiting and spent, from the event log
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
@@ -446,6 +450,49 @@ async function main(argv: string[]): Promise<number> {
       const r = await seedDemo(resolve(sub));
       console.log(`demo seeded: ${r.issues} issues worked by the real coordinator with scripted agents\n  project ${r.root}\n  open it: ${BRAND.cli} dashboard --root ${r.root} --user example-owner`);
       return 0;
+    }
+
+    case 'tune': {
+      const name = sub;
+      if (!name || name.startsWith('-')) {
+        console.error('usage: tune <instance> [--full] [--dry-run]');
+        return 2;
+      }
+      const i = loadInstance(name);
+      const cfg = i.config;
+      // As the coordinator does: the instance's own git credentials and commit identity, never the operator's.
+      const env = instanceEnv(i);
+      for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
+      Object.assign(process.env, env);
+      const gh = i.credentials.github;
+      const identity = i.commitIdentity ?? (gh.kind === 'app' ? await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }) : { name: `${BRAND.cli}-${i.name}`, email: `${BRAND.cli}-${i.name}@users.noreply.invalid` });
+      const main = cfg.project.project.default_branch;
+      execFileSync('git', ['fetch', '-q', 'origin', main], { cwd: i.repo.path, stdio: 'inherit' });
+      const base = execFileSync('git', ['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
+      const dryRun = flag(rest, '--dry-run');
+      const r = await tune({
+        wt: { repo: i.repo.path, root: cfg.tests.worktree.root, stateDir: i.stateDir, setup: cfg.tests.worktree.setup, ...(i.runAs ? { runAs: i.runAs } : {}), env: cfg.tests.env },
+        tests: cfg.tests,
+        base,
+        mainBranch: main,
+        full: flag(rest, '--full'),
+        dryRun,
+        limits: cfg.guardrails.push,
+        ...(dryRun ? {} : { backlog: backlogFor(cfg, i.repo.path, i.stateDir, instanceTokens(i, env)) }),
+        identity,
+        stateDir: i.stateDir,
+      });
+      console.log(`profiled \`${r.profile.command}\` on ${r.profile.cores} cores:`);
+      for (const run of r.profile.runs) console.log(`  ${String(run.workers).padStart(3)} worker(s): ${run.ok ? `${run.seconds.toFixed(0)} s` : 'FAILED'}${run.peakWorkerMb ? `, ${run.peakWorkerMb.toFixed(0)} MB per worker` : ''}`);
+      if (!r.recommendation) {
+        console.log('no recommendation: no run passed');
+        return 1;
+      }
+      console.log(`recommended: ${r.recommendation.workers} (${r.recommendation.why})`);
+      if (r.refused) console.log(`push refused: ${r.refused.join('; ')}`);
+      else if (r.pr) console.log(`opened ${r.pr.url}`);
+      else console.log(r.changed ? 'dry run: the change is committed on a local branch, not pushed' : 'tests.yaml already has these settings');
+      return r.refused ? 1 : 0;
     }
 
     case 'report': {
