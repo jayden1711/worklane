@@ -84,6 +84,8 @@ export default {
       // A group message counts only if addressed to the bot; anything else is dropped here and never stored.
       const body = conversation ? addressedBody(params.Body, prefixes) : String(params.Body || '').trim();
       if (!body) return twiml();
+      // A webhook retry of a message already held changes nothing: it keeps its first received_at (its place in order).
+      if (await env.INTAKE.get(`msg:${id}`)) return twiml();
       const msg = { id, from, body: conversation ? `${prefixes[0]} ${body}` : body, ...(conversation ? { conversation } : {}), received_at: new Date().toISOString() };
       await env.INTAKE.put(`msg:${id}`, JSON.stringify(msg), { expirationTtl: RETENTION_S });
       return twiml();
@@ -96,6 +98,8 @@ export default {
         const v = await env.INTAKE.get(k.name);
         if (v) messages.push(JSON.parse(v));
       }
+      // The store lists by key (the message id); hand them over in arrival order.
+      messages.sort((a, b) => String(a.received_at).localeCompare(String(b.received_at)) || String(a.id).localeCompare(String(b.id)));
       return Response.json({ messages });
     }
     if (req.method === 'POST' && url.pathname === '/ack') {

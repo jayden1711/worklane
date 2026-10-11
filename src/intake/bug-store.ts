@@ -55,6 +55,9 @@ export function pullBugReports(stateDir: string, query: string, run: ReadOnlyQue
     });
     next = /^\d+$/.test(id) && /^\d+$/.test(next) ? String(Math.max(Number(next), Number(id))) : id > next ? id : next;
   }
+  // In the order they were made, whatever order the project's query returns them in.
+  const num = (x: string) => (/^\d{1,15}$/.test(x) ? x.padStart(15, '0') : x);
+  out.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || num(a.sourceId).localeCompare(num(b.sourceId)));
   if (next !== after) {
     privateDir(join(stateDir, 'intake'));
     writeOwnerOnly(cursorFile(stateDir), JSON.stringify({ after: next }));

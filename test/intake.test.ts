@@ -162,7 +162,7 @@ test('the engine signs relay requests exactly as the relay checks them', async (
   for (const body of ['', '{"ids":["SM1"]}']) assert.equal(relaySignature('s3cret', '1760000000', 'POST', '/ack', body), await relay.relaySignature('s3cret', '1760000000', 'POST', '/ack', body));
 });
 
-test('SMS: pulls signed, keeps 1:1 texts and addressed group texts, acks what it took; replies by Messages or Conversations', async () => {
+test('SMS: pulls signed, keeps 1:1 texts and addressed group texts, acks what it drops by rule and the rest on request; replies by Messages or Conversations', async () => {
   const calls: { url: string; init: RequestInit }[] = [];
   const messages = [
     { id: 'SM1', from: '+15550001111', body: 'checkout total is wrong', received_at: 't1' },
@@ -179,7 +179,10 @@ test('SMS: pulls signed, keeps 1:1 texts and addressed group texts, acks what it
   assert.equal(s.dropped, 1, 'an unaddressed group text is dropped');
   const pull = calls[0]!;
   assert.equal((pull.init.headers as Record<string, string>)['x-relay-sig'], relaySignature('s3cret', '1760000000', 'GET', '/pull'));
-  assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { ids: ['SM1', 'IM2', 'IM3'] }, 'everything pulled is acked, so nothing lingers');
+  assert.deepEqual(JSON.parse(String(calls[1]!.init.body)), { ids: ['IM3'] }, 'only what was dropped by rule is acked at pull; the rest once recorded');
+  calls.length = 0;
+  await s.ack(['SM1', 'IM2']);
+  assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), { ids: ['SM1', 'IM2'] });
   calls.length = 0;
   await s.reply({ kind: 'sms', id: '+15550001111' }, 'Thanks');
   await s.reply({ kind: 'group', id: 'CH1' }, 'Thanks');
