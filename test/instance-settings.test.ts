@@ -51,6 +51,37 @@ test('the instance settings: each value in effect and where it comes from, the b
   assert.match(String('limitsError' in broken ? broken.limitsError : ''), /unreadable/);
 });
 
+test('where a value comes from: the instance\'s policy, else the repo\'s config only where it defines the key, else the engine\'s default', () => {
+  const s = setup();
+  writeFileSync(s.policyFile, `${POLICY}  research: { max_usd_per_day: 3 }\n`);
+  const sources = () => {
+    const v = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, limitsPath: s.limitsPath });
+    assert.ok(v.available);
+    return Object.fromEntries((v.settings ?? []).map((x) => [x.key, x.source]));
+  };
+  assert.deepEqual(sources(), {
+    workers: 'repo', // agents.yaml: roles.workers.count
+    daily_budget_usd: 'instance', // the policy sets it
+    'ci_repair.enabled': 'engine', // the example's agents.yaml has no ci_repair role
+    'ci_repair.max_fixes_per_pr': 'engine',
+    run_windows: 'repo', // config.yaml: agent_runtime.run_windows: [] is defined, if empty
+    'research.max_searches_per_day': 'engine', // the repo's config can't set research caps
+    'research.max_fetches_per_day': 'engine',
+    'research.max_usd_per_day': 'instance',
+    'research.repo_access': 'engine',
+  });
+  // The repo's config as written, not as loaded with defaults: drop a key from the file and it's the engine's.
+  const agents = join(s.cfg.dir, 'agents.yaml');
+  writeFileSync(agents, readFileSync(agents, 'utf8').replace('count: 1, ', ''));
+  const config = join(s.cfg.dir, 'config.yaml');
+  writeFileSync(config, readFileSync(config, 'utf8').replace(/^\s*run_windows:.*\n/m, ''));
+  const after = sources();
+  assert.equal(after.workers, 'engine');
+  assert.equal(after.run_windows, 'engine');
+  // Every setting key gets one of the three, and the page labels each.
+  assert.ok(Object.values(after).every((x) => ['instance', 'repo', 'engine'].includes(x)));
+});
+
 test('the owner changes a setting through the instance\'s own server: written, recorded as settings.changed, shown on Activity', async () => {
   const s = setup();
   const x = await serve(s);

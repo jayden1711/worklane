@@ -264,7 +264,7 @@ test('the instance settings: the owner gets a new-value input and a review step 
       { key: 'workers', value: 2, source: 'instance' },
       { key: 'daily_budget_usd', value: 12, source: 'instance' },
       { key: 'ci_repair.enabled', value: false, source: 'repo' },
-      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'repo' },
+      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'engine' },
       { key: 'run_windows', value: [{ from: '22:00', to: '06:00' }], source: 'instance' },
     ],
   };
@@ -274,6 +274,7 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.match(html, /up to \$20 \(machine \$20, policy \$30\)/);
   assert.match(html, /data-setting="run_windows"[\s\S]*?22:00-06:00/);
   assert.match(html, /the repo(&#x27;|')s default/);
+  assert.match(html, /data-setting="ci_repair.max_fixes_per_pr"[\s\S]*?>engine default</, 'a key the repo\'s config doesn\'t define: the engine\'s own default');
   assert.equal((html.match(/data-testid="setting-review-button"/g) ?? []).length, 5, 'a review step for each, before anything is written');
   assert.doesNotMatch(html, /data-testid="setting-confirm"/, 'confirm appears only after Review change');
   assert.doesNotMatch(html, /data-testid="settings-read-only"/);
