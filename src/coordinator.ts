@@ -36,7 +36,7 @@ import { applySettings, inRunWindow, researchCaps, researchRepoAccess } from './
 import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchTrigger, researchUsageToday, writeResearchBundle } from './research.js';
 import type { InstanceSettings } from './instance.js';
 import { readiness, requiredOutcomes, type Readiness } from './pr-watch.js';
-import { instructionEvalReasons, mergeDecision, type MergeDecision } from './merge-policy.js';
+import { instructionEvalReasons, mergeDecision, outsidePlanReasons, waitCategoriesOf, type MergeDecision } from './merge-policy.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
@@ -2025,6 +2025,7 @@ export class Coordinator {
     const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     const v = this.events(n).filter((e) => e.type === 'eval.verdict' && (e.payload as { head: string }).head === pr.headSha).at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
+    const plan = (this.events(n).filter((e) => e.type === 'plan.posted').at(-1)?.payload as EventPayload<'plan.posted'> | undefined)?.plan as { files?: string[] } | undefined;
     let policyOn = false;
     try {
       policyOn = this.d.autoMerge?.() ?? false;
@@ -2049,6 +2050,9 @@ export class Coordinator {
         instructionTargets(files.map((f) => f.path)).map((t) => t.target),
         this.instructionResults(n),
       ),
+      // A planned task: high-risk or design-level files its approved plan didn't list hold the merge: the repo's
+      // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
+      outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).
     const fix = this.d.log.read(0, ['conflict_fix.finished']).map((e) => e.payload as EventPayload<'conflict_fix.finished'>).filter((p) => p.number === number && p.outcome === 'pushed' && p.head === pr.headSha).at(-1);
