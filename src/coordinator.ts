@@ -16,11 +16,14 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached, writeAgentReadable, writeGroupOnly } from './os/index.js';
+import { currentCoreShare, envWithCores, withCores } from './cores.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunControl, type RunResult } from './runner.js';
 import { MAX_MESSAGE, takeRequests, writeLive, type PendingMessage } from './console.js';
+import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
+import { machineStats } from './os/stats.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { allowedOnce, domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from './domain-requests.js';
 import { needsPlan, objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from './plan-mode.js';
@@ -126,7 +129,11 @@ export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator {
   private readonly remote: string;
-  private readonly wt: WorktreeOptions;
+  /** Where task worktrees go and how they're set up; the project's env is filled in when each one is made. */
+  private readonly wtBase: WorktreeOptions;
+  private get wt(): WorktreeOptions {
+    return { ...this.wtBase, env: this.projectEnv() };
+  }
   private active = new Map<number, Promise<void>>();
   /** The hotspot files each running task is expected to change. */
   private taskHotspots = new Map<number, string[]>();
@@ -140,6 +147,8 @@ export class Coordinator {
   private prPolled = new Map<number, number>();
   /** Live runs, for the console. */
   private live = new Map<string, LiveEntry>();
+  /** Chat turns, one at a time. */
+  private chatQueue: Promise<void> = Promise.resolve();
   /** The repo's own config: the defaults the instance's settings apply over. */
   private readonly repoCfg: Config;
   private settingsKey = '';
@@ -216,12 +225,23 @@ export class Coordinator {
     };
     this.repoCfg = d.cfg;
     this.remote = d.remote ?? 'origin';
-    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+    this.wtBase = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+  }
+
+  /** This task's share of the machine's cores right now: the cores over the agents running (cores.ts). */
+  private coreShare(): number {
+    return currentCoreShare(this.d.cfg.tests.cores, this.d.slotsDir);
+  }
+
+  /** The project's env (tests.yaml env) as a command or session starting now gets it: `{cores}` filled in. */
+  private projectEnv(): Record<string, string> {
+    return envWithCores(this.d.cfg.tests.env, this.coreShare());
   }
 
   /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
   private project(command: string, cwd: string) {
-    return sh(command, cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, this.d.cfg.tests.env);
+    const share = this.coreShare();
+    return sh(withCores(command, share), cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share));
   }
 
   private get branch() {
@@ -266,6 +286,7 @@ export class Coordinator {
     };
     this.checkEmergency();
     this.checkConsole();
+    void this.checkChat();
     await step('settings', () => this.refreshSettings(), undefined);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
@@ -318,6 +339,7 @@ export class Coordinator {
   /** Wait for in-flight task pipelines (tests and graceful shutdown). */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
+    await this.chatQueue;
   }
 
   /**
@@ -438,6 +460,59 @@ export class Coordinator {
    * The console's requests from the dashboard (called every few seconds and on each tick): message or stop
    * a live run. Only the owner's are acted on; every outcome is an event.
    */
+  /**
+   * The dashboard chat's questions (called every few seconds and on each tick). Each is answered by a
+   * chief_of_staff turn through this coordinator's runner, so it holds the per-login lock like every run and
+   * never overlaps another claude on the same login. Turns go one at a time; the returned promise is the queue.
+   */
+  checkChat(): Promise<void> {
+    for (const q of takeChatRequests(this.d.stateDir)) this.chatQueue = this.chatQueue.then(() => this.chatRequest(q));
+    return this.chatQueue;
+  }
+
+  private async chatRequest(q: ChatRequest): Promise<void> {
+    const refuse = (why: string) => {
+      writeChatAnswer(this.d.stateDir, q.id, { refused: why });
+      this.emit('chat.turn', { id: q.id, by: q.by, read_only: true, citations: 0, draft: 'none', actions: 0, cost_usd: 0, refused: why });
+    };
+    try {
+      const role = this.d.cfg.agents.roles.chief_of_staff;
+      if (role && !role.enabled) return refuse('the chat is off (agents.yaml roles.chief_of_staff)');
+      if (this.halt.signal.aborted || this.stopped) return refuse('agents are stopped');
+      const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
+      if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
+      const events = this.d.log.read();
+      const context = {
+        instance: this.d.instance,
+        repo: this.d.cfg.project.project.repo,
+        events: events.slice(-2000),
+        runs: recentRuns(this.d.stateDir),
+        health: machineStats({ paths: [this.d.repo, this.d.stateDir] }),
+        ...contextFromEvents(events),
+      };
+      // Bundles beside the agents' task files: readable by their group, never writable by it.
+      const at = this.d.agentTasks;
+      const bundle = at ? { root: join(dirname(at.dir), 'chat'), gid: at.gid } : { root: join(this.d.stateDir, 'chat', 'bundles'), gid: process.getgid?.() ?? 0 };
+      const a = await chatTurn({
+        cfg: this.d.cfg,
+        context,
+        question: q.question,
+        by: q.by,
+        runner: this.d.runner,
+        stateDir: this.d.stateDir,
+        bundleRoot: bundle.root,
+        gid: bundle.gid,
+        repo: this.d.repo,
+        remainingUsd: left,
+        onCost: (r) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
+      });
+      writeChatAnswer(this.d.stateDir, q.id, { answer: a });
+      this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
+    } catch (e) {
+      refuse(`the chat turn failed: ${(e as Error).message.slice(0, 300)}`);
+    }
+  }
+
   checkConsole(): void {
     try {
       this.consoleRequests();
@@ -720,7 +795,7 @@ export class Coordinator {
     const role = this.d.cfg.agents.roles.workers!;
     const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'investigator',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -770,7 +845,7 @@ export class Coordinator {
     try {
       const role = this.d.cfg.agents.roles.evaluator!;
       const r = await this.d.runner.run({
-        env: this.d.cfg.tests.env,
+        env: this.projectEnv(),
         role: 'evaluator-repro',
         stateDir: this.d.stateDir,
         prompt: issueBrief(issue, doneWhen),
@@ -831,7 +906,7 @@ export class Coordinator {
     const before = this.git(path, 'rev-parse', 'HEAD');
     const started = Date.now();
     const r: RunResult = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -1109,7 +1184,7 @@ export class Coordinator {
       ...(opts.extra ?? []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'evaluator-verdict',
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, extra),
@@ -1202,7 +1277,7 @@ export class Coordinator {
     const note = decided?.answer === 'revise' ? decided.note : null;
     const workers = this.d.cfg.agents.roles.workers!;
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'planner',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -2108,7 +2183,7 @@ export class Coordinator {
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -2423,7 +2498,7 @@ export class Coordinator {
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
