@@ -7,7 +7,8 @@ import { BRAND } from './brand.js';
 export const UPDATES_CONFIG = `/etc/${BRAND.cli}/updates.json`;
 export const UPDATES_LOG = `/var/lib/${BRAND.cli}/updates.jsonl`;
 
-export type UpdateEvent = 'attempt' | 'installed' | 'rolled_back' | 'refused' | 'waiting' | 'build_failed' | 'error';
+/** held: a commit that was rolled back, skipped until a newer one or until updates are turned off and on again. */
+export type UpdateEvent = 'attempt' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error';
 export interface UpdateEntry {
   at: string;
   event: UpdateEvent;
@@ -17,9 +18,13 @@ export interface UpdateEntry {
   units?: string[];
   failed?: string[];
   back?: string;
+  /** On a rollback: each failing unit's result, exit status, restarts and journal tail (redacted). */
+  diagnosis?: { unit: string; result: string; status: string; restarts: number; journal: string }[];
+  /** On a rollback: the commit is now held. */
+  held?: boolean;
 }
 
-const EVENTS = new Set<string>(['attempt', 'installed', 'rolled_back', 'refused', 'waiting', 'build_failed', 'error']);
+const EVENTS = new Set<string>(['attempt', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error']);
 
 /** The updater's settings, or null when it isn't set up on this machine. */
 export function updateSettings(path = UPDATES_CONFIG): { enabled: boolean; repo_url: string; branch: string; required_checks: string[] } | null {
