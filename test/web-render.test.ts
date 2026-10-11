@@ -497,7 +497,7 @@ test('agent runs refused: the runs card and a run page say whose they are, not a
   assert.doesNotMatch(r.renderIssue(asOwner, issue), /data-testid="runs-refused"/);
 });
 
-test('a research run on its page: each search, each page fetched or refused (linked only when fetched, rel=noopener), a cap it stopped at; others are told it is the owner\'s', () => {
+test('a research run on its page: each search, each page fetched or refused (linked only when fetched, rel=noopener), a cap it stopped at', () => {
   const html = r.renderRunResearch({
     searches: ['sqlite vacuum into durability', 'litestream restore'],
     fetches: [
@@ -516,7 +516,4 @@ test('a research run on its page: each search, each page fetched or refused (lin
   assert.doesNotMatch(html, /href="javascript:/, 'only http(s) becomes a link');
   assert.match(html, /role="alert"[^>]*data-testid="run-research-capped"[\s\S]*?Stopped at a cap:[\s\S]*?searches: 20 of 20 today/);
   assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
-  const theirs = r.renderRunResearch('owner-only');
-  assert.match(theirs, /data-testid="run-research-owner-only"[^>]*>Only the owner sees/);
-  assert.doesNotMatch(theirs, /run-research-search|run-research-fetch/);
 });

@@ -530,13 +530,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true, number });
           }
         }
-        // A research run's searches and fetches (refusals marked) and where it stopped at a cap: the owner's only.
+        // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
+        // is the runs gate's to say (the owner and the writers), as for the rest of the run.
         const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
-        if (research && req.method === 'GET') {
-          const owner = opts.cfg.project.owners.default;
-          if (!opts.user || opts.user.toLowerCase() !== owner.toLowerCase()) return json(res, 403, { error: `only the owner (@${owner}) sees what a research run searched and fetched` });
-          return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
-        }
+        if (research && req.method === 'GET') return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
           return run ? json(res, 200, run) : json(res, 404, { error: 'no such run' });

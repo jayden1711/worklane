@@ -60,4 +60,4 @@ export { actionHref, citationHref } from './components/ChatPanel';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
-export const renderRunResearch = (data: RunResearchData | 'owner-only') => renderToStaticMarkup(<RunResearchView data={data} />);
+export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);

@@ -162,16 +162,9 @@ export interface RunResearchData {
 /** Only http(s) addresses become links; anything else an agent asked for is shown as text. */
 const linkable = (url: string) => /^https?:\/\//i.test(url);
 
-/** The research section from its data: 'owner-only' when this viewer isn't the owner, null while loading. */
-export function RunResearchView({ data }: { data: RunResearchData | 'owner-only' | { error: string } | null }) {
+/** The research section from its data; null while loading. Who may see it is the run page's (the runs gate). */
+export function RunResearchView({ data }: { data: RunResearchData | { error: string } | null }) {
   if (data === null) return null;
-  if (data === 'owner-only') {
-    return (
-      <Card className="primitive-card-pad text-[13px] text-ink-3" data-testid="run-research-owner-only">
-        Only the owner sees what a research run searched and fetched.
-      </Card>
-    );
-  }
   if ('error' in data) {
     return (
       <Card className="primitive-card-pad text-[13px] text-red" data-testid="run-research">
@@ -239,11 +232,11 @@ export function RunResearchView({ data }: { data: RunResearchData | 'owner-only'
 }
 
 function RunResearch({ id }: { id: string }) {
-  const [data, setData] = useState<RunResearchData | 'owner-only' | { error: string } | null>(null);
+  const [data, setData] = useState<RunResearchData | { error: string } | null>(null);
   useEffect(() => {
     api<RunResearchData>(`/api/runs/${encodeURIComponent(id)}/research`)
       .then(setData)
-      .catch((e: Error) => setData(/only the owner/.test(e.message) ? 'owner-only' : { error: e.message }));
+      .catch((e: Error) => setData({ error: e.message }));
   }, [id]);
   return <RunResearchView data={data} />;
 }

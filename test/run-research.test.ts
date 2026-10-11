@@ -26,7 +26,7 @@ async function serve(user: string) {
   return { d, url, h: { authorization: `Bearer ${d.token}` } };
 }
 
-test('a research run\'s searches, fetches (refusals marked) and caps, for the owner only', async () => {
+test('a research run\'s searches, fetches (refusals marked) and caps, for the owner and the writers', async () => {
   const s = await serve('example-owner');
   try {
     assert.equal((await fetch(s.url)).status, 401);
@@ -43,11 +43,20 @@ test('a research run\'s searches, fetches (refusals marked) and caps, for the ow
   } finally {
     await s.d.close();
   }
-  const other = await serve('example-collaborator');
+  // A writer reads it as the owner does; anyone else is refused by the runs gate, as for the rest of the run.
+  const writer = await serve('example-collaborator');
+  try {
+    const r = await fetch(writer.url, { headers: writer.h });
+    assert.equal(r.status, 200, 'a writer reads it');
+    assert.equal(((await r.json()) as { searches: string[] }).searches.length, 1);
+  } finally {
+    await writer.d.close();
+  }
+  const other = await serve('someone-else');
   try {
     const r = await fetch(other.url, { headers: other.h });
     assert.equal(r.status, 403);
-    assert.match(((await r.json()) as { error: string }).error, /only the owner/);
+    assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the owner \(@example-owner\) and the project's writers/);
   } finally {
     await other.d.close();
   }
