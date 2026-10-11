@@ -260,9 +260,10 @@ test('the research lane denies every read of the checkout, its worktrees and the
     for (const tool of ['Read', 'Glob', 'Grep']) assert.ok(r.permissions.deny.includes(`${tool}(/${a}/**)`), `${tool} denied on ${p}`);
     assert.ok((r.sandbox as { filesystem: { denyRead: string[] } }).filesystem.denyRead.includes(a), `sandbox denies ${p}`);
   }
-  const hook = JSON.stringify(r.hooks);
-  assert.ok(hook.includes(`${RESEARCH_ROOT_ENV}=`));
-  assert.ok(hook.includes(JSON.stringify(join(root, 'srv', 'inst', 'research')).slice(1, -1)), 'the hook gets the research root');
+  // The hook's own command (not the hooks object stringified again, which would escape Windows backslashes twice).
+  const cmd = (r.hooks as { PreToolUse: { hooks: { command: string }[] }[] }).PreToolUse[0]!.hooks[0]!.command;
+  assert.ok(cmd.includes(`${RESEARCH_ROOT_ENV}=`));
+  assert.ok(cmd.includes(JSON.stringify(join(root, 'srv', 'inst', 'research'))), 'the hook gets the research root');
   assert.equal(lanes[RESEARCH_LANE]!.runAs?.user, 'wl-inst-agent', 'as the agent user');
   const withRepo = lanes[RESEARCH_REPO_LANE]!.settings;
   assert.ok(!withRepo.permissions.deny.some((d) => d.includes(checkout)), 'repo access: the checkout is readable');
