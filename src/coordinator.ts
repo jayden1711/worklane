@@ -376,6 +376,19 @@ export class Coordinator {
     this.stopped = true;
   }
 
+  /**
+   * Worker attempts already used on an issue, from the log: since its last block or decision (after which the
+   * owner relabels or answers, and the task starts with a fresh budget). Restarts and requeues don't reset it.
+   */
+  private attemptsUsed(n: number): number {
+    let used = 0;
+    for (const e of this.events(n)) {
+      if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
+      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker') used++;
+    }
+    return used;
+  }
+
   private async reconcile(): Promise<number> {
     // Tasks whose issue was closed elsewhere are cancelled, never re-dispatched.
     let n = 0;
@@ -822,7 +835,11 @@ export class Coordinator {
       let feedback: string[] = [];
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
       let refused: string[] | null = null;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Attempts are counted from the log, so a restart or an emergency stop's requeue continues the count
+      // instead of starting again from 1.
+      const used = this.attemptsUsed(n);
+      if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
+      for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
@@ -2225,7 +2242,8 @@ export class Coordinator {
     if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
     const role = this.d.cfg.agents.roles.ci_repair;
     if (!role?.enabled) return give('CI fix runs are off (agents.yaml roles.ci_repair)');
-    const runs = this.d.log.read(0, ['ci_fix.started']).filter((e) => (e.payload as { number: number }).number === number).length;
+    // Fix runs started, and attempts that lost the issue's claim: both use up the cap.
+    const runs = this.d.log.read(0, ['ci_fix.started', 'ci_fix.finished']).filter((e) => (e.payload as { number: number }).number === number && (e.type === 'ci_fix.started' || (e.payload as { outcome: string }).outcome === 'claim_lost')).length;
     const cap = role.max_fixes_per_pr ?? 2;
     if (runs >= cap) return give(`${runs} fix run(s) already, the limit (agents.yaml roles.ci_repair.max_fixes_per_pr: ${cap})`);
     const hold = this.governorHold();
@@ -2284,9 +2302,10 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    if (!won.won) return; // held elsewhere; the next poll tries again
+    // Held elsewhere: recorded, and it counts toward the cap, so the polls that follow can't retry for ever.
+    if (!won.won) return void this.emit('ci_fix.finished', { issue: n, number, outcome: 'claim_lost', head: null, detail: `the issue's claim is held by ${won.holder?.instance ?? 'another run'}` });
     let leaseSha = won.sha;
-    this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
+    this.emit('ci_fix.started',{ issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
       const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
       if (next) leaseSha = next;
@@ -2494,7 +2513,7 @@ export class Coordinator {
     if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
     const cfg = this.d.cfg.project.conflicts;
     if (!cfg.fix) return give('conflict fix runs are off (config.yaml conflicts.fix)');
-    const used = conflictFixesUsed(this.d.log.read(0, ['conflict_fix.started']), number);
+    const used = conflictFixesUsed(this.d.log.read(0, ['conflict_fix.started', 'conflict_fix.finished']), number);
     if (used >= cfg.max_fixes_per_pr) return give(`${used} conflict fix run(s) already, the limit (config.yaml conflicts.max_fixes_per_pr: ${cfg.max_fixes_per_pr})`);
     const hold = this.governorHold();
     this.noteHold(hold);
@@ -2566,9 +2585,10 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    if (!won.won) return; // held elsewhere; the next poll tries again
+    // Held elsewhere: recorded, and it counts toward the cap, so the polls that follow can't retry for ever.
+    if (!won.won) return void this.emit('conflict_fix.finished', { issue: n, number, base_sha: baseSha, strategy: 'merge', outcome: 'claim_lost', head: null, files: [], waits_owner: false, reasons: [], detail: `the issue's claim is held by ${won.holder?.instance ?? 'another run'}` });
     let leaseSha = won.sha;
-    this.emit('conflict_fix.started', { issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
+    this.emit('conflict_fix.started',{ issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
       const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
       if (next) leaseSha = next;

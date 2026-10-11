@@ -21,7 +21,8 @@ export function conflictTrigger(pr: { state: string; mergeable: boolean | null; 
 
 /** Fix runs already used on a PR: every one started counts, including runs a restart cut short. */
 export function conflictFixesUsed(events: { type: string; payload: unknown }[], pr: number): number {
-  return events.filter((e) => e.type === 'conflict_fix.started' && (e.payload as { number?: number }).number === pr).length;
+  // Runs started, and attempts that lost the issue's claim: both use up the cap.
+  return events.filter((e) => (e.payload as { number?: number }).number === pr && (e.type === 'conflict_fix.started' || (e.type === 'conflict_fix.finished' && (e.payload as { outcome?: string }).outcome === 'claim_lost'))).length;
 }
 
 export interface ConflictHunk {
