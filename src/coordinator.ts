@@ -2106,6 +2106,8 @@ export class Coordinator {
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
+    // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
+    if (this.emergencyInForce()) return;
     const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
