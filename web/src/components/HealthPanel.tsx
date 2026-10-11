@@ -197,6 +197,44 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
         </RecordsTable>
       )}
 
+      {view.merge && (
+        <section className="space-y-1.5" aria-label="Merge flow" data-testid="health-merge">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="text-[13px] font-medium text-ink">Merge flow</span>
+            <span className="text-[12px] text-ink-3">
+              since {new Date(view.merge.since).toLocaleDateString()} · {view.merge.mergedPrs} merged PR(s)
+            </span>
+          </div>
+          <RecordsTable testId="health-merge-table" head={['What', 'How many', 'Minutes', 'Per merged PR', '']} className="[&_th:nth-child(2)]:w-24 [&_th:nth-child(3)]:w-28 [&_th:nth-child(4)]:w-32">
+            <tr className="border-b border-line last:border-0" data-testid="health-merge-row" data-measure="conflicts">
+              <td className="primitive-table-cell text-[13px] text-ink">Conflict fixes</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.conflicts.count}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.conflicts.medianMinutes === null ? '–' : `${view.merge.conflicts.medianMinutes} median to merged`}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.conflicts.perMergedPr} min</td>
+              <td className="primitive-table-cell text-[12px]" data-testid="health-merge-need-owner">
+                {view.merge.conflicts.needOwner ? <Badge tone="warn">{view.merge.conflicts.needOwner} needed the owner</Badge> : <span className="text-ink-3">none needed the owner</span>}
+              </td>
+            </tr>
+            <tr className="border-b border-line last:border-0" data-testid="health-merge-row" data-measure="light-checks">
+              <td className="primitive-table-cell text-[13px] text-ink">Light checks</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.lightChecks.count}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.lightChecks.minutesAdded} added</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.lightChecks.perMergedPr} min</td>
+              <td className="primitive-table-cell text-[12px] text-ink-3">{Object.entries(view.merge.lightChecks.outcomes).map(([k, n]) => `${k} ${n}`).join(' · ') || '–'}</td>
+            </tr>
+            <tr className="border-b border-line last:border-0" data-testid="health-merge-row" data-measure="holds">
+              <td className="primitive-table-cell text-[13px] text-ink">Hotspot holds</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.holds.count}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.holds.minutesWaited} waited</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.holds.perMergedPr} min</td>
+              <td className="primitive-table-cell truncate font-mono text-[12px] text-ink-3" title={view.merge.holds.byFile.map((f) => `${f.file}: ${f.minutes} min (${f.count})`).join(', ')}>
+                {view.merge.holds.byFile[0] ? `most on ${view.merge.holds.byFile[0].file}` : '–'}
+              </td>
+            </tr>
+          </RecordsTable>
+        </section>
+      )}
+
       <section className="space-y-1.5" aria-label="Check times" data-testid="health-checks">
         <div className="text-[13px] font-medium text-ink">Check times</div>
         {view.checks.timings.length ? (

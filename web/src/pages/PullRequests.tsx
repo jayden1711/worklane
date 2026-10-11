@@ -9,6 +9,8 @@ const PHASE: Record<PrView['phase'], { label: string; tone: 'ok' | 'warn' | 'dan
   waiting: { label: 'waiting for you', tone: 'warn', mark: 'waiting' },
   gave_up: { label: 'CI fix gave up', tone: 'danger', mark: 'failed' },
   fixing: { label: 'fixing CI', tone: 'info', mark: 'running' },
+  resolving: { label: 'resolving a conflict', tone: 'info', mark: 'running' },
+  light_check: { label: 'light check', tone: 'info', mark: 'running' },
   checks: { label: 'draft: checks', tone: 'neutral', mark: 'running' },
   ready: { label: 'ready', tone: 'ok', mark: 'done' },
   auto_merged: { label: 'auto-merged', tone: 'ok', mark: 'done' },
@@ -17,6 +19,41 @@ const PHASE: Record<PrView['phase'], { label: string; tone: 'ok' | 'warn' | 'dan
 };
 
 const short = (sha: string) => sha.slice(0, 8);
+/** How long, in words: from a time to now, or a number of milliseconds. */
+const howLong = (ms: number) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${(ms / 3_600_000).toFixed(1)} h`);
+const sinceNow = (at: string) => howLong(Math.max(0, Date.now() - Date.parse(at)));
+/** The last conflict fix left it to a person: it gave up, or what it pushed waits for review. */
+const conflictNeedsOwner = (pr: PrView) => !!pr.conflict && pr.conflict.state === 'done' && (pr.conflict.outcome === 'gave_up' || pr.conflict.waitsOwner);
+
+/** A PR's conflict fix and light check, one line each, with how long. */
+function MergeFlow({ pr }: { pr: PrView }) {
+  const c = pr.conflict;
+  const l = pr.lightCheck;
+  if (!c && !l) return null;
+  return (
+    <div className="space-y-1 text-[12px]">
+      {c && (
+        <div className="flex flex-wrap items-center gap-2" data-testid="pr-conflict">
+          <Badge tone={c.state !== 'done' ? 'info' : c.outcome === 'pushed' && !c.waitsOwner ? 'ok' : c.outcome === 'gave_up' || c.waitsOwner ? 'warn' : 'neutral'}>
+            {c.state === 'detected' ? 'conflict with main' : c.state === 'running' ? `resolving (attempt ${c.attempt})` : `conflict fix: ${c.outcome?.replace('_', ' ')}`}
+          </Badge>
+          <span className="text-ink-2">
+            {c.state === 'done' ? `${c.files.length ? c.files.join(', ') : 'no files'}${c.detail ? ` · ${c.detail}` : ''}` : `for ${sinceNow(c.at)}`}
+          </span>
+        </div>
+      )}
+      {l && (
+        <div className="flex flex-wrap items-center gap-2" data-testid="pr-light-check">
+          <Badge tone={l.state === 'running' ? 'info' : l.outcome === 'merge' ? 'ok' : 'warn'}>{l.state === 'running' ? 'light check running' : `light check: ${l.outcome}`}</Badge>
+          <span className="text-ink-2">
+            {l.state === 'running' ? `waiting ${sinceNow(l.at)} on main ${short(l.mainSha)}` : `waited ${howLong(l.waitMs ?? 0)} on main ${short(l.mainSha)}`}
+            {l.overlap.length ? ` · overlap: ${l.overlap.join(', ')}` : ''}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
 const ext = { target: '_blank', rel: 'noreferrer' } as const;
 
 function PrLink({ pr }: { pr: PrView }) {
@@ -54,6 +91,7 @@ function WaitingCard({ pr }: { pr: PrView }) {
   const groups = [
     ...(pr.gaveUp ? [{ title: 'Why the CI fix stopped', reasons: [pr.gaveUp.reason], testId: 'pr-gave-up-reasons' }] : []),
     ...((pr.waitReasons ?? []).length ? [{ title: 'Why it waits for you', reasons: pr.waitReasons, testId: 'pr-wait-reasons' }] : []),
+    ...(pr.conflict && conflictNeedsOwner(pr) ? [{ title: pr.conflict.outcome === 'gave_up' ? 'Why the conflict fix stopped' : 'Why the conflict fix waits for you', reasons: pr.conflict.reasons.length ? pr.conflict.reasons : [pr.conflict.detail || 'no reason recorded'], testId: 'pr-conflict-reasons' }] : []),
   ];
   return (
     <div className="overflow-hidden rounded-card bg-surface shadow-card" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-wait-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
@@ -86,8 +124,9 @@ function WaitingCard({ pr }: { pr: PrView }) {
             </div>
           )}
         </div>
-        <div className="mt-2.5">
+        <div className="mt-2.5 space-y-2">
           <Checks pr={pr} />
+          <MergeFlow pr={pr} />
         </div>
       </div>
       <div className="primitive-card-footer flex items-center gap-2 border-t border-line text-[12px] text-ink-3">
@@ -125,7 +164,7 @@ function Fixes({ pr }: { pr: PrView }) {
 export function PullRequestsView({ view }: { view: PrsView }) {
   const by = (...phases: PrView['phase'][]) => view.prs.filter((p) => phases.includes(p.phase));
   const waiting = by('waiting', 'gave_up');
-  const moving = by('fixing', 'checks', 'ready');
+  const moving = by('fixing', 'resolving', 'light_check', 'checks', 'ready');
   const auto = by('auto_merged');
   const done = by('merged', 'closed');
   const am = view.autoMerge;
@@ -186,11 +225,12 @@ export function PullRequestsView({ view }: { view: PrsView }) {
                   {pr.title} <span className="font-normal text-ink-3">· #{pr.number}</span>
                 </>
               }
-              amount={checkSummary(pr)}
+              amount={pr.phase === 'resolving' && pr.conflict ? `merging main, ${sinceNow(pr.conflict.at)}` : pr.phase === 'light_check' && pr.lightCheck ? `waiting ${sinceNow(pr.lightCheck.at)}` : checkSummary(pr)}
               pill={<Badge tone={PHASE[pr.phase].tone}>{PHASE[pr.phase].label}</Badge>}
               details={
                 <div className="space-y-2 py-1">
                   <Checks pr={pr} />
+                  <MergeFlow pr={pr} />
                   {pr.status && !pr.status.ready && pr.status.reasons.length > 0 && <div className="text-[12px] text-ink-2">not ready: {pr.status.reasons.join('; ')}</div>}
                   <Fixes pr={pr} />
                   <a href={pr.url} {...ext} className="text-[12px] text-blue-ink hover:underline" data-testid="pr-github-link">
@@ -259,6 +299,33 @@ export function PullRequestsView({ view }: { view: PrsView }) {
             />
           ))}
         </Card>
+      )}
+
+      {(view.holds ?? []).length > 0 && (
+        <section className="space-y-2" aria-label="Hotspot holds" data-testid="prs-holds">
+          <div className="text-[13px] font-medium text-ink">Tasks held on a hotspot ({(view.holds ?? []).filter((h) => !h.until).length} held now)</div>
+          <RecordsTable testId="prs-holds-table" head={['Task', 'Held for', 'Files', 'How long']} className="[&_th:nth-child(1)]:w-[30%] [&_th:nth-child(2)]:w-24 [&_th:nth-child(4)]:w-36">
+            {(view.holds ?? []).slice(0, 30).map((h, i) => (
+              <tr key={i} className="border-b border-line last:border-0" data-testid="hold-row" data-held={h.until ? 'released' : 'held'}>
+                <td className="primitive-table-cell text-[13px]">
+                  <button className="font-mono text-blue-ink hover:underline" onClick={() => navigate(`/issues/${h.issue}`)} data-testid="hold-issue-link">
+                    #{h.issue}
+                  </button>{' '}
+                  <span className="text-ink">{h.title}</span>
+                </td>
+                <td className="primitive-table-cell text-[12.5px] text-ink-2">
+                  <button className="font-mono hover:underline" onClick={() => navigate(`/issues/${h.by}`)}>
+                    #{h.by}
+                  </button>
+                </td>
+                <td className="primitive-table-cell font-mono text-[12px] text-ink-2" title={h.reason}>
+                  {h.files.join(', ')}
+                </td>
+                <td className="primitive-table-cell">{h.until ? <span className="text-[12.5px] tabular-nums text-ink-2">waited {howLong(h.waitedMs ?? 0)}</span> : <DotPill tone="orange">held {sinceNow(h.since)}</DotPill>}</td>
+              </tr>
+            ))}
+          </RecordsTable>
+        </section>
       )}
 
       {view.refused.length > 0 && (

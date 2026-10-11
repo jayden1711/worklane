@@ -7,6 +7,7 @@
 import type { StoredEvent } from './events/types.js';
 import type { MachineStats } from './os/stats.js';
 import { offsiteLine, offsiteStatus, type OffsiteStatus } from './offsite-backup.js';
+import { mergeMetrics, type MergeMetrics } from './merge-metrics.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -51,7 +52,21 @@ export interface HealthView {
   usage: { days: UsageDay[]; quotaNote: string };
   /** The last off-machine backup verified by reading the remote copy back; null when off-machine backups aren't set up. */
   offsiteBackup: OffsiteStatus | null;
+  /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last MERGE_DAYS days. */
+  merge: MergeMetrics;
   suggestions: string[];
+}
+
+/** The window the merge-flow figures cover. */
+export const MERGE_DAYS = 7;
+
+/** A merge-metrics flag ("X adds N min per merged PR: consider Y") as a suggestion: "Consider Y (X adds N min per merged PR)." */
+export function mergeFlagSuggestion(flag: string): string {
+  const i = flag.indexOf(': consider ');
+  if (i < 0) return /^consider /i.test(flag) ? `C${flag.slice(1)}` : `Consider looking at this: ${flag}`;
+  const cost = flag.slice(0, i);
+  const what = flag.slice(i + ': consider '.length).replace(/\.$/, '');
+  return `Consider ${what} (${cost.charAt(0).toLowerCase()}${cost.slice(1)}).`;
 }
 
 export const QUOTA_NOTE = "How much of the Claude subscription's usage limit is left isn't visible to this harness: it counts only its own runs, their estimated cost, and the rate-limit replies they got.";
@@ -169,6 +184,7 @@ export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup'>
   const t = v.usage.days.find((u) => u.day === today);
   if (t && t.rateLimited >= THRESHOLDS.rateLimitsPerDay) out.push(`Consider fewer agents at once or spreading work over the day: ${t.rateLimited} runs hit the usage limit today.`);
   if (t && t.lockWaitMs / 60_000 >= THRESHOLDS.lockWaitMinPerDay) out.push(`Consider fewer agents at once: runs waited ${Math.round(t.lockWaitMs / 60_000)} min today for a login another run was using.`);
+  for (const f of v.merge.flags) out.push(mergeFlagSuggestion(f));
   for (const name of v.checks.regressions) {
     const c = v.checks.timings.find((x) => x.check === name)!;
     out.push(`Consider looking at why "${name}" got slower: a median of ${secs(c.recentMedianMs)} over its last ${REGRESSION.recent} runs, against ${secs(c.priorMedianMs!)} before (+${c.regression!.slowerPct}%).`);
@@ -180,6 +196,7 @@ export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup'>
 /** The whole health view. */
 export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string>; now?: Date } = {}): HealthView {
   const started = [...events].reverse().find((e) => e.type === 'coordinator.started')?.payload as { instance?: string } | undefined;
-  const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now) };
+  const since = new Date((o.now ?? new Date()).getTime() - MERGE_DAYS * 86_400_000);
+  const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now), merge: mergeMetrics(events, { since }) };
   return { ...base, suggestions: suggestions(base, o) };
 }
