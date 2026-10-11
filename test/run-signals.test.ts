@@ -1,3 +1,4 @@
+import { STDIN_LINE } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -17,7 +18,7 @@ function standIn(plan: string[], holdMs = 0) {
 const fs = require('node:fs'), path = require('node:path');
 const dir = ${JSON.stringify(dir)};
 if (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
-fs.readFileSync(0);
+${STDIN_LINE};
 const f = path.join(dir, 'n'); const n = fs.existsSync(f) ? Number(fs.readFileSync(f, 'utf8')) : 0; fs.writeFileSync(f, String(n + 1));
 const what = ${JSON.stringify(plan)}[Math.min(n, ${plan.length - 1})];
 const end = Date.now() + ${holdMs}; while (Date.now() < end) {}

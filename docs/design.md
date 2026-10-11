@@ -533,6 +533,13 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
 - **Messaging a running agent** (spike, 2026-10-09, confirmed on the always-on machine):
   - The console sends messages through the session's stream-json input, which the coordinator holds. A message sent mid-turn is queued and answered only after the current turn ends, so the console shows it as pending until then.
   - Urgent control (pause, stop) uses interrupt and stop, never a message.
+  - **Built (2026-10-10):**
+    - Every run's input is stream-json: the prompt is the first user message, and the input stays open for the run.
+    - A console message is held by the runner until the turn's `result`, then written as the next user message. A local probe showed a message written mid-turn is folded into that turn and replaces its answer. With nothing held at a result, the input closes and the session ends. The per-login lock still covers the whole run.
+    - The dashboard and the coordinator are separate processes. The console library (src/console.ts, owner only) writes a request into `<state>/console/requests/`, which the coordinator takes every 5 s. It lists live runs in `<state>/console/live.json`, and records every outcome as an event (`console.message_queued`, `console.message_delivered`, `console.message_dropped`, `console.run_stopped`, `console.request_refused`).
+    - **Stop** kills the run's tree (reason `stopped`), and the task is blocked with who stopped it.
+    - **Interrupt** is not offered yet: the spike's interrupt step (part 3) has to confirm it for a run as another OS user first.
+    - **Live feed:** each run also writes a live feed (src/run-feed.ts) under its run record's id: assistant text, thinking, every tool call with its input, capped tool output, and Edit/Write diffs. It is redacted with the event log's patterns before it is written, capped per run with one truncation marker, and ended with the run.
   - Not the cross-session socket: the agent's socket lives in a 0700 directory its own user owns, so the coordinator user can't connect to it, by design of the user split.
   - Claude Code keeps that directory at a fixed path in `/tmp` (`/tmp/cc-socks`), so each coordinator service has a private `/tmp` shared only with its own agents. Otherwise one instance's agent user would lock out every other's.
 - Cmd+K, keyboard-first, sidebar badge counts, and owner + delegate avatars on every row.

@@ -155,7 +155,8 @@ function setsCommitIdentity(c: SimpleCommand): boolean {
   return false;
 }
 
-function hostAllowed(host: string, allow: string[]): boolean {
+/** Whether a host is on an allowlist: exact names, or `*.example.org` for it and its subdomains. */
+export function hostAllowed(host: string, allow: string[]): boolean {
   const h = host.toLowerCase();
   return allow.some((d) => {
     const a = d.toLowerCase();

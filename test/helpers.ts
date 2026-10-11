@@ -27,3 +27,9 @@ export function agentIsSelf(instanceHome: string): void {
   const f = join(instanceHome, 'instance.yaml');
   writeFileSync(f, readFileSync(f, 'utf8').replace(/^ {2}agent_user: .*$/m, `  agent_user: ${userInfo().username}`).replace(/^ {2}agent_home: .*$/m, `  agent_home: ${JSON.stringify(homedir())}`));
 }
+
+/**
+ * For stand-in claudes: a JS expression that reads the first line of stdin, as claude reads its first
+ * stream-json message (stdin stays open for the run, so reading to the end would wait for ever).
+ */
+export const STDIN_LINE = `(() => { const fs = require('node:fs'); const b = Buffer.alloc(1); const out = []; for (;;) { let n = 0; try { n = fs.readSync(0, b, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; throw e; } if (!n || b[0] === 10) break; out.push(b[0]); } return Buffer.from(out).toString('utf8'); })()`;

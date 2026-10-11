@@ -5,7 +5,7 @@
 // branch in their own worktree; everything outward-facing happens here.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
@@ -19,8 +19,10 @@ import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, killTree, killTreeA
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
-import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
+import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunControl, type RunResult } from './runner.js';
+import { MAX_MESSAGE, takeRequests, writeLive, type PendingMessage } from './console.js';
 import { checkedPush, pushProblems } from './push-check.js';
+import { allowedOnce, domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from './domain-requests.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
 import { abortMerge, changedFiles, mergeBaseInto } from './merge-base.js';
@@ -135,6 +137,8 @@ export class Coordinator {
   private lightRunning = new Set<number>();
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
+  /** Live runs, for the console. */
+  private live = new Map<string, LiveEntry>();
   /** The repo's own config: the defaults the instance's settings apply over. */
   private readonly repoCfg: Config;
   private settingsKey = '';
@@ -155,18 +159,55 @@ export class Coordinator {
           if (this.halt.signal.aborted) throw new Halted();
           // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
           const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
-          const r = await runner.run({
-            ...req,
-            signal: req.signal ?? this.halt.signal,
-            onLockWait: (ms) => {
-              if (ms >= LOCK_WAIT_RECORDED_MS) this.emit('run.lock_waited', { ...who, wait_ms: Math.round(ms) });
-              req.onLockWait?.(ms);
-            },
-            onTransientRetry: (t) => {
-              this.emit('run.transient_retry', { ...who, attempt: t.attempt, cause: t.cause, wait_ms: Math.round(t.waitMs), detail: t.detail.slice(0, 300) });
-              req.onTransientRetry?.(t);
-            },
-          });
+          // The console holds every live run's input: listed for the dashboard while it runs.
+          const live: LiveEntry = { key: randomBytes(4).toString('hex'), run: null, control: null, issue: who.issue, role: req.role, model: req.model, startedAt: new Date().toISOString(), pending: [], stoppedBy: null };
+          this.live.set(live.key, live);
+          // Hosts the owner allowed once for this task reach its next build run (worker, CI fix, conflict fix) only.
+          const once = who.issue !== null && req.role === 'worker' ? allowedOnce(this.d.log.read(0, ['network.domain_decided', 'run.started']), who.issue) : [];
+          let r: RunResult;
+          try {
+            r = await runner.run({
+              ...req,
+              ...(once.length ? { allowOnce: [...new Set([...(req.allowOnce ?? []), ...once])] } : {}),
+              signal: req.signal ?? this.halt.signal,
+              onLockWait: (ms) => {
+                if (ms >= LOCK_WAIT_RECORDED_MS) this.emit('run.lock_waited', { ...who, wait_ms: Math.round(ms) });
+                req.onLockWait?.(ms);
+              },
+              onTransientRetry: (t) => {
+                this.emit('run.transient_retry', { ...who, attempt: t.attempt, cause: t.cause, wait_ms: Math.round(t.waitMs), detail: t.detail.slice(0, 300) });
+                req.onTransientRetry?.(t);
+              },
+              onControl: (c) => {
+                // A retried start is a new session: its own id and handle.
+                live.control = c;
+                live.run = c.runId;
+                this.writeLive();
+                req.onControl?.(c);
+              },
+              onMessage: (m) => {
+                const at = live.pending.findIndex((p) => p.id === m.id);
+                if (m.state !== 'queued' && at >= 0) {
+                  live.pending.splice(at, 1);
+                  this.emit(m.state === 'delivered' ? 'console.message_delivered' : 'console.message_dropped', { run: live.run ?? live.key, issue: live.issue, role: live.role, id: m.id });
+                  this.writeLive();
+                }
+                req.onMessage?.(m);
+              },
+            });
+          } finally {
+            this.live.delete(live.key);
+            this.writeLive();
+          }
+          // A host the run was refused becomes the owner's decision (once per task and host); nothing is widened here.
+          if (r.refusedHosts?.length && who.issue !== null) {
+            try {
+              await this.noteRefusedHosts(who.issue, req.role, live.run, r.refusedHosts);
+            } catch (e) {
+              this.emit('coordinator.error', { instance: this.d.instance, where: `domain request #${who.issue}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+            }
+          }
+          if (live.stoppedBy) throw new StoppedByOwner(live.stoppedBy);
           if (this.halt.signal.aborted) throw new Halted();
           return r;
         },
@@ -223,6 +264,7 @@ export class Coordinator {
       }
     };
     this.checkEmergency();
+    this.checkConsole();
     await step('settings', () => this.refreshSettings(), undefined);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
@@ -383,6 +425,63 @@ export class Coordinator {
    * The instance's settings (policy.yaml), re-read every tick: when they change, the repo's config with
    * them applied becomes the config in effect, without a restart. Refused settings: the repo's values.
    */
+  /** The live runs list the dashboard reads (only runs whose session is up: they have an id). */
+  private writeLive() {
+    writeLive(
+      this.d.stateDir,
+      [...this.live.values()].filter((l) => l.run).map((l) => ({ run: l.run!, issue: l.issue, role: l.role, model: l.model, startedAt: l.startedAt, pending: l.pending })),
+    );
+  }
+
+  /**
+   * The console's requests from the dashboard (called every few seconds and on each tick): message or stop
+   * a live run. Only the owner's are acted on; every outcome is an event.
+   */
+  checkConsole(): void {
+    try {
+      this.consoleRequests();
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'console', kind: 'error', message: (e as Error).message.slice(0, 500) });
+    }
+  }
+
+  private consoleRequests(): void {
+    for (const q of takeRequests(this.d.stateDir)) {
+      const refuse = (why: string) => this.emit('console.request_refused', { request: q.id, kind: q.kind, run: q.run, by: q.by, why });
+      const owner = this.d.cfg.project.owners.default;
+      if (q.by.toLowerCase() !== owner.toLowerCase()) {
+        refuse(`only the owner (@${owner}) may use the console`);
+        continue;
+      }
+      const l = [...this.live.values()].find((x) => x.run === q.run);
+      if (!l?.control) {
+        refuse(`run ${q.run} isn't live`);
+        continue;
+      }
+      const who = { run: q.run, issue: l.issue, role: l.role };
+      if (q.kind === 'stop') {
+        l.stoppedBy = q.by;
+        this.emit('console.run_stopped', { ...who, by: q.by });
+        l.control.stop();
+        continue;
+      }
+      const text = q.text.trim().slice(0, MAX_MESSAGE);
+      if (!text) {
+        refuse('the message is empty');
+        continue;
+      }
+      l.pending.push({ id: q.id, text, by: q.by, at: q.at });
+      const sent = l.control.send(q.id, text);
+      if (!sent.queued) {
+        l.pending.pop();
+        refuse(sent.why);
+        continue;
+      }
+      this.emit('console.message_queued', { ...who, id: q.id, by: q.by, text });
+      this.writeLive();
+    }
+  }
+
   refreshSettings(): void {
     if (!this.d.settings) return;
     const r = this.d.settings();
@@ -588,6 +687,8 @@ export class Coordinator {
       }
       await this.block(n, owner, refused ? `no pushable change after ${maxAttempts} attempts; ${pushRefusal(refused)}` : `no passing change after ${maxAttempts} attempts`);
     } catch (e) {
+      // Stopped from the console: the task waits for the owner, saying who stopped it.
+      if (e instanceof StoppedByOwner) return await this.block(n, owner, e.message);
       if (!(e instanceof Halted)) throw e;
       // Requeued: the task starts over once the stop is lifted.
       this.releaseClaim(n, 'emergency stop');
@@ -1035,15 +1136,16 @@ export class Coordinator {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  private async ask(kind: 'land' | 'question', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]) {
+  private async ask(kind: 'land' | 'question' | 'domain', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
-    if (issue === null) return; // not tied to an issue: answered from the dashboard or CLI
+    if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
     await this.d.backlog.addLabels(issue, ['needs:decision']);
     await this.d.backlog.comment(
       issue,
       `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}. Recommendation: **${recommendation}**.\n\n${receipts.map((r) => `- ${r}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
     );
+    return id;
   }
 
   private async block(issue: number, owner: string, why: string, release_ = true) {
@@ -1069,12 +1171,92 @@ export class Coordinator {
   // ---------------------------------------------------------------- decisions
 
   /** Decisions answered by CLI (decision.answered) or by a writer's `/<cli> <option>` comment. */
+  /** Each newly refused host for a task: recorded, and asked of the owner, once per task and host. */
+  private async noteRefusedHosts(issue: number, role: string, run: string | null, refused: RefusedRequest[]) {
+    const asked = new Set(this.d.log.read(0, ['network.domain_requested']).map((e) => e.payload as EventPayload<'network.domain_requested'>).filter((p) => p.issue === issue).map((p) => p.host));
+    for (const r of refused) {
+      if (asked.has(r.host)) continue;
+      asked.add(r.host);
+      const d = domainDecision({ ...r, issue, role, run: run ?? 'unknown' }, `${BRAND.configDir}/guardrails.yaml`);
+      const id = await this.ask('domain', issue, this.ownerOf(issue), d.question, d.options, d.recommendation, d.receipts);
+      this.emit('network.domain_requested', { issue, host: r.host, role, run, tool: r.tool, what: r.what.slice(0, 300), decision: id });
+    }
+  }
+
+  /** The owner's answer on a refused host: recorded, and an allow-repo answer opens the config change as a PR. */
+  private async handleDomainDecision(askedId: number, q: EventPayload<'decision.asked'>, writers: Set<string>, cmd: RegExp) {
+    const issue = q.issue!;
+    if (this.d.log.read(askedId, ['network.domain_decided']).some((e) => (e.payload as { decision: string }).decision === q.id)) return;
+    const req = this.d.log.read(askedId, ['network.domain_requested']).map((e) => e.payload as EventPayload<'network.domain_requested'>).find((p) => p.decision === q.id);
+    if (!req) return;
+    let a = this.d.log.read(askedId, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
+    if (!a) {
+      const reply = (await this.d.backlog.comments(issue))
+        .filter((c) => writers.has(c.author.toLowerCase()))
+        .map((c) => ({ by: c.author, m: c.body.match(cmd) }))
+        .filter((x) => x.m && q.options.includes(x.m[1]!))
+        .at(-1);
+      if (!reply) return;
+      a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.m![1]! }).payload;
+    }
+    await this.d.backlog.removeLabel(issue, 'needs:decision');
+    const answer = a.answer as DomainAnswer;
+    let pr: string | null = null;
+    let detail = '';
+    if (answer === 'allow-repo') {
+      const r = await this.proposeAllowedHost(req.host);
+      pr = r.pr;
+      detail = r.detail;
+    } else detail = answer === 'allow-once' ? "the task's next run may reach it" : 'nothing changes';
+    this.emit('network.domain_decided', { issue, host: req.host, decision: q.id, answer, by: a.by, pr, detail: detail.slice(0, 500) });
+    await this.d.backlog.comment(issue, `[${BRAND.cli}] ${req.host}: @${a.by} answered ${answer}. ${pr ? `Proposed as ${pr}; it applies once merged.` : detail}`);
+  }
+
+  /**
+   * The guardrails change that allows a host for this repo, opened as a pull request on its own branch (built
+   * from the default branch with git plumbing: no worktree, no setup). Never applied in place.
+   */
+  private async proposeAllowedHost(host: string): Promise<{ pr: string | null; detail: string }> {
+    const file = `${BRAND.configDir}/guardrails.yaml`;
+    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+    const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+    const shown = spawnSync('git', ['show', `${base}:${file}`], { cwd: this.d.repo, encoding: 'utf8' });
+    if (shown.status !== 0) return { pr: null, detail: `${file} isn't on ${this.branch}, so no change was proposed` };
+    const next = withAllowedHost(shown.stdout, host);
+    if (next === null) return { pr: null, detail: `${host} is already allowed on ${this.branch}` };
+    const blob = spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: this.d.repo, encoding: 'utf8', input: next }).stdout.trim();
+    const index = join(this.d.stateDir, `allow-${randomBytes(3).toString('hex')}.index`);
+    const env = { ...process.env, GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: this.identity.name, GIT_AUTHOR_EMAIL: this.identity.email, GIT_COMMITTER_NAME: this.identity.name, GIT_COMMITTER_EMAIL: this.identity.email };
+    const g = (args: string[], input?: string) => {
+      const r = spawnSync('git', args, { cwd: this.d.repo, encoding: 'utf8', env, ...(input !== undefined ? { input } : {}) });
+      if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || '').trim().slice(-300)}`);
+      return r.stdout.trim();
+    };
+    let head: string;
+    try {
+      g(['read-tree', base]);
+      g(['update-index', '--cacheinfo', `100644,${blob},${file}`]);
+      head = g(['commit-tree', g(['write-tree']), '-p', base], `Allow agents to reach ${host}\n\nThe owner answered allow-repo to a refused request for ${host}.\n`);
+    } finally {
+      rmSync(index, { force: true });
+    }
+    const branch = `${BRAND.cli}/allow-${host.replace(/[^A-Za-z0-9.-]/g, '-')}`;
+    const push = checkedPush({ cwd: this.d.repo, remote: this.remote, base, head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, force: true });
+    if (!push.ok) return { pr: null, detail: `the config change couldn't be pushed: ${'refused' in push ? push.refused.join('; ') : push.error.split('\n').pop()}` };
+    const opened = await this.d.backlog.openPr(branch, this.branch, `Allow agents to reach ${host}`, `Adds \`${host}\` to \`${file}\` \`network.allow\`, as the owner answered (allow-repo) to an agent's refused request for it. It applies once a human merges this; ${BRAND.name} never merges its own config changes.`);
+    return { pr: opened.url, detail: '' };
+  }
+
   private async handleDecisions() {
     const writers = new Set(this.d.cfg.project.owners.writers.map((w) => w.toLowerCase()));
     const cmd = new RegExp(`^/${BRAND.cli}\\s+(\\S+)`, 'm');
     for (const asked of this.d.log.read(0, ['decision.asked'])) {
       const q = asked.payload as EventPayload<'decision.asked'>;
       if (q.issue === null) continue;
+      if (q.kind === 'domain') {
+        await this.handleDomainDecision(asked.id, q, writers, cmd);
+        continue;
+      }
       const later = this.events(q.issue).filter((e) => e.id > asked.id);
       // Already acted on: something moved the task on since the question.
       if (later.some((e) => e.type === 'land.queued' || e.type === 'issue.released')) continue;
@@ -1780,8 +1962,9 @@ export class Coordinator {
       finished = { outcome: 'pushed', head, detail: s.summary.slice(0, 1000) };
       await this.d.backlog.comment(number, `[${BRAND.cli}] ${failed.join(', ')} failed on \`${pr.headSha.slice(0, 8)}\`. CI fix run ${attempt} pushed \`${head.slice(0, 8)}\`: ${s.summary}`);
     } catch (e) {
-      if (!(e instanceof Halted)) throw e;
-      finished = { outcome: 'no_push', head: null, detail: 'stopped by an emergency stop' };
+      if (e instanceof StoppedByOwner) await give(e.message);
+      else if (!(e instanceof Halted)) throw e;
+      else finished = { outcome: 'no_push', head: null, detail: 'stopped by an emergency stop' };
     } finally {
       clearInterval(heartbeat);
       release(n, leaseSha, { repo: this.d.repo, remote: this.remote });
@@ -2100,8 +2283,8 @@ export class Coordinator {
       finished = { outcome: 'pushed', head, files, waits_owner: reasons.length > 0, reasons, detail: summary.slice(0, 1000) };
       await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
     } catch (e) {
-      if (!(e instanceof Halted)) throw e;
-      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: 'stopped by an emergency stop' };
+      if (!(e instanceof Halted) && !(e instanceof StoppedByOwner)) throw e;
+      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner ? e.message : 'stopped by an emergency stop' };
     } finally {
       clearInterval(heartbeat);
       release(n, leaseSha, { repo: this.d.repo, remote: this.remote });
@@ -2207,6 +2390,27 @@ const laneOf = (issue: Issue): { lane?: string } => {
 };
 
 /** An emergency stop interrupted this task. */
+/** The owner stopped this run from the console. */
+class StoppedByOwner extends Error {
+  constructor(readonly by: string) {
+    super(`stopped by @${by} from the console`);
+  }
+}
+
+/** A live run, as the console holds it. */
+interface LiveEntry {
+  key: string;
+  /** The run's id (its record and feed), once the session is up. */
+  run: string | null;
+  control: RunControl | null;
+  issue: number | null;
+  role: string;
+  model: string;
+  startedAt: string;
+  pending: PendingMessage[];
+  stoppedBy: string | null;
+}
+
 class Halted extends Error {
   constructor() {
     super('emergency stop');

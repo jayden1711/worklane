@@ -47,3 +47,14 @@ export function sandboxSettings(s: SandboxInput) {
 export function homeCredentialStores(home: string): string[] {
   return ['.ssh', '.aws', '.config/gh', '.gnupg', '.netrc', '.npmrc', '.pypirc', '.docker/config.json'].map((p) => `${home.replace(/\/$/, '')}/${p}`);
 }
+
+/** The hosts a run's settings let its commands reach (none when there are no settings). */
+export function allowedDomainsOf(settings: unknown): string[] {
+  return ((settings as { sandbox?: { network?: { allowedDomains?: string[] } } } | undefined)?.sandbox?.network?.allowedDomains ?? []).slice();
+}
+
+/** A copy of a run's settings whose commands may also reach `hosts` (for one run; the lane is unchanged). */
+export function withAllowedDomains<T extends object>(settings: T, hosts: string[]): T {
+  const s = settings as T & { sandbox?: { network?: { allowedDomains?: string[] } } };
+  return { ...s, sandbox: { ...s.sandbox, network: { ...s.sandbox?.network, allowedDomains: [...new Set([...allowedDomainsOf(s), ...hosts])] } } };
+}

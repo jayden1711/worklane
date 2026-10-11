@@ -12,6 +12,7 @@ import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator, logTail } from '../src/coordinator.js';
 import type { InstanceSettings } from '../src/instance.js';
+import { liveRuns, sendMessage, stopRun } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
@@ -326,6 +327,84 @@ test('with separate users, task files go to the agents\' read-only task director
     assert.equal(statSync(task).mode & 0o777, 0o640);
     assert.equal(statSync(tasksDir).mode & 0o777, 0o750);
   }
+});
+
+// ---- unknown-domain requests
+
+/** A task whose worker was refused a host and stops (blocked), so the owner's answer can be acted on later. */
+function refusedTask() {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Use the rates API', body: 'Read the rates from new.example.org.\n\n```done_when\n- test: test/price.test.js\n```\n', author: 'example-owner', labels: ['ready'] });
+  const refused = [{ host: 'new.example.org', tool: 'WebFetch', what: 'https://new.example.org/rates' }];
+  const normal = agents();
+  const workers: RunRequest[] = [];
+  const runner = new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return normal.run(req);
+    workers.push(req);
+    return { structured: { summary: 's', blocked: 'needs new.example.org' }, refusedHosts: refused };
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const rerun = async () => {
+    f.backlog.removeLabel(n, 'blocked');
+    f.backlog.addLabels(n, ['ready']);
+    await c.tick();
+    await c.idle();
+  };
+  const answer = async (a: string) => {
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} ${a}`);
+    await c.tick();
+  };
+  return { f, n, c, workers, rerun, answer };
+}
+
+test("unknown domain: a refused host is recorded once per task and asked of the owner, deny recommended; nothing is widened", { skip }, async () => {
+  const t = refusedTask();
+  await t.c.tick();
+  await t.c.idle();
+  const req = lastOf(t.f.log, 'network.domain_requested') as { issue: number; host: string; role: string; tool: string; decision: string };
+  assert.deepEqual([req.issue, req.host, req.role, req.tool], [t.n, 'new.example.org', 'worker', 'WebFetch']);
+  const asked = lastOf(t.f.log, 'decision.asked') as { id: string; kind: string; options: string[]; recommendation: string };
+  assert.deepEqual([asked.id, asked.kind, asked.options, asked.recommendation], [req.decision, 'domain', ['allow-repo', 'allow-once', 'deny'], 'deny']);
+  assert.ok((await t.f.backlog.comments(t.n)).some((x) => /decision needed: \*\*Allow agents to reach new\.example\.org\?\*\*/.test(x.body)));
+  await t.rerun(); // refused again on the next run: not asked twice
+  assert.equal(t.f.log.read(0, ['network.domain_requested']).length, 1);
+  assert.equal(git(t.f.remote, 'branch', '--list', `${BRAND.cli}/allow-*`), '', 'no config change without an answer');
+});
+
+test('unknown domain: allow-repo opens the guardrails change as a pull request; main is untouched', { skip }, async () => {
+  const t = refusedTask();
+  await t.c.tick();
+  await t.c.idle();
+  const mainBefore = git(t.f.remote, 'rev-parse', 'main');
+  await t.answer('allow-repo');
+  const d = lastOf(t.f.log, 'network.domain_decided') as { answer: string; pr: string | null; by: string };
+  assert.deepEqual([d.answer, d.by], ['allow-repo', 'example-owner']);
+  assert.ok(d.pr, 'a pull request');
+  const branch = `${BRAND.cli}/allow-new.example.org`;
+  assert.match(git(t.f.remote, 'show', `${branch}:${BRAND.configDir}/guardrails.yaml`), /new\.example\.org/);
+  assert.equal(git(t.f.remote, 'rev-parse', 'main'), mainBefore, 'never widened in place');
+  assert.ok(t.f.backlog.prs().some((p) => p.head === branch && p.title === 'Allow agents to reach new.example.org'));
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['network.domain_decided']).length, 1, 'acted on once');
+});
+
+test("unknown domain: allow-once lets the task's next run reach the host, and only that run; deny changes nothing", { skip }, async () => {
+  const t = refusedTask();
+  await t.c.tick();
+  await t.c.idle();
+  await t.answer('allow-once');
+  await t.rerun();
+  assert.deepEqual(t.workers.at(-1)!.allowOnce, ['new.example.org']);
+  await t.rerun();
+  assert.equal(t.workers.at(-1)!.allowOnce, undefined, 'used up by the run it was for');
+
+  const u = refusedTask();
+  await u.c.tick();
+  await u.c.idle();
+  await u.answer('deny');
+  assert.equal((lastOf(u.f.log, 'network.domain_decided') as { answer: string; pr: string | null }).pr, null);
+  await u.rerun();
+  assert.equal(u.workers.at(-1)!.allowOnce, undefined);
 });
 
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {
@@ -1855,6 +1934,100 @@ test('instance settings: a lower daily budget and run windows hold new work', { 
   await c.tick();
   await c.idle();
   assert.equal(f.log.read(0, ['issue.claimed']).length, 1, "back to the repo's values: it starts");
+});
+
+// ---- the console
+
+/** A worker that stays live, holding a console handle, until it's stopped or released. */
+function liveWorker() {
+  const sent: { id: string; text: string }[] = [];
+  let finish!: (reason: 'succeeded' | 'stopped') => void;
+  const done = new Promise<'succeeded' | 'stopped'>((r) => (finish = r));
+  let req!: RunRequest;
+  const runner = agents({});
+  const fake = new FakeRunner(async (r) => {
+    if (r.role !== 'worker') return (await runner.run(r)) as never;
+    req = r;
+    r.onControl?.({
+      runId: 'run-w1',
+      send: (id, text) => {
+        sent.push({ id, text });
+        r.onMessage?.({ id, state: 'queued' });
+        return { queued: true };
+      },
+      stop: () => finish('stopped'),
+    });
+    const why = await done;
+    if (why === 'stopped') return { reason: 'stopped', detail: 'killed: stopped' };
+    return (await runner.run(r)) as never;
+  });
+  return { fake, sent, finish, deliver: (id: string) => req.onMessage?.({ id, state: 'delivered' }) };
+}
+
+const waitFor = async (ok: () => boolean) => {
+  for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(ok(), 'timed out');
+};
+
+test('console: the owner messages a live run; it is queued, then delivered, each an event; the live list follows', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const w = liveWorker();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: w.fake, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await waitFor(() => liveRuns(f.stateDir).some((r) => r.run === 'run-w1'));
+  assert.deepEqual(liveRuns(f.stateDir).find((r) => r.run === 'run-w1')!.role, 'worker');
+  sendMessage({ stateDir: f.stateDir, cfg: f.cfg, run: 'run-w1', text: 'Use the cents helper.', by: 'example-owner' });
+  c.checkConsole();
+  assert.deepEqual(w.sent.map((x) => x.text), ['Use the cents helper.']);
+  const q = lastOf(f.log, 'console.message_queued') as { run: string; by: string; text: string; id: string };
+  assert.deepEqual([q.run, q.by, q.text], ['run-w1', 'example-owner', 'Use the cents helper.']);
+  assert.equal(liveRuns(f.stateDir)[0]!.pending.length, 1, 'shown as pending');
+  w.deliver(q.id);
+  assert.equal((lastOf(f.log, 'console.message_delivered') as { id: string }).id, q.id);
+  assert.equal(liveRuns(f.stateDir)[0]!.pending.length, 0);
+  w.finish('succeeded');
+  await c.idle();
+  assert.deepEqual(liveRuns(f.stateDir), [], 'gone once it ends');
+});
+
+test('console: the owner stops a live run; the task is blocked saying who stopped it', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const w = liveWorker();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: w.fake, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await waitFor(() => liveRuns(f.stateDir).length > 0);
+  stopRun({ stateDir: f.stateDir, cfg: f.cfg, run: 'run-w1', by: 'example-owner' });
+  c.checkConsole();
+  await c.idle();
+  assert.deepEqual(lastOf(f.log, 'console.run_stopped'), { run: 'run-w1', issue: n, role: 'worker', by: 'example-owner' });
+  const issue = await f.backlog.get(n);
+  assert.ok(issue.labels.includes('blocked'));
+  assert.ok((await f.backlog.comments(n)).some((x) => /blocked: stopped by @example-owner from the console/.test(x.body)));
+  assert.equal(f.log.read(0, ['change.proposed']).length, 0, 'nothing after the stop');
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
+});
+
+test("console: a request that isn't the owner's, or for a run that isn't live, is refused and recorded", { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const w = liveWorker();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: w.fake, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await waitFor(() => liveRuns(f.stateDir).length > 0);
+  // Written past the library, as anything with write access to the state dir could.
+  mkdirSync(join(f.stateDir, 'console', 'requests'), { recursive: true });
+  writeFileSync(join(f.stateDir, 'console', 'requests', '1.json'), JSON.stringify({ v: 1, id: 'x1', at: '', by: 'mallory', run: 'run-w1', kind: 'stop' }));
+  writeFileSync(join(f.stateDir, 'console', 'requests', '2.json'), JSON.stringify({ v: 1, id: 'x2', at: '', by: 'example-owner', run: 'run-gone', kind: 'message', text: 'hi' }));
+  c.checkConsole();
+  assert.deepEqual(f.log.read(0, ['console.request_refused']).map((e) => [(e.payload as { request: string }).request, (e.payload as { why: string }).why]), [
+    ['x1', 'only the owner (@example-owner) may use the console'],
+    ['x2', "run run-gone isn't live"],
+  ]);
+  assert.equal(f.log.read(0, ['console.run_stopped']).length, 0);
+  w.finish('succeeded');
+  await c.idle();
 });
 
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {

@@ -36,7 +36,7 @@ export const EventSchemas = {
   'run.finished': z.strictObject({
     issue,
     role: z.string(),
-    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch']),
+    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped']),
     detail: z.string(),
   }),
   /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
@@ -55,6 +55,13 @@ export const EventSchemas = {
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
   'settings.applied': z.strictObject({ settings: z.record(z.string(), z.unknown()), error: z.string().nullable() }),
+  /** The console: the owner messaged a live run (held until its current turn ends). */
+  'console.message_queued': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string(), by: z.string(), text: z.string() }),
+  'console.message_delivered': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
+  /** The run ended before the message's turn came. */
+  'console.message_dropped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
+  'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
+  'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
   // verification
   'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
@@ -80,7 +87,11 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  /** An agent's request to a host outside its allowlist was refused: once per issue and host, with the decision it raised. */
+  'network.domain_requested': z.strictObject({ issue, host: z.string(), role: z.string(), run: z.string().nullable(), tool: z.string(), what: z.string(), decision: z.string() }),
+  /** The owner's answer on a refused host: allow-repo (pr: the config change proposed), allow-once (the task's next run), or deny. */
+  'network.domain_decided': z.strictObject({ issue, host: z.string(), decision: z.string(), answer: z.enum(['allow-repo', 'allow-once', 'deny']), by: z.string(), pr: z.string().nullable(), detail: z.string() }),
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),

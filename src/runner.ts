@@ -10,12 +10,20 @@ import { join, posix } from 'node:path';
 import { BRAND } from './brand.js';
 import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
-import { RunRecorder } from './run-record.js';
+import { RunRecorder, runIssue } from './run-record.js';
+import { RunFeed } from './run-feed.js';
+import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
+import { allowedDomainsOf, withAllowedDomains } from './sandbox.js';
 
-export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch';
+export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'stopped';
 
 export interface RunRequest {
   role: string;
+  /**
+   * Hosts the owner allowed for this one run (an "allow once" answer): added to the sandbox's allowedDomains
+   * for this run's commands, and to the hook's WebFetch allowlist through the environment. Never kept.
+   */
+  allowOnce?: string[];
   /** Coordinator's project state dir; hooks in the agent's session log there. */
   stateDir?: string;
   prompt: string;
@@ -32,6 +40,10 @@ export interface RunRequest {
   timeoutMs: number;
   onStart?: (pid: number) => void;
   onActivity?: (note: string) => void;
+  /** Once the session is up: the handle for messaging and stopping it (the console). Called again on a retried start. */
+  onControl?: (c: RunControl) => void;
+  /** A console message's progress: queued (held until the current turn ends), delivered, or dropped (the run ended first). */
+  onMessage?: (m: { id: string; state: 'queued' | 'delivered' | 'dropped' }) => void;
   /** Once the run holds its Claude login's lock: how long it waited for it (another run on the same login), in ms. */
   onLockWait?: (ms: number) => void;
   /** Before each wait on a transient error: which try failed, why (classified), and how long until the next. */
@@ -55,7 +67,27 @@ export interface RunResult {
   sessionId?: string;
   /** The run kept failing on an auth or transient error (token refresh, rate limit, overload, network), not on the task. */
   transient?: boolean;
+  /** Hosts the run was refused (outside its allowlist), each once: for the owner to decide on. */
+  refusedHosts?: RefusedRequest[];
 }
+
+/**
+ * A live session's console handle. The session's input stays open (stream-json) for the whole run: a message
+ * is held until the current turn's result, then delivered as the next user message (a message written mid-turn
+ * would be folded into that turn and change its outcome). With nothing held at a result, the input is closed
+ * and the session ends.
+ */
+export interface RunControl {
+  /** The run's id: its run record and live feed (null without a state dir). */
+  runId: string | null;
+  /** Queue a message; refused once the session's input is closed. */
+  send(id: string, text: string): { queued: true } | { queued: false; why: string };
+  /** End the run now (its process tree), as a stop. */
+  stop(): void;
+}
+
+/** One user message on stream-json input. */
+export const userMessage = (text: string) => `${JSON.stringify({ type: 'user', message: { role: 'user', content: text } })}\n`;
 
 export interface AgentRunner {
   run(req: RunRequest): Promise<RunResult>;
@@ -219,7 +251,7 @@ export interface RetryOptions {
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string): string[] {
-  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
@@ -303,6 +335,7 @@ export class CliRunner implements AgentRunner {
       [`${BRAND.envPrefix}_ROLE`]: req.role,
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),
+      ...(req.allowOnce?.length ? { [`${BRAND.envPrefix}_ALLOW_HOSTS`]: req.allowOnce.join(',') } : {}),
     });
     const laneName = req.lane ?? 'default';
     const lane = this.lanes?.[laneName];
@@ -328,25 +361,61 @@ export class CliRunner implements AgentRunner {
     const cleanup = () => promptDir && rmSync(promptDir, { recursive: true, force: true });
     // What the agent did, for the dashboard: written by this process into the coordinator's state dir (the dashboard can't read the agent user's home).
     const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) }) : null;
+    // The live view of the same run, under the record's id: redacted and capped, ended when the run ends.
+    const feed = record && req.stateDir ? new RunFeed(req.stateDir, { run: record.id, issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model, cwd: req.cwd }) : null;
+    // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
+    const settings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
+    // Requests refused for the network, from the same stream the record and the feed read.
+    const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     return new Promise((resolve) => {
-      const argv = cliArgs(req, lane?.settings, systemPromptFile);
+      const argv = cliArgs(req, settings, systemPromptFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
       const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
-      child.stdin.end(req.prompt);
+      // The prompt is the first user message; the input stays open for console messages until a turn
+      // ends with nothing held, then it's closed and the session ends.
+      child.stdin.write(userMessage(req.prompt));
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
       let rateLimited = false;
       let ended: TerminalReason | null = null;
       let buf = '';
       let stderr = '';
+      let inputOpen = true;
+      const held: { id: string; text: string }[] = [];
+      const closeInput = () => {
+        if (!inputOpen) return;
+        inputOpen = false;
+        child.stdin.end();
+      };
       const kill = (why: TerminalReason) => {
         ended ??= why;
+        closeInput();
         if (runAs) killTreeAs(runAs.user, child.pid);
         else killTree(child.pid, () => child.kill('SIGKILL'));
       };
+      /** A turn ended: deliver the next held message as a new turn, or end the session. */
+      const turnEnded = () => {
+        const next = held.shift();
+        if (next && inputOpen) {
+          child.stdin.write(userMessage(next.text));
+          feed?.message(next.id, 'delivered');
+          req.onMessage?.({ id: next.id, state: 'delivered' });
+        } else closeInput();
+      };
+      req.onControl?.({
+        runId: record?.id ?? null,
+        send: (id, text) => {
+          if (!inputOpen) return { queued: false, why: 'the run is finishing; its input is closed' };
+          held.push({ id, text });
+          feed?.message(id, 'queued', text);
+          req.onMessage?.({ id, state: 'queued' });
+          return { queued: true };
+        },
+        stop: () => kill('stopped'),
+      });
       let stall = setTimeout(() => kill('stalled'), req.stallMs);
       const overall = setTimeout(() => kill('timed_out'), req.timeoutMs);
       req.signal?.addEventListener('abort', () => kill('canceled_by_reconciliation'));
@@ -365,7 +434,12 @@ export class CliRunner implements AgentRunner {
             continue;
           }
           record?.line(j);
-          if (j.type === 'result') result = j as ResultLine;
+          feed?.line(j);
+          refusals.line(j);
+          if (j.type === 'result') {
+            result = j as ResultLine;
+            turnEnded();
+          }
           else if (j.type === 'rate_limit_event' && j.rate_limit_info?.status === 'rejected') rateLimited = true;
           else if (j.type === 'assistant') req.onActivity?.('assistant turn');
         }
@@ -375,13 +449,21 @@ export class CliRunner implements AgentRunner {
       });
       child.on('close', (code) => {
         cleanup();
+        inputOpen = false;
+        // Messages still held when the session ended were never delivered.
+        for (const m of held.splice(0)) {
+          feed?.message(m.id, 'dropped');
+          req.onMessage?.({ id: m.id, state: 'dropped' });
+        }
         clearTimeout(stall);
         clearTimeout(overall);
         const r = result as ResultLine | null;
         const model = Object.keys(r?.modelUsage ?? {})[0] ?? req.model;
         const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}) };
-        const done = (out: RunResult) => {
+        const done = (o: RunResult) => {
+          const out: RunResult = refusals.refused.length ? { ...o, refusedHosts: refusals.refused } : o;
           record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}) });
+          feed?.end({ reason: out.reason, costUsd: out.costUsd, turns: out.turns });
           resolve(out);
         };
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });

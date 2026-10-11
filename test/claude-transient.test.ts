@@ -1,3 +1,4 @@
+import { STDIN_LINE } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -30,7 +31,7 @@ if (process.argv[2] === 'auth') {
   console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }));
   process.exit(0);
 }
-fs.readFileSync(0);
+${STDIN_LINE};
 const what = next('run.n', ${JSON.stringify(plan)});
 log('start ' + Date.now());
 const end = Date.now() + ${holdMs};
