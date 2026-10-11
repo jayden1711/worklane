@@ -1,3 +1,4 @@
+import { STDIN_LINE } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -45,7 +46,7 @@ test('an agent session (and the hooks it runs) gets the project variables, never
     `#!/usr/bin/env node
 const args = process.argv.slice(2);
 if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
-require('node:fs').readFileSync(0);
+${STDIN_LINE};
 require('node:fs').writeFileSync(${JSON.stringify(log)}, JSON.stringify(process.env));
 console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }));
 `,

@@ -1,3 +1,4 @@
+import { STDIN_LINE } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -27,7 +28,7 @@ const fs = require('node:fs');
 const args = process.argv.slice(2);
 if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
 const file = args[args.indexOf('--append-system-prompt-file') + 1];
-const stdin = fs.readFileSync(0, 'utf8');
+const stdin = JSON.parse(${STDIN_LINE}).message.content;
 fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ args, stdin, file, system: fs.readFileSync(file, 'utf8'), mode: (fs.statSync(file).mode & 0o777).toString(8), identity: ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'].map((k) => process.env[k]) }));
 console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }));
 `,

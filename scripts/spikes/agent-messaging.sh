@@ -66,3 +66,25 @@ else
 fi
 wait "$bg" 2>/dev/null || true
 rm -f "$out2"
+
+say "3. interrupt: does a control_request interrupt on the stream-json input stop the current turn?"
+# The agent is told to wait 20s in Bash; an interrupt goes in 5s later. Honored = a control_response
+# for it, then a result ending the turn without the reply the sleep was for.
+out3="$(mktemp)"
+{
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"Run `sleep 20` with Bash, then reply with exactly DONE-1."}}'
+  sleep 5
+  printf '%s\n' '{"type":"control_request","request_id":"int-1","request":{"subtype":"interrupt"}}'
+  sleep 10
+} | sudo -u "$coord" sudo -n -u "$agent" -- /usr/bin/env -i HOME="/home/$agent" PATH=/usr/local/bin:/usr/bin:/bin \
+    claude -p --input-format stream-json --output-format stream-json --verbose --max-turns 6 \
+    --allowedTools 'Bash(sleep:*)' --permission-mode dontAsk > "$out3" 2>&1 || true
+node -e '
+const lines=require("fs").readFileSync(process.argv[1],"utf8").split("\n").filter(Boolean).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean);
+const ack=lines.find(m=>m.type==="control_response" && m.response && m.response.request_id==="int-1");
+const result=lines.find(m=>m.type==="result");
+const done=lines.some(m=>m.type==="assistant" && /DONE-1/.test(JSON.stringify(m)));
+console.log("control_response:", ack ? JSON.stringify(ack.response).slice(0,200) : "none", "| result:", result ? result.subtype : "none", "| DONE-1 answered:", done);
+console.log(ack && result && !done ? "RESULT: interrupt honored: the turn ended without finishing" : "RESULT: interrupt NOT confirmed");
+' "$out3"
+rm -f "$out3"

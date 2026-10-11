@@ -12,6 +12,7 @@ import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator, logTail } from '../src/coordinator.js';
 import type { InstanceSettings } from '../src/instance.js';
+import { liveRuns, sendMessage, stopRun } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
@@ -1855,6 +1856,100 @@ test('instance settings: a lower daily budget and run windows hold new work', { 
   await c.tick();
   await c.idle();
   assert.equal(f.log.read(0, ['issue.claimed']).length, 1, "back to the repo's values: it starts");
+});
+
+// ---- the console
+
+/** A worker that stays live, holding a console handle, until it's stopped or released. */
+function liveWorker() {
+  const sent: { id: string; text: string }[] = [];
+  let finish!: (reason: 'succeeded' | 'stopped') => void;
+  const done = new Promise<'succeeded' | 'stopped'>((r) => (finish = r));
+  let req!: RunRequest;
+  const runner = agents({});
+  const fake = new FakeRunner(async (r) => {
+    if (r.role !== 'worker') return (await runner.run(r)) as never;
+    req = r;
+    r.onControl?.({
+      runId: 'run-w1',
+      send: (id, text) => {
+        sent.push({ id, text });
+        r.onMessage?.({ id, state: 'queued' });
+        return { queued: true };
+      },
+      stop: () => finish('stopped'),
+    });
+    const why = await done;
+    if (why === 'stopped') return { reason: 'stopped', detail: 'killed: stopped' };
+    return (await runner.run(r)) as never;
+  });
+  return { fake, sent, finish, deliver: (id: string) => req.onMessage?.({ id, state: 'delivered' }) };
+}
+
+const waitFor = async (ok: () => boolean) => {
+  for (let i = 0; i < 200 && !ok(); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(ok(), 'timed out');
+};
+
+test('console: the owner messages a live run; it is queued, then delivered, each an event; the live list follows', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const w = liveWorker();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: w.fake, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await waitFor(() => liveRuns(f.stateDir).some((r) => r.run === 'run-w1'));
+  assert.deepEqual(liveRuns(f.stateDir).find((r) => r.run === 'run-w1')!.role, 'worker');
+  sendMessage({ stateDir: f.stateDir, cfg: f.cfg, run: 'run-w1', text: 'Use the cents helper.', by: 'example-owner' });
+  c.checkConsole();
+  assert.deepEqual(w.sent.map((x) => x.text), ['Use the cents helper.']);
+  const q = lastOf(f.log, 'console.message_queued') as { run: string; by: string; text: string; id: string };
+  assert.deepEqual([q.run, q.by, q.text], ['run-w1', 'example-owner', 'Use the cents helper.']);
+  assert.equal(liveRuns(f.stateDir)[0]!.pending.length, 1, 'shown as pending');
+  w.deliver(q.id);
+  assert.equal((lastOf(f.log, 'console.message_delivered') as { id: string }).id, q.id);
+  assert.equal(liveRuns(f.stateDir)[0]!.pending.length, 0);
+  w.finish('succeeded');
+  await c.idle();
+  assert.deepEqual(liveRuns(f.stateDir), [], 'gone once it ends');
+});
+
+test('console: the owner stops a live run; the task is blocked saying who stopped it', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const w = liveWorker();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: w.fake, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await waitFor(() => liveRuns(f.stateDir).length > 0);
+  stopRun({ stateDir: f.stateDir, cfg: f.cfg, run: 'run-w1', by: 'example-owner' });
+  c.checkConsole();
+  await c.idle();
+  assert.deepEqual(lastOf(f.log, 'console.run_stopped'), { run: 'run-w1', issue: n, role: 'worker', by: 'example-owner' });
+  const issue = await f.backlog.get(n);
+  assert.ok(issue.labels.includes('blocked'));
+  assert.ok((await f.backlog.comments(n)).some((x) => /blocked: stopped by @example-owner from the console/.test(x.body)));
+  assert.equal(f.log.read(0, ['change.proposed']).length, 0, 'nothing after the stop');
+  assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
+});
+
+test("console: a request that isn't the owner's, or for a run that isn't live, is refused and recorded", { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const w = liveWorker();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: w.fake, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await waitFor(() => liveRuns(f.stateDir).length > 0);
+  // Written past the library, as anything with write access to the state dir could.
+  mkdirSync(join(f.stateDir, 'console', 'requests'), { recursive: true });
+  writeFileSync(join(f.stateDir, 'console', 'requests', '1.json'), JSON.stringify({ v: 1, id: 'x1', at: '', by: 'mallory', run: 'run-w1', kind: 'stop' }));
+  writeFileSync(join(f.stateDir, 'console', 'requests', '2.json'), JSON.stringify({ v: 1, id: 'x2', at: '', by: 'example-owner', run: 'run-gone', kind: 'message', text: 'hi' }));
+  c.checkConsole();
+  assert.deepEqual(f.log.read(0, ['console.request_refused']).map((e) => [(e.payload as { request: string }).request, (e.payload as { why: string }).why]), [
+    ['x1', 'only the owner (@example-owner) may use the console'],
+    ['x2', "run run-gone isn't live"],
+  ]);
+  assert.equal(f.log.read(0, ['console.run_stopped']).length, 0);
+  w.finish('succeeded');
+  await c.idle();
 });
 
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {

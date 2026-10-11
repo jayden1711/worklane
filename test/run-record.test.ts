@@ -7,7 +7,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { KEEP_RUNS, readRun, RunRecorder, runIssue, runsForIssue, RUNS_DIR } from '../src/run-record.js';
 import { CliRunner, stderrTail } from '../src/runner.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, STDIN_LINE } from './helpers.js';
 
 const cwd = join(tmpdir(), 'wt', 'issue-7');
 const assistant = (...content: object[]) => ({ type: 'assistant', message: { content } });
@@ -79,7 +79,7 @@ test('the runner records each run into the coordinator\'s state dir from the ses
   const dir = mkdtempSync(join(tmpdir(), 'fake-claude-'));
   const bin = join(dir, 'claude');
   const lines = [...session, { type: 'result', subtype: 'success', result: 'All done.', total_cost_usd: 0.25, num_turns: 4 }].map((l) => JSON.stringify(l));
-  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }\nrequire('node:fs').readFileSync(0);\nfor (const l of ${JSON.stringify(lines)}) console.log(l);\n`);
+  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }\n${STDIN_LINE};\nfor (const l of ${JSON.stringify(lines)}) console.log(l);\n`);
   chmodSync(bin, 0o755);
   const state = mkdtempSync(join(tmpdir(), 'state-'));
   const r = await new CliRunner('cli', process.env, bin).run({ role: 'worker', prompt: 'p', model: 'm', cwd: dir, allowedTools: [], maxTurns: 5, maxBudgetUsd: 1, stallMs: 60_000, timeoutMs: 60_000, stateDir: state, issue: 21 });
@@ -120,7 +120,7 @@ test('an error result with no text of its own reports the end of claude\'s stder
   const dir = mkdtempSync(join(tmpdir(), 'claude-stub-'));
   const bin = join(dir, 'claude');
   const result = JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: '', num_turns: 0, total_cost_usd: 0 });
-  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }\nrequire('node:fs').readFileSync(0);\nconsole.error('starting');\nconsole.error('Error: sandbox required but unavailable');\nconsole.log(${JSON.stringify(result)});\nprocess.exit(1);\n`);
+  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }\n${STDIN_LINE};\nconsole.error('starting');\nconsole.error('Error: sandbox required but unavailable');\nconsole.log(${JSON.stringify(result)});\nprocess.exit(1);\n`);
   chmodSync(bin, 0o755);
   const r = await new CliRunner('cli', { PATH: process.env.PATH ?? '' }, bin).run({ role: 'worker', prompt: 'p', cwd: dir, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000 });
   assert.equal(r.reason, 'failed');

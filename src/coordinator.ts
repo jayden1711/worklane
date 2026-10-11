@@ -19,7 +19,8 @@ import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, killTree, killTreeA
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
-import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunResult } from './runner.js';
+import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunControl, type RunResult } from './runner.js';
+import { MAX_MESSAGE, takeRequests, writeLive, type PendingMessage } from './console.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
@@ -135,6 +136,8 @@ export class Coordinator {
   private lightRunning = new Set<number>();
   /** When each watched PR was last polled (ms). */
   private prPolled = new Map<number, number>();
+  /** Live runs, for the console. */
+  private live = new Map<string, LiveEntry>();
   /** The repo's own config: the defaults the instance's settings apply over. */
   private readonly repoCfg: Config;
   private settingsKey = '';
@@ -155,18 +158,44 @@ export class Coordinator {
           if (this.halt.signal.aborted) throw new Halted();
           // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
           const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
-          const r = await runner.run({
-            ...req,
-            signal: req.signal ?? this.halt.signal,
-            onLockWait: (ms) => {
-              if (ms >= LOCK_WAIT_RECORDED_MS) this.emit('run.lock_waited', { ...who, wait_ms: Math.round(ms) });
-              req.onLockWait?.(ms);
-            },
-            onTransientRetry: (t) => {
-              this.emit('run.transient_retry', { ...who, attempt: t.attempt, cause: t.cause, wait_ms: Math.round(t.waitMs), detail: t.detail.slice(0, 300) });
-              req.onTransientRetry?.(t);
-            },
-          });
+          // The console holds every live run's input: listed for the dashboard while it runs.
+          const live: LiveEntry = { key: randomBytes(4).toString('hex'), run: null, control: null, issue: who.issue, role: req.role, model: req.model, startedAt: new Date().toISOString(), pending: [], stoppedBy: null };
+          this.live.set(live.key, live);
+          let r: RunResult;
+          try {
+            r = await runner.run({
+              ...req,
+              signal: req.signal ?? this.halt.signal,
+              onLockWait: (ms) => {
+                if (ms >= LOCK_WAIT_RECORDED_MS) this.emit('run.lock_waited', { ...who, wait_ms: Math.round(ms) });
+                req.onLockWait?.(ms);
+              },
+              onTransientRetry: (t) => {
+                this.emit('run.transient_retry', { ...who, attempt: t.attempt, cause: t.cause, wait_ms: Math.round(t.waitMs), detail: t.detail.slice(0, 300) });
+                req.onTransientRetry?.(t);
+              },
+              onControl: (c) => {
+                // A retried start is a new session: its own id and handle.
+                live.control = c;
+                live.run = c.runId;
+                this.writeLive();
+                req.onControl?.(c);
+              },
+              onMessage: (m) => {
+                const at = live.pending.findIndex((p) => p.id === m.id);
+                if (m.state !== 'queued' && at >= 0) {
+                  live.pending.splice(at, 1);
+                  this.emit(m.state === 'delivered' ? 'console.message_delivered' : 'console.message_dropped', { run: live.run ?? live.key, issue: live.issue, role: live.role, id: m.id });
+                  this.writeLive();
+                }
+                req.onMessage?.(m);
+              },
+            });
+          } finally {
+            this.live.delete(live.key);
+            this.writeLive();
+          }
+          if (live.stoppedBy) throw new StoppedByOwner(live.stoppedBy);
           if (this.halt.signal.aborted) throw new Halted();
           return r;
         },
@@ -223,6 +252,7 @@ export class Coordinator {
       }
     };
     this.checkEmergency();
+    this.checkConsole();
     await step('settings', () => this.refreshSettings(), undefined);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
@@ -383,6 +413,63 @@ export class Coordinator {
    * The instance's settings (policy.yaml), re-read every tick: when they change, the repo's config with
    * them applied becomes the config in effect, without a restart. Refused settings: the repo's values.
    */
+  /** The live runs list the dashboard reads (only runs whose session is up: they have an id). */
+  private writeLive() {
+    writeLive(
+      this.d.stateDir,
+      [...this.live.values()].filter((l) => l.run).map((l) => ({ run: l.run!, issue: l.issue, role: l.role, model: l.model, startedAt: l.startedAt, pending: l.pending })),
+    );
+  }
+
+  /**
+   * The console's requests from the dashboard (called every few seconds and on each tick): message or stop
+   * a live run. Only the owner's are acted on; every outcome is an event.
+   */
+  checkConsole(): void {
+    try {
+      this.consoleRequests();
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'console', kind: 'error', message: (e as Error).message.slice(0, 500) });
+    }
+  }
+
+  private consoleRequests(): void {
+    for (const q of takeRequests(this.d.stateDir)) {
+      const refuse = (why: string) => this.emit('console.request_refused', { request: q.id, kind: q.kind, run: q.run, by: q.by, why });
+      const owner = this.d.cfg.project.owners.default;
+      if (q.by.toLowerCase() !== owner.toLowerCase()) {
+        refuse(`only the owner (@${owner}) may use the console`);
+        continue;
+      }
+      const l = [...this.live.values()].find((x) => x.run === q.run);
+      if (!l?.control) {
+        refuse(`run ${q.run} isn't live`);
+        continue;
+      }
+      const who = { run: q.run, issue: l.issue, role: l.role };
+      if (q.kind === 'stop') {
+        l.stoppedBy = q.by;
+        this.emit('console.run_stopped', { ...who, by: q.by });
+        l.control.stop();
+        continue;
+      }
+      const text = q.text.trim().slice(0, MAX_MESSAGE);
+      if (!text) {
+        refuse('the message is empty');
+        continue;
+      }
+      l.pending.push({ id: q.id, text, by: q.by, at: q.at });
+      const sent = l.control.send(q.id, text);
+      if (!sent.queued) {
+        l.pending.pop();
+        refuse(sent.why);
+        continue;
+      }
+      this.emit('console.message_queued', { ...who, id: q.id, by: q.by, text });
+      this.writeLive();
+    }
+  }
+
   refreshSettings(): void {
     if (!this.d.settings) return;
     const r = this.d.settings();
@@ -588,6 +675,8 @@ export class Coordinator {
       }
       await this.block(n, owner, refused ? `no pushable change after ${maxAttempts} attempts; ${pushRefusal(refused)}` : `no passing change after ${maxAttempts} attempts`);
     } catch (e) {
+      // Stopped from the console: the task waits for the owner, saying who stopped it.
+      if (e instanceof StoppedByOwner) return await this.block(n, owner, e.message);
       if (!(e instanceof Halted)) throw e;
       // Requeued: the task starts over once the stop is lifted.
       this.releaseClaim(n, 'emergency stop');
@@ -1780,8 +1869,9 @@ export class Coordinator {
       finished = { outcome: 'pushed', head, detail: s.summary.slice(0, 1000) };
       await this.d.backlog.comment(number, `[${BRAND.cli}] ${failed.join(', ')} failed on \`${pr.headSha.slice(0, 8)}\`. CI fix run ${attempt} pushed \`${head.slice(0, 8)}\`: ${s.summary}`);
     } catch (e) {
-      if (!(e instanceof Halted)) throw e;
-      finished = { outcome: 'no_push', head: null, detail: 'stopped by an emergency stop' };
+      if (e instanceof StoppedByOwner) await give(e.message);
+      else if (!(e instanceof Halted)) throw e;
+      else finished = { outcome: 'no_push', head: null, detail: 'stopped by an emergency stop' };
     } finally {
       clearInterval(heartbeat);
       release(n, leaseSha, { repo: this.d.repo, remote: this.remote });
@@ -2100,8 +2190,8 @@ export class Coordinator {
       finished = { outcome: 'pushed', head, files, waits_owner: reasons.length > 0, reasons, detail: summary.slice(0, 1000) };
       await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
     } catch (e) {
-      if (!(e instanceof Halted)) throw e;
-      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: 'stopped by an emergency stop' };
+      if (!(e instanceof Halted) && !(e instanceof StoppedByOwner)) throw e;
+      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner ? e.message : 'stopped by an emergency stop' };
     } finally {
       clearInterval(heartbeat);
       release(n, leaseSha, { repo: this.d.repo, remote: this.remote });
@@ -2207,6 +2297,27 @@ const laneOf = (issue: Issue): { lane?: string } => {
 };
 
 /** An emergency stop interrupted this task. */
+/** The owner stopped this run from the console. */
+class StoppedByOwner extends Error {
+  constructor(readonly by: string) {
+    super(`stopped by @${by} from the console`);
+  }
+}
+
+/** A live run, as the console holds it. */
+interface LiveEntry {
+  key: string;
+  /** The run's id (its record and feed), once the session is up. */
+  run: string | null;
+  control: RunControl | null;
+  issue: number | null;
+  role: string;
+  model: string;
+  startedAt: string;
+  pending: PendingMessage[];
+  stoppedBy: string | null;
+}
+
 class Halted extends Error {
   constructor() {
     super('emergency stop');

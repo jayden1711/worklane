@@ -167,7 +167,11 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   process.on('SIGINT', stop);
   const backupDir = opts.backupDir ?? process.env[`${BRAND.envPrefix}_BACKUP_DIR`] ?? join(state, 'backups');
   // An emergency stop takes effect within seconds, not at the next tick.
-  const watch = setInterval(() => coordinator.checkEmergency(), 5_000);
+  // The console's requests (message, stop) are taken on the same short timer.
+  const watch = setInterval(() => {
+    coordinator.checkEmergency();
+    coordinator.checkConsole();
+  }, 5_000);
   watch.unref();
   let lastBackup = 0;
   try {
