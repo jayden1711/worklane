@@ -1,7 +1,7 @@
 // Worktrees the coordinator creates and owns. It never lists, touches or
 // removes a worktree it didn't create: names carry our prefix AND must be in
 // our ownership record, so other sessions' worktrees are always safe.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
@@ -16,6 +16,8 @@ export interface WorktreeOptions {
   runAs?: { user: string; home: string };
   /** The project's own variables (tests.yaml env). */
   env?: Record<string, string>;
+  /** The instance's dependency-cache variables (dep-cache.ts), set for setup steps after the project's own. */
+  cacheEnv?: Record<string, string>;
 }
 
 const ownedFile = (o: WorktreeOptions) => join(o.stateDir, 'worktrees.json');
@@ -118,16 +120,50 @@ export function worktreePath(o: WorktreeOptions, name: string): string {
   return resolve(o.repo, o.root, `${BRAND.cli}-${name}`);
 }
 
-/** Create a worktree on a new branch at `base`, then run the project's setup steps. */
-export function createWorktree(o: WorktreeOptions, name: string, branch: string, base: string): { path: string; setupErrors: string[] } {
+/** The worktree itself, before any setup: on a new branch at `base`, recorded as ours first. */
+function addWorktree(o: WorktreeOptions, name: string, branch: string, base: string): string {
   const path = worktreePath(o, name);
   if (existsSync(path)) removeWorktree(o, name);
   setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
   excludeSandboxPlaceholders(o.repo);
   git(o.repo, 'worktree', 'add', '-q', '-B', branch, path, base);
+  return path;
+}
+
+/**
+ * createWorktree without blocking: the setup steps run as child processes the event loop waits on, for work
+ * done in the background (a worktree pool refilling while the coordinator keeps going).
+ */
+export async function createWorktreeAsync(o: WorktreeOptions, name: string, branch: string, base: string): Promise<{ path: string; setupErrors: string[] }> {
+  const path = addWorktree(o, name, branch, base);
   const setupErrors: string[] = [];
   for (const step of o.setup) {
-    const { file, args, env } = projectCommand(step, o.runAs, o.env);
+    const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
+    const r = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+      let stderr = '';
+      const child = spawn(file, args, { cwd: path, env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const timer = setTimeout(() => child.kill('SIGKILL'), 900_000);
+      child.stderr.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-4000)));
+      child.on('error', () => {
+        clearTimeout(timer);
+        resolve({ status: null, stderr });
+      });
+      child.on('close', (status) => {
+        clearTimeout(timer);
+        resolve({ status, stderr });
+      });
+    });
+    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${r.stderr.trim().split('\n').pop() ?? ''}`);
+  }
+  return { path, setupErrors };
+}
+
+/** Create a worktree on a new branch at `base`, then run the project's setup steps. */
+export function createWorktree(o: WorktreeOptions, name: string, branch: string, base: string): { path: string; setupErrors: string[] } {
+  const path = addWorktree(o, name, branch, base);
+  const setupErrors: string[] = [];
+  for (const step of o.setup) {
+    const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
     const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
     if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }
