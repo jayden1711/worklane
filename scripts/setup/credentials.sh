@@ -17,6 +17,12 @@
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
 #       The eval user's API key; only once evals are on.
+#   bash scripts/setup/credentials.sh <name> intake-discord
+#   bash scripts/setup/credentials.sh <name> intake-twilio <account-sid> <+number>
+#   bash scripts/setup/credentials.sh <name> intake-relay
+#       Work intake (docs/intake.md): the chat bot's token, the SMS provider's auth token, and the secret
+#       shared with the SMS relay. Each is pasted (not shown) and installed for wl-<name> only, 0400, in
+#       the instance home, which no agent user can read. Prints the credentials.yaml lines to add.
 #
 # The App's permissions (checked by app-permissions.mjs): Contents read/write (fetch, push task branches,
 # lease refs), Issues read/write (the backlog), Pull requests read/write (open PRs; Worklane never merges),
@@ -26,13 +32,19 @@
 # too. No webhook.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key ...}"
-what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key ...}"
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord|intake-twilio|intake-relay ...}"
+what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord|intake-twilio|intake-relay ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"
 here="$(cd "$(dirname "$0")" && pwd)"
 # Mint a token as the coordinator user (who alone can read the key) and check what it reaches and may do.
 verify_app() { (cd / && sudo -u "$coord" node --input-type=module - "$@" < "$here/app-permissions.mjs"); }
+# Intake secrets: one file each, for the coordinator user only (0400), in a 0700 directory of its own.
+intake_dir="/home/$coord/.config/$name-intake"
+install_secret() {
+  local file="$1" secret="$2"
+  printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
+}
 
 case "$what" in
   github-app)
@@ -109,6 +121,30 @@ JS
     printf '%s' "$key" | sudo -u "$eval_user" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; cat > "$1"; chmod 0400 "$1"' _ "$file"
     unset key
     echo "set credentials.yaml eval_key: $file   (readable only by $eval_user)"
+    ;;
+  intake-discord)
+    read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token; echo
+    [[ "$token" =~ ^[A-Za-z0-9._-]{50,100}$ ]] || { echo "that doesn't look like a bot token; nothing installed" >&2; exit 1; }
+    install_secret "$intake_dir/discord-token" "$token"; unset token
+    echo "installed $intake_dir/discord-token (0400, $coord only). In credentials.yaml set:"
+    echo "  intake: { discord_token: $intake_dir/discord-token }"
+    ;;
+  intake-twilio)
+    sid="${3:?usage: credentials.sh <name> intake-twilio <account-sid> <+number>}" number="${4:?the SMS number in E.164, e.g. +15551234567}"
+    [[ "$sid" =~ ^AC[0-9a-f]{32}$ ]] || { echo "account SID should be AC followed by 32 hex digits" >&2; exit 1; }
+    [[ "$number" =~ ^\+[1-9][0-9]{6,14}$ ]] || { echo "number should be E.164, e.g. +15551234567" >&2; exit 1; }
+    read -rsp "Paste the auth token, then Enter (it is not shown): " token; echo
+    [[ "$token" =~ ^[0-9a-f]{32}$ ]] || { echo "an auth token is 32 hex digits; nothing installed" >&2; exit 1; }
+    install_secret "$intake_dir/twilio-auth-token" "$token"; unset token
+    echo "installed $intake_dir/twilio-auth-token (0400, $coord only). In credentials.yaml set:"
+    echo "  intake: { twilio: { account_sid: $sid, auth_token: $intake_dir/twilio-auth-token, number: \"$number\" } }"
+    ;;
+  intake-relay)
+    read -rsp "Paste the relay's shared secret (the RELAY_SECRET you set on the Worker), then Enter (it is not shown): " secret; echo
+    [ "${#secret}" -ge 32 ] || { echo "use a secret of at least 32 characters (e.g. openssl rand -hex 32); nothing installed" >&2; exit 1; }
+    install_secret "$intake_dir/relay-secret" "$secret"; unset secret
+    echo "installed $intake_dir/relay-secret (0400, $coord only). In credentials.yaml set:"
+    echo "  intake: { relay_secret: $intake_dir/relay-secret }"
     ;;
   *) echo "unknown credential $what" >&2; exit 2 ;;
 esac

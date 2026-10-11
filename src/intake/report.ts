@@ -26,6 +26,14 @@ export interface IncomingReport {
   thread?: { kind: 'channel' | 'dm' | 'sms' | 'group'; id: string };
 }
 
+/** Intake's daily caps. The instance settings win; these (or the intake config's) are the defaults. */
+export interface IntakeCaps {
+  reports_per_sender_per_day: number;
+  drafts_per_day: number;
+  max_usd_per_day: number;
+}
+export const INTAKE_DEFAULT_CAPS: IntakeCaps = { reports_per_sender_per_day: 10, drafts_per_day: 20, max_usd_per_day: 2 };
+
 export const TRIAGE_KINDS = ['bug', 'feature', 'question', 'duplicate', 'not_actionable', 'needs_info'] as const;
 export type TriageKind = (typeof TRIAGE_KINDS)[number];
 
@@ -88,11 +96,12 @@ export const IntakeConfig = z.strictObject({
         .default([]),
     })
     .prefault({}),
+  /** Defaults for the caps; the instance settings (intake.*) win over these. */
   caps: z
     .strictObject({
-      reports_per_sender_per_day: z.number().int().min(1).max(100).default(10),
-      drafts_per_day: z.number().int().min(1).max(200).default(20),
-      max_usd_per_day: z.number().positive().max(20).default(2),
+      reports_per_sender_per_day: z.number().int().min(1).max(100).default(INTAKE_DEFAULT_CAPS.reports_per_sender_per_day),
+      drafts_per_day: z.number().int().min(1).max(200).default(INTAKE_DEFAULT_CAPS.drafts_per_day),
+      max_usd_per_day: z.number().positive().max(20).default(INTAKE_DEFAULT_CAPS.max_usd_per_day),
     })
     .prefault({}),
 });

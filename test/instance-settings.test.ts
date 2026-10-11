@@ -37,9 +37,28 @@ test('the instance settings: each value in effect and where it comes from, the b
   assert.equal(v.available, true);
   assert.equal(v.canChange, true, 'the owner');
   assert.deepEqual(v.ceilings, { max_workers: 3, daily_usd: 30 });
-  assert.deepEqual(v.limits, { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 }, research: { max_searches_per_day: 200, max_fetches_per_day: 500, max_usd_per_day: 20 } });
+  assert.deepEqual(v.limits, {
+    workers: { min: 1, max: 4 },
+    daily_budget_usd: { max: 20 },
+    max_fixes_per_pr: { max: 3 },
+    research: { max_searches_per_day: 200, max_fetches_per_day: 500, max_usd_per_day: 20 },
+    intake: { reports_per_sender_per_day: 100, drafts_per_day: 200, max_usd_per_day: 20 },
+  });
   const by = Object.fromEntries((v.settings ?? []).map((x) => [x.key, x]));
-  assert.deepEqual(Object.keys(by), ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access']);
+  assert.deepEqual(Object.keys(by), [
+    'workers',
+    'daily_budget_usd',
+    'ci_repair.enabled',
+    'ci_repair.max_fixes_per_pr',
+    'run_windows',
+    'research.max_searches_per_day',
+    'research.max_fetches_per_day',
+    'research.max_usd_per_day',
+    'research.repo_access',
+    'intake.reports_per_sender_per_day',
+    'intake.drafts_per_day',
+    'intake.max_usd_per_day',
+  ]);
   assert.equal(by['research.repo_access']!.value, false, 'research has no repo access unless the owner turns it on');
   assert.deepEqual(by.daily_budget_usd, { key: 'daily_budget_usd', value: 12, source: 'instance' });
   assert.equal(by.workers!.source, 'repo', 'not set on the instance: the repo default');
