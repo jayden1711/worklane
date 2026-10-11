@@ -2,6 +2,8 @@
 // machine's cores and memory, and a profile from `tune` when there is one). Pure: numbers in, proposals out.
 // A proposal is a decision for the owner, with the numbers; nothing changes until they answer, and the
 // change itself then goes through a reviewed PR.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { FailureProposal } from './failure-modes.js';
 
 export type TuningProposal = FailureProposal;
@@ -75,6 +77,41 @@ export interface TuningInput {
   /** The worker cap in force now (tests.yaml cores.max, or a fixed worker count), if any. */
   currentWorkers: number | null;
   profile?: TuneProfile | null;
+}
+
+/** The profile `tune` left in the instance's state, if any. */
+export function readTuneProfile(stateDir: string): TuneProfile | null {
+  try {
+    const p = JSON.parse(readFileSync(join(stateDir, 'tune-profile.json'), 'utf8')) as TuneProfile;
+    return Array.isArray(p?.runs) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Variable names that usually hold a test worker count. */
+export const WORKER_VAR = /WORKERS|JOBS|PARALLEL|THREADS|PROCS|CONCURRENCY/i;
+
+/** The worker cap in force: tests.yaml cores.max, else a fixed number in a worker variable, else none. */
+export function currentWorkerCap(tests: { cores?: { max?: number | undefined }; env: Record<string, string> }): number | null {
+  if (tests.cores?.max !== undefined) return tests.cores.max;
+  for (const [name, value] of Object.entries(tests.env)) if (WORKER_VAR.test(name) && /^\d+$/.test(value)) return Number(value);
+  return null;
+}
+
+/**
+ * The tuning input from the event log: every verify-stage check's duration, and the full-suite check, which is
+ * whichever of the candidates (runner.full and the project's checks) has the longest median among what ran.
+ */
+export function tuningInput(events: { type: string; payload: unknown }[], tests: { runner: { full: string }; checks: string[]; cores?: { max?: number | undefined }; env: Record<string, string> }, profile: TuneProfile | null): TuningInput {
+  const checks = events
+    .filter((e) => e.type === 'check.result' && (e.payload as { stage?: string }).stage === 'verify')
+    .flatMap((e) => ((e.payload as { checks?: { check: string; duration_ms?: number; status: string }[] }).checks ?? []).filter((c) => c.status !== 'skipped' && typeof c.duration_ms === 'number').map((c) => ({ check: c.check, durationMs: c.duration_ms! })));
+  const byMedian = [tests.runner.full, ...tests.checks]
+    .map((check) => ({ check, med: median(checks.filter((c) => c.check === check).map((c) => c.durationMs)) }))
+    .filter((x) => x.med > 0)
+    .sort((a, b) => b.med - a.med);
+  return { checks, ...(byMedian[0] ? { fullCheck: byMedian[0].check } : {}), currentWorkers: currentWorkerCap(tests), profile };
 }
 
 export function tuningProposals(input: TuningInput): TuningProposal[] {
