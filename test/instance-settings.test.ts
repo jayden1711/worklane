@@ -88,6 +88,9 @@ test('where a value comes from: the instance\'s policy, else the repo\'s config 
     'research.max_fetches_per_day': 'engine',
     'research.max_usd_per_day': 'instance',
     'research.repo_access': 'engine',
+    'intake.reports_per_sender_per_day': 'engine', // intake caps default from intake.yaml, never the repo's config
+    'intake.drafts_per_day': 'engine',
+    'intake.max_usd_per_day': 'engine',
   });
   // The repo's config as written, not as loaded with defaults: drop a key from the file and it's the engine's.
   const agents = join(s.cfg.dir, 'agents.yaml');

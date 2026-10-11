@@ -174,6 +174,10 @@ const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = 
   'research.max_fetches_per_day': null,
   'research.max_usd_per_day': null,
   'research.repo_access': null,
+  // Intake's caps default from intake.yaml in the instance home, never from the repo's config.
+  'intake.reports_per_sender_per_day': null,
+  'intake.drafts_per_day': null,
+  'intake.max_usd_per_day': null,
 };
 
 const defines = (obj: unknown, path: string[]): boolean => {
