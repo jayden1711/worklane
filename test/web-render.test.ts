@@ -24,6 +24,9 @@ interface Render {
   renderIntakeHealth(health: unknown): string;
   renderIntakePage(state: unknown): string;
   intakeRefusal(state: unknown): string | null;
+  renderRunsRefused(message: string): string;
+  runsRefused(message: string): string | null;
+  runsRefusal(state: unknown): string | null;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
@@ -634,4 +637,20 @@ test('the Intake page: each report redacted with what became of it, views, a lin
   assert.match(r.renderIntakePage(asOther), /data-testid="intake-refused"[^>]*>Intake reports are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
   assert.equal(r.intakeRefusal(asOwner), null);
   assert.equal(r.intakeRefusal({ ...asOwner, canReadIntake: undefined }), null, 'an older server without the flag: asked as before');
+});
+
+test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
+  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
+  assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
+  // From the state, before asking: the demo's dashboard for someone who is neither the owner nor a writer.
+  assert.equal((asOther as unknown as { canReadRuns: boolean }).canReadRuns, false);
+  assert.equal((asOwner as unknown as { canReadRuns: boolean }).canReadRuns, true);
+  assert.equal(r.runsRefusal(asOther), msg, 'the same words the server would send');
+  assert.equal(r.runsRefusal(asOwner), null);
+  assert.equal(r.runsRefusal({ ...asOwner, canReadRuns: undefined }), null, 'an older server without the flag: asked as before');
+  const issue = asOther.tasks[0]!.issue;
+  assert.match(r.renderIssue(asOther, issue), /data-testid="runs-card"[\s\S]*?data-testid="runs-refused"/, 'the issue page says so instead of asking');
+  assert.doesNotMatch(r.renderIssue(asOwner, issue), /data-testid="runs-refused"/);
 });

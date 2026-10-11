@@ -19,7 +19,7 @@ import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { LogsPage } from './pages/Logs';
-import { RunDetail } from './pages/RunDetail';
+import { RunDetail, runsRefusal } from './pages/RunDetail';
 import { PullRequests } from './pages/PullRequests';
 
 export function navigate(to: string) {
@@ -221,7 +221,7 @@ export function App() {
   if (!state) page = error ? <div className="p-8 text-[13px] text-red">Can't load: {error}</div> : <Loading />;
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
-  else if (runMatch) page = <RunDetail id={runMatch[1]!} />;
+  else if (runMatch) page = <RunDetail id={runMatch[1]!} refused={runsRefusal(state)} />;
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
   else if (path.startsWith('/issues')) page = <Issues state={state} />;
   else if (path === '/land') page = <Landing state={state} />;

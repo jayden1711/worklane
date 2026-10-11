@@ -22,7 +22,7 @@ import { LogsPage } from './pages/Logs';
 import { Overview } from './pages/Overview';
 import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
-import { RunDetail, RunList } from './pages/RunDetail';
+import { RunDetail, RunList, RunsRefused } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
 
 export const pages = {
@@ -67,3 +67,5 @@ export const renderIntake = (data: IntakeViewData, view?: string) => renderToSta
 export const renderIntakeHealth = (health: IntakeViewData['health']) => renderToStaticMarkup(<IntakeHealthSection health={health} />);
 export const renderIntakePage = (state: State) => renderToStaticMarkup(<IntakePage state={state} />);
 export { intakeRefusal } from './pages/Intake';
+export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
+export { runsRefusal, runsRefused } from './pages/RunDetail';

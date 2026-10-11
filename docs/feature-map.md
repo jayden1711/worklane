@@ -63,6 +63,7 @@ Any other path shows Overview.
 | Back to issues | `issue-detail` | – | `Esc` | – |
 | Checks run by the coordinator | `issue-detail` | the checks card, newest run first; one table per run | – | `[data-testid="checks-card"]`, `[data-testid="checks-table"]` |
 | Agent runs of an issue | `issue-detail` | the runs card; a row opens `run-detail` | – | `[data-testid="runs-card"]`, `[data-testid="run-row"]` |
+| Agent runs refused | `issue-detail`, `run-detail` | for anyone but the owner and the project's writers: the runs card and a run page say runs are theirs, instead of an empty list or "No such run" | – | `[data-testid="runs-refused"]` |
 | A run's steps and final message | `run-detail` | the steps card and the final message | – | `[data-testid="run-steps"]`, `[data-testid="run-final"]` |
 | Next report preview | `reports` | the preview card | – | `[data-testid="report-preview"]` |
 | Pull requests page | `prs` | the page itself | – | `[data-testid="prs-page"]` |

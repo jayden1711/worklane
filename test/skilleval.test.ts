@@ -6,6 +6,7 @@ import { EventLog } from '../src/events/log.js';
 import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { defaultRolePrompt } from '../src/roles.js';
 import { assertJudgeDiffers, compareInstructions, comparisonDiff, comparisonLine, engineRoleCases, evalInstructions, instructionTargets, parseCases, runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus, type Ask, type AskRequest } from '../src/skilleval.js';
 import { FakeRunner } from '../src/runner.js';
 import { BRAND } from '../src/brand.js';
@@ -224,6 +225,11 @@ test('the engine ships eval cases for the worker and evaluator role prompts', ()
     assert.ok(cases.every((c) => c.correct.length && c.wrong.length), `${role}: every case has correct and wrong actions`);
   }
   assert.equal(engineRoleCases('no-such-role'), null);
+});
+
+test('the worker stops once done_when passes, with a case that checks it', () => {
+  assert.match(defaultRolePrompt('worker'), /When done_when passes and the change is complete, stop\. Don't re-run the full suite more than once after the final edit\./);
+  assert.ok(parseCases(engineRoleCases('worker')!).some((c) => /stop/i.test(c.title)), 'a worker case about stopping when done');
 });
 
 test('runnerAsk: through the runner like any run, with no tools, its cost reported', async () => {
