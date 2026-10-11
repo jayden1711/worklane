@@ -33,6 +33,7 @@ import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, t
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
+import { intakeHealth, intakeReports } from './intake/view.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -102,6 +103,11 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 }
 
 export { mayAnswer };
+
+/** Who may read intake reports (redacted, but people's words): the project's owner or one of its writers. */
+export function mayReadIntake(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -514,6 +520,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
+      canReadIntake: mayReadIntake(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -677,6 +685,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
+        // Intake: each report (redacted) and what became of it, and the numbers for the health panel. The owner's
+        // and the writers' to read, like the runs.
+        if (url.pathname === '/api/intake' && req.method === 'GET') {
+          const owners = opts.cfg.project.owners;
+          if (!mayReadIntake(opts.user, owners)) return json(res, 403, { error: `intake reports are for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          const events = readEvents(opts.eventsDb);
+          return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events) });
+        }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;
           try {

@@ -181,6 +181,8 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Whether this viewer may read intake reports (the owner or a writer); absent from an older server: yes. */
+  canReadIntake?: boolean;
   project: { name: string; repo: string; landMode: string };
   user: string;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
@@ -427,3 +429,28 @@ export const askChat = (instance: string | null, question: string, key: string) 
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
 export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });
+
+/** Intake (GET /api/intake): each report, redacted, and what became of it; and the numbers for the health panel. */
+export interface IntakeReport {
+  id: string;
+  source: string;
+  receivedAt: string;
+  /** A short hash, never a handle or a number. */
+  sender: string;
+  kind: string | null;
+  reproduction: string | null;
+  outcome: 'filed' | 'awaiting_owner' | 'commented' | 'grouped' | 'replied' | 'asked_owner' | 'dropped' | 'rejected' | 'pending';
+  issue: number | null;
+  dropped: string | null;
+  replies: string[];
+  excerpt: string | null;
+}
+export interface IntakeHealth {
+  perDay: { day: string; source: string; reports: number }[];
+  dropped: Record<string, number>;
+  reportToMerged: { count: number; medianMinutes: number | null };
+}
+export interface IntakeView {
+  reports: IntakeReport[];
+  health: IntakeHealth;
+}
