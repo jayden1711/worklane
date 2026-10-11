@@ -220,6 +220,27 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
  * one, with a clean environment. Project commands run code agents wrote, so
  * they never run as the user that holds the instance's credentials.
  */
+/**
+ * A command wrapped to record its largest single process's peak memory (a test worker's), where the OS can:
+ * GNU time on Linux writes the peak resident size in KB to `outFile`. Elsewhere the command is unchanged and
+ * nothing is recorded (peakMemoryMb then reads null).
+ */
+export function withPeakMemory(command: string, outFile: string): string {
+  if (process.platform !== 'linux' || !existsSync('/usr/bin/time')) return command;
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  return `/usr/bin/time -f %M -o ${q(outFile)} sh -c ${q(command)}`;
+}
+
+/** The peak recorded by withPeakMemory, in MB; null when nothing was (another OS, or no output). */
+export function peakMemoryMb(outFile: string): number | null {
+  try {
+    const kb = Number(readFileSync(outFile, 'utf8').trim().split('\n').pop());
+    return Number.isFinite(kb) && kb > 0 ? kb / 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
 export function projectCommand(command: string, runAs?: { user: string; home: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
