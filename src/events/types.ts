@@ -27,7 +27,10 @@ export const EventSchemas = {
   'issue.claimed': z.strictObject({ issue, instance: z.string(), lease: sha, base: sha, owner: z.string() }),
   'issue.claim_lost': z.strictObject({ issue, instance: z.string(), holder: z.string().nullable() }),
   'issue.released': z.strictObject({ issue, instance: z.string(), why: z.string() }),
-  'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string() }),
+  /** `retry_after`: a rate-limit or budget block retries on its own after then (up to a cap); absent: it waits for a relabel. */
+  'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string(), retry_after: z.string().optional(), retry_kind: z.enum(['rate_limit', 'budget']).optional() }),
+  /** A held block retried on its own (relabelled ready), or, at the cap, left blocked (`gave_up`). */
+  'issue.retry': z.strictObject({ issue, attempt: z.number().int().positive(), kind: z.enum(['rate_limit', 'budget']), gave_up: z.boolean() }),
   /** The worker found nothing to change, and the coordinator's own checks pass on the unchanged base. */
   'issue.no_change': z.strictObject({ issue, owner: z.string(), base: sha, why: z.string(), checks: z.array(CheckRunSchema) }),
   // runs
