@@ -65,6 +65,7 @@ const dash = await optional('dashboard.js');
 const ctx = await optional('guardrails/context.js');
 const record = await optional('run-record.js');
 const hubMod = await optional('dashboard-hub.js');
+const chat = await optional('chat.js');
 
 /** Start a dashboard process and wait for the URL it prints (with its token). */
 async function serve(args) {
@@ -176,6 +177,36 @@ if (existsSync(join(engine, 'dist', 'src', 'settings.js'))) {
   } else console.error(`instance init failed: ${(init.stderr || init.stdout).trim().split('\n').pop()}`);
 }
 
+// A chat question its coordinator answered, for the Ask panel (opened by ?chat=<id>): citations, a draft, proposals.
+let chatId = null;
+if (chat?.writeChatAnswer && stateDir) {
+  chatId = chat.askChat({ stateDir, question: `Why is issue ${issue} stuck?`, by: 'example-owner' }).id;
+  const ev = state.activity[0]?.id;
+  const decision = state.decisions.find((d) => !d.answer);
+  const body = 'Totals floor instead of rounding to the cent.\n\n```done_when\n- test: test/totals.test.js\n```\n';
+  chat.writeChatAnswer(stateDir, chatId, {
+    answer: {
+      turn: 'shot',
+      instance: 'shop',
+      answer: `Issue #${issue} is waiting on your decision: the worker's run fixed the rounding, and the evaluator wants you to approve the change to the totals before it lands.\n\nThe same floor-instead-of-round bug is in the invoice totals, which no issue covers yet.`,
+      citations: [
+        { kind: 'issue', id: String(issue), instance: 'shop', label: `issue #${issue}`, href: `https://github.com/example-org/example-shop/issues/${issue}` },
+        ...(runId ? [{ kind: 'run', id: runId, instance: 'shop', label: 'run', href: `/runs/${runId}` }] : []),
+        ...(ev ? [{ kind: 'event', id: String(ev), instance: 'shop', label: `event ${ev}`, href: `/events/${ev}` }] : []),
+      ],
+      unknownCitations: [],
+      issueDraft: { ok: true, title: 'Round invoice totals to the cent', body, labels: ['ready'] },
+      actions: [
+        ...(decision ? [{ kind: 'decision', id: decision.id, answer: decision.options[0], confirm: 'decision.answer', why: 'the evaluator recommends it' }] : []),
+        { kind: 'settings', key: 'workers', value: 3, confirm: 'settings.change', why: 'three ready issues wait' },
+      ],
+      refusedActions: [],
+      readOnly: false,
+      costUsd: 0.08,
+    },
+  });
+}
+
 let hub = null;
 if (hubMod && stateDir) {
   hub = await serve(['--hub', `shop=${stateDir}`, '--port', String(port + 1)]);
@@ -197,10 +228,12 @@ const pages = [
   ['logs', '/logs'],
   ['settings', '/settings'],
   ...(runId ? [['run-detail', `/runs/${runId}`]] : []),
+  ...(chatId ? [['chat', `/issues?chat=${chatId}`]] : []),
 ];
 const shots = [
   ...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })),
   ...(hub ? [{ name: 'hub-overview', url: `${hub.base}/`, token: hub.token }] : []),
+  ...(hub && chatId ? [{ name: 'hub-chat', url: `${hub.base}/?chat=${chatId}`, token: hub.token }] : []),
   ...(inst ? [{ name: 'instance-settings', url: `${inst.base}/settings`, token: inst.token }, { name: 'instance-activity', url: `${inst.base}/activity`, token: inst.token }] : []),
 ];
 
