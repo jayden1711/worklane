@@ -4,6 +4,7 @@ import { Command } from 'cmdk';
 import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { hub, hubInstance, selectInstance, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
+import { ChatPanel } from './components/ChatPanel';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
 import { InboxPage } from './pages/Inbox';
@@ -276,6 +277,7 @@ export function App() {
         {page}
       </main>
       <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
+      {state && <ChatPanel cli={state.brand.cli} />}
     </div>
   );
 }
