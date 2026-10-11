@@ -331,3 +331,15 @@ export function researchDoc(issue: { number: number; title: string }, r: Researc
   const text = [`# ${issue.title}`, '', `Research for #${issue.number}.`, '', r.report, '', '## Sources', '', ...r.sources.map((s) => `- [${s.title.replace(/[[\]]/g, '') || s.url}](${s.url})`), ''].join('\n');
   return { path: `docs/research/${slug}.md`, text };
 }
+
+/** A run's searches and fetches (refusals included), from the events, for its run page. */
+export function researchForRun(events: { type: string; payload: unknown }[], run: string): { searches: string[]; fetches: { url: string; host: string; refused: string | null }[] } {
+  const out = { searches: [] as string[], fetches: [] as { url: string; host: string; refused: string | null }[] };
+  for (const e of events) {
+    const p = e.payload as { run?: string | null; query?: string; url?: string; host?: string; refused?: string | null };
+    if (p.run !== run) continue;
+    if (e.type === 'research.searched') out.searches.push(String(p.query ?? ''));
+    else if (e.type === 'research.fetched') out.fetches.push({ url: String(p.url ?? ''), host: String(p.host ?? ''), refused: p.refused ?? null });
+  }
+  return out;
+}

@@ -55,6 +55,8 @@ export interface RunRequest {
   env?: Record<string, string>;
   /** The issue this run works on, for its run record; read from the worktree or task file name when unset. */
   issue?: number;
+  /** Every stream-json line of the session, as it arrives (the same stream the run record and the live feed read). */
+  onLine?: (line: unknown) => void;
 }
 
 export interface RunResult {
@@ -436,6 +438,7 @@ export class CliRunner implements AgentRunner {
           record?.line(j);
           feed?.line(j);
           refusals.line(j);
+          req.onLine?.(j);
           if (j.type === 'result') {
             result = j as ResultLine;
             turnEnded();
