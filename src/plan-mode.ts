@@ -78,10 +78,13 @@ export function planExtra(): string[] {
 
 const bullets = (xs: string[]) => xs.map((x) => `- ${x}`).join('\n');
 
-/** The plan as posted on the issue, with how to object. */
-export function planComment(plan: Plan, owner: string): string {
+/** The plan as posted on the issue: the build starts now (with how to object), or it waits for approval (`held`). */
+export function planComment(plan: Plan, owner: string, held: string[] = []): string {
+  const head = held.length
+    ? `[${BRAND.cli}] Plan for this issue (it is size:M/L, so it is planned before building). @${owner} it waits for your approval before anything is built, because ${held.join('; ')}.`
+    : `[${BRAND.cli}] Plan for this issue (it is size:M/L, so it is planned before building). The build starts now with this plan; @${owner} if it's wrong, reply \`/${BRAND.cli} object <why>\` and the task stops before its next step.`;
   return [
-    `[${BRAND.cli}] Plan for this issue (it is size:M/L, so it is planned before building). The build starts now with this plan; @${owner} if it's wrong, reply \`/${BRAND.cli} object <why>\` and the task stops before its next step.`,
+    head,
     '',
     `**Approach.** ${plan.approach}`,
     '',
