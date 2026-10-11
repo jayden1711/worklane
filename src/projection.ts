@@ -176,6 +176,16 @@ export function summarize(e: StoredEvent): string {
       return `report posted (${p.slot})`;
     case 'nightly.queued':
       return 'nightly runs queued';
+    case 'console.message_queued':
+      return `message for the ${p.role} from @${p.by}, held until its turn ends`;
+    case 'console.message_delivered':
+      return `message delivered to the ${p.role}`;
+    case 'console.message_dropped':
+      return `message to the ${p.role} dropped: the run ended first`;
+    case 'console.run_stopped':
+      return `${p.role} stopped by @${p.by} from the console`;
+    case 'console.request_refused':
+      return `console request refused: ${p.why}`;
     case 'settings.changed':
       return `setting ${p.key}: ${settingText(p.from)} → ${settingText(p.to)}, by @${p.by}`;
     default:
