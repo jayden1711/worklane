@@ -86,6 +86,9 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const g = withFrozen(cfg.guardrails, taskFile);
     if ('error' in g) return decide('deny', `the task file ${taskFile} can't be read (${g.error}), so the task's frozen files can't be protected; refusing every call until it can`);
     guardrails = g.guardrails;
+    // Hosts the owner allowed for this one run ("allow once"), set by the runner for this session only.
+    const once = (env[`${BRAND.envPrefix}_ALLOW_HOSTS`] ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+    if (once.length) guardrails = { ...guardrails, network: { ...guardrails.network, allow: [...guardrails.network.allow, ...once] } };
   }
   const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
   if (v.decision === 'none') {

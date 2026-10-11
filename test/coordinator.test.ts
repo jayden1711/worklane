@@ -329,6 +329,84 @@ test('with separate users, task files go to the agents\' read-only task director
   }
 });
 
+// ---- unknown-domain requests
+
+/** A task whose worker was refused a host and stops (blocked), so the owner's answer can be acted on later. */
+function refusedTask() {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Use the rates API', body: 'Read the rates from new.example.org.\n\n```done_when\n- test: test/price.test.js\n```\n', author: 'example-owner', labels: ['ready'] });
+  const refused = [{ host: 'new.example.org', tool: 'WebFetch', what: 'https://new.example.org/rates' }];
+  const normal = agents();
+  const workers: RunRequest[] = [];
+  const runner = new FakeRunner(async (req) => {
+    if (req.role !== 'worker') return normal.run(req);
+    workers.push(req);
+    return { structured: { summary: 's', blocked: 'needs new.example.org' }, refusedHosts: refused };
+  });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const rerun = async () => {
+    f.backlog.removeLabel(n, 'blocked');
+    f.backlog.addLabels(n, ['ready']);
+    await c.tick();
+    await c.idle();
+  };
+  const answer = async (a: string) => {
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} ${a}`);
+    await c.tick();
+  };
+  return { f, n, c, workers, rerun, answer };
+}
+
+test("unknown domain: a refused host is recorded once per task and asked of the owner, deny recommended; nothing is widened", { skip }, async () => {
+  const t = refusedTask();
+  await t.c.tick();
+  await t.c.idle();
+  const req = lastOf(t.f.log, 'network.domain_requested') as { issue: number; host: string; role: string; tool: string; decision: string };
+  assert.deepEqual([req.issue, req.host, req.role, req.tool], [t.n, 'new.example.org', 'worker', 'WebFetch']);
+  const asked = lastOf(t.f.log, 'decision.asked') as { id: string; kind: string; options: string[]; recommendation: string };
+  assert.deepEqual([asked.id, asked.kind, asked.options, asked.recommendation], [req.decision, 'domain', ['allow-repo', 'allow-once', 'deny'], 'deny']);
+  assert.ok((await t.f.backlog.comments(t.n)).some((x) => /decision needed: \*\*Allow agents to reach new\.example\.org\?\*\*/.test(x.body)));
+  await t.rerun(); // refused again on the next run: not asked twice
+  assert.equal(t.f.log.read(0, ['network.domain_requested']).length, 1);
+  assert.equal(git(t.f.remote, 'branch', '--list', `${BRAND.cli}/allow-*`), '', 'no config change without an answer');
+});
+
+test('unknown domain: allow-repo opens the guardrails change as a pull request; main is untouched', { skip }, async () => {
+  const t = refusedTask();
+  await t.c.tick();
+  await t.c.idle();
+  const mainBefore = git(t.f.remote, 'rev-parse', 'main');
+  await t.answer('allow-repo');
+  const d = lastOf(t.f.log, 'network.domain_decided') as { answer: string; pr: string | null; by: string };
+  assert.deepEqual([d.answer, d.by], ['allow-repo', 'example-owner']);
+  assert.ok(d.pr, 'a pull request');
+  const branch = `${BRAND.cli}/allow-new.example.org`;
+  assert.match(git(t.f.remote, 'show', `${branch}:${BRAND.configDir}/guardrails.yaml`), /new\.example\.org/);
+  assert.equal(git(t.f.remote, 'rev-parse', 'main'), mainBefore, 'never widened in place');
+  assert.ok(t.f.backlog.prs().some((p) => p.head === branch && p.title === 'Allow agents to reach new.example.org'));
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['network.domain_decided']).length, 1, 'acted on once');
+});
+
+test("unknown domain: allow-once lets the task's next run reach the host, and only that run; deny changes nothing", { skip }, async () => {
+  const t = refusedTask();
+  await t.c.tick();
+  await t.c.idle();
+  await t.answer('allow-once');
+  await t.rerun();
+  assert.deepEqual(t.workers.at(-1)!.allowOnce, ['new.example.org']);
+  await t.rerun();
+  assert.equal(t.workers.at(-1)!.allowOnce, undefined, 'used up by the run it was for');
+
+  const u = refusedTask();
+  await u.c.tick();
+  await u.c.idle();
+  await u.answer('deny');
+  assert.equal((lastOf(u.f.log, 'network.domain_decided') as { answer: string; pr: string | null }).pr, null);
+  await u.rerun();
+  assert.equal(u.workers.at(-1)!.allowOnce, undefined);
+});
+
 test('two coordinators on one repo: only one claims the issue', { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });

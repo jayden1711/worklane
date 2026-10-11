@@ -12,11 +12,18 @@ import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
+import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
+import { allowedDomainsOf, withAllowedDomains } from './sandbox.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'stopped';
 
 export interface RunRequest {
   role: string;
+  /**
+   * Hosts the owner allowed for this one run (an "allow once" answer): added to the sandbox's allowedDomains
+   * for this run's commands, and to the hook's WebFetch allowlist through the environment. Never kept.
+   */
+  allowOnce?: string[];
   /** Coordinator's project state dir; hooks in the agent's session log there. */
   stateDir?: string;
   prompt: string;
@@ -60,6 +67,8 @@ export interface RunResult {
   sessionId?: string;
   /** The run kept failing on an auth or transient error (token refresh, rate limit, overload, network), not on the task. */
   transient?: boolean;
+  /** Hosts the run was refused (outside its allowlist), each once: for the owner to decide on. */
+  refusedHosts?: RefusedRequest[];
 }
 
 /**
@@ -326,6 +335,7 @@ export class CliRunner implements AgentRunner {
       [`${BRAND.envPrefix}_ROLE`]: req.role,
       ...(req.taskFile ? { [`${BRAND.envPrefix}_TASK_FILE`]: req.taskFile } : {}),
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),
+      ...(req.allowOnce?.length ? { [`${BRAND.envPrefix}_ALLOW_HOSTS`]: req.allowOnce.join(',') } : {}),
     });
     const laneName = req.lane ?? 'default';
     const lane = this.lanes?.[laneName];
@@ -353,8 +363,12 @@ export class CliRunner implements AgentRunner {
     const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) }) : null;
     // The live view of the same run, under the record's id: redacted and capped, ended when the run ends.
     const feed = record && req.stateDir ? new RunFeed(req.stateDir, { run: record.id, issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model, cwd: req.cwd }) : null;
+    // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
+    const settings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
+    // Requests refused for the network, from the same stream the record and the feed read.
+    const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     return new Promise((resolve) => {
-      const argv = cliArgs(req, lane?.settings, systemPromptFile);
+      const argv = cliArgs(req, settings, systemPromptFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
       const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
@@ -421,6 +435,7 @@ export class CliRunner implements AgentRunner {
           }
           record?.line(j);
           feed?.line(j);
+          refusals.line(j);
           if (j.type === 'result') {
             result = j as ResultLine;
             turnEnded();
@@ -445,7 +460,8 @@ export class CliRunner implements AgentRunner {
         const r = result as ResultLine | null;
         const model = Object.keys(r?.modelUsage ?? {})[0] ?? req.model;
         const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}) };
-        const done = (out: RunResult) => {
+        const done = (o: RunResult) => {
+          const out: RunResult = refusals.refused.length ? { ...o, refusedHosts: refusals.refused } : o;
           record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}) });
           feed?.end({ reason: out.reason, costUsd: out.costUsd, turns: out.turns });
           resolve(out);
