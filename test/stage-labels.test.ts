@@ -30,7 +30,8 @@ test('one judge call per failed run: no tools, only the judge labels in the sche
   assert.deepEqual(req.allowedTools, []);
   assert.ok(req.disallowedTools!.includes('Bash') && req.disallowedTools!.includes('WebFetch') && req.disallowedTools!.includes('Read'));
   assert.deepEqual((req.jsonSchema as { properties: { stage: { enum: string[] } } }).properties.stage.enum, [...JUDGE_STAGES]);
-  assert.doesNotMatch(req.prompt, /- verification:|- environment\/harness:/, 'the code-set labels are never offered');
+  assert.doesNotMatch(req.prompt, /- environment\/harness:/, 'the code-only label is never offered');
+  assert.match(req.prompt, /- verification: it ran the checks but misread or ignored/);
   assert.match(req.prompt, /tests failed/);
   assert.match(req.prompt, /EARLIEST/);
 });
@@ -49,8 +50,25 @@ test('environment/harness is set in code for a startup-failure, transient-retry,
 test("verification is set in code when the run ran none of the done_when commands, with no judge call; even over the cap", async () => {
   const { runner, calls } = judge({});
   const l = await labelFailedRun(run('r', { doneWhen: ['npm run typecheck', 'node --test test/a.test.js'], commands: ['git status', 'npm run build'] }), { runner, cwd: '/tmp', allowed: () => false });
-  assert.deepEqual([l?.stage, l?.by], ['verification', 'code']);
+  assert.deepEqual([l?.stage, l?.by, l?.reason], ['verification', 'code', "the run didn't run any of the issue's done_when commands"]);
   assert.equal(calls.length, 0);
+});
+
+test("the judge's answer can't remove the code label: a judge that would say otherwise is never asked", async () => {
+  const { runner, calls } = judge({ r: { stage: 'wrong files', reason: 'the judge would say this' } });
+  const ranNothing = run('r', { doneWhen: ['npm test'], commands: ['npm run build'] });
+  const l = await labelFailedRun(ranNothing, { runner, ...always });
+  assert.deepEqual([l?.stage, l?.by], ['verification', 'code']);
+  const [batch] = await labelFailedRuns([ranNothing], { runner, ...always });
+  assert.deepEqual([batch?.stage, batch?.by], ['verification', 'code']);
+  assert.equal(calls.length, 0);
+});
+
+test('a run that ran its checks can still get verification from the judge (misread or ignored the results)', async () => {
+  const { runner, calls } = judge({ r: { stage: 'verification', reason: 'npm test failed and the final message says it passed' } });
+  const l = await labelFailedRun(run('r', { doneWhen: ['npm test'], commands: ['npm test'] }), { runner, ...always });
+  assert.deepEqual([l?.stage, l?.by], ['verification', 'judge']);
+  assert.equal(calls.length, 1);
 });
 
 test('a run that ran a done_when command (any line, spacing aside), or an issue without done_when commands, goes to the judge', () => {
@@ -58,8 +76,8 @@ test('a run that ran a done_when command (any line, spacing aside), or an issue 
   assert.equal(codeStage(run('r', { doneWhen: [], commands: [] })), null);
 });
 
-test('an answer outside the judge labels (a code-set one included), or a failed judge run, is no label', async () => {
-  for (const stage of ['bad luck', 'verification', 'environment/harness']) {
+test('an answer outside the judge labels (the code-only one included), or a failed judge run, is no label', async () => {
+  for (const stage of ['bad luck', 'environment/harness']) {
     const { runner } = judge({ r1: { stage, reason: 'x' } });
     assert.equal(await labelFailedRun(run('r1'), { runner, ...always }), null, stage);
   }

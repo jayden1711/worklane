@@ -1,22 +1,23 @@
 // The earliest failed stage of a failed or rejected run, for the weekly failure-mode report (grouped by stage and
 // instance); a label never changes anything by itself. Two labels are facts the harness already has, so code sets
 // them and no model is asked: environment/harness when the run has a startup-failure, transient-retry, stuck or
-// console-stop event, and verification when the run never ran any of its done_when commands. Every other failed
-// run gets one cheap judge call that picks among the remaining labels; the judge reads only the run's redacted
-// record, never the repo or the web, and every call counts against the day's cap.
+// console-stop event, and verification when the run never ran any of its done_when commands. The judge can neither
+// set nor clear those. Every other failed run gets one cheap judge call; it may still say verification for a run
+// that ran its checks but misread or ignored the results. The judge reads only the run's redacted record, never the
+// repo or the web, and every call counts against the day's cap.
 import type { AgentRunner, RunRequest } from './runner.js';
 
 export const STAGES = ['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness'] as const;
 export type Stage = (typeof STAGES)[number];
 
-/** The labels the judge picks from: the two set in code are never the judge's. */
-export const JUDGE_STAGES = ['wrong files', 'right files, wrong place', 'wrong or incomplete change'] as const satisfies readonly Stage[];
+/** The labels the judge picks from. environment/harness is code's alone; verification is the judge's only for a run that ran its checks. */
+export const JUDGE_STAGES = ['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification'] as const satisfies readonly Stage[];
 
 export const STAGE_HINTS: Record<Stage, string> = {
   'wrong files': 'it changed files that are not where the problem is',
   'right files, wrong place': 'the right files, but the change is in the wrong function or lines',
   'wrong or incomplete change': 'the right place, but the change is wrong or only part of what was needed',
-  verification: "it didn't run the checks",
+  verification: 'it ran the checks but misread or ignored what they said',
   'environment/harness': 'the machine, a tool, a login, the sandbox or the harness itself failed, not the change',
 };
 
