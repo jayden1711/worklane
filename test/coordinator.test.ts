@@ -194,6 +194,23 @@ test('issues without a contract, or from outsiders, are never started', { skip }
   assert.equal(f.log.read(0, ['issue.seen']).length, before);
 });
 
+test('the core budget: {cores} is filled in for the coordinator\'s checks (env and command) and the agent\'s session', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.env = { WORKERS: '{cores}' };
+  f.cfg.tests.cores = { reserve: 0, min: 2, max: 2 }; // exactly 2 on any machine
+  const seen = join(mkdtempSync(join(tmpdir(), 'cores-')), 'seen.txt');
+  const check = `node -e "require('fs').writeFileSync(process.argv[1], (process.env.WORKERS || 'unset') + ' ' + process.argv[2])" ${JSON.stringify(seen)} {cores}`;
+  const body = `Orders with a zero quantity are counted.\n\n\`\`\`done_when\n- command: |-\n    ${check}\n\`\`\`\n`;
+  f.backlog.open({ title: 'Totals count zero quantities', body, author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(readFileSync(seen, 'utf8'), '2 2', 'the check got WORKERS=2 and the argument 2');
+  const worker = runner.calls.find((r) => r.role === 'worker');
+  assert.equal(worker?.env?.WORKERS, '2', 'the agent session too');
+});
+
 test('a refused issue is judged again when its done_when is edited: still invalid gets the new error; valid is claimed', { skip }, async () => {
   const f = fixture();
   const body = (yaml: string) => `Orders with a zero quantity are counted.\r\n\r\n\`\`\`done_when\r\n${yaml}\r\n\`\`\`\r\n`;

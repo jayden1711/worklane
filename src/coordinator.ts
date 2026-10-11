@@ -16,6 +16,7 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached, writeAgentReadable, writeGroupOnly } from './os/index.js';
+import { currentCoreShare, envWithCores, withCores } from './cores.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
@@ -128,7 +129,11 @@ export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator {
   private readonly remote: string;
-  private readonly wt: WorktreeOptions;
+  /** Where task worktrees go and how they're set up; the project's env is filled in when each one is made. */
+  private readonly wtBase: WorktreeOptions;
+  private get wt(): WorktreeOptions {
+    return { ...this.wtBase, env: this.projectEnv() };
+  }
   private active = new Map<number, Promise<void>>();
   /** The hotspot files each running task is expected to change. */
   private taskHotspots = new Map<number, string[]>();
@@ -220,12 +225,23 @@ export class Coordinator {
     };
     this.repoCfg = d.cfg;
     this.remote = d.remote ?? 'origin';
-    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+    this.wtBase = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+  }
+
+  /** This task's share of the machine's cores right now: the cores over the agents running (cores.ts). */
+  private coreShare(): number {
+    return currentCoreShare(this.d.cfg.tests.cores, this.d.slotsDir);
+  }
+
+  /** The project's env (tests.yaml env) as a command or session starting now gets it: `{cores}` filled in. */
+  private projectEnv(): Record<string, string> {
+    return envWithCores(this.d.cfg.tests.env, this.coreShare());
   }
 
   /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
   private project(command: string, cwd: string) {
-    return sh(command, cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, this.d.cfg.tests.env);
+    const share = this.coreShare();
+    return sh(withCores(command, share), cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share));
   }
 
   private get branch() {
@@ -779,7 +795,7 @@ export class Coordinator {
     const role = this.d.cfg.agents.roles.workers!;
     const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'investigator',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -829,7 +845,7 @@ export class Coordinator {
     try {
       const role = this.d.cfg.agents.roles.evaluator!;
       const r = await this.d.runner.run({
-        env: this.d.cfg.tests.env,
+        env: this.projectEnv(),
         role: 'evaluator-repro',
         stateDir: this.d.stateDir,
         prompt: issueBrief(issue, doneWhen),
@@ -890,7 +906,7 @@ export class Coordinator {
     const before = this.git(path, 'rev-parse', 'HEAD');
     const started = Date.now();
     const r: RunResult = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -1168,7 +1184,7 @@ export class Coordinator {
       ...(opts.extra ?? []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'evaluator-verdict',
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, extra),
@@ -1261,7 +1277,7 @@ export class Coordinator {
     const note = decided?.answer === 'revise' ? decided.note : null;
     const workers = this.d.cfg.agents.roles.workers!;
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'planner',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -2167,7 +2183,7 @@ export class Coordinator {
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -2482,7 +2498,7 @@ export class Coordinator {
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,

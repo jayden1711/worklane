@@ -15,7 +15,7 @@ export interface CoreBudget {
   /** Never fewer than this per task. */
   min: number;
   /** Never more than this per task (absent: no cap beyond the machine). */
-  max?: number;
+  max?: number | undefined;
 }
 
 export const DEFAULT_CORE_BUDGET: CoreBudget = { reserve: 0, min: 1 };
