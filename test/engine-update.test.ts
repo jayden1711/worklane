@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { updateLog, updateSettings } from '../src/updates.js';
 import { repoRoot } from './helpers.js';
 
@@ -16,8 +16,11 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   evaluateChecks(runs: Run[], required: string[]): { ok: boolean; final?: boolean; reason?: string };
   quiet(e: { name: string; pid: number | null }[], alive: (p: number) => boolean): { quiet: boolean; why?: string };
   parseUnits(s: string): string[];
-  health(samples: { at: number; states: Record<string, string> }[], start: number, now: number): string;
-  buildCommand(url: string, sha: string): string[];
+  health(samples: { at: number; states: Record<string, string | { state: string; sub: string; restarts: number; result: string }> }[], start: number, now: number): string;
+  parseShow(s: string): { state: string; sub: string; restarts: number; result: string };
+  redact(s: string): string;
+  buildCommand(url: string, sha: string, state?: string): string[];
+  installTree(sha: string, opt?: string, buildDir?: string, owner?: string): void;
   run(deps: object): Promise<string>;
   BUILD_SCRIPT: string;
 };
@@ -107,7 +110,12 @@ function machine(over: Record<string, unknown> = {}) {
   const logs: Record<string, unknown>[] = [];
   let current = OLD;
   let clock = 0;
+  // Per installed commit, how its services behave: active, failed, or loop (crash loop: activating in auto-restart).
   const states: Record<string, string[]> = { [NEW]: ['active'], [OLD]: ['active'] };
+  let heldEntry: { sha: string; at: string; failed: string[] } | null = null;
+  let configAt = 0;
+  const show = (how: string) =>
+    how === 'failed' ? 'ActiveState=failed\nSubState=failed\nNRestarts=0\nResult=exit-code\n' : how === 'loop' ? 'ActiveState=activating\nSubState=auto-restart\nNRestarts=2\nResult=exit-code\n' : 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n';
   const deps = {
     config: () => ({ enabled: true, repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'] }),
     installed: () => current,
@@ -115,7 +123,9 @@ function machine(over: Record<string, unknown> = {}) {
       calls.push([file, ...args].join(' ').slice(0, 80));
       if (file === 'git') return `${NEW}\trefs/heads/main\n`;
       if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-x.service loaded active running x\nworklane-dashboard-x.service loaded active running y\n';
-      if (file === 'systemctl' && args[0] === 'show') return `${(states[current] ?? ['active'])[0]}\n`;
+      if (file === 'systemctl' && args[0] === 'show' && args.includes('ExecMainStatus')) return '126\n';
+      if (file === 'systemctl' && args[0] === 'show') return show((states[current] ?? ['active'])[0]!);
+      if (file === 'journalctl') return `${'x'.repeat(6000)}\nworklane[1]: Failed to execute /usr/local/bin/worklane: Permission denied\nGH_TOKEN=ghs_${'a'.repeat(36)}\n`;
       return '';
     },
     fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', ahead_by: 1, behind_by: 0 } : { check_runs: [ok('test')] }),
@@ -130,11 +140,16 @@ function machine(over: Record<string, unknown> = {}) {
     sleep: async (ms: number) => {
       clock += ms;
     },
-    log: (e: Record<string, unknown>) => logs.push(e),
+    log: (e: Record<string, unknown>) => logs.push({ ...e, clock }),
+    held: () => heldEntry,
+    hold: (e: { sha: string; at: string; failed: string[] }) => {
+      heldEntry = e;
+    },
+    configChangedAt: () => configAt,
     note: (event: string, sha: string | null, reason: string) => (logs.push({ event, to: sha, reason }), event),
     ...over,
   };
-  return { deps, calls, logs, states, current: () => current };
+  return { deps, calls, logs, states, current: () => current, held: () => heldEntry, setConfigAt: (t: number) => (configAt = t), setCurrent: (sha: string) => (current = sha) };
 }
 
 test('run: off does nothing; up to date does nothing', async () => {
@@ -166,7 +181,7 @@ test('run: a service that doesn\'t come up rolls back to the previous engine and
   assert.equal(last.from, NEW);
   assert.equal(last.to, OLD);
   assert.equal(last.back, 'healthy');
-  assert.deepEqual(last.failed, ['worklane-x.service: failed', 'worklane-dashboard-x.service: failed']);
+  assert.deepEqual(last.failed, ['worklane-x.service: failed (failed), exit-code', 'worklane-dashboard-x.service: failed (failed), exit-code']);
   assert.deepEqual(m.calls.filter((c) => c.startsWith('switchTo')), ['switchTo bbbb', 'switchTo aaaa']);
 });
 
@@ -185,6 +200,123 @@ test('run: refuses a non-fast-forward, a skipped or failed required check; waits
     assert.match(String(m.logs.at(-1)!.reason), why);
     assert.ok(!m.calls.some((c) => c.startsWith('systemd-run') || c.startsWith('switchTo')), `${why.source}: nothing built or switched`);
   }
+});
+
+test('a rolled-back commit is held: not tried again until a newer commit, or updates are turned off and on after it', async () => {
+  const m = machine();
+  m.states[NEW] = ['failed'];
+  assert.equal(await u.run(m.deps), 'rolled_back');
+  const held = m.held()!;
+  assert.equal(held.sha, NEW);
+  assert.deepEqual(held.failed, ['worklane-x.service: failed (failed), exit-code', 'worklane-dashboard-x.service: failed (failed), exit-code']);
+  assert.equal(m.logs.at(-1)!.held, true);
+  // Ten minutes later: the same commit is skipped, logged once as held, and nothing is built.
+  const before = m.calls.length;
+  assert.equal(await u.run(m.deps), 'held');
+  assert.equal(m.logs.at(-1)!.event, 'held');
+  assert.match(String(m.logs.at(-1)!.reason), /rolled back at .*held until a newer commit, or until updates are turned off and on again/);
+  assert.ok(!m.calls.slice(before).some((c) => c.startsWith('systemd-run') || c.startsWith('switchTo')));
+  // Turning updates off and on (updates.json written after the rollback) releases it.
+  m.setConfigAt(Date.parse(held.at) + 1000);
+  m.states[NEW] = ['active'];
+  assert.equal(await u.run(m.deps), 'installed');
+});
+
+test('a newer commit than the held one is tried', async () => {
+  const NEWER = 'c'.repeat(40);
+  const m = machine({
+    exec: (file: string, args: string[]) => (file === 'git' ? `${NEWER}\trefs/heads/main\n` : machine().deps.exec(file, args)),
+    held: () => ({ sha: NEW, at: new Date(0).toISOString(), failed: [] }),
+  });
+  assert.equal(await u.run(m.deps), 'installed');
+});
+
+test('a rollback says why: each failing unit\'s result, exit status and journal tail, redacted and capped', async () => {
+  const m = machine();
+  m.states[NEW] = ['failed'];
+  await u.run(m.deps);
+  const d = m.logs.at(-1)!.diagnosis as { unit: string; result: string; status: string; restarts: number; journal: string }[];
+  assert.deepEqual(d.map((x) => [x.unit, x.result, x.status]), [['worklane-x.service', 'exit-code', '126'], ['worklane-dashboard-x.service', 'exit-code', '126']]);
+  assert.match(d[0]!.journal, /Failed to execute \/usr\/local\/bin\/worklane: Permission denied/);
+  assert.doesNotMatch(d[0]!.journal, /ghs_a{36}/, 'the token is redacted');
+  assert.match(d[0]!.journal, /GH_TOKEN=\[redacted\]/);
+  assert.ok(d[0]!.journal.length <= 4001, 'capped');
+  assert.ok(m.calls.some((c) => c.startsWith('journalctl -u worklane-x.service -n 30 --no-pager')));
+});
+
+test('a crash loop rolls back at once, not after the full 2-minute window', async () => {
+  const m = machine();
+  m.states[NEW] = ['loop'];
+  assert.equal(await u.run(m.deps), 'rolled_back');
+  const rolled = m.logs.find((l) => l.event === 'rolled_back')!;
+  // The new engine's services were judged on the first sample; the rest of the clock is the old engine settling.
+  assert.ok((rolled.clock as number) <= 60_000, `rolled back by ${rolled.clock} ms`);
+  assert.deepEqual(rolled.failed, ['worklane-x.service: activating (auto-restart), exit-code, 2 restarts', 'worklane-dashboard-x.service: activating (auto-restart), exit-code, 2 restarts']);
+});
+
+test('health: restarts, auto-restart, or a failed result while not active are a crash loop; a stale result on an active unit is not', () => {
+  const unit = (state: string, extra: Partial<{ sub: string; restarts: number; result: string }> = {}) => ({ state, sub: '', restarts: 0, result: 'success', ...extra });
+  assert.equal(u.health([{ at: 0, states: { a: unit('activating') } }, { at: 5_000, states: { a: unit('activating', { restarts: 1 }) } }], 0, 5_000), 'failed', 'restarted since the first sample');
+  assert.equal(u.health([{ at: 0, states: { a: unit('activating', { sub: 'auto-restart' }) } }], 0, 0), 'failed');
+  assert.equal(u.health([{ at: 0, states: { a: unit('activating', { result: 'exit-code' }) } }], 0, 0), 'failed');
+  assert.equal(u.health([{ at: 0, states: { a: unit('active', { result: 'exit-code' }) } }], 0, 0), 'wait', 'active now: the result is from before the restart');
+  assert.equal(u.health([{ at: 0, states: { a: unit('active', { restarts: 3 }) } }, { at: 31_000, states: { a: unit('active', { restarts: 3 }) } }], 0, 31_000), 'healthy', 'a restart count from before is the baseline');
+  assert.deepEqual(u.parseShow('ActiveState=activating\nSubState=auto-restart\nNRestarts=4\nResult=exit-code\n'), { state: 'activating', sub: 'auto-restart', restarts: 4, result: 'exit-code' });
+});
+
+test('redact: tokens, keys and secret assignments in a journal never reach the log', () => {
+  const text = [`token ghp_${'b'.repeat(36)}`, `Authorization: Bearer abcdefghijklmnop`, 'API_KEY=hunter2hunter2', 'password: "x y z"', '-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----', 'sk-ant-api03-abcdefghijk'].join('\n');
+  const r = u.redact(text);
+  for (const leak of ['ghp_', 'abcdefghijklmnop', 'hunter2', 'x y z', 'MIIE', 'sk-ant-api03']) assert.ok(!r.includes(leak), leak);
+});
+
+/** A built tree as tsc and npm leave it: the bin targets 0644, some files private. */
+function builtTree(bin: unknown) {
+  const root = mkdtempSync(join(tmpdir(), 'opt-'));
+  const opt = join(root, 'opt');
+  const build = join(root, 'build');
+  mkdirSync(opt);
+  mkdirSync(join(build, 'src', 'dist', 'src'), { recursive: true });
+  mkdirSync(join(build, 'src', 'dist', 'web'), { recursive: true });
+  mkdirSync(join(build, 'src', 'node_modules', 'dep'), { recursive: true });
+  writeFileSync(join(build, 'src', 'dist', 'src', 'cli.js'), '#!/usr/bin/env node\n', { mode: 0o644 });
+  writeFileSync(join(build, 'src', 'dist', 'src', 'other.js'), '#!/usr/bin/env node\n', { mode: 0o644 });
+  writeFileSync(join(build, 'src', 'dist', 'web', 'index.html'), '<html></html>', { mode: 0o600 });
+  writeFileSync(join(build, 'src', 'node_modules', 'dep', 'index.js'), '', { mode: 0o600 });
+  writeFileSync(join(build, 'src', 'package.json'), JSON.stringify({ name: 'x', bin }), { mode: 0o600 });
+  chmodSync(join(build, 'src', 'node_modules', 'dep'), 0o700);
+  return { opt, build, dest: join(opt, NEW), owner: `${process.getuid!()}:${process.getgid!()}` };
+}
+
+test('installTree: every package.json bin target is made 0755, and every file is readable by every user', { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const t = builtTree({ worklane: 'dist/src/cli.js', helper: 'dist/src/other.js' });
+  u.installTree(NEW, t.opt, t.build, t.owner);
+  for (const b of ['dist/src/cli.js', 'dist/src/other.js']) assert.equal(statSync(join(t.dest, b)).mode & 0o777, 0o755, `${b}: the services exec it through /usr/local/bin`);
+  for (const f of ['dist/web/index.html', 'node_modules/dep/index.js', 'package.json']) assert.equal(statSync(join(t.dest, f)).mode & 0o777, 0o644, f);
+  assert.equal(statSync(join(t.dest, 'node_modules', 'dep')).mode & 0o777, 0o755);
+  // An install left by the earlier updater (bin not executable) is redone, not skipped as already there.
+  chmodSync(join(t.dest, 'dist', 'src', 'cli.js'), 0o644);
+  u.installTree(NEW, t.opt, t.build, t.owner);
+  assert.equal(statSync(join(t.dest, 'dist', 'src', 'cli.js')).mode & 0o777, 0o755);
+  // A single-string bin counts too.
+  const s = builtTree('dist/src/cli.js');
+  u.installTree(NEW, s.opt, s.build, s.owner);
+  assert.equal(statSync(join(s.dest, 'dist', 'src', 'cli.js')).mode & 0o777, 0o755);
+});
+
+test('installTree refuses a tree whose bin target is missing, and run() switches nothing', { skip: process.platform === 'win32' && 'POSIX modes' }, async () => {
+  const t = builtTree({ worklane: 'dist/src/cli.js', gone: 'dist/src/gone.js' });
+  assert.throws(() => u.installTree(NEW, t.opt, t.build, t.owner), /can't be started: bin dist\/src\/gone\.js is missing/);
+  assert.ok(!existsSync(t.dest), 'nothing installed');
+  assert.deepEqual(readdirSync(t.opt), [], 'no temp tree left');
+  const m = machine({
+    installTree: () => {
+      throw new Error("the built tree can't be started: bin dist/src/cli.js is not executable (mode 644)");
+    },
+  });
+  assert.equal(await u.run(m.deps), 'build_failed');
+  assert.match(String(m.logs.at(-1)!.reason), /not executable/);
+  assert.ok(!m.calls.some((c) => c.startsWith('switchTo') || c.startsWith('systemctl restart')));
 });
 
 test('the installed updater\'s paths are fixed in its source', () => {
@@ -220,4 +352,58 @@ test('the dashboard\'s reader: settings and the log, torn lines skipped', () => 
   assert.equal(updateSettings(join(dir, 'none.json')), null);
   writeFileSync(join(dir, 'log'), `${JSON.stringify({ at: '1', event: 'installed', from: OLD, to: NEW })}\nnope\n${JSON.stringify({ at: '2', event: 'other' })}\n${JSON.stringify({ at: '3', event: 'rolled_back' })}\n`);
   assert.deepEqual(updateLog(join(dir, 'log')).map((e) => e.event), ['installed', 'rolled_back']);
+  writeFileSync(join(dir, 'log2'), `${JSON.stringify({ at: '4', event: 'held', to: NEW, reason: 'rolled back' })}\n`);
+  assert.deepEqual(updateLog(join(dir, 'log2')).map((e) => e.event), ['held'], 'held entries reach the dashboard');
+});
+
+// The real build and install, on a disposable Linux CI runner with systemd and passwordless sudo.
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
+const sudo = (args: string[], timeout = 120_000) => spawnSync('sudo', ['-n', ...args], { encoding: 'utf8', timeout });
+
+test('acceptance: built as a DynamicUser and installed, the engine is readable by and starts as other users, exec\'d through a symlink like the services do', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd', timeout: 30 * 60_000 }, (t) => {
+  const node = process.execPath;
+  if (sudo(['-u', 'nobody', node, '--version']).status !== 0) return t.skip(`nobody can't run ${node}`);
+  const id = `wl-acc-${process.pid}`;
+  const sha = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+  // The build unit has ProtectHome and a private /tmp, so its source repo lives under /var/lib.
+  const bare = join(mkdtempSync(join(tmpdir(), 'src-')), 'repo.git');
+  assert.equal(spawnSync('git', ['init', '-q', '--bare', bare]).status, 0);
+  assert.equal(spawnSync('git', ['-C', repoRoot, 'push', '-q', bare, 'HEAD:refs/heads/main']).status, 0);
+  const src = `/var/lib/${id}-src.git`;
+  const state = `${id}-build`;
+  const opt = `/var/lib/${id}-opt`;
+  const bin = `/var/lib/${id}-bin`;
+  const user = id;
+  try {
+    assert.equal(sudo(['cp', '-a', bare, src]).status, 0);
+    assert.equal(sudo(['chmod', '-R', 'a+rX', src]).status, 0);
+    // The dynamic user doesn't own the source repo: let git clone it (on this disposable runner only).
+    assert.equal(sudo(['git', 'config', '--system', '--add', 'safe.directory', src]).status, 0);
+    const build = sudo(u.buildCommand(`file://${src}`, sha, state), 25 * 60_000);
+    assert.equal(build.status, 0, `build: ${(build.stderr ?? '').slice(-2000)}`);
+    assert.equal(sudo(['install', '-d', '-o', 'root', '-g', 'root', '-m', '0755', opt, bin]).status, 0);
+    const install = sudo([node, '-e', `require(${JSON.stringify(updaterSrc)}).installTree(${JSON.stringify(sha)}, ${JSON.stringify(opt)}, ${JSON.stringify(`/var/lib/${state}`)})`]);
+    assert.equal(install.status, 0, `install: ${install.stderr}`);
+    const dest = join(opt, sha);
+    const cli = join(dest, 'dist', 'src', 'cli.js');
+    assert.equal(statSync(cli).mode & 0o777, 0o755);
+    assert.equal(statSync(cli).uid, 0, 'root-owned');
+    // /usr/local/bin/worklane points at current/dist/src/cli.js, and the units exec it directly.
+    assert.equal(sudo(['ln', '-s', cli, join(bin, 'worklane')]).status, 0);
+    assert.equal(sudo(['useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user]).status, 0);
+    for (const who of ['nobody', user]) {
+      const unreadable = sudo(['-u', who, 'find', join(dest, 'dist'), join(dest, 'node_modules'), join(dest, 'package.json'), '(', '-type', 'd', '!', '-executable', '-o', '!', '-readable', ')', '-print']);
+      assert.equal(unreadable.status, 0, unreadable.stderr);
+      assert.equal(unreadable.stdout.trim(), '', `${who} can't read: ${unreadable.stdout.slice(0, 500)}`);
+      assert.equal(sudo(['-u', who, 'test', '-x', join(bin, 'worklane')]).status, 0, `${who}: test -x`);
+      const help = sudo(['-u', who, 'env', `PATH=${dirname(node)}:/usr/bin:/bin`, join(bin, 'worklane'), '--help']);
+      assert.equal(help.status, 0, `${who}: exec through the symlink: ${help.stderr}`);
+      const imp = sudo(['-u', who, node, '-e', 'import(process.argv[1]).then(() => process.exit(0), (e) => { console.error(e); process.exit(1); })', join(dest, 'dist', 'src', 'service.js')]);
+      assert.equal(imp.status, 0, `${who}: import service.js: ${imp.stderr}`);
+    }
+  } finally {
+    sudo(['git', 'config', '--system', '--unset-all', 'safe.directory', src]);
+    sudo(['userdel', user]);
+    sudo(['rm', '-rf', src, opt, bin, `/var/lib/private/${state}`, `/var/lib/${state}`]);
+  }
 });
