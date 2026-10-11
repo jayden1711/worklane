@@ -33,6 +33,7 @@ import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, t
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
+import { throughput } from './throughput.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -102,6 +103,11 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 }
 
 export { mayAnswer };
+
+/** Who may read throughput (what runs cost, where PRs waited): the project's owner or one of its writers. */
+export function mayReadThroughput(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -514,6 +520,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
+      canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -677,6 +685,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
+        // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
+        // tuning each. The owner's and the writers' to read, like the runs it is made of.
+        if (url.pathname === '/api/throughput' && req.method === 'GET') {
+          const owners = opts.cfg.project.owners;
+          if (!mayReadThroughput(opts.user, owners)) return json(res, 403, { error: `throughput is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          return json(res, 200, throughput(readEvents(opts.eventsDb)));
+        }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;
           try {

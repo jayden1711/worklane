@@ -20,6 +20,8 @@ interface Render {
   renderIssue(state: State, issue: number): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
+  renderThroughput(t: unknown): string;
+  renderThroughputPanel(state: unknown): string;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
@@ -597,4 +599,43 @@ test('a chat proposal lands in its confirm flow: the setting filled in for revie
     loc.search = '';
     loc.hash = '';
   }
+});
+
+test('the throughput panel: merges, cost per merged PR by stage (zeros shown), the top costs with their tunings, and where PRs waited for the owner; refused to anyone else without asking', () => {
+  const stages = ['worker', 'evaluator', 'plan', 'research', 'intake', 'gardener', 'chat', 'retries', 'other'];
+  const usd: Record<string, number> = { worker: 2, evaluator: 2, plan: 0.5, research: 0.25, intake: 0.5, gardener: 0, chat: 0.75, retries: 4, other: 0 };
+  const t = {
+    since: '2026-10-08T12:00:00.000Z',
+    until: '2026-10-15T12:00:00.000Z',
+    merged: { total: 3, perDay: Array.from({ length: 14 }, (_, i) => ({ day: `2026-10-${String(2 + i).padStart(2, '0')}`, merged: i === 10 ? 2 : i === 12 ? 1 : 0 })), perWeek: [{ week: '2026-10-05', merged: 2 }, { week: '2026-10-12', merged: 2 }] },
+    cost: { totalUsd: 10, perMergedPrUsd: 3.33, byStage: stages.map((stage) => ({ stage, usd: usd[stage], perMergedPrUsd: Math.round((usd[stage]! / 3) * 100) / 100, share: usd[stage]! / 10 })), evaluatorOnL0Usd: 1.5 },
+    waits: [
+      { kind: 'merge', label: 'merging a PR the harness left to you', owner: true, count: 1, open: 0, medianHours: 10, totalHours: 10, reasons: [{ reason: 'touches a high-risk area', count: 1 }] },
+      { kind: 'decision:land', label: 'approving a change to land', owner: true, count: 1, open: 1, medianHours: 10, totalHours: 10, reasons: [] },
+      { kind: 'hotspot', label: 'held behind another task changing the same files (ends on its own)', owner: false, count: 1, open: 0, medianHours: 2, totalHours: 2, reasons: [] },
+    ],
+    top: [
+      { stage: 'retries', usd: 4, share: 0.4, suggestion: 'Retries are 40% of the spend: look at why first attempts fail.' },
+      { stage: 'worker', usd: 2, share: 0.2, suggestion: 'Worker runs cost $0.67 per merged PR: split size:L issues.' },
+      { stage: 'evaluator', usd: 2, share: 0.2, suggestion: '75% of evaluator spend is on L0 PRs: tiered evaluation.' },
+    ],
+  };
+  const html = r.renderThroughput(t);
+  assert.match(html, /data-testid="throughput-merged"[\s\S]*?>3</);
+  assert.match(html, /data-testid="throughput-per-pr"[\s\S]*?~\$3\.33[\s\S]*?~\$10 in all/);
+  assert.equal((html.match(/data-testid="throughput-day"/g) ?? []).length, 14);
+  assert.match(html, /title="2026-10-12: 2 merged"/, 'each day\'s bar says its count on hover');
+  assert.equal((html.match(/data-testid="throughput-week"/g) ?? []).length, 2);
+  assert.equal((html.match(/data-testid="throughput-stage"/g) ?? []).length, 9, 'every stage, gardener at zero included');
+  assert.match(html, /data-stage="gardener"[\s\S]*?~\$0\.00/);
+  assert.match(html, /data-stage="retries"[\s\S]*?Retries and fixes[\s\S]*?~\$1\.33[\s\S]*?~\$4\.00[\s\S]*?40%/);
+  assert.equal((html.match(/data-testid="throughput-suggestion"/g) ?? []).length, 3);
+  assert.match(html, /data-stage="retries"[^>]*>[\s\S]*?1\. Retries and fixes · ~\$4\.00 \(40%\)[\s\S]*?look at why first attempts fail/);
+  assert.equal((html.match(/data-testid="throughput-wait"/g) ?? []).length, 2, 'the owner\'s waits in the table');
+  assert.match(html, /data-kind="decision:land"[\s\S]*?1 waiting now/);
+  assert.match(html, /data-kind="merge"[\s\S]*?touches a high-risk area/);
+  assert.match(html, /data-testid="throughput-other-wait"[^>]*>Also: 1 task\(s\) held behind another task/);
+  assert.match(r.renderThroughput({ ...t, waits: [] }), /data-testid="throughput-no-waits"/);
+  assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.doesNotMatch(r.renderThroughputPanel(asOwner), /throughput-refused/);
 });
