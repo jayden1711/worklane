@@ -87,11 +87,17 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
   /** An agent's request to a host outside its allowlist was refused: once per issue and host, with the decision it raised. */
   'network.domain_requested': z.strictObject({ issue, host: z.string(), role: z.string(), run: z.string().nullable(), tool: z.string(), what: z.string(), decision: z.string() }),
   /** The owner's answer on a refused host: allow-repo (pr: the config change proposed), allow-once (the task's next run), or deny. */
   'network.domain_decided': z.strictObject({ issue, host: z.string(), decision: z.string(), answer: z.enum(['allow-repo', 'allow-once', 'deny']), by: z.string(), pr: z.string().nullable(), detail: z.string() }),
+  /** A size:M/L task's plan, posted on the issue: held for the owner's approval (decision) or built at once. */
+  'plan.posted': z.strictObject({ issue, plan: z.record(z.string(), z.unknown()), held: z.boolean(), reasons: z.array(z.string()), comments_at: z.number().int().nonnegative(), decision: z.string().nullable() }),
+  /** The owner's answer on a held plan: approve builds it, revise plans again with the note, reject stops the task. */
+  'plan.decided': z.strictObject({ issue, decision: z.string(), answer: z.enum(['approve', 'revise', 'reject']), by: z.string(), note: z.string() }),
+  /** The owner (or a writer) objected to a plan that was built at once: the task stopped. */
+  'plan.objected': z.strictObject({ issue, by: z.string(), why: z.string() }),
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),

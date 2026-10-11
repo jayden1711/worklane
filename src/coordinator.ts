@@ -23,6 +23,7 @@ import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type Ru
 import { MAX_MESSAGE, takeRequests, writeLive, type PendingMessage } from './console.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { allowedOnce, domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from './domain-requests.js';
+import { needsPlan, objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
 import { abortMerge, changedFiles, mergeBaseInto } from './merge-base.js';
@@ -633,6 +634,17 @@ export class Coordinator {
 
       if (issue.labels.includes('type:investigation')) return await this.investigate(issue, doneWhen, path, taskFile, base, owner);
 
+      // size:M/L: a read-only plan first. One that touches high-risk or design-level areas waits for the owner's
+      // approval (the task stops here and resumes on the answer); any other is posted and built at once.
+      let plan: Plan | null = null;
+      let planComments = 0;
+      if (needsPlan(issue.labels)) {
+        const p = await this.planStep(issue, doneWhen, path, base, owner);
+        if ('stop' in p) return;
+        plan = p.plan;
+        planComments = p.commentsAt;
+      }
+
       const repro = doneWhen.some((d) => 'repro' in d && d.repro) ? await this.reproduce(issue, doneWhen, base, path) : null;
       // The frozen test is off-limits to the worker: its hook denies writes to it.
       if (repro?.path) this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] });
@@ -641,7 +653,8 @@ export class Coordinator {
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
       let refused: string[] | null = null;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt);
+        if (plan && (await this.planObjected(n, owner, planComments))) return;
+        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
         removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
@@ -675,6 +688,7 @@ export class Coordinator {
         if (verdict.patch_correct) await this.instructionEvals(n, path, base, head, change.files.map((f) => f.path));
         const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
         const lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
+        if (plan && (await this.planObjected(n, owner, planComments))) return;
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${verdict.unread.slice(0, 10).join(', ')}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
@@ -799,7 +813,7 @@ export class Coordinator {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number) {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
     const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
@@ -810,6 +824,7 @@ export class Coordinator {
       `When you finish, the coordinator runs each done_when check${checks.length ? `, then: ${checks.join('; ')}` : ''}.`,
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
       ...this.answers(n),
+      ...(plan ? ['', ...planBrief(plan)] : []),
       ...(feedback.length ? ['', ...feedback] : []),
     ];
     let pid = -1;
@@ -1136,7 +1151,7 @@ export class Coordinator {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  private async ask(kind: 'land' | 'question' | 'domain', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]): Promise<string> {
+  private async ask(kind: 'land' | 'question' | 'domain' | 'plan', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
@@ -1171,6 +1186,102 @@ export class Coordinator {
   // ---------------------------------------------------------------- decisions
 
   /** Decisions answered by CLI (decision.answered) or by a writer's `/<cli> <option>` comment. */
+  /**
+   * The plan for a size:M/L task. After the owner approved a held plan: that plan. Otherwise a read-only plan
+   * run (with the owner's note after a revise), posted on the issue; one touching high-risk or design-level
+   * areas is held as the owner's decision (the claim is released and the task stops: 'stop').
+   */
+  private async planStep(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, owner: string): Promise<{ plan: Plan; commentsAt: number } | { stop: true }> {
+    const n = issue.number;
+    const last = this.events(n).filter((e) => e.type === 'plan.posted' || e.type === 'plan.decided').at(-1);
+    const decided = last?.type === 'plan.decided' ? (last.payload as EventPayload<'plan.decided'>) : null;
+    if (decided?.answer === 'approve') {
+      const posted = this.events(n).filter((e) => e.type === 'plan.posted').at(-1)!.payload as EventPayload<'plan.posted'>;
+      return { plan: posted.plan as unknown as Plan, commentsAt: (await this.d.backlog.comments(n)).length };
+    }
+    const note = decided?.answer === 'revise' ? decided.note : null;
+    const workers = this.d.cfg.agents.roles.workers!;
+    const r = await this.d.runner.run({
+      env: this.d.cfg.tests.env,
+      role: 'planner',
+      ...laneOf(issue),
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, [...planExtra(), ...(note ? ['', `The owner asked for a revised plan: ${note}`] : [])]),
+      cwd: path,
+      model: workers.model,
+      allowedTools: PLAN_TOOLS,
+      disallowedTools: PLAN_DISALLOWED,
+      maxTurns: 60,
+      maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+      jsonSchema: PLAN_SCHEMA,
+      stallMs: 20 * 60_000,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'planner', model: workers.model, worktree: path, pid: p, pgid: p, attempt: 1 }),
+    });
+    this.cost(n, 'planner', r);
+    this.emit('run.finished', { issue: n, role: 'planner', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    if (r.reason !== 'succeeded') {
+      await this.block(n, owner, `the plan run ended: ${r.reason} (${r.detail.slice(0, 300)})`);
+      return { stop: true };
+    }
+    const plan = readPlan(r.structured);
+    if ('invalid' in plan) {
+      await this.block(n, owner, plan.invalid);
+      return { stop: true };
+    }
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const reasons = planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 });
+    await this.d.backlog.comment(n, planComment(plan, owner, reasons));
+    const commentsAt = (await this.d.backlog.comments(n)).length;
+    if (reasons.length) {
+      const d = planDecision(reasons);
+      const id = await this.ask('plan', n, owner, d.question, d.options, d.recommendation, d.receipts);
+      this.emit('plan.posted', { issue: n, plan: plan as unknown as Record<string, unknown>, held: true, reasons, comments_at: commentsAt, decision: id });
+      await this.d.backlog.removeLabel(n, 'agent:working');
+      this.releaseClaim(n, 'plan held for the owner');
+      return { stop: true };
+    }
+    this.emit('plan.posted', { issue: n, plan: plan as unknown as Record<string, unknown>, held: false, reasons: [], comments_at: commentsAt, decision: null });
+    return { plan, commentsAt };
+  }
+
+  /** An objection to a plan that is being built: the task stops (blocked, saying who objected and why). */
+  private async planObjected(n: number, owner: string, commentsAt: number): Promise<boolean> {
+    const o = objection(await this.d.backlog.comments(n), commentsAt, [owner, ...this.d.cfg.project.owners.writers]);
+    if (!o) return false;
+    this.emit('plan.objected', { issue: n, by: o.by, why: o.why.slice(0, 500) });
+    await this.block(n, owner, `@${o.by} objected to the plan: ${o.why}`);
+    return true;
+  }
+
+  /** The owner's answer on a held plan: approve and revise put the task back to ready; reject stops it. */
+  private async handlePlanDecision(askedId: number, q: EventPayload<'decision.asked'>, writers: Set<string>, cmd: RegExp) {
+    const n = q.issue!;
+    if (this.d.log.read(askedId, ['plan.decided']).some((e) => (e.payload as { decision: string }).decision === q.id)) return;
+    let a = this.d.log.read(askedId, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
+    let body = '';
+    if (!a) {
+      const reply = (await this.d.backlog.comments(n))
+        .filter((c) => writers.has(c.author.toLowerCase()))
+        .map((c) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
+        .filter((x) => x.m && q.options.includes(x.m[1]!))
+        .at(-1);
+      if (!reply) return;
+      body = reply.body;
+      a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.m![1]! }).payload;
+    }
+    const act = planAnswer(a.answer, body);
+    const answer = a.answer as PlanAnswer;
+    this.emit('plan.decided', { issue: n, decision: q.id, answer, by: a.by, note: act.act === 'replan' ? act.note.slice(0, 2000) : '' });
+    await this.d.backlog.removeLabel(n, 'needs:decision');
+    if (act.act === 'stop') {
+      await this.d.backlog.comment(n, `[${BRAND.cli}] @${a.by} rejected the plan; nothing is built.`);
+      return;
+    }
+    await this.d.backlog.addLabels(n, ['ready']);
+    await this.d.backlog.comment(n, `[${BRAND.cli}] @${a.by} ${act.act === 'build' ? 'approved the plan; the build starts with it' : `asked for a revised plan: ${act.note}`}.`);
+  }
+
   /** Each newly refused host for a task: recorded, and asked of the owner, once per task and host. */
   private async noteRefusedHosts(issue: number, role: string, run: string | null, refused: RefusedRequest[]) {
     const asked = new Set(this.d.log.read(0, ['network.domain_requested']).map((e) => e.payload as EventPayload<'network.domain_requested'>).filter((p) => p.issue === issue).map((p) => p.host));
@@ -1255,6 +1366,10 @@ export class Coordinator {
       if (q.issue === null) continue;
       if (q.kind === 'domain') {
         await this.handleDomainDecision(asked.id, q, writers, cmd);
+        continue;
+      }
+      if (q.kind === 'plan') {
+        await this.handlePlanDecision(asked.id, q, writers, cmd);
         continue;
       }
       const later = this.events(q.issue).filter((e) => e.id > asked.id);

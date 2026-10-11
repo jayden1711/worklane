@@ -329,6 +329,94 @@ test('with separate users, task files go to the agents\' read-only task director
   }
 });
 
+// ---- plan mode (size:M/L)
+
+const PLAN = { approach: 'Guard totals against non-positive quantities.', steps: ['Change the totals reducer', 'Run the price tests'], files: ['src/price.js'], risks: ['Callers relying on negative totals'], design_change: false };
+
+/** A size:M issue with a scripted planner; `worker` decides each build attempt. */
+function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequest) => object) {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready', 'size:M'] });
+  const runner = agents({ planner: planOf, ...(worker ? { worker } : {}) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const run = async () => {
+    await c.tick();
+    await c.idle();
+  };
+  const answer = async (text: string) => {
+    f.backlog.humanComment(n, 'example-owner', text);
+    await c.tick(); // the decision
+    await run(); // the task again, if it was put back to ready
+  };
+  const roles = () => runner.calls.map((r) => r.role);
+  return { f, n, c, runner, run, answer, roles };
+}
+
+test('plan mode: a size:M issue is planned read-only first, the plan posted, and the build proceeds at once with the plan in its brief', { skip }, async () => {
+  const t = plannedTask(() => PLAN);
+  await t.run();
+  const planner = t.runner.calls.find((r) => r.role === 'planner')!;
+  assert.ok(planner, 'a plan run');
+  assert.ok(planner.disallowedTools?.includes('Edit') && planner.disallowedTools?.includes('Write') && !planner.allowedTools.includes('Bash'), 'read-only');
+  assert.ok(t.roles().indexOf('planner') < t.roles().indexOf('worker'), 'planned before building');
+  const posted = lastOf(t.f.log, 'plan.posted') as { held: boolean; reasons: string[] };
+  assert.deepEqual([posted.held, posted.reasons], [false, []]);
+  assert.ok((await t.f.backlog.comments(t.n)).some((x) => /The build starts now with this plan/.test(x.body)));
+  assert.match(t.runner.calls.find((r) => r.role === 'worker')!.prompt, /1\. Change the totals reducer\n2\. Run the price tests/);
+  assert.equal(t.f.log.read(0, ['decision.asked']).filter((e) => (e.payload as { kind: string }).kind === 'plan').length, 0);
+});
+
+test('plan mode: a plan touching an L3 path is held for the owner and builds nothing until approved; then it builds with that plan', { skip }, async () => {
+  const t = plannedTask(() => ({ ...PLAN, files: ['migrations/002_orders.sql', 'src/price.js'] }));
+  await t.run();
+  const posted = lastOf(t.f.log, 'plan.posted') as { held: boolean; reasons: string[]; decision: string };
+  assert.deepEqual([posted.held, posted.reasons], [true, ['high-risk: migration (migrations/002_orders.sql)', 'design: new top-level module (migrations/)']]);
+  const asked = lastOf(t.f.log, 'decision.asked') as { id: string; kind: string; options: string[] };
+  assert.deepEqual([asked.id, asked.kind, asked.options], [posted.decision, 'plan', ['approve', 'revise', 'reject']]);
+  assert.ok(!t.roles().includes('worker'), 'nothing built');
+  await t.run();
+  assert.ok(!t.roles().includes('worker'), 'still nothing built while it waits');
+  await t.answer(`/${BRAND.cli} approve`);
+  assert.deepEqual((lastOf(t.f.log, 'plan.decided') as { answer: string }).answer, 'approve');
+  assert.equal(t.roles().filter((r) => r === 'planner').length, 1, 'the approved plan is built, not planned again');
+  assert.match(t.runner.calls.find((r) => r.role === 'worker')!.prompt, /migrations\/002_orders\.sql/);
+});
+
+test("plan mode: a design-level plan is held; revise plans again with the owner's note; reject builds nothing", { skip }, async () => {
+  let planned = 0;
+  const t = plannedTask(() => (++planned === 1 ? { ...PLAN, design_change: true, design_reason: 'adds a public --currency option' } : PLAN));
+  await t.run();
+  assert.deepEqual((lastOf(t.f.log, 'plan.posted') as { reasons: string[] }).reasons, ['design: the plan flagged a design change: adds a public --currency option']);
+  await t.answer(`/${BRAND.cli} revise keep the CLI as it is`);
+  assert.deepEqual([(lastOf(t.f.log, 'plan.decided') as { answer: string; note: string }).answer, (lastOf(t.f.log, 'plan.decided') as { note: string }).note], ['revise', 'keep the CLI as it is']);
+  const replanned = t.runner.calls.filter((r) => r.role === 'planner')[1]!;
+  assert.match(replanned.prompt, /The owner asked for a revised plan: keep the CLI as it is/);
+  assert.ok(t.roles().includes('worker'), 'the revised plan was ordinary: built at once');
+
+  const u = plannedTask(() => ({ ...PLAN, files: ['migrations/002_orders.sql'] }));
+  await u.run();
+  await u.answer(`/${BRAND.cli} reject`);
+  await u.run();
+  assert.equal((lastOf(u.f.log, 'plan.decided') as { answer: string }).answer, 'reject');
+  assert.ok(!u.roles().includes('worker'), 'rejected: nothing built');
+});
+
+test("plan mode: the owner's objection to a plan being built stops the task before its next attempt", { skip }, async () => {
+  let attempts = 0;
+  const t = plannedTask(
+    () => PLAN,
+    () => {
+      attempts++;
+      t.f.backlog.humanComment(t.n, 'example-owner', `/${BRAND.cli} object the guard belongs in the caller`);
+      return { summary: 'no change yet' }; // nothing committed: the attempt is rejected and another would follow
+    },
+  );
+  await t.run();
+  assert.equal(attempts, 1, 'no second attempt after the objection');
+  assert.deepEqual(lastOf(t.f.log, 'plan.objected'), { issue: t.n, by: 'example-owner', why: 'the guard belongs in the caller' });
+  assert.ok((await t.f.backlog.comments(t.n)).some((x) => /objected to the plan: the guard belongs in the caller/.test(x.body)));
+});
+
 // ---- unknown-domain requests
 
 /** A task whose worker was refused a host and stops (blocked), so the owner's answer can be acted on later. */
