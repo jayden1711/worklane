@@ -30,6 +30,7 @@ import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
+import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
@@ -317,6 +318,12 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
     settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: settingSource(key, s, repo) })),
   };
+}
+
+/** A research run for its page: each search, each fetch (refused or not), and every cap it stopped at. */
+export function researchView(events: { type: string; payload: unknown }[], run: string) {
+  const capped = events.filter((e) => e.type === 'research.capped' && (e.payload as { run?: string | null }).run === run).map((e) => String((e.payload as { why?: string }).why ?? ''));
+  return { ...researchForRun(events, run), capped };
 }
 
 /** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
@@ -623,6 +630,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true, number });
           }
         }
+        // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
+        // is the runs gate's to say (the owner and the writers), as for the rest of the run.
+        const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
+        if (research && req.method === 'GET') return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
         // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
         if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView(opts));
         const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
