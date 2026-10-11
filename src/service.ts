@@ -17,6 +17,7 @@ import type { Backlog } from './backlog/types.js';
 import { loadConfig, type Config } from './config/load.js';
 import { Coordinator } from './coordinator.js';
 import { backup, dirStore } from './events/backup.js';
+import { maybeOffsiteBackup, OFFSITE_FILE } from './offsite-backup.js';
 import { tidyState } from './state-tidy.js';
 import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
@@ -132,14 +133,14 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
-  return runSite(siteForInstance(i), opts, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i), identity), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i), identity), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -166,6 +167,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
   const backupDir = opts.backupDir ?? process.env[`${BRAND.envPrefix}_BACKUP_DIR`] ?? join(state, 'backups');
+  const offsiteConfig = opts.offsiteConfig ?? process.env[`${BRAND.envPrefix}_OFFSITE_BACKUP`];
   // An emergency stop takes effect within seconds, not at the next tick.
   const watch = setInterval(() => coordinator.checkEmergency(), 5_000);
   watch.unref();
@@ -176,6 +178,8 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
       if (Date.now() - lastBackup > 3600_000) {
         const b = await backup(log, dirStore(backupDir));
         if (!b.ok) log.append('coordinator.error', { instance: instanceId(), where: 'backup', kind: 'backup_failed', message: b.error ?? 'unknown' }, instanceId());
+        // Off the machine too, when the owner set it up: encrypted, and verified by reading the remote copy back.
+        if (offsiteConfig) await maybeOffsiteBackup(log, offsiteConfig, instanceId()).catch((e: Error) => log.append('coordinator.error', { instance: instanceId(), where: 'offsite backup', kind: 'error', message: e.message.slice(0, 500) }, instanceId()));
         lastBackup = Date.now();
       }
       if (opts.once) break;
