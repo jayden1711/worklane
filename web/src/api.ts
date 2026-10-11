@@ -168,6 +168,8 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Whether this viewer may read agent runs (the owner or a writer); absent from an older server: yes. */
+  canReadRuns?: boolean;
   project: { name: string; repo: string; landMode: string };
   user: string;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };

@@ -59,4 +59,4 @@ export const renderProposedSetting = (data: InstanceSettingsData, proposed: { ke
 export { actionHref, citationHref } from './components/ChatPanel';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
-export { runsRefused } from './pages/RunDetail';
+export { runsRefusal, runsRefused } from './pages/RunDetail';

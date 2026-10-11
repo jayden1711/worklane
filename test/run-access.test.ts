@@ -22,7 +22,7 @@ async function serve(user: string) {
   return { d, get, id: r.id };
 }
 
-test('agent runs are the owner\'s and the writers\' to read; anyone else with the token gets 403 on every route under /api/runs', async () => {
+test('agent runs are the owner\'s and the writers\' to read; anyone else with the token gets 403 on every route under /api/runs and on /api/live, and the state tells the page', async () => {
   // The example project: example-owner owns it; example-owner and example-collaborator are its writers.
   for (const user of ['example-owner', 'Example-Collaborator']) {
     const s = await serve(user);
@@ -31,6 +31,8 @@ test('agent runs are the owner\'s and the writers\' to read; anyone else with th
       assert.equal(list.status, 200, `${user} reads an issue's runs`);
       assert.equal(((await list.json()) as unknown[]).length, 1);
       assert.equal((await s.get(`/api/runs/${s.id}`)).status, 200, `${user} reads a run`);
+      assert.equal(((await (await s.get('/api/state')).json()) as { canReadRuns: boolean }).canReadRuns, true, `the state tells the page ${user} may read runs`);
+      assert.notEqual((await s.get('/api/live')).status, 403, `${user} isn't refused the live-runs list`);
     } finally {
       await s.d.close();
     }
@@ -38,13 +40,15 @@ test('agent runs are the owner\'s and the writers\' to read; anyone else with th
   const s = await serve('someone-else');
   try {
     assert.equal((await s.get('/api/runs?issue=4', false)).status, 401, 'no token: as before');
-    for (const path of ['/api/runs?issue=4', `/api/runs/${s.id}`, `/api/runs/${s.id}/research`, `/api/runs/${s.id}/feed`, '/api/runs/']) {
+    for (const path of ['/api/runs?issue=4', `/api/runs/${s.id}`, `/api/runs/${s.id}/research`, `/api/runs/${s.id}/feed`, '/api/runs/', '/api/live']) {
       const r = await s.get(path);
       assert.equal(r.status, 403, `${path} is refused, whatever route serves it`);
       assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the owner \(@example-owner\) and the project's writers; @someone-else isn't one/);
     }
-    // Everything else on the dashboard is as it was for them.
-    assert.equal((await s.get('/api/state')).status, 200);
+    // Everything else on the dashboard is as it was for them; the state says not to ask for runs.
+    const state = await s.get('/api/state');
+    assert.equal(state.status, 200);
+    assert.equal(((await state.json()) as { canReadRuns: boolean }).canReadRuns, false);
   } finally {
     await s.d.close();
   }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import { api, type RunRecord, type RunSummary } from '../api';
+import { api, type RunRecord, type RunSummary, type State } from '../api';
 import { navigate } from '../App';
 import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
@@ -10,6 +10,10 @@ const markFor = (reason: string | null): MarkState => (reason === null ? 'runnin
 
 /** The server's refusal of agent runs to someone who is neither the owner nor a writer (see mayReadRuns). */
 export const runsRefused = (message: string) => (/^agent runs are for /.test(message) ? message : null);
+
+/** For a viewer the state says may not read runs, the refusal the server would give; null for the owner and writers. */
+export const runsRefusal = (state: Pick<State, 'canReadRuns' | 'owners' | 'user'>) =>
+  state.canReadRuns === false ? `agent runs are for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
 
 /** Agent runs are the owner's and the writers': anyone else is told so, not shown an empty list. */
 export function RunsRefused({ message }: { message: string }) {
@@ -21,14 +25,17 @@ export function RunsRefused({ message }: { message: string }) {
 }
 
 /** An issue's agent runs as task rows (Beautiful UI's task rows), oldest first; each opens what it did. */
-export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
+export function RunList({ issue, lastId, refused: known = null }: { issue: number; lastId: number; refused?: string | null }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
-  const [refused, setRefused] = useState<string | null>(null);
+  const [fromServer, setRefused] = useState<string | null>(null);
+  // Refused up front (the state says so): not asked for at all, so no request is turned away.
   useEffect(() => {
+    if (known) return;
     api<RunSummary[]>(`/api/runs?issue=${issue}`)
       .then((r) => (setRuns(r), setRefused(null)))
       .catch((e: Error) => (setRuns([]), setRefused(runsRefused(e.message))));
-  }, [issue, lastId]);
+  }, [issue, lastId, known]);
+  const refused = known ?? fromServer;
   return (
     <Card className="overflow-hidden" data-testid="runs-card">
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Agent runs</div>
@@ -71,19 +78,21 @@ export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
 }
 
 /** One agent run as tool chips (Beautiful UI's tool chips): every command and write, then the files and the final message. */
-export function RunDetail({ id }: { id: string }) {
-  const [run, setRun] = useState<RunRecord | null | undefined>(undefined);
-  const [refused, setRefused] = useState<string | null>(null);
+export function RunDetail({ id, refused: known = null }: { id: string; refused?: string | null }) {
+  const [run, setRun] = useState<RunRecord | null | undefined>(known ? null : undefined);
+  const [fromServer, setRefused] = useState<string | null>(null);
   useEffect(() => {
+    if (known) return;
     api<RunRecord>(`/api/runs/${encodeURIComponent(id)}`)
       .then(setRun)
       .catch((e: Error) => (setRun(null), setRefused(runsRefused(e.message))));
-  }, [id]);
+  }, [id, known]);
+  const refused = known ?? fromServer;
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
   const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
   return (
     <div data-testid="page-run-detail">
-      <Header title={run ? `${run.role} run` : 'Run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : ''}>
+      <Header title={run ? `${run.role} run` : 'Agent run'}sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : ''}>
         <button onClick={() => navigate(back)} className="flex items-center gap-1 text-[12px] text-ink-3 hover:text-ink">
           <ArrowLeft className="size-3.5" /> Back
         </button>

@@ -114,8 +114,11 @@ export function mayReadRuns(user: string, owners: { default: string; writers: st
   return mayAnswer(owners.default, user, owners);
 }
 
-/** Every path served under /api/runs, which the run-reading gate covers whatever route is added there. */
-export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/');
+/**
+ * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
+ * everything under /api/runs, and the list of live runs (/api/live).
+ */
+export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live';
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -429,6 +432,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
+      canReadRuns: mayReadRuns(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -460,7 +465,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
         }
-        // Agent runs are the owner's and the writers' to read: one gate in front of everything under /api/runs.
+        // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
         if (isRunsPath(url.pathname) && !mayReadRuns(opts.user, opts.cfg.project.owners)) {
           return json(res, 403, { error: `agent runs are for the owner (@${opts.cfg.project.owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
         }
