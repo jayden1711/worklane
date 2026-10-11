@@ -103,6 +103,8 @@ const MERGEABLE_RECHECK_MS = 10_000;
 const TIP_CHECK_MS = 15_000;
 /** A wait on the Claude login shorter than this isn't worth an event. */
 const LOCK_WAIT_RECORDED_MS = 1_000;
+/** How long a fix run waits on an issue claim held elsewhere (from the first time it found it so) before giving up. */
+const CLAIM_HELD_GIVE_UP_MS = 3600_000;
 
 /**
  * Run a project command without blocking the event loop: with several agents
@@ -2214,6 +2216,23 @@ export class Coordinator {
 
   // ---------------------------------------------------------------- CI fix runs
 
+  /**
+   * A fix run found the issue's claim held elsewhere. The first time for this PR head it is recorded (`record`);
+   * it never counts toward the fix cap, so a brief collision costs nothing. Only once the claim has been held
+   * elsewhere for CLAIM_HELD_GIVE_UP_MS since that first record does this say to give up.
+   */
+  private claimHeldTooLong(type: 'ci_fix.finished' | 'conflict_fix.finished', number: number, head: string, record: () => void): boolean {
+    const first = this.d.log.read(0, [type]).find((e) => {
+      const p = e.payload as { number: number; outcome: string; head: string | null };
+      return p.number === number && p.outcome === 'claim_lost' && p.head === head;
+    });
+    if (!first) {
+      record();
+      return false;
+    }
+    return Date.now() - Date.parse(first.ts) >= CLAIM_HELD_GIVE_UP_MS;
+  }
+
   private fixGaveUp(number: number): boolean {
     return this.d.log.read(0, ['ci_fix.gave_up']).some((e) => (e.payload as { number: number }).number === number);
   }
@@ -2242,8 +2261,7 @@ export class Coordinator {
     if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
     const role = this.d.cfg.agents.roles.ci_repair;
     if (!role?.enabled) return give('CI fix runs are off (agents.yaml roles.ci_repair)');
-    // Fix runs started, and attempts that lost the issue's claim: both use up the cap.
-    const runs = this.d.log.read(0, ['ci_fix.started', 'ci_fix.finished']).filter((e) => (e.payload as { number: number }).number === number && (e.type === 'ci_fix.started' || (e.payload as { outcome: string }).outcome === 'claim_lost')).length;
+    const runs = this.d.log.read(0, ['ci_fix.started']).filter((e) => (e.payload as { number: number }).number === number).length;
     const cap = role.max_fixes_per_pr ?? 2;
     if (runs >= cap) return give(`${runs} fix run(s) already, the limit (agents.yaml roles.ci_repair.max_fixes_per_pr: ${cap})`);
     const hold = this.governorHold();
@@ -2302,10 +2320,14 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    // Held elsewhere: recorded, and it counts toward the cap, so the polls that follow can't retry for ever.
-    if (!won.won) return void this.emit('ci_fix.finished', { issue: n, number, outcome: 'claim_lost', head: null, detail: `the issue's claim is held by ${won.holder?.instance ?? 'another run'}` });
+    if (!won.won) {
+      const holder = won.holder?.instance ?? 'another run';
+      const record = () => this.emit('ci_fix.finished', { issue: n, number, outcome: 'claim_lost', head: pr.headSha, detail: `the issue's claim is held by ${holder}` });
+      if (this.claimHeldTooLong('ci_fix.finished', number, pr.headSha, record)) await this.giveUpFix(w, pr.headSha, `the issue's claim has been held by ${holder} for over an hour`, failed);
+      return;
+    }
     let leaseSha = won.sha;
-    this.emit('ci_fix.started',{ issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
+    this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
       const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
       if (next) leaseSha = next;
@@ -2513,7 +2535,7 @@ export class Coordinator {
     if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
     const cfg = this.d.cfg.project.conflicts;
     if (!cfg.fix) return give('conflict fix runs are off (config.yaml conflicts.fix)');
-    const used = conflictFixesUsed(this.d.log.read(0, ['conflict_fix.started', 'conflict_fix.finished']), number);
+    const used = conflictFixesUsed(this.d.log.read(0, ['conflict_fix.started']), number);
     if (used >= cfg.max_fixes_per_pr) return give(`${used} conflict fix run(s) already, the limit (config.yaml conflicts.max_fixes_per_pr: ${cfg.max_fixes_per_pr})`);
     const hold = this.governorHold();
     this.noteHold(hold);
@@ -2585,10 +2607,14 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    // Held elsewhere: recorded, and it counts toward the cap, so the polls that follow can't retry for ever.
-    if (!won.won) return void this.emit('conflict_fix.finished', { issue: n, number, base_sha: baseSha, strategy: 'merge', outcome: 'claim_lost', head: null, files: [], waits_owner: false, reasons: [], detail: `the issue's claim is held by ${won.holder?.instance ?? 'another run'}` });
+    if (!won.won) {
+      const holder = won.holder?.instance ?? 'another run';
+      const record = () => this.emit('conflict_fix.finished', { issue: n, number, base_sha: baseSha, strategy: 'merge', outcome: 'claim_lost', head: pr.headSha, files: [], waits_owner: false, reasons: [], detail: `the issue's claim is held by ${holder}` });
+      if (this.claimHeldTooLong('conflict_fix.finished', number, pr.headSha, record)) await this.giveUpConflict(w, pr.headSha, baseSha, `the issue's claim has been held by ${holder} for over an hour`, []);
+      return;
+    }
     let leaseSha = won.sha;
-    this.emit('conflict_fix.started',{ issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
+    this.emit('conflict_fix.started', { issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
       const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
       if (next) leaseSha = next;
