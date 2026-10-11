@@ -111,8 +111,10 @@ receivedAt, thread? }` items and send short replies. Each is enabled per instanc
 7. **Reproduce bugs first.** For a bug, the agent tries to reproduce it on main within its read-only lane
    (reading code, running the project's read-only checks when the lane allows) and attaches the result:
    reproduced (with the steps), not reproduced, or already fixed on main (with the commit).
-8. **Draft.** The issue body carries a closed ```` ```done_when ```` block (commands as YAML block scalars),
-   checked with the engine's contract parser. An invalid draft is refused and retried once with the reason,
+8. **Draft.** The issue body has the five parts every issue the harness drafts itself has: **Outcome** (one
+   sentence), **Sources** (where to look, nowhere else), **Constraints** (what to leave alone), **Deliverable** (a
+   closed ```` ```done_when ```` block, commands as YAML block scalars) and **Review point** (the expected review
+   level, L0 to L3, and what would make it wait for the owner). The engine's contract parser checks all five. An invalid draft is refused and retried once with the reason,
    then dropped to the owner as an Inbox item.
 9. **Trust.**
    - Senders on the instance's trusted list (the owner by default; others added by chat-bot user id or phone

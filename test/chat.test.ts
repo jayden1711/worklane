@@ -92,13 +92,15 @@ test('answers cite events, runs, PRs and issues as links; citations to nothing a
   assert.deepEqual(a.unknownCitations, ['event:999']);
 });
 
-test('issue drafts: validated with parseContract, commands as block scalars; a preview, never filed', async () => {
-  const good = 'Totals skip zero quantities.\n\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n';
+test('issue drafts: the five parts, checked by the contract parser, commands as block scalars; a preview, never filed', async () => {
+  const good = '**Outcome:** Totals skip zero quantities.\n**Sources:** the totals code.\n**Constraints:** leave rounding alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n';
   assert.deepEqual(validateDraft('Skip zero quantities', good), { ok: true, title: 'Skip zero quantities', body: good, labels: ['ready'] });
-  const inline = validateDraft('t', '```done_when\n- command: npm test\n```\n');
+  const inline = validateDraft('t', good.replace('command: |\n    npm test -- --grep zero', 'command: npm test'));
   assert.ok(!inline.ok && /block scalars/.test(inline.why));
   const bad = validateDraft('t', 'no contract at all');
-  assert.ok(!bad.ok && /done_when/.test(bad.why));
+  assert.ok(!bad.ok && /five parts/.test(bad.why));
+  const noParts = validateDraft('t', 'Totals skip zero quantities.\n\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n');
+  assert.ok(!noParts.ok && /missing or empty: Outcome, Sources, Constraints, Deliverable, Review point/.test(noParts.why), 'a bare done_when is no longer enough for a draft');
   assert.ok(!validateDraft('  ', good).ok);
   const s = setup(() => ({ answer: 'drafted', citations: [], issue_draft: { title: 'Skip zero quantities', body: good } }));
   const a = await chatTurn({ ...s.opts, question: 'draft an issue', by: owner });
