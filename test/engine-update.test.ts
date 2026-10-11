@@ -364,11 +364,23 @@ test('acceptance: built as a DynamicUser and installed, the engine is readable b
   const node = process.execPath;
   if (sudo(['-u', 'nobody', node, '--version']).status !== 0) return t.skip(`nobody can't run ${node}`);
   const id = `wl-acc-${process.pid}`;
-  const sha = spawnSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  // The build unit has ProtectHome and a private /tmp, so its source repo lives under /var/lib.
-  const bare = join(mkdtempSync(join(tmpdir(), 'src-')), 'repo.git');
-  assert.equal(spawnSync('git', ['init', '-q', '--bare', bare]).status, 0);
-  assert.equal(spawnSync('git', ['-C', repoRoot, 'push', '-q', bare, 'HEAD:refs/heads/main']).status, 0);
+  // This checkout's committed tree as a one-commit repo (CI checkouts are shallow, which git won't push
+  // from); the build unit has ProtectHome and a private /tmp, so its copy lives under /var/lib.
+  const work = mkdtempSync(join(tmpdir(), 'src-'));
+  const tree = join(work, 'tree');
+  const bare = join(work, 'repo.git');
+  const run = (cmd: string, args: string[], cwd?: string) => {
+    const r = spawnSync(cmd, args, { cwd, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${cmd} ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  run('mkdir', ['-p', tree]);
+  run('sh', ['-c', 'git -C "$1" archive HEAD | tar -x -C "$2"', '_', repoRoot, tree]);
+  run('git', ['init', '-q', '-b', 'main'], tree);
+  run('git', ['add', '-A'], tree);
+  run('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'acceptance'], tree);
+  const sha = run('git', ['rev-parse', 'HEAD'], tree);
+  run('git', ['clone', '-q', '--bare', tree, bare]);
   const src = `/var/lib/${id}-src.git`;
   const state = `${id}-build`;
   const opt = `/var/lib/${id}-opt`;
