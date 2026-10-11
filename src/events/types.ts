@@ -55,6 +55,17 @@ export const EventSchemas = {
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
   'settings.applied': z.strictObject({ settings: z.record(z.string(), z.unknown()), error: z.string().nullable() }),
+  /** A dashboard chat turn: who asked, whether they got a read-only answer, what it carried, what it cost; or why it was refused. */
+  'chat.turn': z.strictObject({
+    id: z.string(),
+    by: z.string(),
+    read_only: z.boolean(),
+    citations: z.number().int().nonnegative(),
+    draft: z.enum(['none', 'valid', 'refused']),
+    actions: z.number().int().nonnegative(),
+    cost_usd: z.number().nonnegative(),
+    refused: z.string().nullable(),
+  }),
   /** The console: the owner messaged a live run (held until its current turn ends). */
   'console.message_queued': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string(), by: z.string(), text: z.string() }),
   'console.message_delivered': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),

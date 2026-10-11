@@ -2,8 +2,9 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { CheckRun, HealthView, HubInfo, PrsView, State } from './api';
+import type { ChatAnswerFile, CheckRun, HealthView, HubInfo, PrsView, State } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
+import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, StopBanner } from './App';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
@@ -53,3 +54,7 @@ export const renderInstanceSettings = (data: InstanceSettingsData) => renderToSt
 export { boundsOf, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);
+export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
+export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
+export { actionHref, citationHref } from './components/ChatPanel';
+export { proposedSetting } from './components/InstanceSettings';

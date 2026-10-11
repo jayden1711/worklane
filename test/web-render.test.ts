@@ -28,6 +28,11 @@ interface Render {
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  renderChatAnswer(f: unknown, cli: string): string;
+  renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
+  actionHref(a: unknown): string | null;
+  citationHref(c: unknown): string;
+  proposedSetting(search: string): unknown;
   pages: Record<string, unknown>;
 }
 
@@ -331,4 +336,99 @@ test('checks render as a table with failures tinted and their output; instances 
   assert.match(nav, /disabled=""/, 'an instance that isn\'t answering can\'t be picked');
   assert.equal(r.renderStopBanner({ ...asOwner, emergency: { inForce: null, halted: null, lastStop: null, lastResume: null } }), '');
   assert.match(r.renderStopBanner({ ...asOwner, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: null, lastStop: null, lastResume: null } }), /Emergency stop in force/);
+});
+
+test('a chat answer: citations as links, a draft preview with a two-step file, proposals that open their confirm flows, read-only for others', () => {
+  const answer = {
+    turn: 't1',
+    instance: 'shop',
+    answer: 'Issue #3 waits on your decision.',
+    citations: [
+      { kind: 'event', id: '41', instance: 'shop', label: 'event 41', href: '/events/41' },
+      { kind: 'run', id: 'r-9', instance: 'shop', label: 'run r-9', href: '/runs/r-9' },
+      { kind: 'issue', id: '3', instance: 'shop', label: 'issue #3', href: 'https://github.com/example-org/example-shop/issues/3' },
+    ],
+    unknownCitations: ['run:nope'],
+    issueDraft: { ok: true, title: 'Round totals', body: '```done_when\n- test: t.js\n```', labels: ['ready'] },
+    actions: [
+      { kind: 'settings', key: 'workers', value: 2, confirm: 'settings.change', why: 'two tasks wait' },
+      { kind: 'decision', id: 'd-1', answer: 'approve', confirm: 'decision.answer' },
+      { kind: 'pause', confirm: 'emergency.pause' },
+    ],
+    refusedActions: ['merge: not something the chat proposes'],
+    readOnly: false,
+    costUsd: 0.123,
+  };
+  const file = { v: 1, id: '1-ab', at: '', owner: true, filed: null, state: 'answered', answer };
+  const html = r.renderChatAnswer(file, BRAND.cli);
+  assert.match(html, /data-testid="chat-answer-text"[^>]*>Issue #3 waits on your decision\./);
+  assert.match(html, /href="\/activity\?event=41"[^>]*data-testid="chat-citation"/, 'an event opens on Activity');
+  assert.match(html, /href="\/runs\/r-9"/);
+  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/issues\/3" target="_blank"/);
+  assert.match(html, /data-testid="chat-unknown-citations"[^>]*>Left out 1 citation/);
+  assert.match(html, /data-testid="chat-draft"[\s\S]*?ready[\s\S]*?Round totals[\s\S]*?data-testid="chat-draft-review"/);
+  assert.doesNotMatch(html, /data-testid="chat-draft-confirm"/, 'filing needs a second click');
+  assert.equal((html.match(/data-testid="chat-action"/g) ?? []).length, 3);
+  assert.equal((html.match(/data-testid="chat-action-open"/g) ?? []).length, 2, 'settings and the decision open their pages');
+  assert.match(html, new RegExp(`data-testid="chat-action-machine"[\\s\\S]*?${BRAND.cli} stop-all`), 'a stop is done on the machine');
+  assert.match(html, /Not proposed: merge/);
+  assert.match(html, /~\$0\.12 \(estimated\)/);
+  assert.doesNotMatch(html, /data-testid="chat-read-only"/);
+  assert.equal(r.actionHref(answer.actions[0]), '/settings?set=workers&to=2');
+  assert.equal(r.actionHref(answer.actions[1]), '/decisions?proposed=approve#d-1');
+  assert.equal(r.actionHref(answer.actions[2]), null);
+  assert.deepEqual(r.proposedSetting('?set=workers&to=2'), { key: 'workers', value: 2 });
+  assert.equal(r.proposedSetting('?set=workers&to=%7B'), null, 'an unreadable value proposes nothing');
+  // Already filed: its number, no button. A draft that fails the contract check: why, and no button.
+  assert.match(r.renderChatAnswer({ ...file, filed: { number: 57 } }, BRAND.cli), /data-testid="chat-draft-filed"[^>]*>Filed as #57/);
+  const invalid = r.renderChatAnswer({ ...file, answer: { ...answer, issueDraft: { ok: false, title: 'x', body: 'prose', why: 'no done_when block' } } }, BRAND.cli);
+  assert.match(invalid, /data-testid="chat-draft-invalid"[^>]*>Can(&#x27;|')t be filed as it is: no done_when block/);
+  assert.doesNotMatch(invalid, /data-testid="chat-draft-review"/);
+  // Anyone but the owner: the server sends no draft and no proposals; the answer says it's read-only.
+  const theirs = r.renderChatAnswer({ ...file, owner: false, answer: { ...answer, issueDraft: null, actions: [], refusedActions: [], readOnly: true } }, BRAND.cli);
+  assert.match(theirs, /data-testid="chat-read-only"/);
+  assert.match(theirs, /data-testid="chat-citation"/);
+  assert.doesNotMatch(theirs, /data-testid="chat-draft"|data-testid="chat-action"/);
+  assert.match(r.renderChatAnswer({ v: 1, id: '1-ab', at: '', owner: true, filed: null, state: 'pending' }, BRAND.cli), /data-testid="chat-pending"/);
+  assert.match(r.renderChatAnswer({ v: 1, id: '1-ab', at: '', owner: true, filed: null, state: 'refused', why: 'over the chat budget' }, BRAND.cli), /data-testid="chat-refused"[^>]*>Not answered: over the chat budget/);
+});
+
+test('a chat proposal lands in its confirm flow: the setting filled in for review, the decision option marked, the cited event marked', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    keys: ['workers'],
+    available: true,
+    limits: { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 } },
+    limitsError: null,
+    ceilings: { max_workers: 3, daily_usd: 30 },
+    settings: [
+      { key: 'workers', value: 1, source: 'instance' },
+      { key: 'daily_budget_usd', value: 12, source: 'instance' },
+    ],
+  };
+  const html = r.renderProposedSetting(data, { key: 'workers', value: 3 });
+  assert.match(html, /data-testid="setting-proposed"[^>]*>The chat proposed workers = 3/);
+  assert.match(html, /data-setting="workers" data-proposed=""[\s\S]*?value="3"/, 'filled in, not written');
+  assert.doesNotMatch(html, /data-testid="setting-confirm"/, 'still Review, then Confirm');
+  assert.doesNotMatch(r.renderProposedSetting({ ...data, canChange: false, user: 'someone-else' }, { key: 'workers', value: 3 }), /setting-proposed|data-proposed/);
+  const loc = (globalThis as unknown as { window: { location: { search: string; hash: string } } }).window.location;
+  const d = asOwner.decisions.find((x) => !x.answer && x.canAnswer !== false)!;
+  try {
+    loc.search = `?proposed=${encodeURIComponent(d.options[0]!)}`;
+    loc.hash = `#${d.id}`;
+    const dec = r.renderPage('decisions', asOwner);
+    assert.match(dec, new RegExp(`data-decision="${d.id}"[\\s\\S]*?data-testid="decision-proposed"`));
+    assert.equal((dec.match(/data-testid="decision-proposed"/g) ?? []).length, 1, 'only on the decision in the address');
+    const ev = (asOwner.activity[0] as unknown as { id: number }).id;
+    loc.search = `?event=${ev}`;
+    loc.hash = '';
+    assert.match(r.renderPage('activity', asOwner), new RegExp(`data-event="${ev}" data-testid="activity-row" data-cited=""`));
+    loc.search = '?event=999999';
+    assert.match(r.renderPage('activity', asOwner), /data-testid="activity-cited-missing"/);
+  } finally {
+    loc.search = '';
+    loc.hash = '';
+  }
 });

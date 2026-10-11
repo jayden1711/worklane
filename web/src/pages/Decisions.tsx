@@ -11,7 +11,7 @@ import { Header } from './Overview';
  * an inset list, and each option is a row; picking one answers it. Only the
  * decision's owner or a writer gets the rows (canAnswer); everyone else sees whom it waits on.
  */
-export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selected: boolean; onAnswered?: () => void }) {
+export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decision; selected: boolean; onAnswered?: () => void; proposed?: string | null }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const answer = async (a: string) => {
@@ -63,6 +63,11 @@ export function DecisionCard({ d, selected, onAnswered }: { d: Decision; selecte
             {d.options.map((o, i) => (
               <Button key={o} type="button" size="sm" data-option={o} data-testid="decision-option" variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
                 {busy === o ? `${o}…` : o}
+                {proposed === o && (
+                  <span className="rounded-full bg-blue-tint px-1.5 text-[10.5px] font-medium text-blue-ink" data-testid="decision-proposed">
+                    chat proposed
+                  </span>
+                )}
                 <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
               </Button>
             ))}
@@ -95,6 +100,8 @@ export function Decisions({ state }: { state: State }) {
   const open = useMemo(() => state.decisions.filter((d) => !d.answer), [state.decisions]);
   const list = showAnswered ? state.decisions : open;
   const [sel, setSel] = useState(0);
+  // An answer the chat proposed for the decision in the address: marked on its option, never sent by itself.
+  const proposed = useMemo(() => new URLSearchParams(window.location.search).get('proposed'), []);
 
   useEffect(() => {
     const hash = window.location.hash.slice(1);
@@ -137,7 +144,7 @@ export function Decisions({ state }: { state: State }) {
         </Button>
       </Header>
       <div className="mx-auto max-w-3xl space-y-3 p-6">
-        {list.length ? list.map((d, i) => <DecisionCard key={d.id} d={d} selected={i === sel} />) : <Empty title="Nothing to decide" hint="When a change needs your approval, or an agent asks a real question, it shows up here and in your Inbox." />}
+        {list.length ? list.map((d, i) => <DecisionCard key={d.id} d={d} selected={i === sel} proposed={d.id === window.location.hash.slice(1) ? proposed : null} />) : <Empty title="Nothing to decide" hint="When a change needs your approval, or an agent asks a real question, it shows up here and in your Inbox." />}
       </div>
     </div>
   );

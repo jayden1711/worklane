@@ -309,8 +309,8 @@ async function apiPath(path: string): Promise<string> {
 }
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
-export async function instanceApi<T>(name: string, path: string): Promise<T> {
-  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { headers: { authorization: `Bearer ${token}` } });
+export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
@@ -375,3 +375,26 @@ export interface Filters { owner?: string; status?: string; level?: string; labe
 
 export const listViews = () => api<SavedView[]>('/api/views');
 export const saveViews = (v: SavedView[]) => api('/api/views', { method: 'PUT', body: JSON.stringify(v) });
+
+/** A chat answer as the instance's server gives it (src/chat.ts); a non-owner's has no draft and no proposals. */
+export interface ChatCitation { kind: 'event' | 'run' | 'pr' | 'issue'; id: string; instance: string; label: string; href: string }
+export type ChatAction = ({ kind: 'settings'; key: string; value: unknown; confirm: 'settings.change' } | { kind: 'decision'; id: string; answer: string; confirm: 'decision.answer' } | { kind: 'pause'; confirm: 'emergency.pause' } | { kind: 'resume'; confirm: 'emergency.resume' }) & { why?: string };
+export interface ChatAnswer {
+  turn: string;
+  instance: string;
+  answer: string;
+  citations: ChatCitation[];
+  unknownCitations: string[];
+  issueDraft: null | { ok: true; title: string; body: string; labels: string[] } | { ok: false; title: string; body: string; why: string };
+  actions: ChatAction[];
+  refusedActions: string[];
+  readOnly: boolean;
+  costUsd: number;
+}
+export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean; filed: { number: number } | null } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
+
+/** The chat on one instance: this page's (null), or a named one through the hub. */
+const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
+export const askChat = (instance: string | null, question: string) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question }) });
+export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
+export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });
