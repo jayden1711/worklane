@@ -177,11 +177,13 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   const backupDir = opts.backupDir ?? process.env[`${BRAND.envPrefix}_BACKUP_DIR`] ?? join(state, 'backups');
   const offsiteConfig = opts.offsiteConfig ?? process.env[`${BRAND.envPrefix}_OFFSITE_BACKUP`];
   // An emergency stop takes effect within seconds, not at the next tick.
-  // The console's requests (message, stop) and chat questions are taken on the same short timer.
+  // The console's requests (message, stop), chat questions and intake (which pulls its sources on its own, slower
+  // clock) are taken on the same short timer.
   const watch = setInterval(() => {
     coordinator.checkEmergency();
     coordinator.checkConsole();
     void coordinator.checkChat();
+    void coordinator.checkIntake();
   }, 5_000);
   watch.unref();
   let lastBackup = 0;
