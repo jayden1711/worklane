@@ -23,13 +23,14 @@ import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
-import { ConsoleError, liveRuns, runFeed, sendMessage, stopRun } from './console.js';
-import type { FeedItem } from './run-feed.js';
+import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
+import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
+import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
@@ -109,6 +110,21 @@ export function mayReadThroughput(user: string, owners: { default: string; write
   return mayAnswer(owners.default, user, owners);
 }
 
+/**
+ * Who may read agent runs (every route under /api/runs: a run's record, its live feed, a research run's
+ * searches and pages): the project's owner or one of its writers. Writing to a run (a console message, a
+ * stop) stays the owner's alone, checked on those routes as well.
+ */
+export function mayReadRuns(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
+
+/**
+ * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
+ * everything under /api/runs, and the list of live runs (/api/live).
+ */
+export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live';
+
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
 /**
@@ -187,14 +203,16 @@ export function liveView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>)
   return { owner, canControl, runs: liveRuns(o.stateDir).map((r) => ({ ...r, pending: canControl ? r.pending : r.pending.map((m) => ({ id: m.id, by: m.by, at: m.at, text: '' })) })) };
 }
 
-/** A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error). */
-function feedOrWait(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>, run: string, after: number): { items: FeedItem[]; ended: boolean } {
-  try {
-    return runFeed({ stateDir: o.stateDir, cfg: o.cfg, run, by: o.user, after });
-  } catch (e) {
-    if (e instanceof ConsoleError && /no feed/.test(e.message) && liveRuns(o.stateDir).some((r) => r.run === run)) return { items: [], ended: false };
-    throw e;
-  }
+/**
+ * A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error).
+ * Reading it is the runs gate's to allow (the owner and the writers), as for the rest of a run's record; only a
+ * message or a stop is the owner's alone (sendMessage, stopRun).
+ */
+function feedOrWait(o: Pick<DashboardOptions, 'stateDir'>, run: string, after: number): { items: FeedItem[]; ended: boolean } {
+  const f = readFeed(o.stateDir, run, after);
+  if (f) return f;
+  if (liveRuns(o.stateDir).some((r) => r.run === run)) return { items: [], ended: false };
+  throw new ConsoleError(`no feed for run ${run}`);
 }
 
 /**
@@ -306,6 +324,12 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
     settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: settingSource(key, s, repo) })),
   };
+}
+
+/** A research run for its page: each search, each fetch (refused or not), and every cap it stopped at. */
+export function researchView(events: { type: string; payload: unknown }[], run: string) {
+  const capped = events.filter((e) => e.type === 'research.capped' && (e.payload as { run?: string | null }).run === run).map((e) => String((e.payload as { why?: string }).why ?? ''));
+  return { ...researchForRun(events, run), capped };
 }
 
 /** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
@@ -522,6 +546,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
       canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
+      // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
+      canReadRuns: mayReadRuns(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -552,6 +578,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/logs' && req.method === 'GET') {
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
+        }
+        // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
+        if (isRunsPath(url.pathname) && !mayReadRuns(opts.user, opts.cfg.project.owners)) {
+          return json(res, 403, { error: `agent runs are for the owner (@${opts.cfg.project.owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
         }
         // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
         if (url.pathname === '/api/runs' && req.method === 'GET') {
@@ -608,6 +638,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true, number });
           }
         }
+        // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
+        // is the runs gate's to say (the owner and the writers), as for the rest of the run.
+        const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
+        if (research && req.method === 'GET') return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
         // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
         if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView(opts));
         const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
@@ -629,7 +663,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             let after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? -1);
             if (!Number.isInteger(after)) after = -1;
             try {
-              feedOrWait(opts, run, after); // owner only, and the run must have a feed or be live
+              feedOrWait(opts, run, after); // the run must have a feed or be live
             } catch (e) {
               return consoleError(e);
             }

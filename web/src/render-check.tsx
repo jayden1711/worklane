@@ -22,7 +22,7 @@ import { LogsPage } from './pages/Logs';
 import { Overview } from './pages/Overview';
 import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
-import { RunDetail, RunList } from './pages/RunDetail';
+import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
 
 export const pages = {
@@ -65,3 +65,6 @@ export { actionHref, citationHref } from './components/ChatPanel';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderThroughput = (t: Throughput) => renderToStaticMarkup(<ThroughputView t={t} />);
 export const renderThroughputPanel = (state: State) => renderToStaticMarkup(<ThroughputPanel state={state} />);
+export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
+export { runsRefusal, runsRefused } from './pages/RunDetail';
+export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);

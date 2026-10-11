@@ -61,7 +61,9 @@ Any other path shows Overview.
 | Back to issues | `issue-detail` | – | `Esc` | – |
 | Checks run by the coordinator | `issue-detail` | the checks card, newest run first; one table per run | – | `[data-testid="checks-card"]`, `[data-testid="checks-table"]` |
 | Agent runs of an issue | `issue-detail` | the runs card; a row opens `run-detail` | – | `[data-testid="runs-card"]`, `[data-testid="run-row"]` |
+| Agent runs refused | `issue-detail`, `run-detail` | for anyone but the owner and the project's writers: the runs card and a run page say runs are theirs, instead of an empty list or "No such run" | – | `[data-testid="runs-refused"]` |
 | A run's steps and final message | `run-detail` | the steps card and the final message | – | `[data-testid="run-steps"]`, `[data-testid="run-final"]` |
+| A research run's searches and pages (the owner and writers) | `run-detail` | on a researcher run: each search query, each page with fetched or refused (and why), linked when fetched; a cap it stopped at, in orange. Who may see it is the run page's: the owner and the writers | – | `[data-testid="run-research"]`, `[data-testid="run-research-search"]`, `[data-testid="run-research-fetch"]`, `[data-testid="run-research-capped"]` |
 | Next report preview | `reports` | the preview card | – | `[data-testid="report-preview"]` |
 | Pull requests page | `prs` | the page itself | – | `[data-testid="prs-page"]` |
 | Auto-merge state | `prs` | the card at the top: on or off, why, the kill switch and the repo's setting | – | `[data-testid="prs-auto-merge"]`, `[data-testid="prs-auto-merge-state"]`, `[data-testid="prs-auto-merge-why"]` |

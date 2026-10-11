@@ -22,6 +22,10 @@ interface Render {
   renderRunList(issue: number): string;
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
+  renderRunsRefused(message: string): string;
+  runsRefused(message: string): string | null;
+  runsRefusal(state: unknown): string | null;
+  renderRunResearch(data: unknown): string;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
@@ -638,4 +642,41 @@ test('the throughput panel: merges, cost per merged PR by stage (zeros shown), t
   assert.match(r.renderThroughput({ ...t, waits: [] }), /data-testid="throughput-no-waits"/);
   assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
   assert.doesNotMatch(r.renderThroughputPanel(asOwner), /throughput-refused/);
+});
+
+test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
+  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
+  assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
+  // From the state, before asking: the demo's dashboard for someone who is neither the owner nor a writer.
+  assert.equal((asOther as unknown as { canReadRuns: boolean }).canReadRuns, false);
+  assert.equal((asOwner as unknown as { canReadRuns: boolean }).canReadRuns, true);
+  assert.equal(r.runsRefusal(asOther), msg, 'the same words the server would send');
+  assert.equal(r.runsRefusal(asOwner), null);
+  assert.equal(r.runsRefusal({ ...asOwner, canReadRuns: undefined }), null, 'an older server without the flag: asked as before');
+  const issue = asOther.tasks[0]!.issue;
+  assert.match(r.renderIssue(asOther, issue), /data-testid="runs-card"[\s\S]*?data-testid="runs-refused"/, 'the issue page says so instead of asking');
+  assert.doesNotMatch(r.renderIssue(asOwner, issue), /data-testid="runs-refused"/);
+});
+
+test('a research run on its page: each search, each page fetched or refused (linked only when fetched, rel=noopener), a cap it stopped at', () => {
+  const html = r.renderRunResearch({
+    searches: ['sqlite vacuum into durability', 'litestream restore'],
+    fetches: [
+      { url: 'https://sqlite.org/lang_vacuum.html', host: 'sqlite.org', refused: null },
+      { url: 'https://tracker.example.net/x', host: 'tracker.example.net', refused: 'not on the allowed hosts' },
+      { url: 'javascript:alert(1)', host: '', refused: null },
+    ],
+    capped: ['searches: 20 of 20 today'],
+  });
+  assert.match(html, /2 search\(es\), 2 page\(s\) fetched, 1 refused/);
+  assert.equal((html.match(/data-testid="run-research-search"/g) ?? []).length, 2);
+  assert.match(html, /data-testid="run-research-search"[^>]*>sqlite vacuum into durability</);
+  assert.match(html, /<a href="https:\/\/sqlite\.org\/lang_vacuum\.html" target="_blank" rel="noopener noreferrer"/);
+  assert.match(html, /data-testid="run-research-fetch" data-refused=""[\s\S]*?>refused<[\s\S]*?tracker\.example\.net\/x[\s\S]*?not on the allowed hosts/);
+  assert.doesNotMatch(html, /href="https:\/\/tracker\.example\.net/, 'a refused page is not a link');
+  assert.doesNotMatch(html, /href="javascript:/, 'only http(s) becomes a link');
+  assert.match(html, /role="alert"[^>]*data-testid="run-research-capped"[\s\S]*?Stopped at a cap:[\s\S]*?searches: 20 of 20 today/);
+  assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
 });
