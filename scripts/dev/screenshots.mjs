@@ -123,6 +123,19 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('merge.main_result', { issue: 4, number: 44, sha: s('e'), outcome: 'green', failed: [] });
     add('pr.closed', { issue: 4, number: 44, merged: true });
     add('push.refused', { issue: 5, head: s('f'), stage: 'push', reasons: ['data/export.csv: under a refused path (data/**)'] });
+    // The merge flow: a conflict being resolved, one whose fix waits for a person, a light check, two hotspot holds.
+    open(6, 45, s('7'));
+    add('conflict_fix.detected', { issue: 6, number: 45, head: s('7'), base_sha: s('8') });
+    add('conflict_fix.started', { issue: 6, number: 45, head: s('7'), base_sha: s('8'), strategy: 'merge', attempt: 1, lease: s('3') });
+    open(7, 46, s('6'));
+    add('conflict_fix.detected', { issue: 7, number: 46, head: s('6'), base_sha: s('8') });
+    add('conflict_fix.finished', { issue: 7, number: 46, base_sha: s('8'), strategy: 'merge', outcome: 'pushed', head: s('5'), files: ['src/totals.js'], waits_owner: true, reasons: ['the merge touched src/totals.js (money-path)'], detail: 'merged main' });
+    open(8, 47, s('4'));
+    add('pr.ready', { issue: 8, number: 47, head: s('4') });
+    add('light_check.started', { issue: 8, number: 47, head: s('4'), main_sha: s('8'), overlap: ['src/cart.js'] });
+    add('hotspot.held', { issue: 9, by: 6, files: ['src/totals.js'], reason: 'issue 6 is changing src/totals.js' });
+    add('hotspot.held', { issue: 10, by: 7, files: ['src/discounts.js'], reason: 'issue 7 is changing src/discounts.js' });
+    add('hotspot.released', { issue: 10, waited_ms: 180_000, files: ['src/discounts.js'], started: true });
   } catch (e) {
     console.error(`no PR events in this engine (${e.message.split('\n')[0]}); the PR page stays empty`);
   } finally {

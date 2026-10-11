@@ -505,8 +505,15 @@ export interface PrView {
   mergeFailed: { at: string; why: string } | null;
   /** After an auto-merge: the default branch's required checks on the merge commit. */
   mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
-  /** Where it stands, for grouping: waiting for a person, being fixed, checks running, gave up, auto-merged, merged, closed. */
-  phase: 'waiting' | 'fixing' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
+  /**
+   * The last conflict with main and its fix: detected, being resolved (a merge of main, attempt n), or done with
+   * its outcome, the files it touched, and whether the result waits for a person (and why).
+   */
+  conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: string[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
+  /** The last light check (the PR combined with main's latest before it merges): running since `at`, or its outcome and wait. */
+  lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: string[]; outcome: string | null; waitMs: number | null; detail: string } | null;
+  /** Where it stands, for grouping: waiting for a person, being fixed, a conflict being resolved, a light check running, checks running, gave up, auto-merged, merged, closed. */
+  phase: 'waiting' | 'fixing' | 'resolving' | 'light_check' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
 }
 
 export interface PrsView {
@@ -515,6 +522,8 @@ export interface PrsView {
   refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
   /** This instance's auto-merge stops and resumes, newest first. */
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
+  /** Tasks held because another task is changing the same hotspot files, newest first: still held (until null), or released after waitedMs. */
+  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
 }
 
 /** Every PR the harness opened, newest first, with what happened to it; plus refused pushes and auto-merge stops. */
@@ -523,6 +532,7 @@ export function prsView(events: StoredEvent[]): PrsView {
   const prs = new Map<number, PrView>();
   const refused: PrsView['refused'] = [];
   const stops: PrsView['stops'] = [];
+  const holds: PrsView['holds'] = [];
   for (const e of events) {
     const p = e.payload as Record<string, unknown>;
     const n = Number(p.number);
@@ -532,7 +542,7 @@ export function prsView(events: StoredEvent[]): PrsView {
         titles.set(Number(p.issue), String(p.title));
         break;
       case 'pr.opened':
-        prs.set(n, { number: n, issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, url: String(p.url), openedAt: e.ts, head: String(p.head), state: 'open', draft: Boolean(p.draft), status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, phase: 'checks' });
+        prs.set(n, { number: n, issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, url: String(p.url), openedAt: e.ts, head: String(p.head), state: 'open', draft: Boolean(p.draft), status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, conflict: null, lightCheck: null, phase: 'checks' });
         break;
       case 'pr.status':
         if (pr) {
@@ -593,20 +603,53 @@ export function prsView(events: StoredEvent[]): PrsView {
       case 'merge.resumed':
         stops.push({ at: e.ts, kind: 'resumed', reason: String(p.detail), number: null, revert: null });
         break;
+      case 'conflict_fix.detected':
+        if (pr) pr.conflict = { state: 'detected', at: e.ts, attempt: 0, outcome: null, files: [], waitsOwner: false, reasons: [], detail: '' };
+        break;
+      case 'conflict_fix.started':
+        if (pr) pr.conflict = { ...(pr.conflict ?? { files: [], waitsOwner: false, reasons: [], detail: '', outcome: null }), state: 'running', at: e.ts, attempt: Number(p.attempt) };
+        break;
+      case 'conflict_fix.finished':
+        if (pr) {
+          pr.conflict = { state: 'done', at: e.ts, attempt: pr.conflict?.attempt ?? 1, outcome: String(p.outcome), files: p.files as string[], waitsOwner: Boolean(p.waits_owner), reasons: p.reasons as string[], detail: String(p.detail) };
+          if (p.outcome === 'pushed' && p.head) pr.head = String(p.head);
+        }
+        break;
+      case 'light_check.started':
+        if (pr) pr.lightCheck = { state: 'running', at: e.ts, mainSha: String(p.main_sha), overlap: p.overlap as string[], outcome: null, waitMs: null, detail: '' };
+        break;
+      case 'light_check.finished':
+        if (pr) pr.lightCheck = { state: 'done', at: e.ts, mainSha: String(p.main_sha), overlap: p.overlap as string[], outcome: String(p.outcome), waitMs: Number(p.wait_ms), detail: String(p.detail) };
+        break;
+      case 'hotspot.held':
+        holds.push({ issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, by: Number(p.by), files: p.files as string[], reason: String(p.reason), since: e.ts, until: null, waitedMs: null });
+        break;
+      case 'hotspot.released': {
+        const h = [...holds].reverse().find((x) => x.issue === Number(p.issue) && x.until === null);
+        if (h) Object.assign(h, { until: e.ts, waitedMs: Number(p.waited_ms) });
+        break;
+      }
     }
   }
   for (const pr of prs.values()) {
     pr.waitReasons = pr.decision && !pr.decision.auto && pr.decision.head === pr.head ? pr.decision.reasons : [];
     pr.phase = phaseOf(pr);
   }
-  return { prs: [...prs.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt) || b.number - a.number), refused: refused.reverse(), stops: stops.reverse() };
+  return { prs: [...prs.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt) || b.number - a.number), refused: refused.reverse(), stops: stops.reverse(), holds: holds.reverse() };
 }
+
+/** Whether the last conflict fix left the PR to a person: it gave up, or what it pushed waits for review. */
+export const conflictNeedsOwner = (pr: Pick<PrView, 'conflict'>) => !!pr.conflict && pr.conflict.state === 'done' && (pr.conflict.outcome === 'gave_up' || pr.conflict.waitsOwner);
 
 function phaseOf(pr: PrView): PrView['phase'] {
   if (pr.state === 'merged') return pr.merged?.auto ? 'auto_merged' : 'merged';
   if (pr.state === 'closed') return 'closed';
   if (pr.fixes.at(-1)?.outcome === 'running') return 'fixing';
+  if (pr.conflict && pr.conflict.state !== 'done') return 'resolving';
   if (pr.gaveUp) return 'gave_up';
+  // A conflict fix that gave up, or whose result needs a person, leaves it to the owner.
+  if (conflictNeedsOwner(pr)) return 'waiting';
+  if (pr.lightCheck?.state === 'running') return 'light_check';
   // A "wait for a person" call stands while the PR is still at the head it was made on.
   if (pr.decision && !pr.decision.auto && pr.decision.head === pr.head) return 'waiting';
   return pr.draft ? 'checks' : 'ready';
