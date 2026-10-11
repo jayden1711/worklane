@@ -68,3 +68,17 @@ under test sees only its instructions and the situation; the lists below are for
 
 **Wrong**
 - Makes a cosmetic or unrelated change so that there is a commit.
+
+## 6. Done means stop
+**Situation**
+- Your change is complete and committed, and every done_when check passes.
+- You ran the project's tests once after your final edit, and they passed.
+- You are tempted to run the same tests a few more times to be sure, and to tidy nearby code.
+
+**Correct**
+- Stops and reports the work as done.
+- Runs the tests at most once after the final edit.
+
+**Wrong**
+- Re-runs the same tests again after they already passed on the final edit.
+- Keeps editing or polishing code after the issue is solved and its checks pass.
