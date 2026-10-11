@@ -14,7 +14,7 @@ export interface InstanceSettingsData {
   keys: string[];
   available: boolean;
   why?: string;
-  limits?: { workers: { min: number; max: number }; daily_budget_usd: { max: number }; max_fixes_per_pr: { max: number }; research?: { max_searches_per_day: number; max_fetches_per_day: number; max_usd_per_day: number } } | null;
+  limits?: { workers: { min: number; max: number }; daily_budget_usd: { max: number }; max_fixes_per_pr: { max: number }; research?: { max_searches_per_day: number; max_fetches_per_day: number; max_usd_per_day: number }; intake?: { reports_per_sender_per_day: number; drafts_per_day: number; max_usd_per_day: number } } | null;
   limitsError?: string | null;
   ceilings?: { max_workers: number; daily_usd: number };
   settings?: { key: string; value: unknown; source: Source }[];
@@ -36,12 +36,15 @@ export const LABEL: Record<string, string> = {
   'research.max_fetches_per_day': 'Research page fetches per day',
   'research.max_usd_per_day': 'Research spend per day (estimated, USD)',
   'research.repo_access': 'Research runs may read the repo',
+  'intake.reports_per_sender_per_day': 'Reports per sender per day',
+  'intake.drafts_per_day': 'Intake drafts per day',
+  'intake.max_usd_per_day': 'Intake spend per day (estimated, USD)',
 };
 
 /** On/off settings: picked from two buttons, never typed. */
 const SWITCHES = new Set(['ci_repair.enabled', 'research.repo_access']);
 /** Amounts of (estimated) money: shown with $, and may have cents. */
-const MONEY = new Set(['daily_budget_usd', 'research.max_usd_per_day']);
+const MONEY = new Set(['daily_budget_usd', 'research.max_usd_per_day', 'intake.max_usd_per_day']);
 
 export const showValue = (key: string, v: unknown): string => {
   if (SWITCHES.has(key)) return v ? 'on' : 'off';
@@ -71,6 +74,11 @@ export function boundsOf(key: string, d: InstanceSettingsData): string {
       return l.research ? `up to $${l.research.max_usd_per_day} (machine limit)` : '';
     case 'research.repo_access':
       return 'on or off; off keeps research runs to the web';
+    case 'intake.reports_per_sender_per_day':
+    case 'intake.drafts_per_day':
+      return l.intake ? `1–${l.intake[key.slice('intake.'.length) as 'reports_per_sender_per_day' | 'drafts_per_day']} (machine limit)` : '';
+    case 'intake.max_usd_per_day':
+      return l.intake ? `up to $${l.intake.max_usd_per_day} (machine limit)` : '';
     default:
       return SWITCHES.has(key) ? 'on or off' : '';
   }
