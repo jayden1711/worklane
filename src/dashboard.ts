@@ -23,8 +23,8 @@ import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
-import { ConsoleError, liveRuns, runFeed, sendMessage, stopRun } from './console.js';
-import type { FeedItem } from './run-feed.js';
+import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
+import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
@@ -184,14 +184,16 @@ export function liveView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>)
   return { owner, canControl, runs: liveRuns(o.stateDir).map((r) => ({ ...r, pending: canControl ? r.pending : r.pending.map((m) => ({ id: m.id, by: m.by, at: m.at, text: '' })) })) };
 }
 
-/** A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error). */
-function feedOrWait(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>, run: string, after: number): { items: FeedItem[]; ended: boolean } {
-  try {
-    return runFeed({ stateDir: o.stateDir, cfg: o.cfg, run, by: o.user, after });
-  } catch (e) {
-    if (e instanceof ConsoleError && /no feed/.test(e.message) && liveRuns(o.stateDir).some((r) => r.run === run)) return { items: [], ended: false };
-    throw e;
-  }
+/**
+ * A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error).
+ * Reading it is the runs gate's to allow (the owner and the writers), as for the rest of a run's record; only a
+ * message or a stop is the owner's alone (sendMessage, stopRun).
+ */
+function feedOrWait(o: Pick<DashboardOptions, 'stateDir'>, run: string, after: number): { items: FeedItem[]; ended: boolean } {
+  const f = readFeed(o.stateDir, run, after);
+  if (f) return f;
+  if (liveRuns(o.stateDir).some((r) => r.run === run)) return { items: [], ended: false };
+  throw new ConsoleError(`no feed for run ${run}`);
 }
 
 /**
@@ -630,7 +632,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             let after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? -1);
             if (!Number.isInteger(after)) after = -1;
             try {
-              feedOrWait(opts, run, after); // owner only, and the run must have a feed or be live
+              feedOrWait(opts, run, after); // the run must have a feed or be live
             } catch (e) {
               return consoleError(e);
             }

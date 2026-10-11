@@ -96,11 +96,26 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
   } finally {
     await x.d.close();
   }
-  const other = await serve(s, 'example-collaborator');
+  // The owner's decision: a run's record, live view and feed are the owner's and the writers' to read (the
+  // console's message and stop stay the owner's, below); anyone else is refused by the runs gate.
+  const writer = await serve(s, 'example-collaborator');
+  try {
+    const feed = await fetch(`${writer.base}/api/runs/${RUN}/feed?after=-1`, { headers: writer.h });
+    assert.equal(feed.status, 200, 'a writer reads the feed');
+    assert.equal(((await feed.json()) as { ended: boolean }).ended, true);
+    const r = await fetch(`${writer.base}/api/runs/${RUN}/live?t=${writer.d.token}`);
+    assert.equal(r.status, 200, 'and the live view');
+    assert.equal(r.headers.get('content-type'), 'text/event-stream');
+    await r.body?.cancel();
+  } finally {
+    await writer.d.close();
+  }
+  const other = await serve(s, 'someone-else');
   try {
     const r = await fetch(`${other.base}/api/runs/${RUN}/live?t=${other.d.token}`);
-    assert.equal(r.status, 403, 'the live view is the owner\'s');
-    assert.match(((await r.json()) as { error: string }).error, /only the owner/);
+    assert.equal(r.status, 403, 'neither the owner nor a writer');
+    assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the owner \(@example-owner\) and the project's writers; @someone-else isn't one/);
+    assert.equal((await fetch(`${other.base}/api/live`, { headers: other.h })).status, 403, 'nor the list of live runs');
   } finally {
     await other.d.close();
   }
@@ -125,8 +140,12 @@ test('the owner messages and stops a live run through the console; a non-owner, 
   }
   const other = await serve(s, 'example-collaborator');
   try {
+    // A writer may read the run (the runs gate lets them through) but neither stops nor messages it.
     const r = await fetch(`${other.base}/api/runs/${RUN}/stop`, { method: 'POST', headers: other.h, body: '{}' });
     assert.equal(r.status, 403);
+    const m = await fetch(`${other.base}/api/runs/${RUN}/message`, { method: 'POST', headers: other.h, body: JSON.stringify({ text: 'hi' }) });
+    assert.equal(m.status, 403);
+    assert.match(((await m.json()) as { error: string }).error, /only the owner/);
     assert.equal(requests().length, 2, 'nothing more requested');
   } finally {
     await other.d.close();
