@@ -35,32 +35,78 @@ export function withCursor(query: string, after: string): string {
   return query.replaceAll(':after', `'${after}'`);
 }
 
-/** Pull reports newer than the stored cursor and advance it. */
-export function pullBugReports(stateDir: string, query: string, run: ReadOnlyQuery, now = () => new Date()): IncomingReport[] {
-  const after = readCursor(stateDir);
-  const r = run(withCursor(query, after));
+/** Cursor order: numeric ids as numbers, anything else (timestamps) as text. */
+const before = (a: string, b: string) => (/^\d+$/.test(a) && /^\d+$/.test(b) ? BigInt(a) < BigInt(b) : a < b);
+
+/**
+ * Pull reports newer than the stored cursor, oldest first. The cursor is not moved here but in BugStoreIntake.ack,
+ * once what was pulled is recorded, so a crash between the pull and the record pulls the same rows again (and the
+ * seen ledger takes each once). `skipped`: rows with no text, which nothing will record.
+ */
+export function pullBugReports(stateDir: string, query: string, run: ReadOnlyQuery, now = () => new Date()): { reports: IncomingReport[]; skipped: string[] } {
+  const r = run(withCursor(query, readCursor(stateDir)));
   if (!r.ok) throw new Error(`bug-report read failed: ${r.error ?? 'unknown'}`);
   const { rows } = JSON.parse(r.output) as { rows: Row[] };
-  const out: IncomingReport[] = [];
-  let next = after;
+  const reports: IncomingReport[] = [];
+  const skipped: string[] = [];
   for (const row of rows ?? []) {
-    if (row.text == null || row.id == null) continue;
+    if (row.id == null) continue;
     const id = String(row.id);
-    out.push({
+    if (row.text == null) {
+      skipped.push(id);
+      continue;
+    }
+    reports.push({
       source: 'bug-store',
       sourceId: id,
       sender: { source: 'bug-store', id: row.reporter == null ? 'anonymous' : String(row.reporter) },
       text: String(row.text),
       receivedAt: row.created_at ?? now().toISOString(),
     });
-    next = /^\d+$/.test(id) && /^\d+$/.test(next) ? String(Math.max(Number(next), Number(id))) : id > next ? id : next;
   }
   // In the order they were made, whatever order the project's query returns them in.
   const num = (x: string) => (/^\d{1,15}$/.test(x) ? x.padStart(15, '0') : x);
-  out.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || num(a.sourceId).localeCompare(num(b.sourceId)));
-  if (next !== after) {
-    privateDir(join(stateDir, 'intake'));
-    writeOwnerOnly(cursorFile(stateDir), JSON.stringify({ after: next }));
-  }
-  return out;
+  reports.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || num(a.sourceId).localeCompare(num(b.sourceId)));
+  return { reports, skipped };
 }
+
+/** The bug store as an intake source: pulled on each pass, its cursor advanced only past what is recorded. */
+export class BugStoreIntake {
+  readonly name = 'bug-store' as const;
+  /** Ids pulled and not yet behind the cursor, and whether each is recorded (or needs no record). */
+  private pending = new Map<string, boolean>();
+  constructor(private o: { stateDir: string; query: string; run: ReadOnlyQuery; now?: () => Date }) {}
+
+  async take(): Promise<IncomingReport[]> {
+    const { reports, skipped } = pullBugReports(this.o.stateDir, this.o.query, this.o.run, this.o.now);
+    for (const r of reports) if (!this.pending.has(r.sourceId)) this.pending.set(r.sourceId, false);
+    for (const id of skipped) this.pending.set(id, true);
+    this.advance();
+    return reports;
+  }
+
+  /** These ids are recorded: move the cursor past every pulled id up to the first one that isn't. */
+  async ack(ids: string[]): Promise<void> {
+    for (const id of ids) if (this.pending.has(id)) this.pending.set(id, true);
+    this.advance();
+  }
+
+  /** In-product reports have no thread to reply into. */
+  async reply(): Promise<boolean> {
+    return false;
+  }
+
+  private advance() {
+    const after = readCursor(this.o.stateDir);
+    let next = after;
+    for (const id of [...this.pending.keys()].sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0))) {
+      if (!this.pending.get(id)) break;
+      if (before(next, id)) next = id;
+      this.pending.delete(id);
+    }
+    if (next === after) return;
+    privateDir(join(this.o.stateDir, 'intake'));
+    writeOwnerOnly(cursorFile(this.o.stateDir), JSON.stringify({ after: next }));
+  }
+}
+
