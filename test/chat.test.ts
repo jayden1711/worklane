@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { askChat, bundleFiles, chatAnswer, chatHistory, chatTurn, CHAT_HISTORY, CHAT_TOOLS, contextFromEvents, hubChat, takeChatRequests, validateDraft, writeChatAnswer, type ChatContext } from '../src/chat.js';
+import { askChat, bundleFiles, chatAnswer, chatHistory, chatTurn, CHAT_HISTORY, CHAT_TOOLS, contextFromEvents, hubChat, recentRuns, takeChatRequests, validateDraft, writeChatAnswer, type ChatContext } from '../src/chat.js';
+import { RunRecorder } from '../src/run-record.js';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { CHAT_SCHEMA } from '../src/roles.js';
@@ -167,6 +168,20 @@ test('request/answer files: a question is a request the coordinator takes once; 
   assert.deepEqual(chatAnswer(s, id), { v: 1, id, at: '2026-10-10T12:00:05.000Z', state: 'refused', why: 'chat is off' });
   assert.equal(chatAnswer(s, '../../etc/passwd'), null, 'never a path outside');
   if (process.platform !== 'win32') assert.equal(statSync(join(s, 'chat', 'answers', `${id}.json`)).mode & 0o777, 0o600);
+});
+
+test('recent runs: the newest run records as summaries, oldest first, no steps', () => {
+  const s = mkdtempSync(join(tmpdir(), 'chat-runs-'));
+  assert.deepEqual(recentRuns(s), []);
+  for (const [i, role] of ['worker', 'evaluator-verdict', 'chat'].entries()) {
+    const r = new RunRecorder(s, { role, model: 'm', cwd: '/w/issue-4' }, new Date(Date.UTC(2026, 9, 10, 12, i)));
+    r.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't', name: 'Bash', input: { command: 'npm test' } }] } });
+    r.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: 'exit code 1', is_error: true }] } });
+    r.finish({ reason: 'succeeded', costUsd: 0.1, turns: 1, model: 'm' });
+  }
+  const runs = recentRuns(s, 2);
+  assert.deepEqual(runs.map((r) => [r.role, r.issue, r.commands, r.failedCommands]), [['evaluator-verdict', 4, 1, 1], ['chat', 4, 1, 1]]);
+  assert.ok(runs.every((r) => !('steps' in r)));
 });
 
 test('hub: a cross-instance question is answered from each selected instance, each its own run and bundle', async () => {
