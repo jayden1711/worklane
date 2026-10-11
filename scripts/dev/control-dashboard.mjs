@@ -24,7 +24,8 @@
 //
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
 // --with-prs (add pull-request history for the PR views), --keep (leave the temporary directory),
-// --no-chrome-sandbox (for nested sandboxes; see the skill).
+// --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
+// demo's owner, example-owner: e.g. someone-else to see what anyone but the owner and writers gets).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -150,7 +151,7 @@ async function start() {
     const seeded = spawnSync(process.execPath, [cli, 'demo', join(work, 'demo')], { encoding: 'utf8', env });
     const root = seeded.stdout.match(/project (.+)/)?.[1]?.trim();
     if (seeded.status !== 0 || !root) throw new Error(`seeding the demo failed:\n${seeded.stdout}${seeded.stderr}`);
-    const dash = spawn(process.execPath, [cli, 'dashboard', '--root', root, '--user', 'example-owner', '--no-open', '--port', String(await freePort())], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const dash = spawn(process.execPath, [cli, 'dashboard', '--root', root, '--user', option('--user', 'example-owner'), '--no-open', '--port', String(await freePort())], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     procs.push(dash);
     let printed = '';
     dash.stdout.on('data', (d) => (printed += d));
