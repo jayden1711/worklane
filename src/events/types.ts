@@ -55,6 +55,17 @@ export const EventSchemas = {
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
   'settings.applied': z.strictObject({ settings: z.record(z.string(), z.unknown()), error: z.string().nullable() }),
+  /** A dashboard chat turn: who asked, whether they got a read-only answer, what it carried, what it cost; or why it was refused. */
+  'chat.turn': z.strictObject({
+    id: z.string(),
+    by: z.string(),
+    read_only: z.boolean(),
+    citations: z.number().int().nonnegative(),
+    draft: z.enum(['none', 'valid', 'refused']),
+    actions: z.number().int().nonnegative(),
+    cost_usd: z.number().nonnegative(),
+    refused: z.string().nullable(),
+  }),
   /** The console: the owner messaged a live run (held until its current turn ends). */
   'console.message_queued': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string(), by: z.string(), text: z.string() }),
   'console.message_delivered': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
@@ -176,6 +187,10 @@ export const EventSchemas = {
   'guardrail.decision': z.strictObject({ decision: z.enum(['deny', 'ask']), rule: z.string(), agent: z.boolean() }),
   'secret.detected': z.strictObject({ source: z.string(), findings: z.number().int().nonnegative() }),
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
+  /** A task started in a worktree from the pool (worktree-pool.ts), not a fresh one: this claim's worktree is `name`. */
+  'worktree.pooled': z.strictObject({ issue, name: z.string() }),
+  /** The worktree pool brought to main's tip: what was made and removed, and setups that failed. */
+  'worktree.pool_refilled': z.strictObject({ base: sha, created: z.array(z.string()), removed: z.array(z.string()), errors: z.array(z.string()) }),
   /** At start: state/ closed to other users (paths tightened, first 20 named) and old task files removed. */
   'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
