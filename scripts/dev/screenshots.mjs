@@ -176,6 +176,23 @@ if (existsSync(join(engine, 'dist', 'src', 'settings.js'))) {
   } else console.error(`instance init failed: ${(init.stderr || init.stdout).trim().split('\n').pop()}`);
 }
 
+// A run that's live right now, for the live run page: listed by the console, with its feed so far
+// (thinking, text, a failing test, an edit's diff) and a message held for the next turn.
+let liveId = null;
+const consoleMod = await optional('console.js');
+const feedMod = await optional('run-feed.js');
+if (consoleMod?.writeLive && feedMod?.RunFeed && stateDir) {
+  liveId = `${new Date().toISOString().replace(/[:.]/g, '-')}-worker-live01`;
+  const wt = join(root, '.claude', 'worktrees', `issue-${issue}`);
+  consoleMod.writeLive(stateDir, [{ run: liveId, issue, role: 'worker', model: 'sonnet', startedAt: new Date().toISOString(), pending: [{ id: 'm1', text: 'Also add a test for negative quantities.', by: 'example-owner', at: new Date().toISOString() }] }]);
+  const f = new feedMod.RunFeed(stateDir, { run: liveId, issue, role: 'worker', model: 'sonnet', cwd: wt });
+  f.line({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'The total is floored before the discount is applied, so 10.009999 shows as 10.00.' }, { type: 'text', text: "I'll reproduce the rounding failure first." }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });
+  f.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'not ok 3 - totals round to the cent\n  expected 10.01, got 10.009999' }] } });
+  f.line({ type: 'assistant', message: { content: [{ type: 'text', text: 'Rounding at the end instead.' }, { type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: join(wt, 'src', 'totals.js'), old_string: 'return Math.floor(total * 100) / 100;', new_string: 'return Math.round(total * 100) / 100;' } }] } });
+  f.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'edited' }] } });
+  f.message('m1', 'queued', 'Also add a test for negative quantities.');
+}
+
 let hub = null;
 if (hubMod && stateDir) {
   hub = await serve(['--hub', `shop=${stateDir}`, '--port', String(port + 1)]);
@@ -197,6 +214,7 @@ const pages = [
   ['logs', '/logs'],
   ['settings', '/settings'],
   ...(runId ? [['run-detail', `/runs/${runId}`]] : []),
+  ...(liveId ? [['live-run', `/runs/${liveId}`]] : []),
 ];
 const shots = [
   ...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })),

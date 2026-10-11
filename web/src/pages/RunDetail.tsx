@@ -4,6 +4,7 @@ import { api, type RunRecord, type RunSummary } from '../api';
 import { navigate } from '../App';
 import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
+import { LiveRun } from '../components/LiveRun';
 import { Header } from './Overview';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
@@ -58,23 +59,33 @@ export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
 /** One agent run as tool chips (Beautiful UI's tool chips): every command and write, then the files and the final message. */
 export function RunDetail({ id }: { id: string }) {
   const [run, setRun] = useState<RunRecord | null | undefined>(undefined);
-  useEffect(() => {
+  // Live while the coordinator runs it (its record is written when it ends); the stored record afterwards.
+  const [live, setLive] = useState<boolean | undefined>(undefined);
+  const loadRecord = () =>
     api<RunRecord>(`/api/runs/${encodeURIComponent(id)}`)
       .then(setRun)
       .catch(() => setRun(null));
+  useEffect(() => {
+    void loadRecord();
+    api<{ live: boolean }>(`/api/runs/${encodeURIComponent(id)}/console`)
+      .then((c) => setLive(c.live))
+      .catch(() => setLive(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+  const showLive = live === true && !run;
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
   const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
   return (
     <div data-testid="page-run-detail">
-      <Header title={run ? `${run.role} run` : 'Run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : ''}>
+      <Header title={run ? `${run.role} run` : showLive ? 'Live run' : 'Run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : showLive ? 'live: what the agent does, as it does it' : ''}>
         <button onClick={() => navigate(back)} className="flex items-center gap-1 text-[12px] text-ink-3 hover:text-ink">
           <ArrowLeft className="size-3.5" /> Back
         </button>
       </Header>
       <div className="mx-auto max-w-4xl space-y-4 p-6">
-        {run === undefined && <Loading />}
-        {run === null && <Empty title="No such run" hint="Runs are kept for the most recent 500." />}
+        {showLive && <LiveRun run={id} onEnded={() => void loadRecord()} />}
+        {!showLive && (run === undefined || live === undefined) && <Loading />}
+        {!showLive && run === null && live === false && <Empty title="No such run" hint="Runs are kept for the most recent 500." />}
         {run && (
           <>
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">

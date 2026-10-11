@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { CheckRun, HealthView, HubInfo, PrsView, State } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { InstanceList, StopBanner } from './App';
+import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
@@ -52,4 +53,7 @@ export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => 
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
 export { boundsOf, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
+export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToStaticMarkup(<LiveFeedView items={items} ended={ended} />);
+export const renderConsole = (data: ConsoleData) => renderToStaticMarkup(<ConsolePanel data={data} run="r" />);
+export const renderAgents = (state: State, live: LiveList | null) => renderToStaticMarkup(<Agents state={state} live={live} />);
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);
