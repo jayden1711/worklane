@@ -185,6 +185,8 @@ export interface State {
   canReadThroughput?: boolean;
   /** Whether this viewer may read agent runs (the owner or a writer); absent from an older server: yes. */
   canReadRuns?: boolean;
+  /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
+  canReadDigest?: boolean;
   project: { name: string; repo: string; landMode: string };
   user: string;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
@@ -441,4 +443,22 @@ export interface Throughput {
   cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; evaluatorOnL0Usd: number };
   waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
+}
+
+/** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
+export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held';
+export interface WaitItem {
+  kind: WaitKind;
+  since: string;
+  issue: number | null;
+  pr: number | null;
+  title: string | null;
+  detail: string;
+  sha?: string;
+}
+export interface Waiting {
+  at: string;
+  items: WaitItem[];
+  /** The daily digest as posted to GitHub. */
+  markdown: string;
 }

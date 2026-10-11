@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ChatAnswerFile, CheckRun, HealthView, HubInfo, PrsView, State, Throughput } from './api';
+import type { ChatAnswerFile, CheckRun, HealthView, HubInfo, PrsView, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, StopBanner } from './App';
@@ -15,6 +15,7 @@ import { Agents } from './pages/Agents';
 import { Decisions } from './pages/Decisions';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
+import { WaitingPage, WaitingView } from './pages/Waiting';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
@@ -68,3 +69,5 @@ export const renderThroughputPanel = (state: State) => renderToStaticMarkup(<Thr
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
+export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(<WaitingView w={w} {...(now !== undefined ? { now } : {})} />);
+export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);

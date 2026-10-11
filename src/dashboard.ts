@@ -35,6 +35,7 @@ import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
 import { throughput } from './throughput.js';
+import { digestMarkdown, waitingOnYou } from './digest.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -107,6 +108,11 @@ export { mayAnswer };
 
 /** Who may read throughput (what runs cost, where PRs waited): the project's owner or one of its writers. */
 export function mayReadThroughput(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
+
+/** Who may read what waits on the owner (the digest): the project's owner or one of its writers. */
+export function mayReadDigest(user: string, owners: { default: string; writers: string[] }): boolean {
   return mayAnswer(owners.default, user, owners);
 }
 
@@ -548,6 +554,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
       // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
       canReadRuns: mayReadRuns(opts.user, opts.cfg.project.owners),
+      // Whether this viewer may read what waits on the owner, so the page asks only when it will get it.
+      canReadDigest: mayReadDigest(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -725,6 +733,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const owners = opts.cfg.project.owners;
           if (!mayReadThroughput(opts.user, owners)) return json(res, 403, { error: `throughput is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
+        }
+        // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
+        // (what the daily GitHub comment posts). The owner's and the writers', like runs.
+        if (url.pathname === '/api/waiting' && req.method === 'GET') {
+          const owners = opts.cfg.project.owners;
+          if (!mayReadDigest(opts.user, owners)) return json(res, 403, { error: `what waits on the owner is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          const digest = waitingOnYou(readEvents(opts.eventsDb));
+          return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
         }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;
