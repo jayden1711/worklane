@@ -8,18 +8,33 @@ import { Header } from './Overview';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
 
+/** The server's refusal of agent runs to someone who is neither the owner nor a writer (see mayReadRuns). */
+export const runsRefused = (message: string) => (/^agent runs are for /.test(message) ? message : null);
+
+/** Agent runs are the owner's and the writers': anyone else is told so, not shown an empty list. */
+export function RunsRefused({ message }: { message: string }) {
+  return (
+    <div className="p-4 text-[13px] text-ink-3" data-testid="runs-refused">
+      {message.replace(/^agent runs/, 'Agent runs')}.
+    </div>
+  );
+}
+
 /** An issue's agent runs as task rows (Beautiful UI's task rows), oldest first; each opens what it did. */
 export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [refused, setRefused] = useState<string | null>(null);
   useEffect(() => {
     api<RunSummary[]>(`/api/runs?issue=${issue}`)
-      .then(setRuns)
-      .catch(() => setRuns([]));
+      .then((r) => (setRuns(r), setRefused(null)))
+      .catch((e: Error) => (setRuns([]), setRefused(runsRefused(e.message))));
   }, [issue, lastId]);
   return (
     <Card className="overflow-hidden" data-testid="runs-card">
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Agent runs</div>
-      {runs.length ? (
+      {refused ? (
+        <RunsRefused message={refused} />
+      ) : runs.length ? (
         <div>
           {runs.map((r, i) => (
             <TaskRow
@@ -58,10 +73,11 @@ export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
 /** One agent run as tool chips (Beautiful UI's tool chips): every command and write, then the files and the final message. */
 export function RunDetail({ id }: { id: string }) {
   const [run, setRun] = useState<RunRecord | null | undefined>(undefined);
+  const [refused, setRefused] = useState<string | null>(null);
   useEffect(() => {
     api<RunRecord>(`/api/runs/${encodeURIComponent(id)}`)
       .then(setRun)
-      .catch(() => setRun(null));
+      .catch((e: Error) => (setRun(null), setRefused(runsRefused(e.message))));
   }, [id]);
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
   const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
@@ -74,7 +90,7 @@ export function RunDetail({ id }: { id: string }) {
       </Header>
       <div className="mx-auto max-w-4xl space-y-4 p-6">
         {run === undefined && <Loading />}
-        {run === null && <Empty title="No such run" hint="Runs are kept for the most recent 500." />}
+        {run === null && (refused ? <Card><RunsRefused message={refused} /></Card> : <Empty title="No such run" hint="Runs are kept for the most recent 500." />)}
         {run && (
           <>
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">

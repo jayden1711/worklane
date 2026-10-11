@@ -20,7 +20,7 @@ import { LogsPage } from './pages/Logs';
 import { Overview } from './pages/Overview';
 import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
-import { RunDetail, RunList } from './pages/RunDetail';
+import { RunDetail, RunList, RunsRefused } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
 
 export const pages = {
@@ -58,3 +58,5 @@ export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStat
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';
 export { proposedSetting } from './components/InstanceSettings';
+export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
+export { runsRefused } from './pages/RunDetail';

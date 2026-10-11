@@ -105,6 +105,18 @@ export function mayAnswer(owner: string, user: string, owners: { writers: string
   return !!u && (owner.toLowerCase() === u || owners.writers.some((w) => w.toLowerCase() === u));
 }
 
+/**
+ * Who may read agent runs (every route under /api/runs: a run's record, its live feed, a research run's
+ * searches and pages): the project's owner or one of its writers. Writing to a run (a console message, a
+ * stop) stays the owner's alone, checked on those routes as well.
+ */
+export function mayReadRuns(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
+
+/** Every path served under /api/runs, which the run-reading gate covers whatever route is added there. */
+export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/');
+
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
 /**
@@ -447,6 +459,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/logs' && req.method === 'GET') {
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
+        }
+        // Agent runs are the owner's and the writers' to read: one gate in front of everything under /api/runs.
+        if (isRunsPath(url.pathname) && !mayReadRuns(opts.user, opts.cfg.project.owners)) {
+          return json(res, 403, { error: `agent runs are for the owner (@${opts.cfg.project.owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
         }
         // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
         if (url.pathname === '/api/runs' && req.method === 'GET') {

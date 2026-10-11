@@ -19,6 +19,8 @@ interface Render {
   renderIssue(state: State, issue: number): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
+  renderRunsRefused(message: string): string;
+  runsRefused(message: string): string | null;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
@@ -475,4 +477,11 @@ test('a chat proposal lands in its confirm flow: the setting filled in for revie
     loc.search = '';
     loc.hash = '';
   }
+});
+
+test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
+  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
+  assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
 });
