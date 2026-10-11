@@ -40,6 +40,7 @@ import { scanRange } from './scan/secrets.js';
 import { emergencyStop, fullRunLock, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords } from './reports.js';
+import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -413,7 +414,9 @@ export class Coordinator {
     const report = buildReport(events, this.d.cfg, { since, now, slot, runRecords, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}), ...(this.d.appKeyPath ? { appKeyPath: this.d.appKeyPath } : {}) });
     // A fix proposed for a repeated failure goes to the owner's Inbox once; it changes nothing until answered.
     const asked = new Set(events.filter((e) => e.type === 'decision.asked').flatMap((e) => (e.payload as { receipts: string[] }).receipts));
-    for (const p of report.proposals) {
+    // So does a tuning suggestion from what was measured (check times, a tune profile); a change is a reviewed PR.
+    const tuning = tuningProposals(tuningInput(events, this.d.cfg.tests, readTuneProfile(this.d.stateDir)));
+    for (const p of [...report.proposals, ...tuning]) {
       if (asked.has(`key: ${p.key}`)) continue;
       await this.ask('question', null, this.d.cfg.project.owners.default, p.question, p.options, p.recommendation, [`key: ${p.key}`, ...p.receipts]);
     }

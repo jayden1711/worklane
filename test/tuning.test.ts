@@ -1,6 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { recommendWorkers, tuningProposals, type TuneProfile } from '../src/tuning.js';
+import { currentWorkerCap, recommendWorkers, tuningInput, tuningProposals, type TuneProfile } from '../src/tuning.js';
+
+test('the tuning input: verify-stage check times, the full suite is the slowest candidate, the cap in force', () => {
+  const ev = (stage: string, checks: object[]) => ({ type: 'check.result', payload: { stage, checks } });
+  const events = [
+    ev('verify', [{ check: 'make test-fast', status: 'pass', duration_ms: 60_000 }, { check: 'bash full.sh', status: 'pass', duration_ms: 1_200_000 }]),
+    ev('verify', [{ check: 'bash full.sh', status: 'skipped' }]),
+    ev('land', [{ check: 'gate', status: 'pass', duration_ms: 5 }]),
+    { type: 'run.cost', payload: {} },
+  ];
+  const input = tuningInput(events, { runner: { full: 'make test-full' }, checks: ['bash full.sh'], env: { XDIST_WORKERS: '6' } }, null);
+  assert.deepEqual(input.checks, [{ check: 'make test-fast', durationMs: 60_000 }, { check: 'bash full.sh', durationMs: 1_200_000 }], 'verify only, ran only');
+  assert.equal(input.fullCheck, 'bash full.sh', 'the project check that runs the full tier, though runner.full never ran');
+  assert.equal(input.currentWorkers, 6);
+  assert.equal(currentWorkerCap({ cores: { max: 3 }, env: { XDIST_WORKERS: '6' } }), 3, 'cores.max wins');
+  assert.equal(currentWorkerCap({ env: { SIM_REALTIME: '1' } }), null);
+});
 
 const profile = (runs: TuneProfile['runs'], extra: Partial<TuneProfile> = {}): TuneProfile => ({ at: '2026-10-11T08:00:00Z', command: 'make test-fast', cores: 16, memAvailableMb: 32000, runs, ...extra });
 

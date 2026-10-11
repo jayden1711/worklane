@@ -255,6 +255,22 @@ test('a worktree pool on main: refilled in the background, a task starts in a po
   assert.ok(!worktrees.includes(pooledName), 'the pooled worktree is removed after the task, under its own name');
 });
 
+test('a tuning suggestion from a tune profile goes to the owner\'s Inbox with the report, once', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.env = { XDIST_WORKERS: '8' };
+  mkdirSync(f.stateDir, { recursive: true });
+  writeFileSync(join(f.stateDir, 'tune-profile.json'), JSON.stringify({ at: '2026-10-11T07:00:00Z', command: 'make test-fast', cores: 16, memAvailableMb: 32000, runs: [{ workers: 1, seconds: 400, ok: true, peakWorkerMb: 300 }, { workers: 4, seconds: 100, ok: true, peakWorkerMb: 300 }, { workers: 16, seconds: 95, ok: true, peakWorkerMb: 300 }] }));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.maybeReport(new Date(2026, 9, 12, 8, 5));
+  const asked = () => f.log.read(0, ['decision.asked']).map((e) => e.payload as { question: string; owner: string; receipts: string[] });
+  assert.equal(asked().length, 1);
+  assert.equal(asked()[0]!.question, 'Set the test worker cap to 4 (now 8)?');
+  assert.equal(asked()[0]!.owner, 'example-owner');
+  assert.ok(asked()[0]!.receipts.includes('4 worker(s): 100 s, 300 MB per worker'));
+  await c.maybeReport(new Date(2026, 9, 13, 8, 5));
+  assert.equal(asked().length, 1, 'not asked again');
+});
+
 test('a refused issue is judged again when its done_when is edited: still invalid gets the new error; valid is claimed', { skip }, async () => {
   const f = fixture();
   const body = (yaml: string) => `Orders with a zero quantity are counted.\r\n\r\n\`\`\`done_when\r\n${yaml}\r\n\`\`\`\r\n`;
