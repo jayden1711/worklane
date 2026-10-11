@@ -19,7 +19,7 @@ import { redact, redactString } from './events/redact.js';
 import type { StoredEvent } from './events/types.js';
 import { groupOnlyDir } from './os/index.js';
 import { CHAT_SCHEMA, rolePrompt } from './roles.js';
-import type { RunSummary } from './run-record.js';
+import { readRun, RUNS_DIR, type RunSummary } from './run-record.js';
 import type { AgentRunner } from './runner.js';
 import { SETTING_KEYS } from './settings.js';
 
@@ -60,6 +60,24 @@ export interface ChatContext {
   issues: ChatIssue[];
   prs: ChatPr[];
   decisions: OpenDecision[];
+}
+
+/** The newest run records' summaries, oldest first (what the chat's runs file lists). */
+export function recentRuns(stateDir: string, n = 50): RunSummary[] {
+  const dir = join(stateDir, RUNS_DIR);
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort().slice(-n);
+  } catch {
+    return [];
+  }
+  return files.flatMap((f) => {
+    const r = readRun(stateDir, f.slice(0, -'.json'.length));
+    if (!r) return [];
+    const { steps, otherTools: _o, final: _f, v: _v, ...rest } = r;
+    const commands = steps.filter((s) => s.kind === 'command');
+    return [{ ...rest, commands: commands.length, failedCommands: commands.filter((s) => s.status === 'error').length }];
+  });
 }
 
 /** Open issues, PRs and decisions from the event log, for a context. */
