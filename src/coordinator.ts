@@ -5,7 +5,7 @@
 // branch in their own worktree; everything outward-facing happens here.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
@@ -16,11 +16,14 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, killTree, killTreeAs, machineLoad, projectCommand, spawnDetached, writeAgentReadable, writeGroupOnly } from './os/index.js';
+import { currentCoreShare, envWithCores, withCores } from './cores.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunControl, type RunResult } from './runner.js';
 import { MAX_MESSAGE, takeRequests, writeLive, type PendingMessage } from './console.js';
+import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
+import { machineStats } from './os/stats.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { allowedOnce, domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from './domain-requests.js';
 import { needsPlan, objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from './plan-mode.js';
@@ -40,6 +43,8 @@ import { buildReport, dueSlot, recentRunRecords } from './reports.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { refillPool, takeFromPool } from './worktree-pool.js';
+import { prepareDepCache } from './dep-cache.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -58,6 +63,11 @@ export interface CoordinatorDeps {
    * write (group `gid`, 2750; files 0640), outside the worktree. Without it, task files stay in stateDir.
    */
   agentTasks?: { dir: string; gid: number };
+  /**
+   * The instance's root (beside its checkout), where its dependency cache lives, and the agents' group: set only
+   * when agents run as their own user. Without it there is no shared cache.
+   */
+  depCacheRoot?: { dir: string; gid: number };
   /** The OS user project commands run as (checks, gates, setup, full runs): the agent user, never the coordinator's. */
   commandsAs?: RunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
@@ -83,6 +93,8 @@ export interface CoordinatorDeps {
 }
 
 const COMMAND_TIMEOUT_MS = 2 * 3600_000;
+/** How often the worktree pool is checked against main's tip. */
+const POOL_CHECK_MS = 5 * 60_000;
 /** When GitHub is still computing whether a PR can merge, look again this soon. */
 const MERGEABLE_RECHECK_MS = 10_000;
 /** How often the default branch's tip is checked for a merge (which can make open PRs conflict). */
@@ -126,7 +138,12 @@ export const STARTUP_FAILURE_SECS = 90;
 
 export class Coordinator {
   private readonly remote: string;
-  private readonly wt: WorktreeOptions;
+  /** Where task worktrees go and how they're set up; the project's env is filled in when each one is made. */
+  private readonly wtBase: WorktreeOptions;
+  private get wt(): WorktreeOptions {
+    const cacheEnv = this.depCacheEnv();
+    return { ...this.wtBase, env: this.projectEnv(), ...(cacheEnv ? { cacheEnv } : {}) };
+  }
   private active = new Map<number, Promise<void>>();
   /** The hotspot files each running task is expected to change. */
   private taskHotspots = new Map<number, string[]>();
@@ -140,6 +157,8 @@ export class Coordinator {
   private prPolled = new Map<number, number>();
   /** Live runs, for the console. */
   private live = new Map<string, LiveEntry>();
+  /** Chat turns, one at a time. */
+  private chatQueue: Promise<void> = Promise.resolve();
   /** The repo's own config: the defaults the instance's settings apply over. */
   private readonly repoCfg: Config;
   private settingsKey = '';
@@ -216,12 +235,23 @@ export class Coordinator {
     };
     this.repoCfg = d.cfg;
     this.remote = d.remote ?? 'origin';
-    this.wt = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+    this.wtBase = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+  }
+
+  /** This task's share of the machine's cores right now: the cores over the agents running (cores.ts). */
+  private coreShare(): number {
+    return currentCoreShare(this.d.cfg.tests.cores, this.d.slotsDir);
+  }
+
+  /** The project's env (tests.yaml env) as a command or session starting now gets it: `{cores}` filled in. */
+  private projectEnv(): Record<string, string> {
+    return envWithCores(this.d.cfg.tests.env, this.coreShare());
   }
 
   /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
   private project(command: string, cwd: string) {
-    return sh(command, cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, this.d.cfg.tests.env);
+    const share = this.coreShare();
+    return sh(withCores(command, share), cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share));
   }
 
   private get branch() {
@@ -266,6 +296,7 @@ export class Coordinator {
     };
     this.checkEmergency();
     this.checkConsole();
+    void this.checkChat();
     await step('settings', () => this.refreshSettings(), undefined);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
@@ -275,6 +306,7 @@ export class Coordinator {
     await step('prs', () => this.watchPrs(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
+    await step('pool', () => this.maybeRefillPool(), undefined);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
 
@@ -318,6 +350,8 @@ export class Coordinator {
   /** Wait for in-flight task pipelines (tests and graceful shutdown). */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
+    await this.chatQueue;
+    await this.poolRefill;
   }
 
   /**
@@ -438,6 +472,59 @@ export class Coordinator {
    * The console's requests from the dashboard (called every few seconds and on each tick): message or stop
    * a live run. Only the owner's are acted on; every outcome is an event.
    */
+  /**
+   * The dashboard chat's questions (called every few seconds and on each tick). Each is answered by a
+   * chief_of_staff turn through this coordinator's runner, so it holds the per-login lock like every run and
+   * never overlaps another claude on the same login. Turns go one at a time; the returned promise is the queue.
+   */
+  checkChat(): Promise<void> {
+    for (const q of takeChatRequests(this.d.stateDir)) this.chatQueue = this.chatQueue.then(() => this.chatRequest(q));
+    return this.chatQueue;
+  }
+
+  private async chatRequest(q: ChatRequest): Promise<void> {
+    const refuse = (why: string) => {
+      writeChatAnswer(this.d.stateDir, q.id, { refused: why });
+      this.emit('chat.turn', { id: q.id, by: q.by, read_only: true, citations: 0, draft: 'none', actions: 0, cost_usd: 0, refused: why });
+    };
+    try {
+      const role = this.d.cfg.agents.roles.chief_of_staff;
+      if (role && !role.enabled) return refuse('the chat is off (agents.yaml roles.chief_of_staff)');
+      if (this.halt.signal.aborted || this.stopped) return refuse('agents are stopped');
+      const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
+      if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
+      const events = this.d.log.read();
+      const context = {
+        instance: this.d.instance,
+        repo: this.d.cfg.project.project.repo,
+        events: events.slice(-2000),
+        runs: recentRuns(this.d.stateDir),
+        health: machineStats({ paths: [this.d.repo, this.d.stateDir] }),
+        ...contextFromEvents(events),
+      };
+      // Bundles beside the agents' task files: readable by their group, never writable by it.
+      const at = this.d.agentTasks;
+      const bundle = at ? { root: join(dirname(at.dir), 'chat'), gid: at.gid } : { root: join(this.d.stateDir, 'chat', 'bundles'), gid: process.getgid?.() ?? 0 };
+      const a = await chatTurn({
+        cfg: this.d.cfg,
+        context,
+        question: q.question,
+        by: q.by,
+        runner: this.d.runner,
+        stateDir: this.d.stateDir,
+        bundleRoot: bundle.root,
+        gid: bundle.gid,
+        repo: this.d.repo,
+        remainingUsd: left,
+        onCost: (r) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
+      });
+      writeChatAnswer(this.d.stateDir, q.id, { answer: a });
+      this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
+    } catch (e) {
+      refuse(`the chat turn failed: ${(e as Error).message.slice(0, 300)}`);
+    }
+  }
+
   checkConsole(): void {
     try {
       this.consoleRequests();
@@ -599,7 +686,62 @@ export class Coordinator {
   // ---------------------------------------------------------------- task pipeline
 
   private paths(issue: number) {
-    return { name: `issue-${issue}`, branch: `${BRAND.cli}/issue-${issue}`, taskFile: join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `issue-${issue}.json`) };
+    return { name: this.pooledName(issue) ?? `issue-${issue}`, branch: `${BRAND.cli}/issue-${issue}`, taskFile: join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `issue-${issue}.json`) };
+  }
+
+  /** The pooled worktree this claim of the issue runs in, if it took one (recorded, so a restart still finds it). */
+  private pooledName(issue: number): string | null {
+    const ev = this.events(issue);
+    const claim = ev.map((e) => e.type).lastIndexOf('issue.claimed');
+    const p = ev.slice(claim + 1).filter((e) => e.type === 'worktree.pooled').at(-1);
+    return p ? String((p.payload as { name: string }).name) : null;
+  }
+
+  /**
+   * The instance's dependency cache (pip, uv, npm, pnpm, yarn) for worktree setup: only for an instance whose
+   * agents run as their own user (the cache lives beside its checkout), and when the project keeps it on.
+   * Not for agent sessions: their sandbox writes only inside the worktree, so a cache outside it fails there.
+   */
+  private depCacheEnv(): Record<string, string> | undefined {
+    const root = this.d.depCacheRoot;
+    if (!root || !this.d.cfg.tests.worktree.dep_cache) return undefined;
+    if (this.cacheEnv === undefined) {
+      try {
+        this.cacheEnv = prepareDepCache(root.dir, root.gid).env;
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: 'dep-cache', kind: 'error', message: (e as Error).message.slice(0, 500) });
+        this.cacheEnv = null;
+      }
+    }
+    return this.cacheEnv ?? undefined;
+  }
+  private cacheEnv: Record<string, string> | null | undefined;
+
+  private poolBusy = false;
+  private poolCheckedAt = 0;
+  private poolRefill: Promise<void> = Promise.resolve();
+
+  /**
+   * Keep the worktree pool on main's tip, in the background: at most one refill at a time, checked every
+   * few minutes, so a slow setup never holds the coordinator's tick.
+   */
+  private maybeRefillPool(now = Date.now()) {
+    const size = this.d.cfg.tests.worktree.pool;
+    if (size <= 0 || this.poolBusy || this.stopped || now - this.poolCheckedAt < POOL_CHECK_MS) return;
+    this.poolCheckedAt = now;
+    this.poolBusy = true;
+    this.poolRefill = (async () => {
+      try {
+        spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
+        const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+        const r = await refillPool(this.wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb });
+        if (r.created.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree pool', kind: 'error', message: (e as Error).message.slice(0, 500) });
+      } finally {
+        this.poolBusy = false;
+      }
+    })();
   }
 
   async runTask(issue: Issue, doneWhen: DoneWhenList): Promise<void> {
@@ -628,7 +770,10 @@ export class Coordinator {
 
     const { name, branch, taskFile } = this.paths(n);
     try {
-      const { path, setupErrors } = createWorktree(this.wt, name, branch, base);
+      // A worktree already set up on this base, from the pool, when there is one; else a fresh one.
+      const pooled = this.d.cfg.tests.worktree.pool > 0 ? takeFromPool(this.wt, base, branch) : null;
+      if (pooled) this.emit('worktree.pooled', { issue: n, name: pooled.name });
+      const { path, setupErrors } = pooled ? { path: pooled.path, setupErrors: [] as string[] } : createWorktree(this.wt, name, branch, base);
       if (setupErrors.length) throw new Error(`worktree setup failed: ${setupErrors.join('; ')}`);
       this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen });
 
@@ -720,7 +865,7 @@ export class Coordinator {
     const role = this.d.cfg.agents.roles.workers!;
     const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'investigator',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -770,7 +915,7 @@ export class Coordinator {
     try {
       const role = this.d.cfg.agents.roles.evaluator!;
       const r = await this.d.runner.run({
-        env: this.d.cfg.tests.env,
+        env: this.projectEnv(),
         role: 'evaluator-repro',
         stateDir: this.d.stateDir,
         prompt: issueBrief(issue, doneWhen),
@@ -831,7 +976,7 @@ export class Coordinator {
     const before = this.git(path, 'rev-parse', 'HEAD');
     const started = Date.now();
     const r: RunResult = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -1109,7 +1254,7 @@ export class Coordinator {
       ...(opts.extra ?? []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'evaluator-verdict',
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, extra),
@@ -1202,7 +1347,7 @@ export class Coordinator {
     const note = decided?.answer === 'revise' ? decided.note : null;
     const workers = this.d.cfg.agents.roles.workers!;
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'planner',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -2108,7 +2253,7 @@ export class Coordinator {
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
@@ -2423,7 +2568,7 @@ export class Coordinator {
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
     const r = await this.d.runner.run({
-      env: this.d.cfg.tests.env,
+      env: this.projectEnv(),
       role: 'worker',
       ...laneOf(issue),
       stateDir: this.d.stateDir,

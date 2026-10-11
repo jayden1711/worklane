@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
@@ -13,11 +13,12 @@ import { loadConfig } from '../src/config/load.js';
 import { Coordinator, logTail } from '../src/coordinator.js';
 import type { InstanceSettings } from '../src/instance.js';
 import { liveRuns, sendMessage, stopRun } from '../src/console.js';
+import { askChat, chatAnswer } from '../src/chat.js';
 import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
-import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
+import { CliRunner, DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
-import { repoRoot } from './helpers.js';
+import { repoRoot, STDIN_LINE } from './helpers.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -191,6 +192,67 @@ test('issues without a contract, or from outsiders, are never started', { skip }
   const before = f.log.read(0, ['issue.seen']).length;
   for (let i = 0; i < 3; i++) await c.tick();
   assert.equal(f.log.read(0, ['issue.seen']).length, before);
+});
+
+test('the core budget: {cores} is filled in for the coordinator\'s checks (env and command) and the agent\'s session', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.env = { WORKERS: '{cores}' };
+  f.cfg.tests.cores = { reserve: 0, min: 2, max: 2 }; // exactly 2 on any machine
+  const seen = join(mkdtempSync(join(tmpdir(), 'cores-')), 'seen.txt');
+  const check = `node -e "require('fs').writeFileSync(process.argv[1], (process.env.WORKERS || 'unset') + ' ' + process.argv[2])" ${JSON.stringify(seen)} {cores}`;
+  const body = `Orders with a zero quantity are counted.\n\n\`\`\`done_when\n- command: |-\n    ${check}\n\`\`\`\n`;
+  f.backlog.open({ title: 'Totals count zero quantities', body, author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  assert.equal(readFileSync(seen, 'utf8'), '2 2', 'the check got WORKERS=2 and the argument 2');
+  const worker = runner.calls.find((r) => r.role === 'worker');
+  assert.equal(worker?.env?.WORKERS, '2', 'the agent session too');
+});
+
+test('worktree setup gets the instance\'s dependency cache, and only an instance with its own root has one', { skip }, async () => {
+  const f = fixture();
+  const seen = join(mkdtempSync(join(tmpdir(), 'cache-')), 'seen.txt');
+  f.cfg.tests.worktree.setup = [`node -e "require('fs').writeFileSync(process.argv[1], process.env.PIP_CACHE_DIR || 'none')" ${JSON.stringify(seen)}`];
+  const root = mkdtempSync(join(tmpdir(), 'inst-'));
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, depCacheRoot: { dir: root, gid: process.getgid?.() ?? 0 } });
+  await c.tick();
+  await c.idle();
+  assert.equal(readFileSync(seen, 'utf8'), join(root, 'cache', 'pip'));
+  assert.ok(existsSync(join(root, 'cache', 'npm')));
+  // Without an instance root (a single-user checkout), no cache appears anywhere beside the repo.
+  const g = fixture();
+  g.cfg.tests.worktree.setup = f.cfg.tests.worktree.setup;
+  g.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const d = new Coordinator({ cfg: g.cfg, log: g.log, backlog: g.backlog, runner: agents(), repo: g.repo, instance: 'alice', stateDir: g.stateDir, slotsDir: g.slotsDir, machine: g.machine });
+  await d.tick();
+  await d.idle();
+  assert.equal(readFileSync(seen, 'utf8'), 'none');
+  assert.ok(!existsSync(join(g.repo, '..', 'cache')));
+});
+
+test('a worktree pool on main: refilled in the background, a task starts in a pooled worktree, which is removed after it', { skip }, async () => {
+  const f = fixture();
+  f.cfg.tests.worktree.pool = 1;
+  f.cfg.tests.worktree.est_size_gb = 0.01;
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  const refilled = f.log.read(0, ['worktree.pool_refilled']).map((e) => e.payload as { created: string[] });
+  assert.equal(refilled.length, 1);
+  assert.equal(refilled[0]!.created.length, 1);
+  const pooledName = refilled[0]!.created[0]!;
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(f.log.read(0, ['worktree.pooled']).map((e) => e.payload), [{ issue: n, name: pooledName }], 'the task took the ready worktree');
+  await c.tick(); // lands what the first tick queued
+  await c.idle();
+  assert.ok(f.log.read(0, ['land.result']).some((e) => (e.payload as { issue: number; outcome: string }).issue === n && (e.payload as { outcome: string }).outcome === 'landed'), 'and finished');
+  const worktrees = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: f.repo, encoding: 'utf8' });
+  assert.ok(!worktrees.includes(pooledName), 'the pooled worktree is removed after the task, under its own name');
 });
 
 test('a refused issue is judged again when its done_when is edited: still invalid gets the new error; valid is claimed', { skip }, async () => {
@@ -2116,6 +2178,85 @@ test("console: a request that isn't the owner's, or for a run that isn't live, i
   assert.equal(f.log.read(0, ['console.run_stopped']).length, 0);
   w.finish('succeeded');
   await c.idle();
+});
+
+// ---- the dashboard chat
+
+test('chat: a question from the dashboard is answered by a chief_of_staff turn; the answer is written, its cost counted, the turn recorded', { skip }, async () => {
+  const f = fixture();
+  f.log.append('issue.seen', { issue: 3, title: 'Totals', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, 'alice');
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'Issue #3 is waiting.', citations: [{ kind: 'issue', id: '3' }] }, costUsd: 0.2 } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const { id } = askChat({ stateDir: f.stateDir, question: 'what is waiting?', by: 'example-owner' });
+  assert.equal(chatAnswer(f.stateDir, id)!.state, 'pending');
+  await c.checkChat();
+  const a = chatAnswer(f.stateDir, id)!;
+  assert.equal(a.state, 'answered');
+  const answered = a as { answer: { answer: string; citations: { href: string }[] } };
+  assert.equal(answered.answer.answer, 'Issue #3 is waiting.');
+  assert.deepEqual(answered.answer.citations.map((x) => x.href), [`https://github.com/${f.cfg.project.project.repo}/issues/3`]);
+  assert.deepEqual(f.log.read(0, ['run.cost']).map((e) => [(e.payload as { role: string }).role, (e.payload as { usd: number }).usd]), [['chat', 0.2]]);
+  assert.deepEqual(lastOf(f.log, 'chat.turn'), { id, by: 'example-owner', read_only: false, citations: 1, draft: 'none', actions: 0, cost_usd: 0.2, refused: null });
+  const req = runner.calls[0]!;
+  assert.deepEqual([req.role, req.allowedTools], ['chat', ['Read', 'Glob', 'Grep']]);
+  assert.match(req.prompt, /Context files for instance alice: /);
+});
+
+test("chat: someone who isn't the owner gets a read-only answer; a spent budget or a disabled chat is refused", { skip }, async () => {
+  const f = fixture();
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [], actions: [{ kind: 'pause' }] } } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const other = askChat({ stateDir: f.stateDir, question: 'pause it all', by: 'collaborator' });
+  await c.checkChat();
+  const a = chatAnswer(f.stateDir, other.id)!;
+  assert.ok(a.state === 'answered' && a.answer.readOnly && a.answer.actions.length === 0, JSON.stringify(a));
+  f.log.append('run.cost', { issue: null, role: 'worker', model: 'm', usd: 1000, turns: 1 }, 'alice');
+  const spent = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-owner' });
+  await c.checkChat();
+  assert.deepEqual([chatAnswer(f.stateDir, spent.id)!.state, (chatAnswer(f.stateDir, spent.id) as { why: string }).why], ['refused', `the daily budget ($${f.cfg.agents.daily_budget_usd}) is spent`]);
+  assert.equal(runner.calls.length, 1, 'no run for a refused question');
+});
+
+test('chat: a chat turn and a worker run on the same Claude login never overlap (the chat holds the login lock too)', { skip: (skip || process.platform === 'win32') && 'POSIX stand-in for claude' }, async () => {
+  const f = fixture();
+  f.cfg.tests.runner.changed = 'true';
+  const dir = mkdtempSync(join(tmpdir(), 'claude-stub-'));
+  const log = join(dir, 'runs.log');
+  const bin = join(dir, 'claude');
+  // A stand-in claude: logs when each run starts and ends (with its role), takes 400 ms, and answers per role.
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
+${STDIN_LINE};
+const role = process.env[${JSON.stringify(`${BRAND.envPrefix}_ROLE`)}];
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ role, start: Date.now() }) + '\\n');
+const end = Date.now() + 400; while (Date.now() < end) {}
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ role, end: Date.now() }) + '\\n');
+const structured = role === 'chat' ? { answer: 'ok', citations: [] } : { summary: 'looked; changed nothing' };
+console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', structured_output: structured, num_turns: 1, total_cost_usd: 0.01 }));
+`,
+  );
+  chmodSync(bin, 0o755);
+  const runner = new CliRunner('cli', { PATH: process.env.PATH ?? '', CLAUDE_CONFIG_DIR: join(dir, 'login') }, bin);
+  f.backlog.open({ title: 'Look at totals', body: 'Check the totals.\n\n```done_when\n- command: |\n    true\n```\n', author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 2 });
+  await c.tick(); // starts the worker
+  await new Promise((r) => setTimeout(r, 100));
+  askChat({ stateDir: f.stateDir, question: 'anything?', by: 'example-owner' });
+  const chat = c.checkChat(); // asked while the worker runs
+  await chat;
+  await c.idle();
+  const lines = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { role: string; start?: number; end?: number });
+  const spans: { role: string; start: number; end: number }[] = [];
+  for (const l of lines) {
+    if (l.start !== undefined) spans.push({ role: l.role, start: l.start, end: Infinity });
+    else spans.filter((s) => s.role === l.role && s.end === Infinity).at(-1)!.end = l.end!;
+  }
+  assert.ok(spans.some((s) => s.role === 'chat') && spans.some((s) => s.role === 'worker'), JSON.stringify(spans));
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  for (let i = 1; i < sorted.length; i++) assert.ok(sorted[i]!.start >= sorted[i - 1]!.end, `overlap: ${JSON.stringify(sorted[i - 1])} and ${JSON.stringify(sorted[i])}`);
 });
 
 test('push limits on the change: refused before any check runs, the worker is told why, and the block lists every reason', { skip }, async () => {

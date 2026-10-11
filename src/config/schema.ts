@@ -272,6 +272,10 @@ export const TestsConfig = z.strictObject({
       root: z.string().default('.claude/worktrees'),
       setup: z.array(z.string()).default([]),
       est_size_gb: z.number().positive().default(1),
+      /** Share one dependency cache (pip, uv, npm, pnpm, yarn) across this instance's tasks; never across instances. */
+      dep_cache: z.boolean().default(true),
+      /** Worktrees kept ready on main, set up, for tasks to start in (0: off). Bounded by free disk. */
+      pool: z.number().int().min(0).max(4).default(0),
     })
     .prefault({}),
   land: z
@@ -308,6 +312,19 @@ export const TestsConfig = z.strictObject({
       }
     })
     .default({}),
+  /**
+   * The core budget: `{cores}` in an env value or a command is replaced by this task's share of the machine's
+   * cores (cores minus `reserve`, split over the agents running, within min..max), so parallel test runs never
+   * oversubscribe the machine.
+   */
+  cores: z
+    .strictObject({
+      reserve: z.number().int().min(0).max(256).default(0),
+      min: z.number().int().min(1).max(256).default(1),
+      max: z.number().int().min(1).max(256).optional(),
+    })
+    .refine((c) => c.max === undefined || c.max >= c.min, 'max must be at least min')
+    .prefault({}),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
   checks: z.array(z.string()).default([]),
   tiers: z
