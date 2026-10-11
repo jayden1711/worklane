@@ -125,6 +125,12 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('push.refused', { issue: 5, head: s('f'), stage: 'push', reasons: ['data/export.csv: under a refused path (data/**)'] });
   } catch (e) {
     console.error(`no PR events in this engine (${e.message.split('\n')[0]}); the PR page stays empty`);
+  }
+  // An off-machine copy, verified, for the health panel's backup card (engines that make them).
+  try {
+    add('backup.offsite', { ok: true, destination: 'rclone remote, backups bucket', key: 'events-112.db.age', last_id: 1 });
+  } catch (e) {
+    console.error(`no off-machine backups in this engine (${e.message.split('\n')[0]}); the health panel says not set up`);
   } finally {
     log.close();
   }
