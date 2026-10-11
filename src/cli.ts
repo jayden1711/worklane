@@ -18,7 +18,8 @@ import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
-import { runSkillEval, skillStatus } from './skilleval.js';
+import { runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus } from './skilleval.js';
+import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
@@ -269,10 +270,19 @@ async function main(argv: string[]): Promise<number> {
         console.error('usage: skill eval <skill-dir> [--model m] [--judge m] | skill status');
         return 2;
       }
-      const model = option(rest, '--model') ?? 'sonnet';
-      const judge = option(rest, '--judge') ?? 'sonnet';
-      const samples = Number(option(rest, '--samples') ?? 3);
-      const r = runSkillEval(resolve(rest[0]), { model, judge, samples });
+      const model = option(rest, '--model') ?? SKILL_EVAL_DEFAULTS.model;
+      const judge = option(rest, '--judge') ?? SKILL_EVAL_DEFAULTS.judge;
+      const samples = Number(option(rest, '--samples') ?? SKILL_EVAL_DEFAULTS.samples);
+      // Through the runner like every run: one claude per login, the subscription CLI, each call's cost recorded.
+      const cfg = loadConfig(root);
+      const log = new EventLog(logPath(root));
+      const ask = runnerAsk(new CliRunner(cfg.project.agent_runtime.kind), (c) => log.append('run.cost', { issue: null, role: 'skill-eval', model: c.model, usd: c.costUsd, turns: c.turns }, instanceId()));
+      let r;
+      try {
+        r = await runSkillEval(resolve(rest[0]), { model, judge, samples, ask });
+      } finally {
+        log.close();
+      }
       for (const c of r.cases) console.log(`${c.pass ? 'pass' : 'FAIL'}  ${c.id}. ${c.title}  (${c.samples} samples passed${c.pass ? '' : `; e.g. correct ${c.correct}${c.wrongDone.length ? `, WRONG: ${c.wrongDone.join(' | ')}` : ''}`})`);
       console.log(`${r.passed}/${r.total} passed (model ${model}, judge ${judge})`);
       return r.passed === r.total ? 0 : 1;
