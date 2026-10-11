@@ -28,6 +28,7 @@ import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError } from './settings.js';
+import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
@@ -218,6 +219,12 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
     settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: set[key] ? ('instance' as const) : ('repo' as const) })),
   };
+}
+
+/** A research run for its page: each search, each fetch (refused or not), and every cap it stopped at. */
+export function researchView(events: { type: string; payload: unknown }[], run: string) {
+  const capped = events.filter((e) => e.type === 'research.capped' && (e.payload as { run?: string | null }).run === run).map((e) => String((e.payload as { why?: string }).why ?? ''));
+  return { ...researchForRun(events, run), capped };
 }
 
 /** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
@@ -522,6 +529,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ number, at: new Date().toISOString(), by: opts.user }), { mode: 0o600 });
             return json(res, 200, { ok: true, number });
           }
+        }
+        // A research run's searches and fetches (refusals marked) and where it stopped at a cap: the owner's only.
+        const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
+        if (research && req.method === 'GET') {
+          const owner = opts.cfg.project.owners.default;
+          if (!opts.user || opts.user.toLowerCase() !== owner.toLowerCase()) return json(res, 403, { error: `only the owner (@${owner}) sees what a research run searched and fetched` });
+          return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
         }
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));

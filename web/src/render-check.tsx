@@ -20,7 +20,7 @@ import { LogsPage } from './pages/Logs';
 import { Overview } from './pages/Overview';
 import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
-import { RunDetail, RunList, RunsRefused } from './pages/RunDetail';
+import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
 
 export const pages = {
@@ -60,3 +60,4 @@ export { actionHref, citationHref } from './components/ChatPanel';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
+export const renderRunResearch = (data: RunResearchData | 'owner-only') => renderToStaticMarkup(<RunResearchView data={data} />);

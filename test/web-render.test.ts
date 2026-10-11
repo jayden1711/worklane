@@ -22,6 +22,7 @@ interface Render {
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
+  renderRunResearch(data: unknown): string;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
@@ -494,4 +495,28 @@ test('agent runs refused: the runs card and a run page say whose they are, not a
   const issue = asOther.tasks[0]!.issue;
   assert.match(r.renderIssue(asOther, issue), /data-testid="runs-card"[\s\S]*?data-testid="runs-refused"/, 'the issue page says so instead of asking');
   assert.doesNotMatch(r.renderIssue(asOwner, issue), /data-testid="runs-refused"/);
+});
+
+test('a research run on its page: each search, each page fetched or refused (linked only when fetched, rel=noopener), a cap it stopped at; others are told it is the owner\'s', () => {
+  const html = r.renderRunResearch({
+    searches: ['sqlite vacuum into durability', 'litestream restore'],
+    fetches: [
+      { url: 'https://sqlite.org/lang_vacuum.html', host: 'sqlite.org', refused: null },
+      { url: 'https://tracker.example.net/x', host: 'tracker.example.net', refused: 'not on the allowed hosts' },
+      { url: 'javascript:alert(1)', host: '', refused: null },
+    ],
+    capped: ['searches: 20 of 20 today'],
+  });
+  assert.match(html, /2 search\(es\), 2 page\(s\) fetched, 1 refused/);
+  assert.equal((html.match(/data-testid="run-research-search"/g) ?? []).length, 2);
+  assert.match(html, /data-testid="run-research-search"[^>]*>sqlite vacuum into durability</);
+  assert.match(html, /<a href="https:\/\/sqlite\.org\/lang_vacuum\.html" target="_blank" rel="noopener noreferrer"/);
+  assert.match(html, /data-testid="run-research-fetch" data-refused=""[\s\S]*?>refused<[\s\S]*?tracker\.example\.net\/x[\s\S]*?not on the allowed hosts/);
+  assert.doesNotMatch(html, /href="https:\/\/tracker\.example\.net/, 'a refused page is not a link');
+  assert.doesNotMatch(html, /href="javascript:/, 'only http(s) becomes a link');
+  assert.match(html, /role="alert"[^>]*data-testid="run-research-capped"[\s\S]*?Stopped at a cap:[\s\S]*?searches: 20 of 20 today/);
+  assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
+  const theirs = r.renderRunResearch('owner-only');
+  assert.match(theirs, /data-testid="run-research-owner-only"[^>]*>Only the owner sees/);
+  assert.doesNotMatch(theirs, /run-research-search|run-research-fetch/);
 });
