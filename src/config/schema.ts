@@ -272,6 +272,10 @@ export const TestsConfig = z.strictObject({
       root: z.string().default('.claude/worktrees'),
       setup: z.array(z.string()).default([]),
       est_size_gb: z.number().positive().default(1),
+      /** Share one dependency cache (pip, uv, npm, pnpm, yarn) across this instance's tasks; never across instances. */
+      dep_cache: z.boolean().default(true),
+      /** Worktrees kept ready on main, set up, for tasks to start in (0: off). Bounded by free disk. */
+      pool: z.number().int().min(0).max(4).default(0),
     })
     .prefault({}),
   land: z

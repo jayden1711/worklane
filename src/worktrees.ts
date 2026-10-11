@@ -16,6 +16,8 @@ export interface WorktreeOptions {
   runAs?: { user: string; home: string };
   /** The project's own variables (tests.yaml env). */
   env?: Record<string, string>;
+  /** The instance's dependency-cache variables (dep-cache.ts), set for setup steps after the project's own. */
+  cacheEnv?: Record<string, string>;
 }
 
 const ownedFile = (o: WorktreeOptions) => join(o.stateDir, 'worktrees.json');
@@ -127,7 +129,7 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
   git(o.repo, 'worktree', 'add', '-q', '-B', branch, path, base);
   const setupErrors: string[] = [];
   for (const step of o.setup) {
-    const { file, args, env } = projectCommand(step, o.runAs, o.env);
+    const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
     const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
     if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }

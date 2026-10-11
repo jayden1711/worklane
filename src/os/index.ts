@@ -34,6 +34,18 @@ export function groupOnly(...paths: string[]): void {
  * the agents share), 2750, so files made in it keep that group. No-op beyond mkdir on Windows.
  */
 export function agentReadableDir(dir: string, gid: number): void {
+  agentDir(dir, gid, 0o2750, 'task files');
+}
+
+/**
+ * A directory the agents' group may also write (a dependency cache their setup steps fill): owned by this
+ * (coordinator) user, group `gid`, 2770. The same checks as agentReadableDir keep it from being swapped.
+ */
+export function agentWritableDir(dir: string, gid: number): void {
+  agentDir(dir, gid, 0o2770, 'a shared cache');
+}
+
+function agentDir(dir: string, gid: number, mode: number, what: string): void {
   if (process.platform === 'win32') {
     mkdirSync(dir, { recursive: true });
     return;
@@ -45,13 +57,13 @@ export function agentReadableDir(dir: string, gid: number): void {
   mkdirSync(parent, { recursive: true });
   const p = statSync(parent);
   if ((p.mode & 0o022) !== 0 && (p.mode & 0o1000) === 0) {
-    if (p.uid !== me) throw new Error(`${parent} is writable by others and not sticky, and not ours to fix: task files can't be kept safe there`);
+    if (p.uid !== me) throw new Error(`${parent} is writable by others and not sticky, and not ours to fix: ${what} can't be kept safe there`);
     chmodSync(parent, (p.mode & 0o7777) | 0o1000);
   }
-  if (existsSync(dir) && statSync(dir).uid !== me) throw new Error(`${dir} exists but isn't owned by this user; refusing to keep task files there`);
-  mkdirSync(dir, { recursive: true, mode: 0o750 });
+  if (existsSync(dir) && statSync(dir).uid !== me) throw new Error(`${dir} exists but isn't owned by this user; refusing to keep ${what} there`);
+  mkdirSync(dir, { recursive: true, mode: mode & 0o777 });
   chownSync(dir, me, gid);
-  chmodSync(dir, 0o2750);
+  chmodSync(dir, mode);
 }
 
 /** A file the agent user can read but not write: owner this user, group `gid`, 0640. */
