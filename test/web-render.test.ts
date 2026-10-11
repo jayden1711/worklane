@@ -11,6 +11,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
+import { SETTING_KEYS } from '../src/settings.js';
 import { repoRoot } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
@@ -27,6 +28,8 @@ interface Render {
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
+  boundsOf(key: string, d: unknown): string;
+  LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   renderChatAnswer(f: unknown, cli: string): string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
@@ -291,6 +294,46 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.deepEqual(r.parseEntry('run_windows', ''), { value: [] });
   assert.match(String((r.parseEntry('run_windows', 'night') as { error: string }).error), /isn't HH:MM-HH:MM/);
   assert.equal(r.showValue('run_windows', []), 'any time');
+});
+
+test('the research settings: readable names, bounds from the machine\'s limits, the repo access as an on/off switch, and a name for every setting key', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    keys: [...SETTING_KEYS],
+    available: true,
+    limits: { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 }, research: { max_searches_per_day: 200, max_fetches_per_day: 500, max_usd_per_day: 20 } },
+    limitsError: null,
+    ceilings: { max_workers: 3, daily_usd: 30 },
+    settings: [
+      { key: 'research.max_searches_per_day', value: 20, source: 'instance' },
+      { key: 'research.max_fetches_per_day', value: 40, source: 'repo' },
+      { key: 'research.max_usd_per_day', value: 2.5, source: 'instance' },
+      { key: 'research.repo_access', value: false, source: 'repo' },
+    ],
+  };
+  const html = r.renderInstanceSettings(data);
+  const row = (key: string) => html.match(new RegExp(`<tr[^>]*data-setting="${key.replace('.', '\\.')}"[\\s\\S]*?</tr>`))?.[0] ?? '';
+  assert.match(row('research.max_searches_per_day'), />Research searches per day</);
+  assert.match(row('research.max_searches_per_day'), /data-testid="setting-bounds"[^>]*>0–200 \(machine limit\)</);
+  assert.match(row('research.max_fetches_per_day'), />Research page fetches per day</);
+  assert.match(row('research.max_fetches_per_day'), /data-testid="setting-bounds"[^>]*>0–500 \(machine limit\)</);
+  assert.match(row('research.max_usd_per_day'), />Research spend per day \(estimated, USD\)</);
+  assert.match(row('research.max_usd_per_day'), /data-testid="setting-current"[^>]*>\$2\.5</, 'money, with its $');
+  assert.match(row('research.max_usd_per_day'), /data-testid="setting-bounds"[^>]*>up to \$20 \(machine limit\)</);
+  assert.match(row('research.repo_access'), />Research runs may read the repo</);
+  assert.match(row('research.repo_access'), /data-testid="setting-current"[^>]*>off</);
+  assert.equal((row('research.repo_access').match(/<button[^>]*data-testid="setting-input"/g) ?? []).length, 2, 'two buttons, on and off, not a text box');
+  for (const k of ['research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day']) assert.doesNotMatch(row(k), /on or off/, `${k} is a number, not a switch`);
+  // What can be entered: whole caps, a cent amount for the spend cap, on or off for the access.
+  assert.deepEqual(r.parseEntry('research.max_searches_per_day', '50'), { value: 50 });
+  assert.deepEqual(r.parseEntry('research.max_fetches_per_day', '1.5'), { error: 'a whole number' });
+  assert.deepEqual(r.parseEntry('research.max_usd_per_day', '2.75'), { value: 2.75 });
+  assert.deepEqual(r.parseEntry('research.repo_access', 'on'), { value: true });
+  assert.equal(r.boundsOf('research.max_usd_per_day', { ...data, limits: { ...data.limits, research: undefined } }), '', 'no research limits sent: no bounds line, not a wrong one');
+  // Every setting key the server has gets a readable name, so a new one never shows as its raw key.
+  assert.deepEqual(SETTING_KEYS.filter((k) => !r.LABEL[k]), []);
 });
 
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {
