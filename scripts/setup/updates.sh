@@ -4,7 +4,7 @@
 # or `sudo /usr/local/libexec/worklane-machine set-updates on` as a coordinator user once
 # machine-helper.sh is set up).
 #
-#   bash scripts/setup/updates.sh [--checks "name,name,..."]
+#   bash scripts/setup/updates.sh [--check "name" ...]      (repeat --check for each required check)
 #
 #   - /usr/local/libexec/worklane-update (root:root 0755): every 10 minutes, when on, installs main's
 #     newest commit only if it fast-forwards the installed engine, every check on it is green and every
@@ -13,13 +13,21 @@
 #     `npm ci --ignore-scripts`; root only copies the result. It restarts the worklane-*.service units and
 #     rolls back if any isn't active and steady within 2 minutes.
 #   - /etc/worklane/updates.json (root:root 0644): enabled (false), the repo and branch to follow (this
-#     checkout's origin, main), and the required checks (--checks, or the defaults below). An existing file
+#     checkout's origin, main), and the required checks (each --check, or the defaults below). An existing file
 #     keeps its values.
 #   - /var/lib/worklane/updates.jsonl (root:root 0644): every attempt, install, refusal and rollback.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-checks="agentshield,dco,denylist,desktop,push-gate,scan,test (macos-latest, 22),test (macos-latest, 24),test (ubuntu-latest, 22),test (ubuntu-latest, 24),test (windows-latest, 22),test (windows-latest, 24)"
-[ "${1:-}" = --checks ] && checks="${2:?--checks needs a comma-separated list}"
+# Check names hold commas ("test (macos-latest, 22)"), so each is its own argument: nothing is ever split.
+checks=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) checks+=("${2:?--check needs a check name}"); shift 2 ;;
+    --checks) echo "--checks (a comma-separated list) is gone: check names contain commas. Pass each with --check \"name\"." >&2; exit 2 ;;
+    *) echo "unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+[ "${#checks[@]}" -gt 0 ] || checks=("${UPDATE_DEFAULT_CHECKS[@]}")
 command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 command -v systemd-run >/dev/null || { echo "needs systemd" >&2; exit 1; }
 [ -d /etc/worklane ] || { echo "no /etc/worklane; run machine.sh first" >&2; exit 1; }
@@ -49,11 +57,14 @@ echo "installed /usr/local/libexec/worklane-update"
 
 say "its config (off) and log"
 if [ ! -f /etc/worklane/updates.json ]; then
-  node -e 'const [repo, checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, repo_url: repo, branch: "main", required_checks: checks.split(",").map((s) => s.trim()).filter(Boolean) }, null, 2) + "\n")' "$origin" "$checks" > /etc/worklane/.updates.json.tmp
+  updates_config_json "$origin" "${checks[@]}" > /etc/worklane/.updates.json.tmp
   chmod 0644 /etc/worklane/.updates.json.tmp
   mv -f /etc/worklane/.updates.json.tmp /etc/worklane/updates.json
 fi
 chown root:root /etc/worklane/updates.json
+# A file written by the comma-splitting version holds fragments like "test (macos-latest" and "22)",
+# which never match a real check: the updater would wait forever. Say so (the file is kept as it is).
+node -e 'const c = JSON.parse(require("fs").readFileSync("/etc/worklane/updates.json", "utf8")).required_checks || []; const bad = c.filter((n) => (n.match(/\(/g) || []).length !== (n.match(/\)/g) || []).length); if (bad.length) { console.error("WARNING: /etc/worklane/updates.json required_checks has split names: " + JSON.stringify(bad) + ". Fix them by hand (or remove the file and run this again)."); }' || true
 chmod 0644 /etc/worklane/updates.json
 cat /etc/worklane/updates.json
 install -d -o root -g root -m 0755 /var/lib/worklane
