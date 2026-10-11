@@ -71,6 +71,14 @@ export const EventSchemas = {
   'console.message_delivered': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
   /** The run ended before the message's turn came. */
   'console.message_dropped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
+  /** A research run searched the web (WebSearch), from its stream. `run`: its run record and live feed. */
+  'research.searched': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), query: z.string() }),
+  /** A research run fetched a page (WebFetch), or was refused it (`refused`: why). */
+  'research.fetched': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), url: z.string(), host: z.string(), refused: z.string().nullable() }),
+  /** A research run was held or stopped by a daily cap (searches, fetches or spend). */
+  'research.capped': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), why: z.string() }),
+  /** A research report was accepted and posted: its sources, the fields it returned that were dropped, and the report. */
+  'research.reported': z.strictObject({ issue, run: z.string().nullable(), sources: z.number().int(), ignored: z.array(z.string()), report: z.string() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
