@@ -178,6 +178,18 @@ test('intake: needs_info gets the engine\'s own reply and no issue', async () =>
   assert.deepEqual(await t.backlog.list('ready'), []);
 });
 
+test('intake: a trusted bug whose draft fails checkDraft is recorded as needs_info, gets the request for details and files nothing (#107)', async () => {
+  const t = setup({ triage: () => ({ kind: 'bug', draft: { title: 'Totals ignore discounts', body: '```done_when\n- command: npm test\n```\n' } }) });
+  await t.c.checkIntake();
+  assert.deepEqual(t.discord.replies.map((r) => r.text), [NEEDS_INFO_REPLY]);
+  assert.deepEqual(await t.backlog.list('ready'), []);
+  assert.deepEqual(await t.backlog.list('bug'), []);
+  const [tr] = payloads(t.log, 'intake.triaged');
+  assert.equal(tr!.kind, 'needs_info');
+  assert.match(String(tr!.draft_refused), /block scalars/);
+  assert.deepEqual(payloads(t.log, 'intake.dropped'), [], 'not dropped');
+});
+
 test('intake: over the per-sender cap, a report is dropped before any agent run', async () => {
   const t = setup({ settings: { intake: { reports_per_sender_per_day: 1 } }, batches: [[report(), report({ text: 'bug: another thing is broken' })]] });
   await t.c.checkIntake();

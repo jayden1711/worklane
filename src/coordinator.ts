@@ -1529,9 +1529,11 @@ export class Coordinator {
     if (run.reason !== 'succeeded') return drop(`triage run ended: ${run.reason}`);
     const got = acceptTriage(run.structured);
     if (!got.ok) return drop(`triage not accepted: ${got.why}`);
-    this.emit('intake.triaged', { id, kind: got.triage.kind, reproduction: got.triage.reproduction?.result ?? null, ignored: got.dropped });
     const trusted = isTrusted(r.sender, cfg);
     const action = intakeDecide({ report: r, redacted, triage: got.triage, trusted, shown });
+    // A refused draft makes it needs_info, whatever kind the agent chose (decide.ts).
+    const refused = action.action === 'reply' ? action.refused : undefined;
+    this.emit('intake.triaged', { id, kind: refused ? 'needs_info' : got.triage.kind, reproduction: got.triage.reproduction?.result ?? null, ignored: got.dropped, ...(refused ? { draft_refused: refused.slice(0, 500) } : {}) });
     await this.intakeAct(r, id, trusted, action, INTAKE_KIND_LABEL[got.triage.kind]);
   }
 

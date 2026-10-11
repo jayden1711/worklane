@@ -16,8 +16,11 @@ export type IntakeAction =
   | { action: 'comment'; issue: number; body: string }
   /** Same as a recent report with no issue yet: group them. */
   | { action: 'group'; with: string }
-  /** Not actionable or needs more info: a polite reply asking for details; never an issue. */
-  | { action: 'reply'; text: string }
+  /**
+   * Not actionable or needs more info: a polite reply asking for details; never an issue. `refused`: the agent's draft
+   * failed checkDraft (why, for the log only), so the report is treated as needs_info whatever kind the agent chose.
+   */
+  | { action: 'reply'; text: string; refused?: string }
   /** A question: the owner answers it; the reporter is told a person will. */
   | { action: 'ask_owner'; text: string; reply: string }
   | { action: 'drop'; reason: string };
@@ -58,7 +61,8 @@ export function decide(o: { report: IncomingReport; redacted: string; triage: Tr
   }
   if (!triage.draft) return { action: 'reply', text: NEEDS_INFO_REPLY };
   const check = checkDraft(triage.draft);
-  if (!check.ok) return { action: 'drop', reason: `draft refused: ${check.why}` };
+  // A draft that can't be filed as written is a report we need more about, never an issue or a silent drop.
+  if (!check.ok) return { action: 'reply', text: NEEDS_INFO_REPLY, refused: check.why };
   const body = `${triage.draft.body.trim()}\n\n---\n${reportSection(report, redacted, triage)}`;
   const kindLabel = KIND_LABEL[triage.kind];
   if (trusted) return { action: 'file', title: triage.draft.title, body, labels: ['ready', ...(kindLabel ? [kindLabel] : [])] };

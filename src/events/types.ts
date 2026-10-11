@@ -84,8 +84,8 @@ export const EventSchemas = {
   'intake.received': z.strictObject({ id: z.string(), source: z.string(), sender: z.string(), excerpt: z.string() }),
   /** A report taken no further: a cap (sender_cap, flood, drafts_cap, spend_cap, budget), a failed run or a refused draft. */
   'intake.dropped': z.strictObject({ id: z.string(), reason: z.string() }),
-  /** The intake agent's triage as accepted: `ignored`, fields it returned that were dropped. */
-  'intake.triaged': z.strictObject({ id: z.string(), kind: z.string(), reproduction: z.string().nullable(), ignored: z.array(z.string()) }),
+  /** The intake agent's triage as accepted: `ignored`, fields it returned that were dropped; `draft_refused`, why its draft failed (then the kind is needs_info). */
+  'intake.triaged': z.strictObject({ id: z.string(), kind: z.string(), reproduction: z.string().nullable(), ignored: z.array(z.string()), draft_refused: z.string().optional() }),
   'intake.filed': z.strictObject({ id: z.string(), issue, ready: z.boolean() }),
   /** An untrusted sender's draft, waiting on the owner's decision. */
   'intake.awaiting': z.strictObject({ id: z.string(), decision: z.string() }),
