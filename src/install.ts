@@ -32,6 +32,8 @@ export function missingEngineWarning(enginePath: string): string {
  * and is otherwise unaffected.
  */
 export function hookCommand(enginePath: string, event: string): string {
+  // The post-edit check only gives feedback: a missing engine or a crash must stay silent, never exit 2.
+  if (event === 'post-tool-use') return `E="${enginePath}"; if [ -f "$E" ]; then ${HOOK_MARKER} node "$E" hook post-tool-use || true; else :; fi`;
   const agentVar = `$${BRAND.envPrefix}_AGENT`;
   const run = `${HOOK_MARKER} node "$E" hook ${event} || exit 2`;
   const human =
@@ -63,6 +65,8 @@ export function mergeSettings(existing: Settings, enginePath: string, preApprove
     PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30 }] },
     SessionStart: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-start'), timeout: 30 }] },
     SessionEnd: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-end'), timeout: 300 }] },
+    // The post-edit check: feedback only, so it never fails the edit (see hookCommand).
+    PostToolUse: { matcher: 'Edit|Write|MultiEdit', hooks: [{ type: 'command', command: hookCommand(enginePath, 'post-tool-use'), timeout: 30 }] },
   };
   for (const [event, entry] of Object.entries(ours)) {
     const kept = (hooks[event] ?? []).filter((e) => !e.hooks?.some((h) => h.command.includes(HOOK_MARKER)));

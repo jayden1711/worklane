@@ -2,8 +2,10 @@
 // Hooks read one JSON object on stdin. Every failure inside a hook fails
 // closed (deny or block with a reason); the generated settings also append
 // `|| exit 2`, so a missing or crashing engine blocks instead of allowing.
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { childEnv, shellCommand } from './os/index.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { hostOf, RESEARCH_ROOT_ENV, researchCallRefusal, researchModeRefusal } from './research.js';
@@ -155,9 +157,48 @@ function sessionEnd(input: HookInput): HookOutput {
   };
 }
 
-export async function runHook(event: string, input: HookInput, env: NodeJS.ProcessEnv = process.env): Promise<HookOutput> {
+/** How long the post-edit check may take; a slower check is ignored, never waited out. */
+export const POST_EDIT_TIMEOUT_MS = 20_000;
+const POST_EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit']);
+const POST_EDIT_MAX_CHARS = 4000;
+/** One shell word (project commands run in bash on every platform). */
+const shellWord = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * After an Edit/Write: the project's fast check of that one file (tests.yaml `post_edit`), its findings returned
+ * to the agent as context. It never blocks or undoes the edit: no config, a file outside the project, a timeout or
+ * any error is a silent no-op (exit 0, no output). The PreToolUse guard is separate and unchanged.
+ */
+function postToolUse(input: HookInput, timeoutMs: number): HookOutput {
+  const none: HookOutput = { exitCode: 0 };
+  try {
+    if (!POST_EDIT_TOOLS.has(input.tool_name ?? '')) return none;
+    const target = input.tool_input?.file_path;
+    if (typeof target !== 'string' || !target) return none;
+    const cwd = input.cwd ?? process.cwd();
+    const root = findProjectRoot(cwd);
+    if (!root) return none;
+    const template = loadConfig(root).tests.post_edit;
+    if (!template) return none;
+    const rel = relative(root, resolve(cwd, target));
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return none;
+    const file = rel.split(sep).join('/');
+    const [bin, args] = shellCommand(template.replaceAll('{file}', shellWord(file)));
+    const r = spawnSync(bin, args, { cwd: root, encoding: 'utf8', timeout: timeoutMs, env: childEnv() });
+    if (r.error || r.signal || r.status === null || r.status === 0) return none;
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+    const text = out.length > POST_EDIT_MAX_CHARS ? `${out.slice(0, POST_EDIT_MAX_CHARS)}\n… (cut)` : out || `exit ${r.status}`;
+    const context = `[${BRAND.cli}] the project's post-edit check found problems in ${file} (${template}):\n${text}`;
+    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: context } }), exitCode: 0 };
+  } catch {
+    return none;
+  }
+}
+
+export async function runHook(event: string, input: HookInput, env: NodeJS.ProcessEnv = process.env, opts: { postEditTimeoutMs?: number } = {}): Promise<HookOutput> {
   try {
     if (event === 'pre-tool-use') return preToolUse(input, env);
+    if (event === 'post-tool-use') return postToolUse(input, opts.postEditTimeoutMs ?? POST_EDIT_TIMEOUT_MS);
     // The Stop gate was removed (the coordinator re-runs every check itself); older installs still call it.
     if (event === 'stop') return { exitCode: 0 };
     if (event === 'session-end') return sessionEnd(input);
