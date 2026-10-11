@@ -181,6 +181,8 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Whether this viewer may read the throughput panel (the owner or a writer); absent from an older server: yes. */
+  canReadThroughput?: boolean;
   /** Whether this viewer may read agent runs (the owner or a writer); absent from an older server: yes. */
   canReadRuns?: boolean;
   project: { name: string; repo: string; landMode: string };
@@ -429,3 +431,14 @@ export const askChat = (instance: string | null, question: string, key: string) 
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
 export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });
+
+/** Throughput (GET /api/throughput, src/throughput.ts): merges, cost per merged PR by stage, waits, the top costs. */
+export type ThroughputStage = 'worker' | 'evaluator' | 'plan' | 'research' | 'intake' | 'gardener' | 'chat' | 'retries' | 'other';
+export interface Throughput {
+  since: string;
+  until: string;
+  merged: { total: number; perDay: { day: string; merged: number }[]; perWeek: { week: string; merged: number }[] };
+  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; evaluatorOnL0Usd: number };
+  waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
+  top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
+}
