@@ -122,6 +122,18 @@ export const isRunsPath = (pathname: string) => pathname === '/api/runs' || path
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
 /**
+ * A page of the engine's docs on its public repository, from package.json (docs aren't in the package);
+ * null when the package names no https repository.
+ */
+export function docsUrl(page: string, repository: unknown = enginePackage().repository): string | null {
+  const raw = typeof repository === 'string' ? repository : (repository as { url?: unknown } | undefined)?.url;
+  if (typeof raw !== 'string') return null;
+  const base = raw.replace(/^git\+/, '').replace(/\.git$/, '');
+  return /^https:\/\/[^/\s]+\/[^\s]+$/.test(base) ? `${base}/blob/main/docs/${page}.md` : null;
+}
+const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { repository?: unknown };
+
+/**
  * Which log and state a dashboard reads. A project checkout's own, or, with
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
@@ -706,7 +718,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          return json(res, 200, healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }));
+          return json(res, 200, { ...healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }), docs: { backups: docsUrl('backups') } });
         }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView(opts));

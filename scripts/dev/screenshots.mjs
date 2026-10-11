@@ -143,6 +143,12 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('hotspot.released', { issue: 10, waited_ms: 180_000, files: ['src/discounts.js'], started: true });
   } catch (e) {
     console.error(`no PR events in this engine (${e.message.split('\n')[0]}); the PR page stays empty`);
+  }
+  // An off-machine copy, verified, for the health panel's backup card (engines that make them).
+  try {
+    add('backup.offsite', { ok: true, destination: 'rclone remote, backups bucket', key: 'events-112.db.age', last_id: 1 });
+  } catch (e) {
+    console.error(`no off-machine backups in this engine (${e.message.split('\n')[0]}); the health panel says not set up`);
   } finally {
     log.close();
   }
