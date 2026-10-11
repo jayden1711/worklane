@@ -98,7 +98,9 @@ export interface PrView {
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
-  phase: 'waiting' | 'fixing' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
+  conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: string[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
+  lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: string[]; outcome: string | null; waitMs: number | null; detail: string } | null;
+  phase: 'waiting' | 'fixing' | 'resolving' | 'light_check' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
 }
 
 /** The machine health view (GET /api/health): the OS adapter's snapshot, check times, usage per day, suggestions. */
@@ -137,6 +139,15 @@ export interface HealthView {
   } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
+  /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
+  merge?: {
+    since: string;
+    mergedPrs: number;
+    conflicts: { count: number; needOwner: number; minutesToMerged: number[]; medianMinutes: number | null; perMergedPr: number };
+    lightChecks: { count: number; minutesAdded: number; perMergedPr: number; outcomes: Record<string, number> };
+    holds: { count: number; minutesWaited: number; perMergedPr: number; byFile: { file: string; minutes: number; count: number }[] };
+    flags: string[];
+  };
   suggestions: string[];
 }
 
@@ -144,6 +155,8 @@ export interface PrsView {
   prs: PrView[];
   refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
+  /** Tasks held on a hotspot (another task is changing the same files): still held (until null), or released. */
+  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
 }
@@ -322,8 +335,8 @@ async function apiPath(path: string): Promise<string> {
 }
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
-export async function instanceApi<T>(name: string, path: string): Promise<T> {
-  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { headers: { authorization: `Bearer ${token}` } });
+export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
@@ -388,3 +401,29 @@ export interface Filters { owner?: string; status?: string; level?: string; labe
 
 export const listViews = () => api<SavedView[]>('/api/views');
 export const saveViews = (v: SavedView[]) => api('/api/views', { method: 'PUT', body: JSON.stringify(v) });
+
+/** A chat answer as the instance's server gives it (src/chat.ts); a non-owner's has no draft and no proposals. */
+export interface ChatCitation { kind: 'event' | 'run' | 'pr' | 'issue'; id: string; instance: string; label: string; href: string }
+export type ChatAction = ({ kind: 'settings'; key: string; value: unknown; confirm: 'settings.change' } | { kind: 'decision'; id: string; answer: string; confirm: 'decision.answer' } | { kind: 'pause'; confirm: 'emergency.pause' } | { kind: 'resume'; confirm: 'emergency.resume' }) & { why?: string };
+export interface ChatAnswer {
+  turn: string;
+  instance: string;
+  answer: string;
+  citations: ChatCitation[];
+  unknownCitations: string[];
+  issueDraft: null | { ok: true; title: string; body: string; labels: string[] } | { ok: false; title: string; body: string; why: string };
+  actions: ChatAction[];
+  refusedActions: string[];
+  readOnly: boolean;
+  costUsd: number;
+}
+export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean; filed: { number: number } | null } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
+
+/** The chat on one instance: this page's (null), or a named one through the hub. */
+const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
+/** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
+export const askChat = (instance: string | null, question: string, key: string) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key }) });
+/** A fresh request key (works outside secure contexts too, where randomUUID is missing). */
+export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
+export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });

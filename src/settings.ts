@@ -12,6 +12,8 @@ import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { InstanceSettings, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
+import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
+import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = `/etc/${BRAND.cli}/limits.json`;
@@ -20,6 +22,20 @@ export const Limits = z.strictObject({
   workers: z.strictObject({ min: z.number().int().min(0), max: z.number().int().min(0) }).default({ min: 1, max: 8 }),
   daily_budget_usd: z.strictObject({ max: z.number().positive() }).default({ max: 100 }),
   max_fixes_per_pr: z.strictObject({ max: z.number().int().min(0) }).default({ max: 5 }),
+  research: z
+    .strictObject({
+      max_searches_per_day: z.number().int().min(0).default(200),
+      max_fetches_per_day: z.number().int().min(0).default(500),
+      max_usd_per_day: z.number().min(0).default(20),
+    })
+    .prefault({}),
+  intake: z
+    .strictObject({
+      reports_per_sender_per_day: z.number().int().min(1).default(100),
+      drafts_per_day: z.number().int().min(1).default(200),
+      max_usd_per_day: z.number().min(0).default(20),
+    })
+    .prefault({}),
 });
 export type Limits = z.infer<typeof Limits>;
 
@@ -53,6 +69,14 @@ export function settingsProblems(s: InstanceSettings, limits: Limits, policy?: P
   const fixes = s.ci_repair?.max_fixes_per_pr;
   if (fixes !== undefined && fixes > limits.max_fixes_per_pr.max) out.push(`ci_repair.max_fixes_per_pr ${fixes} is over ${limits.max_fixes_per_pr.max} (machine limits)`);
   for (const w of s.run_windows ?? []) if (w.from === w.to) out.push(`run window ${w.from}-${w.to} is empty`);
+  for (const k of ['max_searches_per_day', 'max_fetches_per_day', 'max_usd_per_day'] as const) {
+    const v = s.research?.[k];
+    if (v !== undefined && v > limits.research[k]) out.push(`research.${k} ${v} is over ${limits.research[k]} (machine limits)`);
+  }
+  for (const k of ['reports_per_sender_per_day', 'drafts_per_day', 'max_usd_per_day'] as const) {
+    const v = s.intake?.[k];
+    if (v !== undefined && v > limits.intake[k]) out.push(`intake.${k} ${v} is over ${limits.intake[k]} (machine limits)`);
+  }
   return out;
 }
 
@@ -114,7 +138,7 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
   };
 }
 
-export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows'] as const;
+export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access', 'intake.reports_per_sender_per_day', 'intake.drafts_per_day', 'intake.max_usd_per_day'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 
 /** A setting's value in effect: the instance's if set, else the repo's. */
@@ -131,7 +155,42 @@ export function currentValue(cfg: Config, s: InstanceSettings, key: SettingKey):
       return eff.agents.roles.ci_repair?.max_fixes_per_pr ?? 2;
     case 'run_windows':
       return eff.project.agent_runtime.run_windows;
+    case 'research.max_searches_per_day':
+    case 'research.max_fetches_per_day':
+    case 'research.max_usd_per_day':
+      return researchCaps(s)[key.slice('research.'.length) as keyof ResearchCaps];
+    case 'research.repo_access':
+      return researchRepoAccess(s);
+    case 'intake.reports_per_sender_per_day':
+    case 'intake.drafts_per_day':
+    case 'intake.max_usd_per_day':
+      return intakeCaps(s)[key.slice('intake.'.length) as keyof IntakeCaps];
   }
+}
+
+/** Intake's daily caps in force: the instance's settings, else the intake config's values, else the engine's defaults. */
+export function intakeCaps(s: InstanceSettings, defaults: IntakeCaps = INTAKE_DEFAULT_CAPS): IntakeCaps {
+  const v = s.intake ?? {};
+  return {
+    reports_per_sender_per_day: v.reports_per_sender_per_day ?? defaults.reports_per_sender_per_day,
+    drafts_per_day: v.drafts_per_day ?? defaults.drafts_per_day,
+    max_usd_per_day: v.max_usd_per_day ?? defaults.max_usd_per_day,
+  };
+}
+
+/** Whether research runs may read the repo: only when the owner turned it on. */
+export function researchRepoAccess(s: InstanceSettings): boolean {
+  return s.research?.repo_access === true;
+}
+
+/** The research caps in force: the instance's, else the engine's conservative defaults (there's no repo value). */
+export function researchCaps(s: InstanceSettings): ResearchCaps {
+  const r = s.research ?? {};
+  return {
+    max_searches_per_day: r.max_searches_per_day ?? RESEARCH_DEFAULT_CAPS.max_searches_per_day,
+    max_fetches_per_day: r.max_fetches_per_day ?? RESEARCH_DEFAULT_CAPS.max_fetches_per_day,
+    max_usd_per_day: r.max_usd_per_day ?? RESEARCH_DEFAULT_CAPS.max_usd_per_day,
+  };
 }
 
 /**

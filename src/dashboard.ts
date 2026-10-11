@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,7 +17,9 @@ import { redactString } from './events/redact.js';
 import type { StoredEvent } from './events/types.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
-import { siteForInstance, siteForRoot } from './service.js';
+import { backlogFor, instanceEnv, instanceTokens, siteForInstance, siteForRoot } from './service.js';
+import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
+import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
@@ -25,7 +27,7 @@ import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
-import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError } from './settings.js';
+import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
@@ -72,6 +74,8 @@ export interface DashboardOptions {
   policyFile?: string | null;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
+  /** The backlog a confirmed chat draft is filed to (the instance's); made when first needed. */
+  backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
@@ -95,19 +99,10 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
   };
 }
 
-/** Who may answer a decision from the dashboard: its owner, or one of the project's writers. GitHub logins are case-insensitive. */
-export function mayAnswer(owner: string, user: string, owners: { writers: string[] }): boolean {
-  const u = user.toLowerCase();
-  return !!u && (owner.toLowerCase() === u || owners.writers.some((w) => w.toLowerCase() === u));
-}
+export { mayAnswer };
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
-/**
- * Which log and state a dashboard reads. A project checkout's own, or, with
- * an instance, that instance's: run it as the instance's coordinator user,
- * the only user that can read (and, for answers, write) the instance's log.
- */
 /**
  * A page of the engine's docs on its public repository, from package.json (docs aren't in the package);
  * null when the package names no https repository.
@@ -120,13 +115,32 @@ export function docsUrl(page: string, repository: unknown = enginePackage().repo
 }
 const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { repository?: unknown };
 
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null } {
+/**
+ * Which log and state a dashboard reads. A project checkout's own, or, with
+ * an instance, that instance's: run it as the instance's coordinator user,
+ * the only user that can read (and, for answers, write) the instance's log.
+ */
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog } {
   const i = instance ? loadInstance(instance, dir) : null;
   const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
   const logs = { unit: instance ? `${BRAND.cli}-${instance}.service` : null, file: join(s.stateDir, 'coordinator.log') };
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null };
+  // The backlog the coordinator files to, made when first needed: an instance's with its App's tokens.
+  const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog };
 }
+
+/**
+ * A chat answer as this dashboard's user may see it: the owner gets it whole; anyone else the answer and its
+ * citations, never a draft or a proposal (the coordinator answers them read-only already; this holds it here too).
+ */
+export function chatAnswerFor(f: ChatAnswerFile, owner: boolean): ChatAnswerFile {
+  if (owner || f.state !== 'answered') return f;
+  return { ...f, answer: { ...f.answer, issueDraft: null, actions: [], refusedActions: [], readOnly: true } };
+}
+
+/** Where a filed chat draft is recorded, so the same draft is never filed twice. */
+const filedPath = (stateDir: string, id: string) => join(stateDir, 'chat', 'filed', `${id}.json`);
 
 /**
  * What the health view reads: the OS adapter's snapshot of the machine, the
@@ -159,8 +173,64 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
 }
 
 /**
+ * Where each instance setting lives in the repo's config, or null when the repo's config can't set it.
+ * Every setting key must say (a Record over SettingKey): a new key without a place doesn't compile.
+ */
+const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = {
+  workers: { file: 'agents.yaml', path: ['roles', 'workers', 'count'] },
+  daily_budget_usd: { file: 'agents.yaml', path: ['daily_budget_usd'] },
+  'ci_repair.enabled': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'enabled'] },
+  'ci_repair.max_fixes_per_pr': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'max_fixes_per_pr'] },
+  run_windows: { file: 'config.yaml', path: ['agent_runtime', 'run_windows'] },
+  'research.max_searches_per_day': null,
+  'research.max_fetches_per_day': null,
+  'research.max_usd_per_day': null,
+  'research.repo_access': null,
+  // Intake's caps default from intake.yaml in the instance home, never from the repo's config.
+  'intake.reports_per_sender_per_day': null,
+  'intake.drafts_per_day': null,
+  'intake.max_usd_per_day': null,
+};
+
+const defines = (obj: unknown, path: string[]): boolean => {
+  let at = obj;
+  for (const k of path) {
+    if (at === null || typeof at !== 'object' || !Object.hasOwn(at, k)) return false;
+    at = (at as Record<string, unknown>)[k];
+  }
+  return at !== undefined && at !== null;
+};
+
+/** The repo's config files as written, before the schema's defaults: what the repo itself defines. Unreadable: none. */
+export function repoConfigFiles(dir: string): (file: string) => unknown {
+  const cache = new Map<string, unknown>();
+  return (file) => {
+    if (!cache.has(file)) {
+      let raw: unknown;
+      try {
+        raw = parseDocument(readFileSync(join(dir, file), 'utf8')).toJS();
+      } catch {
+        raw = undefined;
+      }
+      cache.set(file, raw);
+    }
+    return cache.get(file);
+  };
+}
+
+/**
+ * Where a setting's value in effect comes from: the instance's policy when it sets the key (its dotted path),
+ * else the repo's config when that defines it, else the engine's own default.
+ */
+export function settingSource(key: SettingKey, instance: unknown, repo: (file: string) => unknown): 'instance' | 'repo' | 'engine' {
+  if (defines(instance, key.split('.'))) return 'instance';
+  const place = REPO_PLACE[key];
+  return place && defines(repo(place.file), place.path) ? 'repo' : 'engine';
+}
+
+/**
  * The Settings page's instance section: each setting's value in effect and where it comes from (the
- * instance's policy, or the repo's default), the bounds a new value must keep (the machine's limits and
+ * instance's policy, the repo's config, or the engine's default), the bounds a new value must keep (the machine's limits and
  * the policy's own ceilings), and whether this dashboard's user, the owner, may change them.
  */
 export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'cfg' | 'user' | 'limitsPath'>) {
@@ -181,13 +251,7 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     return { ...base, canChange: false, available: false as const, why: `the instance policy can't be read: ${(e as Error).message.split('\n')[0]}` };
   }
   const s = policy.settings;
-  const set: Record<string, boolean> = {
-    workers: s.workers !== undefined,
-    daily_budget_usd: s.daily_budget_usd !== undefined,
-    'ci_repair.enabled': s.ci_repair?.enabled !== undefined,
-    'ci_repair.max_fixes_per_pr': s.ci_repair?.max_fixes_per_pr !== undefined,
-    run_windows: s.run_windows !== undefined,
-  };
+  const repo = repoConfigFiles(o.cfg.dir);
   return {
     ...base,
     canChange: base.canChange && !limitsError,
@@ -195,7 +259,7 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     limits,
     limitsError,
     ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
-    settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: set[key] ? ('instance' as const) : ('repo' as const) })),
+    settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: settingSource(key, s, repo) })),
   };
 }
 
@@ -447,6 +511,55 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
           return json(res, 200, runsForIssue(opts.stateDir, issue));
+        }
+        // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
+        // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
+        if (url.pathname === '/api/chat' && req.method === 'POST') {
+          const body = (await readBody(req)) as { question?: string; key?: unknown };
+          try {
+            // `key`: the client's request key, so a retried POST is the same question, not a second turn.
+            return json(res, 200, askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: opts.user, ...(body.key !== undefined ? { key: String(body.key) } : {}) }));
+          } catch (e) {
+            if (e instanceof ChatError) return json(res, 400, { error: e.message });
+            throw e;
+          }
+        }
+        const chat = url.pathname.match(/^\/api\/chat\/([0-9]+-[a-f0-9]+)(\/file-issue)?$/);
+        if (chat) {
+          const owner = opts.cfg.project.owners.default;
+          const isOwner = !!opts.user && opts.user.toLowerCase() === owner.toLowerCase();
+          const f = chatAnswer(opts.stateDir, chat[1]!);
+          if (!f) return json(res, 404, { error: `no chat question ${chat[1]}` });
+          if (!chat[2] && req.method === 'GET') {
+            const rec = existsSync(filedPath(opts.stateDir, chat[1]!)) ? (JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as { number?: number }) : null;
+            const filed = typeof rec?.number === 'number' ? { number: rec.number } : null;
+            return json(res, 200, { ...chatAnswerFor(f, isOwner), owner: isOwner, filed });
+          }
+          if (chat[2] && req.method === 'POST') {
+            if (!isOwner) return json(res, 403, { error: `only the owner (@${owner}) may file a draft; @${opts.user || 'unknown'} may not` });
+            if (f.state !== 'answered' || !f.answer.issueDraft) return json(res, 400, { error: 'this answer has no issue draft' });
+            if (existsSync(filedPath(opts.stateDir, chat[1]!))) return json(res, 409, { error: 'this draft was filed already', ...(JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as object) });
+            // The draft as the answer file has it, never one from the request, checked again as the harness will.
+            const d = validateDraft(f.answer.issueDraft.title, f.answer.issueDraft.body);
+            if (!d.ok) return json(res, 400, { error: `the draft isn't one the harness can take: ${d.why}` });
+            if (!opts.backlog) return json(res, 400, { error: 'this dashboard has no backlog to file to' });
+            // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
+            mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
+            try {
+              writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ filing: true, at: new Date().toISOString(), by: opts.user }), { mode: 0o600, flag: 'wx' });
+            } catch {
+              return json(res, 409, { error: 'this draft is being filed already' });
+            }
+            let number: number;
+            try {
+              number = await opts.backlog().createIssue(d.title, d.body, ['ready']);
+            } catch (e) {
+              rmSync(filedPath(opts.stateDir, chat[1]!), { force: true });
+              throw e;
+            }
+            writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ number, at: new Date().toISOString(), by: opts.user }), { mode: 0o600 });
+            return json(res, 200, { ok: true, number });
+          }
         }
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));

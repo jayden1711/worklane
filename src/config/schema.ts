@@ -68,6 +68,11 @@ export const ProjectConfig = z.strictObject({
    * head merges. The PR is never pushed to for this, and the full tier keeps running on the default branch.
    */
   combined_check: z.boolean().default(true),
+  /**
+   * Research runs (type:research / type:investigation issues, a ```research block): Claude Code's WebSearch and
+   * WebFetch only. Fetches of a listed domain (or any subdomain of it) are refused and recorded.
+   */
+  research: z.strictObject({ domain_blocklist: z.array(z.string().min(1)).default([]) }).prefault({}),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),
@@ -299,6 +304,11 @@ export const TestsConfig = z.strictObject({
   nightly_at: hhmm.optional(),
   /** Exits 0 when no full test run is live on this machine (any harness or session). Queued full runs wait for it. */
   idle_probe: z.string().optional(),
+  /**
+   * A fast check of one file, run after an agent's Edit/Write on it (e.g. `npx eslint {file}`); a failure's output
+   * goes back to the agent as feedback. Never blocks the edit; a timeout (20 s) or an error is ignored.
+   */
+  post_edit: z.string().includes('{file}', { message: 'must contain {file}' }).optional(),
   /**
    * Variables set for the project's agent sessions (and the hooks they run) and its commands
    * (checks, worktree setup), e.g. a fixed test worker count. Never secrets or harness variables.

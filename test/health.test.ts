@@ -9,7 +9,8 @@ import { healthStats, startDashboard } from '../src/dashboard.js';
 import { startHub } from '../src/dashboard-hub.js';
 import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
-import { checkTimings, healthView, QUOTA_NOTE, REGRESSION, suggestions, usageByDay, type MachineStats } from '../src/health.js';
+import { checkTimings, healthView, mergeFlagSuggestion, QUOTA_NOTE, REGRESSION, suggestions, usageByDay, type MachineStats } from '../src/health.js';
+import { mergeMetrics } from '../src/merge-metrics.js';
 import { exampleProject } from './helpers.js';
 
 let id = 0;
@@ -98,8 +99,32 @@ test('suggestions are conservative, always phrased as suggestions, and say so wh
   for (const re of [/of memory \(2\.0 GB\) is available/, /50% of swap is in use/, new RegExp(`${svc}'s memory limit`), /5-minute load \(9\.0\) is over 1\.5× the 4 cores/, /space on the state dir/, /3 runs hit the usage limit today/, /waited 40 min today/, /"full suite" got slower/]) assert.ok(s.some((l) => re.test(l)), String(re));
   // Just under every threshold: nothing. Unknown figures (null load, no cores, units that couldn't be read) suggest nothing.
   const edge: MachineStats = { ...calm, memory: { totalBytes: 100, availableBytes: 10, swapTotalBytes: 100, swapFreeBytes: 75 }, load: [6, 6, 6], units: [{ unit: svc, memoryCurrent: 89, memoryMax: 100, memorySwapCurrent: 0, cpuUsageNSec: 0, activeState: 'active' }], disks: [{ path: '/x', freeBytes: 10e9, totalBytes: 100e9 }] };
-  assert.deepEqual(suggestions({ instance: null, machine: edge, cores: 4, checks: checkTimings([]), usage: { days: usageByDay([]), quotaNote: QUOTA_NOTE } }), NOTHING);
+  assert.deepEqual(suggestions({ instance: null, machine: edge, cores: 4, checks: checkTimings([]), usage: { days: usageByDay([]), quotaNote: QUOTA_NOTE }, merge: mergeMetrics([], { since: new Date(0) }) }), NOTHING);
   assert.deepEqual(healthView([], { ...strained, memory: null, load: null, units: null, disks: [] }, { cores: null }).suggestions, NOTHING);
+});
+
+test('merge flow: what conflict fixes cost per merged PR over the last week, and its flags as "Consider ..." suggestions', () => {
+  const now = new Date(Date.UTC(2026, 0, 10, 12));
+  const at = (min: number) => new Date(now.getTime() - min * 60_000).toISOString();
+  const events = [
+    // Inside the week: a conflict detected, fixed, and the PR merged 30 minutes later.
+    ev('conflict_fix.detected', at(40), { issue: 1, number: 101, head: 'a'.repeat(40), base_sha: 'b'.repeat(40) }),
+    ev('conflict_fix.finished', at(30), { issue: 1, number: 101, base_sha: 'b'.repeat(40), strategy: 'merge', outcome: 'pushed', head: 'c'.repeat(40), files: ['src/totals.js'], waits_owner: true, reasons: ['money-path'], detail: '' }),
+    ev('pr.closed', at(10), { issue: 1, number: 101, merged: true }),
+    // Before the week: not counted.
+    ev('conflict_fix.detected', at(60 * 24 * 9), { issue: 2, number: 102, head: 'a'.repeat(40), base_sha: 'b'.repeat(40) }),
+    ev('pr.closed', at(60 * 24 * 9 - 5), { issue: 2, number: 102, merged: true }),
+  ];
+  const v = healthView(events, calm, { cores: 8, today: '2026-01-10', now });
+  assert.equal(v.merge.mergedPrs, 1, 'only the last week');
+  assert.equal(v.merge.conflicts.count, 1);
+  assert.equal(v.merge.conflicts.needOwner, 1);
+  assert.ok(v.merge.flags.length >= 1, 'a conflict costing 30 min per merged PR is flagged');
+  const s = v.suggestions.filter((x) => /conflict fixes add/.test(x));
+  assert.equal(s.length, 1, v.suggestions.join('\n'));
+  assert.match(s[0]!, /^Consider listing .* as hotspots so those tasks don't run at once \(conflict fixes add [\d.]+ min per merged PR\)\.$/);
+  assert.equal(mergeFlagSuggestion('Hotspot holds add 4 min per merged PR, most on a.ts: consider splitting the file.'), 'Consider splitting the file (hotspot holds add 4 min per merged PR, most on a.ts).');
+  assert.equal(mergeFlagSuggestion('something odd'), 'Consider looking at this: something odd');
 });
 
 test('the dashboard serves /api/health behind its token, from the OS adapter\'s stats, and the hub forwards it', async () => {

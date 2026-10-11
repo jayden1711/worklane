@@ -11,6 +11,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
+import { SETTING_KEYS } from '../src/settings.js';
 import { repoRoot } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
@@ -27,7 +28,14 @@ interface Render {
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
+  boundsOf(key: string, d: unknown): string;
+  LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  renderChatAnswer(f: unknown, cli: string): string;
+  renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
+  actionHref(a: unknown): string | null;
+  citationHref(c: unknown): string;
+  proposedSetting(search: string): unknown;
   pages: Record<string, unknown>;
 }
 
@@ -294,7 +302,7 @@ test('the instance settings: the owner gets a new-value input and a review step 
       { key: 'workers', value: 2, source: 'instance' },
       { key: 'daily_budget_usd', value: 12, source: 'instance' },
       { key: 'ci_repair.enabled', value: false, source: 'repo' },
-      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'repo' },
+      { key: 'ci_repair.max_fixes_per_pr', value: 2, source: 'engine' },
       { key: 'run_windows', value: [{ from: '22:00', to: '06:00' }], source: 'instance' },
     ],
   };
@@ -304,6 +312,7 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.match(html, /up to \$20 \(machine \$20, policy \$30\)/);
   assert.match(html, /data-setting="run_windows"[\s\S]*?22:00-06:00/);
   assert.match(html, /the repo(&#x27;|')s default/);
+  assert.match(html, /data-setting="ci_repair.max_fixes_per_pr"[\s\S]*?>engine default</, 'a key the repo\'s config doesn\'t define: the engine\'s own default');
   assert.equal((html.match(/data-testid="setting-review-button"/g) ?? []).length, 5, 'a review step for each, before anything is written');
   assert.doesNotMatch(html, /data-testid="setting-confirm"/, 'confirm appears only after Review change');
   assert.doesNotMatch(html, /data-testid="settings-read-only"/);
@@ -320,6 +329,46 @@ test('the instance settings: the owner gets a new-value input and a review step 
   assert.deepEqual(r.parseEntry('run_windows', ''), { value: [] });
   assert.match(String((r.parseEntry('run_windows', 'night') as { error: string }).error), /isn't HH:MM-HH:MM/);
   assert.equal(r.showValue('run_windows', []), 'any time');
+});
+
+test('the research settings: readable names, bounds from the machine\'s limits, the repo access as an on/off switch, and a name for every setting key', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    keys: [...SETTING_KEYS],
+    available: true,
+    limits: { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 }, research: { max_searches_per_day: 200, max_fetches_per_day: 500, max_usd_per_day: 20 } },
+    limitsError: null,
+    ceilings: { max_workers: 3, daily_usd: 30 },
+    settings: [
+      { key: 'research.max_searches_per_day', value: 20, source: 'instance' },
+      { key: 'research.max_fetches_per_day', value: 40, source: 'repo' },
+      { key: 'research.max_usd_per_day', value: 2.5, source: 'instance' },
+      { key: 'research.repo_access', value: false, source: 'repo' },
+    ],
+  };
+  const html = r.renderInstanceSettings(data);
+  const row = (key: string) => html.match(new RegExp(`<tr[^>]*data-setting="${key.replace('.', '\\.')}"[\\s\\S]*?</tr>`))?.[0] ?? '';
+  assert.match(row('research.max_searches_per_day'), />Research searches per day</);
+  assert.match(row('research.max_searches_per_day'), /data-testid="setting-bounds"[^>]*>0–200 \(machine limit\)</);
+  assert.match(row('research.max_fetches_per_day'), />Research page fetches per day</);
+  assert.match(row('research.max_fetches_per_day'), /data-testid="setting-bounds"[^>]*>0–500 \(machine limit\)</);
+  assert.match(row('research.max_usd_per_day'), />Research spend per day \(estimated, USD\)</);
+  assert.match(row('research.max_usd_per_day'), /data-testid="setting-current"[^>]*>\$2\.5</, 'money, with its $');
+  assert.match(row('research.max_usd_per_day'), /data-testid="setting-bounds"[^>]*>up to \$20 \(machine limit\)</);
+  assert.match(row('research.repo_access'), />Research runs may read the repo</);
+  assert.match(row('research.repo_access'), /data-testid="setting-current"[^>]*>off</);
+  assert.equal((row('research.repo_access').match(/<button[^>]*data-testid="setting-input"/g) ?? []).length, 2, 'two buttons, on and off, not a text box');
+  for (const k of ['research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day']) assert.doesNotMatch(row(k), /on or off/, `${k} is a number, not a switch`);
+  // What can be entered: whole caps, a cent amount for the spend cap, on or off for the access.
+  assert.deepEqual(r.parseEntry('research.max_searches_per_day', '50'), { value: 50 });
+  assert.deepEqual(r.parseEntry('research.max_fetches_per_day', '1.5'), { error: 'a whole number' });
+  assert.deepEqual(r.parseEntry('research.max_usd_per_day', '2.75'), { value: 2.75 });
+  assert.deepEqual(r.parseEntry('research.repo_access', 'on'), { value: true });
+  assert.equal(r.boundsOf('research.max_usd_per_day', { ...data, limits: { ...data.limits, research: undefined } }), '', 'no research limits sent: no bounds line, not a wrong one');
+  // Every setting key the server has gets a readable name, so a new one never shows as its raw key.
+  assert.deepEqual(SETTING_KEYS.filter((k) => !r.LABEL[k]), []);
 });
 
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {
@@ -352,6 +401,50 @@ test('the machine settings: the owner gets the slot cap and engine updates with 
   assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
 });
 
+test('merge flow on the PR page and in the health panel: conflict fixes, light checks and hotspot holds, with how long', () => {
+  const mins = (n: number) => new Date(Date.now() - n * 60_000).toISOString();
+  const pr = (number: number, phase: string, extra: Record<string, unknown> = {}) => ({ number, issue: number - 100, title: `Change ${number}`, url: `https://example.test/pr/${number}`, openedAt: mins(60), head: 'a'.repeat(40), state: 'open', draft: false, status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, conflict: null, lightCheck: null, phase, ...extra });
+  const html = r.renderPrs({
+    prs: [
+      pr(131, 'resolving', { conflict: { state: 'running', at: mins(7), attempt: 2, outcome: null, files: [], waitsOwner: false, reasons: [], detail: '' } }),
+      pr(132, 'waiting', { conflict: { state: 'done', at: mins(3), attempt: 1, outcome: 'pushed', files: ['src/totals.js'], waitsOwner: true, reasons: ['the merge touched src/totals.js (money-path)'], detail: 'merged main' } }),
+      pr(133, 'light_check', { lightCheck: { state: 'running', at: mins(4), mainSha: 'f'.repeat(40), overlap: ['src/cart.js'], outcome: null, waitMs: null, detail: '' } }),
+    ],
+    refused: [],
+    stops: [],
+    holds: [
+      { issue: 41, title: 'Round the discounts', by: 32, files: ['src/totals.js', 'src/discounts.js'], reason: 'issue 32 is changing them', since: mins(12), until: null, waitedMs: null },
+      { issue: 40, title: 'Change the totals', by: 31, files: ['src/totals.js'], reason: '', since: mins(30), until: mins(27), waitedMs: 180_000 },
+    ],
+    autoMerge: { on: true, policy: true, repo: true, stopped: null, why: 'on' },
+  });
+  assert.match(html, /data-task-row="pr-131"[\s\S]*?merging main, 7 min[\s\S]*?resolving a conflict/, 'a conflict being resolved, for how long');
+  assert.match(html, /data-testid="pr-conflict"[\s\S]*?resolving \(attempt 2\)/);
+  assert.match(html, /data-pr="132"[\s\S]*?Why the conflict fix waits for you[\s\S]*?data-testid="pr-conflict-reasons"[\s\S]*?the merge touched src\/totals\.js \(money-path\)/, 'why it waits after a conflict fix');
+  assert.match(html, /data-pr="132"[\s\S]*?conflict fix: pushed[\s\S]*?src\/totals\.js · merged main/);
+  assert.match(html, /data-task-row="pr-133"[\s\S]*?waiting 4 min[\s\S]*?light check/, 'a PR waiting on a light check, for how long');
+  assert.match(html, /data-testid="pr-light-check"[\s\S]*?light check running[\s\S]*?waiting 4 min on main ffffffff · overlap: src\/cart\.js/);
+  assert.match(html, /data-testid="prs-holds"[\s\S]*?1 held now/);
+  assert.match(html, /data-testid="hold-row" data-held="held"[\s\S]*?#41[\s\S]*?#32[\s\S]*?src\/totals\.js, src\/discounts\.js[\s\S]*?held 12 min/, 'a task held on a hotspot: the files and how long');
+  assert.match(html, /data-held="released"[\s\S]*?waited 3 min/);
+
+  const view = {
+    instance: 'shop',
+    machine: null,
+    cores: 4,
+    checks: { timings: [], slowest: [], regressions: [], rule: '' },
+    usage: { days: [], quotaNote: 'q' },
+    merge: { since: mins(7 * 24 * 60), mergedPrs: 4, conflicts: { count: 2, needOwner: 1, minutesToMerged: [20, 40], medianMinutes: 30, perMergedPr: 15 }, lightChecks: { count: 3, minutesAdded: 9, perMergedPr: 2.3, outcomes: { merge: 2, hold: 1 } }, holds: { count: 2, minutesWaited: 15, perMergedPr: 3.8, byFile: [{ file: 'src/totals.js', minutes: 12, count: 1 }] }, flags: ['x'] },
+    suggestions: ['Consider listing src/totals.js as hotspots so those tasks don\'t run at once (conflict fixes add 15 min per merged PR).'],
+  };
+  const h = r.renderHealth(view);
+  assert.match(h, /data-testid="health-merge"[\s\S]*?4 merged PR\(s\)/);
+  assert.match(h, /data-measure="conflicts"[\s\S]*?>2<[\s\S]*?30 median to merged[\s\S]*?15 min[\s\S]*?1 needed the owner/);
+  assert.match(h, /data-measure="light-checks"[\s\S]*?>3<[\s\S]*?9 added[\s\S]*?2\.3 min[\s\S]*?merge 2 · hold 1/);
+  assert.match(h, /data-measure="holds"[\s\S]*?15 waited[\s\S]*?3\.8 min[\s\S]*?most on src\/totals\.js/);
+  assert.match(h, /data-testid="health-suggestion"[^>]*>Consider listing src\/totals\.js as hotspots/);
+});
+
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {
   const checks = r.renderChecks([{ id: 1, at: new Date().toISOString(), stage: 'verify', head: 'c'.repeat(40), checks: [{ check: 'npm test', status: 'fail', exitCode: 1, tail: 'AssertionError: 2 !== 3' }, { check: 'npm run full', status: 'skipped', exitCode: null, tail: null }] }]);
   assert.match(checks, /<table/);
@@ -366,4 +459,99 @@ test('checks render as a table with failures tinted and their output; instances 
   assert.match(nav, /disabled=""/, 'an instance that isn\'t answering can\'t be picked');
   assert.equal(r.renderStopBanner({ ...asOwner, emergency: { inForce: null, halted: null, lastStop: null, lastResume: null } }), '');
   assert.match(r.renderStopBanner({ ...asOwner, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: null, lastStop: null, lastResume: null } }), /Emergency stop in force/);
+});
+
+test('a chat answer: citations as links, a draft preview with a two-step file, proposals that open their confirm flows, read-only for others', () => {
+  const answer = {
+    turn: 't1',
+    instance: 'shop',
+    answer: 'Issue #3 waits on your decision.',
+    citations: [
+      { kind: 'event', id: '41', instance: 'shop', label: 'event 41', href: '/events/41' },
+      { kind: 'run', id: 'r-9', instance: 'shop', label: 'run r-9', href: '/runs/r-9' },
+      { kind: 'issue', id: '3', instance: 'shop', label: 'issue #3', href: 'https://github.com/example-org/example-shop/issues/3' },
+    ],
+    unknownCitations: ['run:nope'],
+    issueDraft: { ok: true, title: 'Round totals', body: '```done_when\n- test: t.js\n```', labels: ['ready'] },
+    actions: [
+      { kind: 'settings', key: 'workers', value: 2, confirm: 'settings.change', why: 'two tasks wait' },
+      { kind: 'decision', id: 'd-1', answer: 'approve', confirm: 'decision.answer' },
+      { kind: 'pause', confirm: 'emergency.pause' },
+    ],
+    refusedActions: ['merge: not something the chat proposes'],
+    readOnly: false,
+    costUsd: 0.123,
+  };
+  const file = { v: 1, id: '1-ab', at: '', owner: true, filed: null, state: 'answered', answer };
+  const html = r.renderChatAnswer(file, BRAND.cli);
+  assert.match(html, /data-testid="chat-answer-text"[^>]*>Issue #3 waits on your decision\./);
+  assert.match(html, /href="\/activity\?event=41"[^>]*data-testid="chat-citation"/, 'an event opens on Activity');
+  assert.match(html, /href="\/runs\/r-9"/);
+  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/issues\/3" target="_blank"/);
+  assert.match(html, /data-testid="chat-unknown-citations"[^>]*>Left out 1 citation/);
+  assert.match(html, /data-testid="chat-draft"[\s\S]*?ready[\s\S]*?Round totals[\s\S]*?data-testid="chat-draft-review"/);
+  assert.doesNotMatch(html, /data-testid="chat-draft-confirm"/, 'filing needs a second click');
+  assert.equal((html.match(/data-testid="chat-action"/g) ?? []).length, 3);
+  assert.equal((html.match(/data-testid="chat-action-open"/g) ?? []).length, 2, 'settings and the decision open their pages');
+  assert.match(html, new RegExp(`data-testid="chat-action-machine"[\\s\\S]*?${BRAND.cli} stop-all`), 'a stop is done on the machine');
+  assert.match(html, /Not proposed: merge/);
+  assert.match(html, /~\$0\.12 \(estimated\)/);
+  assert.doesNotMatch(html, /data-testid="chat-read-only"/);
+  assert.equal(r.actionHref(answer.actions[0]), '/settings?set=workers&to=2');
+  assert.equal(r.actionHref(answer.actions[1]), '/decisions?proposed=approve#d-1');
+  assert.equal(r.actionHref(answer.actions[2]), null);
+  assert.deepEqual(r.proposedSetting('?set=workers&to=2'), { key: 'workers', value: 2 });
+  assert.equal(r.proposedSetting('?set=workers&to=%7B'), null, 'an unreadable value proposes nothing');
+  // Already filed: its number, no button. A draft that fails the contract check: why, and no button.
+  assert.match(r.renderChatAnswer({ ...file, filed: { number: 57 } }, BRAND.cli), /data-testid="chat-draft-filed"[^>]*>Filed as #57/);
+  const invalid = r.renderChatAnswer({ ...file, answer: { ...answer, issueDraft: { ok: false, title: 'x', body: 'prose', why: 'no done_when block' } } }, BRAND.cli);
+  assert.match(invalid, /data-testid="chat-draft-invalid"[^>]*>Can(&#x27;|')t be filed as it is: no done_when block/);
+  assert.doesNotMatch(invalid, /data-testid="chat-draft-review"/);
+  // Anyone but the owner: the server sends no draft and no proposals; the answer says it's read-only.
+  const theirs = r.renderChatAnswer({ ...file, owner: false, answer: { ...answer, issueDraft: null, actions: [], refusedActions: [], readOnly: true } }, BRAND.cli);
+  assert.match(theirs, /data-testid="chat-read-only"/);
+  assert.match(theirs, /data-testid="chat-citation"/);
+  assert.doesNotMatch(theirs, /data-testid="chat-draft"|data-testid="chat-action"/);
+  assert.match(r.renderChatAnswer({ v: 1, id: '1-ab', at: '', owner: true, filed: null, state: 'pending' }, BRAND.cli), /data-testid="chat-pending"/);
+  assert.match(r.renderChatAnswer({ v: 1, id: '1-ab', at: '', owner: true, filed: null, state: 'refused', why: 'over the chat budget' }, BRAND.cli), /data-testid="chat-refused"[^>]*>Not answered: over the chat budget/);
+});
+
+test('a chat proposal lands in its confirm flow: the setting filled in for review, the decision option marked, the cited event marked', () => {
+  const data = {
+    owner: 'example-owner',
+    user: 'example-owner',
+    canChange: true,
+    keys: ['workers'],
+    available: true,
+    limits: { workers: { min: 1, max: 4 }, daily_budget_usd: { max: 20 }, max_fixes_per_pr: { max: 3 } },
+    limitsError: null,
+    ceilings: { max_workers: 3, daily_usd: 30 },
+    settings: [
+      { key: 'workers', value: 1, source: 'instance' },
+      { key: 'daily_budget_usd', value: 12, source: 'instance' },
+    ],
+  };
+  const html = r.renderProposedSetting(data, { key: 'workers', value: 3 });
+  assert.match(html, /data-testid="setting-proposed"[^>]*>The chat proposed workers = 3/);
+  assert.match(html, /data-setting="workers" data-proposed=""[\s\S]*?value="3"/, 'filled in, not written');
+  assert.doesNotMatch(html, /data-testid="setting-confirm"/, 'still Review, then Confirm');
+  assert.doesNotMatch(r.renderProposedSetting({ ...data, canChange: false, user: 'someone-else' }, { key: 'workers', value: 3 }), /setting-proposed|data-proposed/);
+  const loc = (globalThis as unknown as { window: { location: { search: string; hash: string } } }).window.location;
+  const d = asOwner.decisions.find((x) => !x.answer && x.canAnswer !== false)!;
+  try {
+    loc.search = `?proposed=${encodeURIComponent(d.options[0]!)}`;
+    loc.hash = `#${d.id}`;
+    const dec = r.renderPage('decisions', asOwner);
+    assert.match(dec, new RegExp(`data-decision="${d.id}"[\\s\\S]*?data-testid="decision-proposed"`));
+    assert.equal((dec.match(/data-testid="decision-proposed"/g) ?? []).length, 1, 'only on the decision in the address');
+    const ev = (asOwner.activity[0] as unknown as { id: number }).id;
+    loc.search = `?event=${ev}`;
+    loc.hash = '';
+    assert.match(r.renderPage('activity', asOwner), new RegExp(`data-event="${ev}" data-testid="activity-row" data-cited=""`));
+    loc.search = '?event=999999';
+    assert.match(r.renderPage('activity', asOwner), /data-testid="activity-cited-missing"/);
+  } finally {
+    loc.search = '';
+    loc.hash = '';
+  }
 });

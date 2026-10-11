@@ -71,6 +71,41 @@ export const EventSchemas = {
   'console.message_delivered': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
   /** The run ended before the message's turn came. */
   'console.message_dropped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), id: z.string() }),
+  /** A research run searched the web (WebSearch), from its stream. `run`: its run record and live feed. */
+  'research.searched': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), query: z.string() }),
+  /** A research run fetched a page (WebFetch), or was refused it (`refused`: why). */
+  'research.fetched': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), url: z.string(), host: z.string(), refused: z.string().nullable() }),
+  /** A research run was held or stopped by a daily cap (searches, fetches or spend). */
+  'research.capped': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), why: z.string() }),
+  /** A research report was accepted and posted: its sources, the fields it returned that were dropped, and the report. */
+  'research.reported': z.strictObject({ issue, run: z.string().nullable(), sources: z.number().int(), ignored: z.array(z.string()), report: z.string() }),
+  // work intake (docs/intake.md): ids are report ids; senders only as a short hash; text only redacted
+  /** A new report from a source: `sender` is a hash of the source's sender id, `excerpt` the redacted text's start. */
+  'intake.received': z.strictObject({ id: z.string(), source: z.string(), sender: z.string(), excerpt: z.string() }),
+  /** A report taken no further: a cap (sender_cap, flood, drafts_cap, spend_cap, budget), a failed run or a refused draft. */
+  'intake.dropped': z.strictObject({ id: z.string(), reason: z.string() }),
+  /** The intake agent's triage as accepted: `ignored`, fields it returned that were dropped; `draft_refused`, why its draft failed (then the kind is needs_info). */
+  'intake.triaged': z.strictObject({ id: z.string(), kind: z.string(), reproduction: z.string().nullable(), ignored: z.array(z.string()), draft_refused: z.string().optional() }),
+  'intake.filed': z.strictObject({ id: z.string(), issue, ready: z.boolean() }),
+  /** An untrusted sender's draft, waiting on the owner's decision. */
+  'intake.awaiting': z.strictObject({ id: z.string(), decision: z.string() }),
+  /** A question passed to the owner. */
+  'intake.asked': z.strictObject({ id: z.string(), decision: z.string() }),
+  /** The owner's answer on an intake decision; `issue`: what approve or edit filed. */
+  'intake.decided': z.strictObject({ id: z.string(), decision: z.string(), answer: z.string(), by: z.string(), issue: issue.nullable() }),
+  /** Same as an open issue: a comment there. */
+  'intake.commented': z.strictObject({ id: z.string(), issue }),
+  /** Same as a recent report with no issue yet. */
+  'intake.grouped': z.strictObject({ id: z.string(), with: z.string() }),
+  /** The triage run for a report is about to start: until its outcome, a restart ends it as interrupted. */
+  'intake.started': z.strictObject({ id: z.string() }),
+  /** A reply is about to be sent (recorded first, so a crash can't send it twice). */
+  'intake.replying': z.strictObject({ id: z.string(), stage: z.string() }),
+  /**
+   * A reply to the reporter at a stage (filed, info, question, merged, deployed, interrupted), once each; `ok`: the
+   * source took it; `unknown`: a restart cut it off mid-send, so whether it went out is unknown (it isn't resent).
+   */
+  'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
@@ -98,7 +133,7 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
   /** An agent's request to a host outside its allowlist was refused: once per issue and host, with the decision it raised. */
   'network.domain_requested': z.strictObject({ issue, host: z.string(), role: z.string(), run: z.string().nullable(), tool: z.string(), what: z.string(), decision: z.string() }),
   /** The owner's answer on a refused host: allow-repo (pr: the config change proposed), allow-once (the task's next run), or deny. */

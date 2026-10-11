@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
@@ -17,6 +17,11 @@ const GROUPS: Record<string, (t: string) => boolean> = {
 
 export function ActivityPage({ state }: { state: State }) {
   const [group, setGroup] = useState('All');
+  // An event a chat answer cited (`?event=<id>`): marked and scrolled to, if this page still lists it.
+  const cited = useMemo(() => new URLSearchParams(window.location.search).get('event'), []);
+  useEffect(() => {
+    if (cited) document.querySelector(`[data-event="${CSS.escape(cited)}"]`)?.scrollIntoView({ block: 'center' });
+  }, [cited]);
   const [text, setText] = useState('');
   const rows = useMemo(() => {
     const q = text.trim().toLowerCase();
@@ -28,6 +33,11 @@ export function ActivityPage({ state }: { state: State }) {
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter…" className="h-7 w-48 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]" />
       </Header>
       <div className="space-y-3 p-6">
+        {cited && !state.activity.some((a) => String(a.id) === cited) && (
+          <div className="text-[12.5px] text-ink-3" data-testid="activity-cited-missing">
+            Event {cited} is older than the events this page lists.
+          </div>
+        )}
         <div className="flex flex-wrap gap-1.5">
           {Object.keys(GROUPS).map((g) => (
             <button key={g} onClick={() => setGroup(g)} className={cx('h-7 rounded-full px-2.5 text-[12px]', group === g ? 'bg-ink font-medium text-surface' : 'text-ink-2 shadow-hairline hover:bg-hover-2')}>
@@ -39,7 +49,7 @@ export function ActivityPage({ state }: { state: State }) {
           {rows.length ? (
             <ul className="divide-y divide-line">
               {rows.map((a) => (
-                <li key={a.id} className="flex items-center gap-3 px-4 py-2 text-sm">
+                <li key={a.id} className={cx('flex items-center gap-3 px-4 py-2 text-sm', cited === String(a.id) && 'bg-blue-tint')} data-event={a.id} data-testid="activity-row" {...(cited === String(a.id) ? { 'data-cited': '' } : {})}>
                   <span className="w-16 shrink-0 text-xs text-muted-foreground" title={a.ts}>
                     {ago(a.ts)}
                   </span>
