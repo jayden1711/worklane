@@ -858,6 +858,12 @@ export class Coordinator {
         if (verdict.patch_correct) await this.instructionEvals(n, path, base, head, change.files.map((f) => f.path));
         const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
         const lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
+        // Safety floor: in direct mode a change the evaluator rejected never lands without the owner. Not a
+        // setting: no config, policy or review level can lower it. (PR mode needs the approval at the head anyway.)
+        if (this.d.cfg.project.land_mode === 'direct' && !verdict.patch_correct) {
+          lvl.level = 'L3';
+          lvl.reasons.push('the evaluator rejected the patch: held for the owner (safety floor)');
+        }
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${verdict.unread.slice(0, 10).join(', ')}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
