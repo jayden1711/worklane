@@ -17,10 +17,13 @@ export interface InstanceSettingsData {
   limits?: { workers: { min: number; max: number }; daily_budget_usd: { max: number }; max_fixes_per_pr: { max: number } } | null;
   limitsError?: string | null;
   ceilings?: { max_workers: number; daily_usd: number };
-  settings?: { key: string; value: unknown; source: 'instance' | 'repo' }[];
+  settings?: { key: string; value: unknown; source: Source }[];
 }
 
 type Windows = { from: string; to: string }[];
+/** Where a value in effect comes from: the instance's policy, the repo's config, or the engine's own default. */
+export type Source = 'instance' | 'repo' | 'engine';
+export const SOURCE_LABEL: Record<Source, string> = { instance: "this instance's", repo: "the repo's default", engine: 'engine default' };
 
 const LABEL: Record<string, string> = {
   workers: 'Workers at once',
@@ -78,7 +81,7 @@ export function parseEntry(key: string, raw: string): { value: unknown } | { err
 
 const entryOf = (key: string, v: unknown) => (key === 'ci_repair.enabled' ? (v ? 'on' : 'off') : key === 'run_windows' ? (Array.isArray(v) ? (v as Windows).map((w) => `${w.from}-${w.to}`).join(', ') : '') : String(v));
 
-function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: unknown; source: 'instance' | 'repo' }; d: InstanceSettingsData; onChanged: () => void; proposed?: { value: unknown } }) {
+function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: unknown; source: Source }; d: InstanceSettingsData; onChanged: () => void; proposed?: { value: unknown } }) {
   const [entry, setEntry] = useState(entryOf(s.key, proposed ? proposed.value : s.value));
   const [review, setReview] = useState<{ value: unknown } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -111,7 +114,7 @@ function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: un
           {showValue(s.key, s.value)}
         </div>
         <div className="mt-0.5">
-          <Badge tone={s.source === 'instance' ? 'info' : 'neutral'}>{s.source === 'instance' ? "this instance's" : "the repo's default"}</Badge>
+          <Badge tone={s.source === 'instance' ? 'info' : 'neutral'}>{SOURCE_LABEL[s.source] ?? s.source}</Badge>
         </div>
       </td>
       <td className="primitive-table-cell">
@@ -182,7 +185,7 @@ export function InstanceSettingsView({ data, onChanged = () => {}, proposed }: {
     <section className="space-y-2" aria-label="Instance settings" data-testid="instance-settings">
       <div className="flex flex-wrap items-baseline gap-2">
         <span className="text-[13px] font-medium text-ink">Instance settings</span>
-        <span className="text-[12px] text-ink-3">this instance's policy wins over the repo's defaults; each change is recorded on Activity</span>
+        <span className="text-[12px] text-ink-3">this instance's policy wins over the repo's config, which wins over the engine's defaults; each change is recorded on Activity</span>
       </div>
       {proposed && data.canChange && (data.settings ?? []).some((s) => s.key === proposed.key) && (
         <div className="rounded-control bg-blue-tint px-2.5 py-2 text-[12.5px] text-ink-2" data-testid="setting-proposed">
