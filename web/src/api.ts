@@ -98,7 +98,9 @@ export interface PrView {
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
-  phase: 'waiting' | 'fixing' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
+  conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: string[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
+  lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: string[]; outcome: string | null; waitMs: number | null; detail: string } | null;
+  phase: 'waiting' | 'fixing' | 'resolving' | 'light_check' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
 }
 
 /** The machine health view (GET /api/health): the OS adapter's snapshot, check times, usage per day, suggestions. */
@@ -124,6 +126,15 @@ export interface HealthView {
     days: { day: string; runs: number; estimatedUsd: number; turns: number; rateLimited: number; authProblems: number; retries: Record<string, number>; retryWaitMs: number; lockWaits: number; lockWaitMs: number }[];
     quotaNote: string;
   };
+  /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
+  merge?: {
+    since: string;
+    mergedPrs: number;
+    conflicts: { count: number; needOwner: number; minutesToMerged: number[]; medianMinutes: number | null; perMergedPr: number };
+    lightChecks: { count: number; minutesAdded: number; perMergedPr: number; outcomes: Record<string, number> };
+    holds: { count: number; minutesWaited: number; perMergedPr: number; byFile: { file: string; minutes: number; count: number }[] };
+    flags: string[];
+  };
   suggestions: string[];
 }
 
@@ -131,6 +142,8 @@ export interface PrsView {
   prs: PrView[];
   refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
+  /** Tasks held on a hotspot (another task is changing the same files): still held (until null), or released. */
+  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
 }
