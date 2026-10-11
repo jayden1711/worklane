@@ -30,7 +30,7 @@ function instance(policy = POLICY) {
 
 test('limits: the engine defaults without a limits file; a broken one is an error, never a silent default', () => {
   const d = dir();
-  assert.deepEqual(loadLimits(join(d, 'none.json')), { workers: { min: 1, max: 8 }, daily_budget_usd: { max: 100 }, max_fixes_per_pr: { max: 5 } });
+  assert.deepEqual(loadLimits(join(d, 'none.json')), { workers: { min: 1, max: 8 }, daily_budget_usd: { max: 100 }, max_fixes_per_pr: { max: 5 }, research: { max_searches_per_day: 200, max_fetches_per_day: 500, max_usd_per_day: 20 } });
   writeFileSync(join(d, 'l.json'), JSON.stringify({ workers: { min: 1, max: 2 } }));
   assert.deepEqual(loadLimits(join(d, 'l.json')).workers, { min: 1, max: 2 });
   writeFileSync(join(d, 'bad.json'), '{ nope');
