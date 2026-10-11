@@ -28,6 +28,7 @@ import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
+import { scanStuck } from './stuck.js';
 import { openUrl, stateDir } from './os/index.js';
 import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
 import { checkRepoScope } from './github-scope.js';
@@ -84,6 +85,8 @@ usage: ${BRAND.cli} <command> [options]
                                    profile the test suite at 1/2/4/all cores' workers and open a PR
                                    with the recommended worker settings (run as the coordinator user)
   status                           what's running, waiting and spent, from the event log
+  stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
+                                   flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
   instance init <name> --repo <path> --github <owner/repo>
@@ -504,6 +507,13 @@ async function main(argv: string[]): Promise<number> {
       } finally {
         log.close();
       }
+      return 0;
+    }
+
+    case 'stuck-scan': {
+      const s = scanStuck(instanceOpt ? loadInstance(instanceOpt).stateDir : projectStateDir(root));
+      console.log(`runs scanned: ${s.scanned} (${s.noFeed} older record(s) without a feed not scanned)\nwould flag: ${s.flagged}\nwould stop: ${s.stopped}`);
+      for (const e of s.examples) console.log(`  ${e.kind} ${e.run}: ${e.tool} ${e.input}${e.failures ? ` (${e.failures} failure(s) in a row)` : ''}`);
       return 0;
     }
 
