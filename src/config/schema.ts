@@ -68,6 +68,11 @@ export const ProjectConfig = z.strictObject({
    * head merges. The PR is never pushed to for this, and the full tier keeps running on the default branch.
    */
   combined_check: z.boolean().default(true),
+  /**
+   * Research runs (type:research / type:investigation issues, a ```research block): Claude Code's WebSearch and
+   * WebFetch only. Fetches of a listed domain (or any subdomain of it) are refused and recorded.
+   */
+  research: z.strictObject({ domain_blocklist: z.array(z.string().min(1)).default([]) }).prefault({}),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),

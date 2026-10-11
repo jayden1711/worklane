@@ -25,7 +25,7 @@ import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
-import { instanceProblems, laneRuns, loadInstance, type Instance, type InstanceSettings } from './instance.js';
+import { instanceProblems, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
 import { settingsReader } from './settings.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
@@ -133,7 +133,13 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, laneRuns(i), identity), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+}
+
+/** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
+function allLanes(i: ReturnType<typeof loadInstance>) {
+  const lanes = laneRuns(i);
+  return { ...lanes, ...researchLanes(i, lanes.default) };
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
