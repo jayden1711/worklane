@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { addressed } from '../src/intake/addressing.js';
-import { pullBugReports, readCursor, withCursor } from '../src/intake/bug-store.js';
+import { BugStoreIntake, pullBugReports, readCursor, withCursor } from '../src/intake/bug-store.js';
 import { candidates, similarity } from '../src/intake/dedupe.js';
 import { decide, statusReply, NEEDS_INFO_REPLY } from '../src/intake/decide.js';
 import { DiscordIntake, INTENTS, type Socket } from '../src/intake/discord.js';
@@ -226,20 +226,26 @@ test('relay: verifies Twilio\'s signature, drops unaddressed group texts unstore
   assert.equal(kv.m.size, 0);
 });
 
-test('in-product reports: the fixed query with only a validated cursor filled in; the cursor advances, privately', { skip: !posix && 'POSIX modes' }, () => {
+test('in-product reports: the fixed query with only a validated cursor filled in; the cursor advances privately, only past what is recorded', { skip: !posix && 'POSIX modes' }, async () => {
   const dir = state();
   const q = "SELECT id, reporter, text, created_at FROM bug_reports_v WHERE id > :after ORDER BY id LIMIT 50";
   assert.throws(() => withCursor('SELECT 1', '0'), /must use :after/);
   assert.throws(() => withCursor(q, "0' OR 1=1 --"), /unexpected cursor/);
   const seen: string[] = [];
-  const run = (sql: string) => (seen.push(sql), { ok: true, output: JSON.stringify({ rows: [{ id: 41, reporter: 7, text: 'crash on open', created_at: 't' }, { id: 42, reporter: null, text: 'blank screen', created_at: 't' }] }) });
-  const got = pullBugReports(dir, q, run);
+  const run = (sql: string) => (seen.push(sql), { ok: true, output: JSON.stringify({ rows: [{ id: 41, reporter: 7, text: 'crash on open', created_at: 't' }, { id: 42, reporter: null, text: 'blank screen', created_at: 't' }, { id: 43, text: null, created_at: 't' }] }) });
+  const src = new BugStoreIntake({ stateDir: dir, query: q, run });
+  const got = await src.take();
   assert.equal(seen[0], q.replace(':after', "'0'"));
   assert.deepEqual(got.map((r) => [r.sourceId, r.sender.id, r.text]), [['41', '7', 'crash on open'], ['42', 'anonymous', 'blank screen']]);
-  assert.equal(readCursor(dir), '42');
+  assert.equal(readCursor(dir), '0', 'not moved by the pull');
+  await src.ack(['42']);
+  assert.equal(readCursor(dir), '0', 'not past 41, which is not recorded yet');
+  await src.ack(['41']);
+  assert.equal(readCursor(dir), '43', 'past both, and the empty row 43 that nothing records');
   assert.equal(statSync(join(dir, 'intake', 'bug-store-cursor.json')).mode & 0o777, 0o600);
-  pullBugReports(dir, q, run);
-  assert.equal(seen[1], q.replace(':after', "'42'"));
+  await src.take();
+  assert.equal(seen[1], q.replace(':after', "'43'"));
+  assert.equal(pullBugReports(dir, q, run).reports.length, 2, 'the plain pull reads only');
 });
 
 // ---------- triage, dedupe, draft and decision ----------

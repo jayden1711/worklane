@@ -13,7 +13,7 @@ import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { pullBugReports } from '../src/intake/bug-store.js';
+import { BugStoreIntake, pullBugReports, readCursor } from '../src/intake/bug-store.js';
 import { DiscordIntake, type Socket } from '../src/intake/discord.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
 import { relaySignature, SmsIntake } from '../src/intake/sms.js';
@@ -155,7 +155,7 @@ test('relay and adapters: two texts in one thread delivered in reverse id order 
     { id: 10, reporter: 'u1', text: 'later', created_at: '2026-10-01T10:00:02.000Z' },
     { id: 9, reporter: 'u1', text: 'earlier', created_at: '2026-10-01T10:00:01.000Z' },
   ];
-  assert.deepEqual(pullBugReports(dir, 'SELECT * FROM r WHERE id > :after', () => ({ ok: true, output: JSON.stringify({ rows }) })).map((x) => x.text), ['earlier', 'later']);
+  assert.deepEqual(pullBugReports(dir, 'SELECT * FROM r WHERE id > :after', () => ({ ok: true, output: JSON.stringify({ rows }) })).reports.map((x) => x.text), ['earlier', 'later']);
 });
 
 test('intake: a message redelivered after its raw text was purged is still deduped', () => {
@@ -230,6 +230,33 @@ test('intake: an SMS is acknowledged only after it is recorded: a crash before t
   release();
   await c.checkIntake();
   assert.deepEqual(src.acked, [['SMaaaaaaaaaa1']]);
+});
+
+test('bug store: a crash between the pull and the record pulls the rows again after a restart, and each is processed once', async () => {
+  const i = instance();
+  const rows = [
+    { id: 41, reporter: 'u1', text: 'the export button does nothing', created_at: '2026-10-01T10:00:01.000Z' },
+    { id: 42, reporter: 'u2', text: 'the search box loses focus', created_at: '2026-10-01T10:00:02.000Z' },
+  ];
+  const queries: string[] = [];
+  const run = (sql: string) => {
+    queries.push(sql);
+    const after = Number(/'(\d+)'/.exec(sql)![1]);
+    return { ok: true, output: JSON.stringify({ rows: rows.filter((r) => r.id > after) }) };
+  };
+  const q = 'SELECT id, reporter, text, created_at FROM bug_reports_v WHERE id > :after ORDER BY id';
+  // Pulled, then the process dies before either row is recorded.
+  assert.equal((await new BugStoreIntake({ stateDir: i.stateDir, query: q, run }).take()).length, 2);
+  const src = new BugStoreIntake({ stateDir: i.stateDir, query: q, run });
+  const { c, runner } = coordinator(i, { sources: [src] });
+  await c.recover();
+  await c.checkIntake();
+  assert.equal(runner.calls.length, 2, 'both rows are processed after the restart');
+  assert.equal(readCursor(i.stateDir), '42', 'and the cursor is past them once recorded');
+  await c.checkIntake();
+  assert.equal(runner.calls.length, 2, 'once each');
+  assert.equal(payloads(i.log, 'intake.received').length, 2);
+  assert.equal(queries.at(-1), q.replace(':after', "'42'"));
 });
 
 // ---------- (2) one at a time, in arrival order ----------
