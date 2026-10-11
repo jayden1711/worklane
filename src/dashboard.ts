@@ -499,9 +499,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
         // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string };
+          const body = (await readBody(req)) as { question?: string; key?: unknown };
           try {
-            return json(res, 200, askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: opts.user }));
+            // `key`: the client's request key, so a retried POST is the same question, not a second turn.
+            return json(res, 200, askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: opts.user, ...(body.key !== undefined ? { key: String(body.key) } : {}) }));
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
             throw e;

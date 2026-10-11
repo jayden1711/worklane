@@ -48,17 +48,23 @@ export class SmsIntake {
     });
   }
 
-  /** Pull waiting messages, acknowledge them, and return them as reports. Group texts not addressed to the bot are dropped. */
+  /**
+   * Pull waiting messages as reports, oldest first. Only group texts not addressed to the bot (dropped by rule, never
+   * stored) are acknowledged here: the rest stay on the relay until `ack`, which the coordinator calls once each is
+   * recorded, so a crash in between redelivers them rather than losing them.
+   */
   async pull(): Promise<IncomingReport[]> {
     const r = await this.signed('GET', '/pull');
     if (!r.ok) throw new Error(`relay pull failed: ${r.status}`);
     const { messages } = (await r.json()) as { messages: RelayMessage[] };
     const out: IncomingReport[] = [];
+    const ruled: string[] = [];
     for (const m of messages ?? []) {
       // The relay already keeps only addressed group messages; check again here, so a misconfigured relay can't widen it.
       const text = m.conversation ? addressed(m.body, this.o.prefixes) : m.body.trim() || null;
       if (!text || !/^\+[1-9]\d{6,14}$/.test(m.from)) {
         this.dropped++;
+        ruled.push(m.id);
         continue;
       }
       out.push({
@@ -70,11 +76,15 @@ export class SmsIntake {
         thread: m.conversation ? { kind: 'group', id: m.conversation } : { kind: 'sms', id: m.from },
       });
     }
-    if (messages?.length) {
-      const ack = await this.signed('POST', '/ack', JSON.stringify({ ids: messages.map((m) => m.id) }));
-      if (!ack.ok) throw new Error(`relay ack failed: ${ack.status}`);
-    }
-    return out;
+    await this.ack(ruled);
+    return out.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+  }
+
+  /** Delete these messages from the relay: they are recorded (or dropped by rule) and must not come back. */
+  async ack(ids: string[]): Promise<void> {
+    if (!ids.length) return;
+    const ack = await this.signed('POST', '/ack', JSON.stringify({ ids }));
+    if (!ack.ok) throw new Error(`relay ack failed: ${ack.status}`);
   }
 
   /** Reply to a 1:1 text (Messages API) or into a group (Conversations API). */

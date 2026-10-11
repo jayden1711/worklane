@@ -1,5 +1,6 @@
 // The coordinator's private intake state: the raw (unredacted) reports, kept
-// 0600 for a configured number of days and then deleted, and the daily counters
+// 0600 for a configured number of days and then deleted; the ids seen (hashes
+// only, kept far longer, so a redelivery is never new); and the daily counters
 // behind the caps. Nothing here is ever given to an agent or written to an issue.
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
@@ -18,15 +19,40 @@ export function reportId(r: Pick<IncomingReport, 'source' | 'sourceId'>): string
 export const privateDir = ownerOnlyDir;
 const writePrivate = writeOwnerOnly;
 
-/** Store a raw report; returns false if this report was already stored (seen before). */
+/**
+ * How long a report's id is remembered after it is first seen: far longer than the raw text is kept, the relay holds
+ * an unacknowledged message (3 days), or a chat gateway replays on resume, so a redelivery is never taken as new.
+ */
+export const SEEN_DAYS = 365;
+
+/** The seen-id ledger: one empty file per report id (a hash of source and the provider's message id), no text. */
+const seenFile = (stateDir: string, id: string) => join(stateDir, DIR, 'seen', id);
+
+/** Has this report (by the provider's message id) been taken before? Raw text may be long purged; the ledger isn't. */
+export function seen(stateDir: string, r: Pick<IncomingReport, 'source' | 'sourceId'>): boolean {
+  const id = reportId(r);
+  return existsSync(seenFile(stateDir, id)) || existsSync(join(stateDir, DIR, 'raw', `${id}.json`));
+}
+
+/**
+ * Store a raw report and record its id as seen; returns false if it was seen before (a redelivery or retry). The raw
+ * file is written first: a crash between the two still counts as seen, and recovery finds the raw file.
+ */
 export function storeRaw(stateDir: string, r: IncomingReport): boolean {
-  const dir = join(stateDir, DIR, 'raw');
+  if (seen(stateDir, r)) return false;
+  const id = reportId(r);
   privateDir(join(stateDir, DIR));
-  privateDir(dir);
-  const file = join(dir, `${reportId(r)}.json`);
-  if (existsSync(file)) return false;
-  writePrivate(file, JSON.stringify(r));
+  privateDir(join(stateDir, DIR, 'raw'));
+  privateDir(join(stateDir, DIR, 'seen'));
+  writePrivate(join(stateDir, DIR, 'raw', `${id}.json`), JSON.stringify(r));
+  writePrivate(seenFile(stateDir, id), '');
   return true;
+}
+
+/** Report ids whose raw text is still kept. */
+export function rawIds(stateDir: string): string[] {
+  const dir = join(stateDir, DIR, 'raw');
+  return existsSync(dir) ? readdirSync(dir).filter((f) => /^[0-9a-f]{20}\.json$/.test(f)).map((f) => f.slice(0, 20)) : [];
 }
 
 export function readRaw(stateDir: string, id: string): IncomingReport | null {
@@ -38,9 +64,17 @@ export function readRaw(stateDir: string, id: string): IncomingReport | null {
   }
 }
 
-/** Delete raw reports older than `days`. Returns how many were removed. */
+/** Delete raw reports older than `days`. Returns how many were removed. Their ids stay in the seen ledger. */
 export function purgeRaw(stateDir: string, days: number, now = Date.now()): number {
-  const dir = join(stateDir, DIR, 'raw');
+  return purgeOlder(join(stateDir, DIR, 'raw'), days, now);
+}
+
+/** Forget seen ids older than `days` (SEEN_DAYS by default). */
+export function purgeSeen(stateDir: string, days = SEEN_DAYS, now = Date.now()): number {
+  return purgeOlder(join(stateDir, DIR, 'seen'), days, now);
+}
+
+function purgeOlder(dir: string, days: number, now: number): number {
   if (!existsSync(dir)) return 0;
   let n = 0;
   for (const f of readdirSync(dir)) {

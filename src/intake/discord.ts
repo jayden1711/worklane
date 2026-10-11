@@ -43,6 +43,11 @@ export class DiscordIntake {
   private seq: number | null = null;
   private heartbeat: unknown = null;
   private botId: string | null = null;
+  /**
+   * Messages received and not yet taken. Known loss: this lives in memory only, so messages that arrived in the few
+   * seconds before a coordinator crash (or that the gateway delivered while it was down) are not recovered; the
+   * gateway has no acknowledgement to hold them. A replay of a message already taken is deduped by its id.
+   */
   private queue: IncomingReport[] = [];
   /** Messages seen and dropped (not addressed, wrong channel, from a bot), counted only. */
   dropped = 0;

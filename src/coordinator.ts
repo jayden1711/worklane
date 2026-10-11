@@ -22,7 +22,7 @@ import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, role
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunAs, type RunControl, type RunResult } from './runner.js';
 import { MAX_MESSAGE, takeRequests, writeLive, type PendingMessage } from './console.js';
-import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
+import { chatTurn, contextFromEvents, recentRuns, refuseInterruptedChats, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { checkedPush, pushProblems } from './push-check.js';
 import { allowedOnce, domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from './domain-requests.js';
@@ -49,7 +49,7 @@ import { refillPool, takeFromPool } from './worktree-pool.js';
 import { prepareDepCache } from './dep-cache.js';
 import { isTrusted, type IncomingReport, type IntakeConfig, type IntakeSource } from './intake/report.js';
 import { redactPii } from './intake/redact.js';
-import { IntakeMeter, purgeRaw, readRaw, reportId, storeRaw } from './intake/store.js';
+import { IntakeMeter, purgeRaw, purgeSeen, rawIds, readRaw, reportId, seen, storeRaw } from './intake/store.js';
 import { candidates as intakeCandidates } from './intake/dedupe.js';
 import { acceptTriage } from './intake/triage.js';
 import { decide as intakeDecide, excerpt, statusReply, type IntakeAction } from './intake/decide.js';
@@ -117,6 +117,12 @@ const TIP_CHECK_MS = 15_000;
 const INTAKE_PULL_MS = 30_000;
 /** The labels intake puts on what it files, by triage kind; also where it looks for open issues a report may repeat. */
 const INTAKE_KIND_LABEL: Record<string, string> = { bug: 'bug', feature: 'enhancement' };
+/** Events that end a report's handling (with an intake.replied at stage info, for a report answered by a reply). */
+const INTAKE_OUTCOMES = ['intake.filed', 'intake.awaiting', 'intake.commented', 'intake.grouped', 'intake.asked', 'intake.dropped'] as const;
+/** What a sender is told when a restart cut off their report. */
+const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Could you send it again?";
+/** The marker in an intake issue's body that ties it to its report, so it is never filed twice. */
+const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 /** A wait on the Claude login shorter than this isn't worth an event. */
 const LOCK_WAIT_RECORDED_MS = 1_000;
 
@@ -339,6 +345,13 @@ export class Coordinator {
    * landings and open decisions resume from the log on their own.
    */
   async recover(): Promise<number[]> {
+    // Chat turns and intake reports cut off by a restart: each ended once, never run again.
+    refuseInterruptedChats(this.d.stateDir);
+    try {
+      await this.recoverIntake();
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'intake recovery', kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
     // A CI fix run cut off by a restart: release its claim and record it; the PR watch decides what's next.
     for (const e of this.d.log.read(0, ['ci_fix.started'])) {
       const p = e.payload as EventPayload<'ci_fix.started'>;
@@ -1471,10 +1484,59 @@ export class Coordinator {
     return this.intakeQueue;
   }
 
+  /**
+   * At start-up, before any pass: end what a restart cut off, exactly once and without running any agent again.
+   * A reply recorded as being sent but never as sent is marked unknown (not resent). A report taken but without an
+   * outcome is filed if its issue exists (found by its marker), else dropped as interrupted, and its sender asked
+   * once to send it again. Each writes an outcome, so a second restart finds nothing to do.
+   */
+  async recoverIntake(): Promise<void> {
+    const it = this.d.intake;
+    if (!it) return;
+    const sent = new Set(this.d.log.read(0, ['intake.replied']).map((e) => `${(e.payload as { id: string }).id}\0${(e.payload as { stage: string }).stage}`));
+    for (const e of this.d.log.read(0, ['intake.replying'])) {
+      const p = e.payload as EventPayload<'intake.replying'>;
+      if (sent.has(`${p.id}\0${p.stage}`)) continue;
+      this.emit('intake.replied', { id: p.id, stage: p.stage, ok: false, unknown: true });
+      sent.add(`${p.id}\0${p.stage}`);
+    }
+    const ended = new Set<string>();
+    for (const e of this.d.log.read(0, [...INTAKE_OUTCOMES, 'intake.replied'])) {
+      const p = e.payload as { id: string; stage?: string };
+      // A reply is an outcome only for a report whose action was the reply (asking for details).
+      if (e.type !== 'intake.replied' || p.stage === 'info' || p.stage === 'interrupted') ended.add(p.id);
+    }
+    const received = new Set(this.d.log.read(0, ['intake.received']).map((e) => (e.payload as { id: string }).id));
+    const cfg = it.config();
+    // Stored but never recorded as received (a crash between the two): recorded now, so it can be ended.
+    for (const id of rawIds(this.d.stateDir)) {
+      if (received.has(id)) continue;
+      const raw = readRaw(this.d.stateDir, id);
+      if (!raw) continue;
+      const redacted = redactPii(raw.text, { names: [...(raw.sender.name ? [raw.sender.name] : []), ...(cfg?.redact.names ?? [])], patterns: cfg?.redact.patterns ?? [] });
+      this.emit('intake.received', { id, source: raw.source, sender: createHash('sha256').update(`${raw.sender.source}\0${raw.sender.id}`).digest('hex').slice(0, 12), excerpt: excerpt(redacted) });
+      received.add(id);
+    }
+    for (const id of received) {
+      if (ended.has(id)) continue;
+      const raw = readRaw(this.d.stateDir, id);
+      const issue = await this.intakeIssueFor(id, ['ready', ...Object.values(INTAKE_KIND_LABEL)]).catch(() => null);
+      if (issue !== null) {
+        const ready = (await this.d.backlog.get(issue)).labels.includes('ready');
+        this.emit('intake.filed', { id, issue, ready });
+        if (!sent.has(`${id}\0filed`)) await this.intakeReply(id, raw, 'filed', statusReply('filed', raw && cfg ? isTrusted(raw.sender, cfg) : false));
+        continue;
+      }
+      this.emit('intake.dropped', { id, reason: 'interrupted' });
+      await this.intakeReply(id, raw, 'interrupted', INTERRUPTED_REPLY);
+    }
+  }
+
   private async intakePass(it: NonNullable<CoordinatorDeps['intake']>): Promise<void> {
     const cfg = it.config();
     if (!cfg) return;
     purgeRaw(this.d.stateDir, cfg.raw_retention_days);
+    purgeSeen(this.d.stateDir);
     const error = (where: string, e: unknown) => this.emit('coordinator.error', { instance: this.d.instance, where, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
     for (const src of it.sources) {
       if (!cfg[src.name].enabled) continue;
@@ -1485,15 +1547,20 @@ export class Coordinator {
         error(`intake ${src.name}`, e);
         continue;
       }
-      // An adapter speaks only for its own source: trust is looked up per source.
-      for (const r of got.filter((x) => x.source === src.name)) {
-        if (this.halt.signal.aborted || this.stopped) return;
+      // An adapter speaks only for its own source: trust is looked up per source. Each conversation in arrival order.
+      const batch = got.filter((x) => x.source === src.name).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      for (const r of batch) {
+        if (this.halt.signal.aborted || this.stopped) break;
         try {
           await this.intakeReport(cfg, r);
         } catch (e) {
           error(`intake ${src.name} report`, e);
         }
       }
+      // Only what is recorded (its id in the seen ledger) is acknowledged; the rest comes again.
+      const recorded = batch.filter((r) => seen(this.d.stateDir, r)).map((r) => r.sourceId);
+      if (recorded.length && src.ack) await src.ack(recorded).catch((e: unknown) => error(`intake ${src.name} ack`, e));
+      if (this.halt.signal.aborted || this.stopped) return;
     }
     await this.intakeDecisions(cfg);
     await this.intakeStatus(cfg);
@@ -1521,6 +1588,8 @@ export class Coordinator {
     const bundleDir = writeIntakeBundle({ instanceRoot: dirname(this.d.repo), gid: this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, id, redacted, source: r.source, candidates: shown, recent: recent.map(({ id: rid, text }) => ({ id: rid, text })) });
     const spec = intakeRun({ bundleDir, repoAccess: researchRepoAccess(settings), repo: this.d.repo });
     const role = this.d.cfg.agents.roles.researcher ?? this.d.cfg.agents.roles.workers!;
+    // From here until its outcome is recorded, a restart finds this report started and ends it (recoverIntake).
+    this.emit('intake.started', { id });
     const run = await this.d.runner.run({
       ...spec,
       stateDir: this.d.stateDir,
@@ -1547,7 +1616,7 @@ export class Coordinator {
     const owner = this.d.cfg.project.owners.default;
     switch (a.action) {
       case 'file': {
-        const n = await this.d.backlog.createIssue(a.title, a.body, a.labels);
+        const n = await this.intakeFileOnce(id, a.title, a.body, a.labels);
         this.emit('intake.filed', { id, issue: n, ready: a.labels.includes('ready') });
         return this.intakeReply(id, r, 'filed', statusReply('filed', trusted));
       }
@@ -1580,8 +1649,32 @@ export class Coordinator {
     }
   }
 
-  /** A reply into the report's thread, recorded (each caller sends a stage once). Its text is the engine's own, never the agent's. */
+  /**
+   * File a report's issue at most once: its body carries `<!-- intake:<id> -->`, and an open issue with that marker
+   * (filed before a crash, its event never written) is reused instead of filing a second one.
+   */
+  private async intakeFileOnce(id: string, title: string, body: string, labels: string[]): Promise<number> {
+    const found = await this.intakeIssueFor(id, labels);
+    if (found !== null) return found;
+    return this.d.backlog.createIssue(title, `${body}\n\n${intakeMarker(id)}`, labels);
+  }
+
+  /** The open issue filed for this report, if any, among issues with these labels. */
+  private async intakeIssueFor(id: string, labels: string[]): Promise<number | null> {
+    for (const label of labels) {
+      const hit = (await this.d.backlog.list(label)).find((i) => i.body.includes(intakeMarker(id)));
+      if (hit) return hit.number;
+    }
+    return null;
+  }
+
+  /**
+   * A reply into the report's thread, sent at most once: the intent is recorded first, so a crash between sending
+   * and recording is found at start-up and marked unknown, never sent again (a person's phone gets at most one).
+   * Its text is the engine's own, never the agent's.
+   */
   private async intakeReply(id: string, r: IncomingReport | null, stage: string, text: string): Promise<void> {
+    this.emit('intake.replying', { id, stage });
     const src = r ? this.d.intake?.sources.find((x) => x.name === r.source) : undefined;
     let ok = false;
     if (src && r?.thread) {
@@ -1651,7 +1744,7 @@ export class Coordinator {
       let issue: number | null = null;
       if (existsSync(file) && (a.answer === 'approve' || a.answer === 'edit')) {
         const d = JSON.parse(readFileSync(file, 'utf8')) as { title: string; body: string; labels: string[] };
-        issue = await this.d.backlog.createIssue(d.title, d.body, a.answer === 'approve' ? ['ready', ...d.labels] : d.labels);
+        issue = await this.intakeFileOnce(rid, d.title, d.body, a.answer === 'approve' ? ['ready', ...d.labels] : d.labels);
       }
       this.emit('intake.decided', { id: rid, decision: q.id, answer: a.answer, by: a.by, issue });
       rmSync(file, { force: true });
@@ -1673,8 +1766,8 @@ export class Coordinator {
     }
     const deployed = this.d.log.read(0, ['deploy.verified']).map((e) => (e.payload as { sha: string }).sha);
     const replied = new Set(
-      this.d.log.read(0, ['intake.replied']).map((e) => {
-        const p = e.payload as EventPayload<'intake.replied'>;
+      this.d.log.read(0, ['intake.replying', 'intake.replied']).map((e) => {
+        const p = e.payload as { id: string; stage: string };
         return `${p.id}\0${p.stage}`;
       }),
     );

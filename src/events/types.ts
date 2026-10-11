@@ -97,8 +97,15 @@ export const EventSchemas = {
   'intake.commented': z.strictObject({ id: z.string(), issue }),
   /** Same as a recent report with no issue yet. */
   'intake.grouped': z.strictObject({ id: z.string(), with: z.string() }),
-  /** A reply to the reporter at a stage (filed, info, question, merged, deployed), once each; `ok`: the source took it. */
-  'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean() }),
+  /** The triage run for a report is about to start: until its outcome, a restart ends it as interrupted. */
+  'intake.started': z.strictObject({ id: z.string() }),
+  /** A reply is about to be sent (recorded first, so a crash can't send it twice). */
+  'intake.replying': z.strictObject({ id: z.string(), stage: z.string() }),
+  /**
+   * A reply to the reporter at a stage (filed, info, question, merged, deployed, interrupted), once each; `ok`: the
+   * source took it; `unknown`: a restart cut it off mid-send, so whether it went out is unknown (it isn't resent).
+   */
+  'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),

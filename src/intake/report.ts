@@ -31,6 +31,8 @@ export interface IntakeSource {
   name: Source;
   take(): Promise<IncomingReport[]>;
   reply(thread: NonNullable<IncomingReport['thread']>, text: string): Promise<boolean>;
+  /** Tell the source these reports are recorded (their ids are in the seen ledger), so it stops redelivering them. */
+  ack?(sourceIds: string[]): Promise<void>;
 }
 
 /** Intake's daily caps. The instance settings win; these (or the intake config's) are the defaults. */
