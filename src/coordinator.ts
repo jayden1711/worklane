@@ -677,8 +677,14 @@ export class Coordinator {
       this.endHotspotHold(issue.number, true);
       this.taskHotspots.set(issue.number, hotspots);
       const p = this.runTask(issue, contract.done_when)
-        .catch((e: Error) => {
+        .catch(async (e: Error) => {
           this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}`, kind: 'error', message: e.message.slice(0, 500) });
+          // Never left silently claimed: the owner is told on the issue, and the claim released.
+          try {
+            await this.block(issue.number, this.ownerOf(issue.number), `the task failed: ${e.message.slice(0, 300)}`);
+          } catch (e2) {
+            this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}: blocking it`, kind: 'error', message: (e2 as Error).message.slice(0, 500) });
+          }
         })
         .finally(() => {
           slot.release();
@@ -2159,7 +2165,10 @@ export class Coordinator {
     let split = false;
     try {
       if (setupErrors.length) {
-        for (const n of issues) result(n, 'error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+        for (const n of issues) {
+          result(n, 'error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+          await this.block(n, ownerOf(n), `landing failed: the land worktree's setup failed: ${setupErrors.join('; ')}`);
+        }
         return;
       }
       for (const q of batch) {
@@ -2177,7 +2186,10 @@ export class Coordinator {
       for (const step of this.d.cfg.tests.land.pre) {
         const r = await this.project(step, path);
         if (r.code !== 0) {
-          for (const q of applied) result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
+          for (const q of applied) {
+            result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
+            await this.block(q.issue, ownerOf(q.issue), `landing failed: the pre-land step \`${step}\` failed\n${r.tail.split('\n').slice(-5).join('\n')}`);
+          }
           return;
         }
       }
@@ -2205,7 +2217,10 @@ export class Coordinator {
       }
       const scan = await scanRange(path, `${tip}..HEAD`);
       if (scan.status !== 'clean') {
-        for (const q of applied) result(q.issue, 'rejected', null, `secret scan ${scan.status} at landing`);
+        for (const q of applied) {
+          result(q.issue, 'rejected', null, `secret scan ${scan.status} at landing`);
+          await this.block(q.issue, ownerOf(q.issue), `landing failed: the secret scan at landing found ${scan.status === 'leaks' ? 'possible secrets' : 'it could not run'}; nothing was pushed`);
+        }
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');

@@ -606,12 +606,13 @@ test('two coordinators on one repo: only one claims the issue', { skip }, async 
 test('after a restart mid-task, the task is requeued rather than left stuck', { skip }, async () => {
   const f = fixture();
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
-  const crashing = new FakeRunner(() => {
-    throw new Error('simulated crash');
-  });
-  const c1 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: crashing, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  // The process dies mid-task: its run never returns, so nothing in it gets to report or release (an error
+  // that is caught blocks the task instead; see test/repro-state-graph/p0-3a).
+  const dying = new FakeRunner(() => new Promise<never>(() => {}));
+  const c1 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: dying, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c1.tick();
-  await c1.idle();
+  for (let i = 0; i < 100 && !f.log.read(0, ['run.started']).length; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(f.log.read(0, ['issue.blocked']).length, 0, 'the dead process left it claimed, not blocked');
   // A fresh process: same log, same repo.
   const c2 = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   assert.deepEqual(await c2.recover(), [n]);
