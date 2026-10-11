@@ -80,23 +80,38 @@ export interface MergeDecision {
 
 const paths = (p: string[]) => `${p.slice(0, 3).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
 
+/** The categories that always wait for a human: review.yaml's L3, CI config, and the repo's merge.wait_categories. */
+export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] } }; merge: { wait_categories: string[] } }): string[] {
+  return [...review.levels.L3_human.when, 'ci-config', ...review.merge.wait_categories];
+}
+
+/**
+ * Why files (changed, or planned to change) need a human: high-risk categories, and design-level changes,
+ * meaning a binding design flag (`design.by`: who raised it), dependency manifests, or a new top-level
+ * module. One answer for the merge policy and for plan mode.
+ */
+export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: string[]; design?: { flag: boolean | undefined; reason?: string | undefined; by: string }; newTopLevel: string[] }): string[] {
+  const reasons: string[] = [];
+  for (const c of o.waitCategories) {
+    const hit = o.level.categories[c];
+    if (hit?.length) reasons.push(`high-risk: ${c} (${paths(hit)})`);
+  }
+  if (o.design?.flag === true) reasons.push(`design: ${o.design.by} flagged a design change${o.design.reason ? `: ${o.design.reason}` : ''}`);
+  const deps = o.level.categories.dependency;
+  if (deps?.length) reasons.push(`design: dependency manifests change (${paths(deps)})`);
+  if (o.newTopLevel.length) reasons.push(`design: new top-level module (${paths(o.newTopLevel)})`);
+  return reasons;
+}
+
 export function mergeDecision(i: MergeInput): MergeDecision {
   const reasons: string[] = [];
   if (!i.policyOn) reasons.push('auto-merge is off for this instance (policy.yaml auto_merge)');
   if (!i.repoOn) reasons.push("auto-merge is off for this repo (review.yaml merge.auto)");
   if (i.stopped) reasons.push(`auto-merge is stopped: ${i.stopped}`);
 
-  // High-risk paths or categories.
-  for (const c of i.waitCategories) {
-    const hit = i.level.categories[c];
-    if (hit?.length) reasons.push(`high-risk: ${c} (${paths(hit)})`);
-  }
-
-  // Design-level: the evaluator's flag is binding; new dependencies and new top-level modules are seen in code too.
-  if (i.verdict?.design_change === true) reasons.push(`design: the evaluator flagged a design change${i.verdict.design_reason ? `: ${i.verdict.design_reason}` : ''}`);
-  const deps = i.level.categories.dependency;
-  if (deps?.length) reasons.push(`design: dependency manifests change (${paths(deps)})`);
-  if (i.newTopLevel.length) reasons.push(`design: new top-level module (${paths(i.newTopLevel)})`);
+  // High-risk paths or categories, and design-level: the evaluator's flag is binding; new dependencies and new
+  // top-level modules are seen in code too.
+  reasons.push(...riskAndDesignReasons({ level: i.level, waitCategories: i.waitCategories, design: { flag: i.verdict?.design_change, reason: i.verdict?.design_reason, by: 'the evaluator' }, newTopLevel: i.newTopLevel }));
 
   // Big.
   if (i.lines > i.limits.max_lines) reasons.push(`big: ${i.lines} changed lines (over ${i.limits.max_lines})`);
