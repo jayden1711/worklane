@@ -107,6 +107,50 @@ test('regression: a CI fix that gave up, then a person\'s push the merge policy 
   log.close();
 });
 
+test('conflict fixes, light checks and hotspot holds: where each PR stands, how long, and when it waits for a person', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dash-prs-flow-'));
+  const log = new EventLog(join(dir, 'events.db'));
+  const open = (issue: number, number: number, head: string) => {
+    log.append('issue.seen', seen(issue, `Issue ${issue}`), 'c');
+    log.append('pr.opened', { issue, number, url: `https://example.test/pr/${number}`, head, draft: true }, 'c');
+  };
+  // 31: a conflict with main being resolved right now.
+  open(31, 131, sha('a'));
+  log.append('conflict_fix.detected', { issue: 31, number: 131, head: sha('a'), base_sha: sha('b') }, 'c');
+  log.append('conflict_fix.started', { issue: 31, number: 131, head: sha('a'), base_sha: sha('b'), strategy: 'merge', attempt: 1, lease: sha('1') }, 'c');
+  // 32: resolved and pushed, but the result touches a hotspot file: it waits for the owner.
+  open(32, 132, sha('c'));
+  log.append('conflict_fix.detected', { issue: 32, number: 132, head: sha('c'), base_sha: sha('b') }, 'c');
+  log.append('conflict_fix.started', { issue: 32, number: 132, head: sha('c'), base_sha: sha('b'), strategy: 'merge', attempt: 1, lease: sha('2') }, 'c');
+  log.append('conflict_fix.finished', { issue: 32, number: 132, base_sha: sha('b'), strategy: 'merge', outcome: 'pushed', head: sha('d'), files: ['src/totals.js'], waits_owner: true, reasons: ['the merge touched src/totals.js (money-path)'], detail: 'merged main' }, 'c');
+  // 33: ready, waiting on a light check against main's latest.
+  open(33, 133, sha('e'));
+  log.append('pr.ready', { issue: 33, number: 133, head: sha('e') }, 'c');
+  log.append('light_check.started', { issue: 33, number: 133, head: sha('e'), main_sha: sha('f'), overlap: ['src/cart.js'] }, 'c');
+  // 34: a light check finished: merge, after 4 minutes; then a conflict fix that gave up.
+  open(34, 134, sha('5'));
+  log.append('light_check.started', { issue: 34, number: 134, head: sha('5'), main_sha: sha('f'), overlap: [] }, 'c');
+  log.append('light_check.finished', { issue: 34, number: 134, head: sha('5'), main_sha: sha('f'), overlap: [], outcome: 'merge', wait_ms: 240_000, detail: 'green on main + PR' }, 'c');
+  log.append('conflict_fix.finished', { issue: 34, number: 134, base_sha: null, strategy: 'merge', outcome: 'gave_up', head: null, files: [], waits_owner: true, reasons: [], detail: 'both sides rewrote the same function' }, 'c');
+  // Two hotspot holds: one released after 3 minutes, one still held.
+  log.append('issue.seen', seen(40, 'Change the totals'), 'c');
+  log.append('hotspot.held', { issue: 40, by: 31, files: ['src/totals.js'], reason: 'issue 31 is changing src/totals.js' }, 'c');
+  log.append('hotspot.released', { issue: 40, waited_ms: 180_000, files: ['src/totals.js'], started: true }, 'c');
+  log.append('issue.seen', seen(41, 'Round the discounts'), 'c');
+  log.append('hotspot.held', { issue: 41, by: 32, files: ['src/totals.js', 'src/discounts.js'], reason: 'issue 32 is changing them' }, 'c');
+  const v = prsView(log.read());
+  const by = Object.fromEntries(v.prs.map((p) => [p.number, p]));
+  assert.deepEqual(Object.fromEntries(v.prs.map((p) => [p.number, p.phase])), { 131: 'resolving', 132: 'waiting', 133: 'light_check', 134: 'waiting' });
+  assert.deepEqual([by[131]!.conflict?.state, by[131]!.conflict?.attempt], ['running', 1]);
+  assert.equal(by[132]!.head, sha('d'), 'the resolved branch is the PR\'s head');
+  assert.deepEqual([by[132]!.conflict?.outcome, by[132]!.conflict?.waitsOwner, by[132]!.conflict?.files, by[132]!.conflict?.reasons], ['pushed', true, ['src/totals.js'], ['the merge touched src/totals.js (money-path)']]);
+  assert.deepEqual([by[133]!.lightCheck?.state, by[133]!.lightCheck?.mainSha, by[133]!.lightCheck?.overlap], ['running', sha('f'), ['src/cart.js']]);
+  assert.deepEqual([by[134]!.lightCheck?.outcome, by[134]!.lightCheck?.waitMs], ['merge', 240_000]);
+  assert.equal(by[134]!.conflict?.outcome, 'gave_up');
+  assert.deepEqual(v.holds.map((h) => [h.issue, h.title, h.by, h.files, h.until === null, h.waitedMs]), [[41, 'Round the discounts', 32, ['src/totals.js', 'src/discounts.js'], true, null], [40, 'Change the totals', 31, ['src/totals.js'], false, 180_000]], 'newest first; the released one with its wait');
+  log.close();
+});
+
 test('auto-merge state: the policy kill switch, the repo rule and the stop file, as the coordinator reads them', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dash-am-'));
   const policy = join(dir, 'policy.yaml');
