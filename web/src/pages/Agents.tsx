@@ -4,13 +4,15 @@ import { liveRunFor, type LiveList } from '../components/LiveRun';
 import { StatusMark, TaskRow } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { Header } from './Overview';
+import { runsRefusal } from './RunDetail';
 
 const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
 
 export function Agents({ state, live: given }: { state: State; live?: LiveList | null }) {
   const g = state.governor;
-  // Each running agent's live view, where the coordinator lists the run (it does once its session is up).
-  const { data: fetched } = useFetch(() => (given === undefined ? api<LiveList>('/api/live') : Promise.resolve(given)), state.lastId);
+  // Each running agent's live view, where the coordinator lists the run (it does once its session is up); not asked
+  // for by someone the state says may not read runs (no live links for them).
+  const { data: fetched } = useFetch(() => (given === undefined && !runsRefusal(state) ? api<LiveList>('/api/live') : Promise.resolve(given ?? null)), state.lastId);
   const live = given === undefined ? fetched : given;
   return (
     <div data-testid="page-agents">

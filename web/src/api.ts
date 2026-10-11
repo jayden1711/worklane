@@ -126,6 +126,19 @@ export interface HealthView {
     days: { day: string; runs: number; estimatedUsd: number; turns: number; rateLimited: number; authProblems: number; retries: Record<string, number>; retryWaitMs: number; lockWaits: number; lockWaitMs: number }[];
     quotaNote: string;
   };
+  /** The off-machine backup (src/offsite-backup.ts): null when it was never set up (no attempt recorded). */
+  offsiteBackup: {
+    destination: string;
+    lastOkAt: string | null;
+    lastOkKey: string | null;
+    lastAttemptAt: string;
+    lastError: string | null;
+    ageHours: number | null;
+    /** No verified copy, or the last one is over a day old. */
+    stale: boolean;
+  } | null;
+  /** Links to the engine's docs; null when the package names no repository. */
+  docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
   merge?: {
     since: string;
@@ -168,6 +181,8 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Whether this viewer may read agent runs (the owner or a writer); absent from an older server: yes. */
+  canReadRuns?: boolean;
   project: { name: string; repo: string; landMode: string };
   user: string;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };

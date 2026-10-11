@@ -20,6 +20,9 @@ interface Render {
   renderIssue(state: State, issue: number): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
+  renderRunsRefused(message: string): string;
+  runsRefused(message: string): string | null;
+  runsRefusal(state: unknown): string | null;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
@@ -254,6 +257,41 @@ test('the health panel: suggestions, machine figures, services, check times with
   assert.match(bare, /nothing to do/);
   assert.match(bare, /No timed check runs yet/);
   assert.doesNotMatch(bare, /data-testid="health-instances"/, 'no hub: no instances table');
+});
+
+test('the off-machine backup on the health panel: not set up with the docs link; the last verified copy; stale in red with the latest error; per instance on a hub', () => {
+  const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, suggestions: ['Nothing to suggest.'] };
+  const docs = { backups: 'https://example.org/acme/engine/blob/main/docs/backups.md' };
+  const none = r.renderHealth({ ...base, offsiteBackup: null, docs });
+  assert.match(none, /data-testid="health-offsite"[\s\S]*not set up/);
+  assert.match(none, /data-testid="health-offsite-none"[\s\S]*Nothing is copied off this machine[\s\S]*offsite-backup\.yaml/);
+  assert.match(none, /href="https:\/\/example\.org\/acme\/engine\/blob\/main\/docs\/backups\.md"[^>]*data-testid="health-offsite-docs"/);
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null }), /<code[^>]*>docs\/backups\.md<\/code>/, 'no repository: the doc is named, not linked');
+  const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
+  const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });
+  assert.match(ok, /verified 3 h ago/);
+  assert.match(ok, new RegExp(`data-testid="health-offsite-last"[^>]*>3h ago \\(${at.slice(0, 10)} ${at.slice(11, 16)} UTC\\)`));
+  assert.match(ok, /data-testid="health-offsite-destination"[^>]*>rclone remote, backups bucket</);
+  assert.match(ok, /data-testid="health-offsite-key"[^>]*>events-41\.db\.age</);
+  assert.doesNotMatch(ok, /data-testid="health-offsite-stale"/);
+  const old = new Date(Date.now() - 30 * 3_600_000).toISOString();
+  const stale = r.renderHealth({ ...base, offsiteBackup: { ...fresh, lastOkAt: old, ageHours: 30, lastAttemptAt: new Date().toISOString(), lastError: 'put exited 1: remote unreachable', stale: true }, docs });
+  assert.match(stale, />stale</);
+  assert.match(stale, /role="alert"[^>]*data-testid="health-offsite-stale"[\s\S]*text-red[^>]*>The last verified copy is 30 h old\./);
+  assert.match(stale, /data-testid="health-offsite-error"[^>]*>put exited 1: remote unreachable</);
+  const never = r.renderHealth({ ...base, offsiteBackup: { ...fresh, lastOkAt: null, lastOkKey: null, ageHours: null, lastError: 'encrypt left the snapshot readable', stale: true }, docs });
+  assert.match(never, /No copy has been verified yet\./);
+  assert.match(never, /data-testid="health-offsite-last"[^>]*>never</);
+  assert.doesNotMatch(never, /data-testid="health-offsite-key"/);
+  // On a hub, each instance's backup in the side-by-side table.
+  const hubHtml = r.renderHealth({ ...base, offsiteBackup: fresh }, [
+    { name: 'shop', view: { ...base, offsiteBackup: fresh }, error: null },
+    { name: 'site', view: { ...base, offsiteBackup: null }, error: null },
+    { name: 'code', view: { ...base, offsiteBackup: { ...fresh, lastOkAt: null, ageHours: null, stale: true } }, error: null },
+  ]);
+  const cells = [...hubHtml.matchAll(/data-testid="health-instance-offsite">([\s\S]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ''));
+  assert.deepEqual(cells, ['3 h ago', 'not set up', 'never verified']);
 });
 
 test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
@@ -562,4 +600,20 @@ test('a chat proposal lands in its confirm flow: the setting filled in for revie
     loc.search = '';
     loc.hash = '';
   }
+});
+
+test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
+  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
+  assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
+  // From the state, before asking: the demo's dashboard for someone who is neither the owner nor a writer.
+  assert.equal((asOther as unknown as { canReadRuns: boolean }).canReadRuns, false);
+  assert.equal((asOwner as unknown as { canReadRuns: boolean }).canReadRuns, true);
+  assert.equal(r.runsRefusal(asOther), msg, 'the same words the server would send');
+  assert.equal(r.runsRefusal(asOwner), null);
+  assert.equal(r.runsRefusal({ ...asOwner, canReadRuns: undefined }), null, 'an older server without the flag: asked as before');
+  const issue = asOther.tasks[0]!.issue;
+  assert.match(r.renderIssue(asOther, issue), /data-testid="runs-card"[\s\S]*?data-testid="runs-refused"/, 'the issue page says so instead of asking');
+  assert.doesNotMatch(r.renderIssue(asOwner, issue), /data-testid="runs-refused"/);
 });
