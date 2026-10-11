@@ -34,11 +34,21 @@ test('agent slots are capped machine-wide and freed when the holder dies', () =>
   assert.ok(slotStatus(dir).agents.every((x) => x.owner !== 'crashed'));
 });
 
-test('regression: a queued run survives the session that started it being killed', { skip: !posix && 'posix process groups' }, async () => {
+/** Wait until the job has finished (passed, failed or error): no fixed deadline to race, only a hang ceiling. */
+async function settled(stateDir: string, id: string, ceilingMs = 300_000) {
+  await until(() => ['passed', 'failed', 'error'].includes(readJob(stateDir, id).status), ceilingMs);
+  return readJob(stateDir, id);
+}
+
+/**
+ * A stand-in "session" in its own process group queues a job and hangs; it is killed hard while the job runs.
+ * The job must still finish. Waits are on the job's own state, never a fixed time, so a slow or busy machine
+ * only makes this slower, not red.
+ */
+async function sessionKilledWhileJobRuns() {
   const base = mkdtempSync(join(tmpdir(), 'q-'));
   const stateDir = join(base, 'state');
   const marker = join(base, 'ran');
-  // A stand-in "session": its own process group, which queues a job and then hangs.
   const session = spawn(
     process.execPath,
     [
@@ -53,10 +63,25 @@ test('regression: a queued run survives the session that started it being killed
   );
   let id = '';
   session.stdout!.on('data', (d: Buffer) => (id += d.toString().trim()));
-  assert.ok(await until(() => id.length > 0, 10_000), 'job queued');
+  assert.ok(await until(() => id.length > 0, 120_000), 'job queued');
   process.kill(-session.pid!, 'SIGKILL'); // the session ends, hard
-  assert.ok(await until(() => existsSync(marker), 20_000), 'job ran after the session died');
-  assert.ok(await until(() => readJob(stateDir, id).status === 'passed', 10_000), readJob(stateDir, id).status);
+  const job = await settled(stateDir, id);
+  assert.equal(job.status, 'passed', `job ${job.status}${job.error ? `: ${job.error}` : ''}`);
+  assert.ok(existsSync(marker), 'the job ran after the session died');
+}
+
+test('regression: a queued run survives the session that started it being killed', { skip: !posix && 'posix process groups' }, async () => {
+  await sessionKilledWhileJobRuns();
+});
+
+test('the same holds on a machine busy on every core (slower, never red)', { skip: !posix && 'posix process groups' }, async () => {
+  const { availableParallelism } = await import('node:os');
+  const hogs = Array.from({ length: availableParallelism() }, () => spawn(process.execPath, ['-e', 'for (;;) {}'], { stdio: 'ignore' }));
+  try {
+    await sessionKilledWhileJobRuns();
+  } finally {
+    for (const h of hogs) h.kill('SIGKILL');
+  }
 });
 
 test('a queued full run waits while another run is live, then starts by itself', { skip: !posix && 'posix shell probe' }, async () => {
