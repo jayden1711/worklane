@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import { api, type RunRecord, type RunSummary } from '../api';
+import { api, type RunRecord, type RunSummary, type State } from '../api';
 import { navigate } from '../App';
 import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
@@ -9,18 +9,40 @@ import { Header } from './Overview';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
 
+/** The server's refusal of agent runs to someone who is neither the owner nor a writer (see mayReadRuns). */
+export const runsRefused = (message: string) => (/^agent runs are for /.test(message) ? message : null);
+
+/** For a viewer the state says may not read runs, the refusal the server would give; null for the owner and writers. */
+export const runsRefusal = (state: Pick<State, 'canReadRuns' | 'owners' | 'user'>) =>
+  state.canReadRuns === false ? `agent runs are for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+
+/** Agent runs are the owner's and the writers': anyone else is told so, not shown an empty list. */
+export function RunsRefused({ message }: { message: string }) {
+  return (
+    <div className="p-4 text-[13px] text-ink-3" data-testid="runs-refused">
+      {message.replace(/^agent runs/, 'Agent runs')}.
+    </div>
+  );
+}
+
 /** An issue's agent runs as task rows (Beautiful UI's task rows), oldest first; each opens what it did. */
-export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
+export function RunList({ issue, lastId, refused: known = null }: { issue: number; lastId: number; refused?: string | null }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [fromServer, setRefused] = useState<string | null>(null);
+  // Refused up front (the state says so): not asked for at all, so no request is turned away.
   useEffect(() => {
+    if (known) return;
     api<RunSummary[]>(`/api/runs?issue=${issue}`)
-      .then(setRuns)
-      .catch(() => setRuns([]));
-  }, [issue, lastId]);
+      .then((r) => (setRuns(r), setRefused(null)))
+      .catch((e: Error) => (setRuns([]), setRefused(runsRefused(e.message))));
+  }, [issue, lastId, known]);
+  const refused = known ?? fromServer;
   return (
     <Card className="overflow-hidden" data-testid="runs-card">
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Agent runs</div>
-      {runs.length ? (
+      {refused ? (
+        <RunsRefused message={refused} />
+      ) : runs.length ? (
         <div>
           {runs.map((r, i) => (
             <TaskRow
@@ -57,27 +79,31 @@ export function RunList({ issue, lastId }: { issue: number; lastId: number }) {
 }
 
 /** One agent run as tool chips (Beautiful UI's tool chips): every command and write, then the files and the final message. */
-export function RunDetail({ id }: { id: string }) {
-  const [run, setRun] = useState<RunRecord | null | undefined>(undefined);
+export function RunDetail({ id, refused: known = null }: { id: string; refused?: string | null }) {
+  const [run, setRun] = useState<RunRecord | null | undefined>(known ? null : undefined);
+  const [fromServer, setRefused] = useState<string | null>(null);
   // Live while the coordinator runs it (its record is written when it ends); the stored record afterwards.
-  const [live, setLive] = useState<boolean | undefined>(undefined);
+  const [live, setLive] = useState<boolean | undefined>(known ? false : undefined);
   const loadRecord = () =>
     api<RunRecord>(`/api/runs/${encodeURIComponent(id)}`)
       .then(setRun)
-      .catch(() => setRun(null));
+      .catch((e: Error) => (setRun(null), setRefused(runsRefused(e.message))));
   useEffect(() => {
+    // Refused up front (the state says so): neither the record nor the console is asked for.
+    if (known) return;
     void loadRecord();
     api<{ live: boolean }>(`/api/runs/${encodeURIComponent(id)}/console`)
       .then((c) => setLive(c.live))
       .catch(() => setLive(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, known]);
+  const refused = known ?? fromServer;
   const showLive = live === true && !run;
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
   const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
   return (
     <div data-testid="page-run-detail">
-      <Header title={run ? `${run.role} run` : showLive ? 'Live run' : 'Run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : showLive ? 'live: what the agent does, as it does it' : ''}>
+      <Header title={run ? `${run.role} run` : showLive ? 'Live run' : 'Agent run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : showLive ? 'live: what the agent does, as it does it' : ''}>
         <button onClick={() => navigate(back)} className="flex items-center gap-1 text-[12px] text-ink-3 hover:text-ink">
           <ArrowLeft className="size-3.5" /> Back
         </button>
@@ -85,7 +111,7 @@ export function RunDetail({ id }: { id: string }) {
       <div className="mx-auto max-w-4xl space-y-4 p-6">
         {showLive && <LiveRun run={id} onEnded={() => void loadRecord()} />}
         {!showLive && (run === undefined || live === undefined) && <Loading />}
-        {!showLive && run === null && live === false && <Empty title="No such run" hint="Runs are kept for the most recent 500." />}
+        {!showLive && run === null && live === false && (refused ? <Card><RunsRefused message={refused} /></Card> : <Empty title="No such run" hint="Runs are kept for the most recent 500." />)}
         {run && (
           <>
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
