@@ -151,8 +151,9 @@ export class RunFeed {
     }
   }
 
+  /** A path inside the worktree as the repo names it: relative, with forward slashes on every OS. */
   private relative(p: string): string {
-    return p.startsWith(this.cwd + '/') || p.startsWith(this.cwd + '\\') ? p.slice(this.cwd.length + 1) : p;
+    return p.startsWith(this.cwd + '/') || p.startsWith(this.cwd + '\\') ? p.slice(this.cwd.length + 1).split('\\').join('/') : p;
   }
 }
 

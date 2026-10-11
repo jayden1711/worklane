@@ -1,13 +1,17 @@
-import type { State } from '../api';
+import { api, useFetch, type State } from '../api';
 import { navigate } from '../App';
+import { liveRunFor, type LiveList } from '../components/LiveRun';
 import { StatusMark, TaskRow } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { Header } from './Overview';
 
 const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
 
-export function Agents({ state }: { state: State }) {
+export function Agents({ state, live: given }: { state: State; live?: LiveList | null }) {
   const g = state.governor;
+  // Each running agent's live view, where the coordinator lists the run (it does once its session is up).
+  const { data: fetched } = useFetch(() => (given === undefined ? api<LiveList>('/api/live') : Promise.resolve(given)), state.lastId);
+  const live = given === undefined ? fetched : given;
   return (
     <div data-testid="page-agents">
       <Header title="Agents" sub={`${state.slots.running} of ${state.slots.cap} machine-wide slots in use`} />
@@ -74,8 +78,17 @@ export function Agents({ state }: { state: State }) {
                     </>
                   }
                   amount={<span title={`pid ${r.pid}`}>started {ago(r.startedAt)}</span>}
-                  pill={<Badge>{r.model}</Badge>}
-                  onClick={() => navigate(`/issues/${r.issue}`)}
+                  pill={
+                    liveRunFor(r, live) ? (
+                      <span className="flex items-center gap-1.5" data-testid="agent-live-link" data-run={liveRunFor(r, live) ?? undefined}>
+                        <Badge tone="info">live view</Badge>
+                        <Badge>{r.model}</Badge>
+                      </span>
+                    ) : (
+                      <Badge>{r.model}</Badge>
+                    )
+                  }
+                  onClick={() => navigate(liveRunFor(r, live) ? `/runs/${liveRunFor(r, live)}` : `/issues/${r.issue}`)}
                 />
               ))}
             </div>
