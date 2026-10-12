@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventLog } from '../src/events/log.js';
 import { AskError, asks, asksFrom, mayAnswerAsk } from '../src/console/asks.js';
-import { checkRootStep } from '../src/console/root-steps.js';
-import { SLOTS_MAX, SLOTS_MIN } from '../src/machine.js';
+import { checkRootStep, slotCeiling } from '../src/console/root-steps.js';
+import { SLOTS_MIN } from '../src/machine.js';
 
 const base = { instance: 'demo', title: 'Needs a thing', detail: 'Because.' };
 const err = (status: number) => (e: unknown) => e instanceof AskError && e.status === status;
@@ -93,7 +93,7 @@ test("a root step off the helper's allowlist is recorded as needing the helper e
   assert.equal(checkRootStep('set-updates', ['off']).allowed, true);
   // The bounds are machine.ts's, not a copy.
   assert.equal(checkRootStep('set-slots', [String(SLOTS_MIN)]).allowed, true);
-  assert.equal(checkRootStep('set-slots', [String(SLOTS_MAX)]).allowed, true);
-  assert.equal(checkRootStep('set-slots', [String(SLOTS_MAX + 1)]).allowed, false);
+  assert.equal(checkRootStep('set-slots', [String(slotCeiling())]).allowed, true);
+  assert.equal(checkRootStep('set-slots', [String(slotCeiling() + 1)]).allowed, false);
   assert.equal(checkRootStep('set-slots', [String(SLOTS_MIN - 1)]).allowed, false);
 });

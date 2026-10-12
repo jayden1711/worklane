@@ -17,14 +17,25 @@ export interface RootStepRule {
   run: (args: string[], exec?: Exec) => MachineResult;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots 1..16, set-updates on|off. Nothing else. */
+/**
+ * The slot ceiling, read when asked: machine.ts's SLOTS_MAX, a constant now and a function once the ceiling is
+ * read from the machine's config (#212). Either form works, so the bounds are never a copy.
+ */
+export function slotCeiling(): number {
+  const max = SLOTS_MAX as unknown as number | (() => number);
+  return typeof max === 'function' ? max() : max;
+}
+
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off. Nothing else. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
     what: "set the machine's agent slot cap",
-    usage: `set-slots <${SLOTS_MIN}..${SLOTS_MAX}>`,
+    get usage() {
+      return `set-slots <${SLOTS_MIN}..${slotCeiling()}>`;
+    },
     // A plain whole number (no sign, leading zero or spaces: sudoers matches the argument as written), within the shared bounds.
-    allows: (a) => a.length === 1 && /^[1-9][0-9]*$/.test(a[0]!) && Number(a[0]) >= SLOTS_MIN && Number(a[0]) <= SLOTS_MAX,
+    allows: (a) => a.length === 1 && /^[1-9][0-9]*$/.test(a[0]!) && Number(a[0]) >= SLOTS_MIN && Number(a[0]) <= slotCeiling(),
     run: (a, exec) => setSlotCap(Number(a[0]), exec),
   },
   {
