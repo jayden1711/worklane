@@ -94,13 +94,15 @@ test("the Board's Landing column: the running batch first, then the last ones; e
 });
 
 test('the digest lists the PR batches since the last one, with their status and what came of them', () => {
-  const now = new Date(Date.now() + 1000);
-  const d = waitingOnYou(seed().read(), now, { since: new Date(now.getTime() - 3600_000), updates: [] });
+  // Seeded first: `now` after every seeded event, however slow the machine.
+  const events = seed().read();
+  const now = new Date(Math.max(...events.map((e) => Date.parse(e.ts))) + 1000);
+  const d = waitingOnYou(events, now, { since: new Date(now.getTime() - 3600_000), updates: [] });
   assert.deepEqual(d.batches.map((b) => [b.id, b.status]), [['batch-1', 'red'], ['batch-3', 'testing']]);
   const md = digestMarkdown(d);
   assert.match(md, /\*\*PR batches since yesterday\*\* \(2\)\n- batch-1 red: #11, #12; passed #11; returned #12 \(unit failed\)\n- batch-3 testing: #13\n/);
   // None: no section (a digest without batching reads as before).
-  const quiet = waitingOnYou(seed().read(), new Date(now.getTime() + 7 * 86_400_000), { since: new Date(now.getTime() + 6 * 86_400_000), updates: [] });
+  const quiet = waitingOnYou(events, new Date(now.getTime() + 7 * 86_400_000), { since: new Date(now.getTime() + 6 * 86_400_000), updates: [] });
   assert.deepEqual(quiet.batches.map((b) => b.id), ['batch-3'], 'a batch still running is listed until it ends');
 });
 
