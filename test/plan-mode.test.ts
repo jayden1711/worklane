@@ -82,3 +82,13 @@ test("a held plan's decision: approve builds, revise plans again with the note, 
   assert.deepEqual(planAnswer('revise', `/${BRAND.cli} revise`), { act: 'replan', note: 'no note given; plan it again with the risks in mind' });
   assert.deepEqual(planAnswer('reject'), { act: 'stop' });
 });
+
+test('the planner is a role like the others: its brief comes from src/roles.ts, with eval cases that ship with the engine', async () => {
+  const { defaultRolePrompt } = await import('../src/roles.js');
+  const { planExtra } = await import('../src/plan-mode.js');
+  const { engineRoleCases, parseCases } = await import('../src/skilleval.js');
+  assert.deepEqual(planExtra(), [defaultRolePrompt('planner')]);
+  assert.match(defaultRolePrompt('planner'), /^Own: /m);
+  const cases = parseCases(engineRoleCases('planner') ?? '');
+  assert.ok(cases.length >= 5 && cases.every((c) => c.correct.length && c.wrong.length), `${cases.length} cases`);
+});
