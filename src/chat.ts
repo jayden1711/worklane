@@ -12,12 +12,13 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { parseContract } from './backlog/types.js';
+import { checkDraftedIssue } from './backlog/types.js';
 import { writeBundle } from './bundle.js';
 import type { Config } from './config/load.js';
 import { redact, redactString } from './events/redact.js';
 import type { StoredEvent } from './events/types.js';
 import { groupOnlyDir } from './os/index.js';
+import { acceptSummary, EMPTY_SUMMARY, readSummary, renderSummary, writeSummary } from './chat-summary.js';
 import { CHAT_SCHEMA, rolePrompt } from './roles.js';
 import { readRun, RUNS_DIR, type RunSummary } from './run-record.js';
 import type { AgentRunner } from './runner.js';
@@ -152,15 +153,9 @@ export interface ChatAnswer {
   costUsd: number;
 }
 
-/** A draft issue the harness can check: a ```done_when block parseContract accepts, commands as block scalars. */
+/** A draft issue the harness can check: the five parts, checked by the contract parser (checkDraftedIssue). */
 export function validateDraft(title: string, body: string): IssueDraft {
-  if (!title.trim()) return { ok: false, title, body, why: 'no title' };
-  const block = body.match(/```done_when\s*\n([\s\S]*?)\n```/)?.[1];
-  if (block !== undefined) {
-    const inline = block.split('\n').filter((l) => /^\s*-\s*command:\s*\S/.test(l) && !/^\s*-\s*command:\s*[|>][-+]?\s*$/.test(l));
-    if (inline.length) return { ok: false, title, body, why: `commands must be YAML block scalars ("- command: |"), not inline: ${inline[0]!.trim()}` };
-  }
-  const c = parseContract(body);
+  const c = checkDraftedIssue(title, body);
   return c.ok ? { ok: true, title: title.trim(), body, labels: ['ready'] } : { ok: false, title, body, why: c.why };
 }
 
@@ -240,9 +235,8 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
   const readOnly = !o.by || o.by.toLowerCase() !== owner.toLowerCase();
   const turn = `${(o.now ?? (() => new Date()))().getTime()}-${randomBytes(3).toString('hex')}`;
   const dir = writeBundle(o.bundleRoot, turn, o.gid, bundleFiles(o.context));
-  const history = chatHistory(o.stateDir)
-    .map((h) => `Q (@${h.by}): ${h.question}\nA: ${h.answer}`)
-    .join('\n\n');
+  // The conversation so far is the owner's running summary, never the transcript; anyone else starts empty.
+  const previous = readOnly ? { ...EMPTY_SUMMARY } : readSummary(o.stateDir);
   const role = o.cfg.agents.roles.chief_of_staff;
   const model = role?.model ?? 'sonnet';
   const r = await o.runner.run({
@@ -250,7 +244,9 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     stateDir: o.stateDir,
     prompt: [
       `Context files for instance ${o.context.instance}: ${dir} (start with README.md). The repository is the current directory.`,
-      ...(history ? ['', 'Earlier in this conversation:', history] : []),
+      '',
+      'Conversation summary so far (your memory of it, not a source; return it updated):',
+      renderSummary(previous),
       '',
       readOnly ? `Asked by @${o.by || 'unknown'}, who is not the owner: answer only; no issue drafts and no proposed actions.` : `Asked by the owner, @${owner}.`,
       '',
@@ -268,7 +264,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     timeoutMs: 20 * 60_000,
   });
   o.onCost?.({ costUsd: r.costUsd, model: r.model, turns: r.turns });
-  const s = (r.reason === 'succeeded' ? r.structured : undefined) as { answer?: string; citations?: { kind?: string; id?: string }[]; issue_draft?: { title?: string; body?: string }; actions?: Record<string, unknown>[] } | undefined;
+  const s = (r.reason === 'succeeded' ? r.structured : undefined) as { answer?: string; citations?: { kind?: string; id?: string }[]; issue_draft?: { title?: string; body?: string }; actions?: Record<string, unknown>[]; summary?: unknown } | undefined;
   const answer = s?.answer ? redactString(s.answer) : `The chat run ended without an answer (${r.reason}).`;
   const { kept, unknown } = citationsOf(s?.citations ?? [], o.context);
   const acts = readOnly ? [] : (s?.actions ?? []).map((a) => validateAction(a, o.context.decisions));
@@ -291,6 +287,15 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
       appendFileSync(join(o.stateDir, CHAT_HISTORY), `${JSON.stringify(redact({ at: (o.now ?? (() => new Date()))().toISOString(), by: o.by, question: o.question, answer: out.answer, citations: kept.map((c) => `${c.kind}:${c.id}`) }))}\n`, { mode: 0o600 });
     } catch {
       // history is best effort
+    }
+    // The summary the next turn gets: this turn's, made safe (every heading, redacted, capped); a turn that
+    // returned none leaves the previous one as it was.
+    if (s?.summary) {
+      try {
+        writeSummary(o.stateDir, acceptSummary(s.summary, previous));
+      } catch {
+        // the summary is best effort too
+      }
     }
   }
   return out;

@@ -27,7 +27,10 @@ export const EventSchemas = {
   'issue.claimed': z.strictObject({ issue, instance: z.string(), lease: sha, base: sha, owner: z.string() }),
   'issue.claim_lost': z.strictObject({ issue, instance: z.string(), holder: z.string().nullable() }),
   'issue.released': z.strictObject({ issue, instance: z.string(), why: z.string() }),
-  'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string() }),
+  /** `retry_after`: a rate-limit or budget block retries on its own after then (up to a cap); absent: it waits for a relabel. */
+  'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string(), retry_after: z.string().optional(), retry_kind: z.enum(['rate_limit', 'budget']).optional() }),
+  /** A held block retried on its own (relabelled ready), or, at the cap, left blocked (`gave_up`). */
+  'issue.retry': z.strictObject({ issue, attempt: z.number().int().positive(), kind: z.enum(['rate_limit', 'budget']), gave_up: z.boolean() }),
   /** The worker found nothing to change, and the coordinator's own checks pass on the unchanged base. */
   'issue.no_change': z.strictObject({ issue, owner: z.string(), base: sha, why: z.string(), checks: z.array(CheckRunSchema) }),
   // runs
@@ -117,6 +120,8 @@ export const EventSchemas = {
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
+  /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
+  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -125,6 +130,8 @@ export const EventSchemas = {
     test_correct: z.boolean(),
     confidence: z.enum(['high', 'medium', 'low']),
     advice: z.string(),
+    /** The worker's claims no recorded command or check backs: never evidence; `confidence` was lowered for them. */
+    unverified_claims: z.array(z.string()).optional(),
     /** Changed files the evaluator didn't read; any means the change goes to a human. */
     unread: z.array(z.string()).optional(),
     /** The evaluator's binding design-level flag; absent (an older or failed verdict) counts as doubt. */
@@ -164,7 +171,7 @@ export const EventSchemas = {
   /** A CI fix run on a PR whose required check failed at `head`; `lease` is its claim. */
   'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
-  'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted']), head: sha.nullable(), detail: z.string() }),
+  'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted', 'claim_lost']), head: sha.nullable(), detail: z.string() }),
   /** An eval of instructions the change touches, base vs head (base null: new instructions). `error`: it couldn't run. */
   'instructions.eval': z.strictObject({
     issue,
@@ -205,7 +212,7 @@ export const EventSchemas = {
     number: z.number().int().positive(),
     base_sha: sha.nullable(),
     strategy: z.literal('merge'),
-    outcome: z.enum(['pushed', 'no_push', 'gave_up', 'interrupted']),
+    outcome: z.enum(['pushed', 'no_push', 'gave_up', 'interrupted', 'claim_lost']),
     head: sha.nullable(),
     files: z.array(z.string()),
     waits_owner: z.boolean(),

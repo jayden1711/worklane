@@ -10,7 +10,7 @@ import { EventLog } from '../src/events/log.js';
 import type { Backlog } from '../src/backlog/types.js';
 import { exampleProject } from './helpers.js';
 
-const BODY = 'Totals floor instead of rounding.\n\n```done_when\n- test: test/totals.test.js\n```\n';
+const BODY = '**Outcome:** Totals round to the cent.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- test: test/totals.test.js\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n';
 
 function answer(extra: Partial<ChatAnswer> = {}): ChatAnswer {
   return {

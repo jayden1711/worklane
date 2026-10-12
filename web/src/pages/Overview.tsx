@@ -3,6 +3,7 @@ import { navigate } from '../App';
 import { HealthPanel } from '../components/HealthPanel';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
+import { IntakeHealthPanel } from './Intake';
 
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
@@ -110,6 +111,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
         </div>
 
         <HealthPanel />
+        <IntakeHealthPanel state={state} />
 
         <Card className="overflow-hidden">
           <div className="primitive-card-bar flex items-center justify-between border-b border-line">

@@ -20,6 +20,10 @@ interface Render {
   renderIssue(state: State, issue: number): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
+  renderIntake(data: unknown, view?: string): string;
+  renderIntakeHealth(health: unknown): string;
+  renderIntakePage(state: unknown): string;
+  intakeRefusal(state: unknown): string | null;
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
@@ -605,6 +609,39 @@ test('a chat proposal lands in its confirm flow: the setting filled in for revie
     loc.search = '';
     loc.hash = '';
   }
+});
+
+test('the Intake page: each report redacted with what became of it, views, a link to the Inbox when drafts wait; the health numbers; refused to anyone else without asking', () => {
+  const at = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+  const report = (o: Record<string, unknown>) => ({ id: 'r', source: 'discord', receivedAt: at(1), sender: 'a1b2c3', kind: null, reproduction: null, outcome: 'pending', issue: null, dropped: null, replies: [], excerpt: 'text', ...o });
+  const data = {
+    reports: [
+      report({ id: 'r1', kind: 'bug', reproduction: 'reproduced', outcome: 'filed', issue: 7, replies: ['received', 'filed'], excerpt: 'Checkout total is off by a cent for [AMOUNT]' }),
+      report({ id: 'r2', source: 'sms', sender: 'd4e5f6', kind: 'feature', outcome: 'awaiting_owner', excerpt: 'Please add dark mode' }),
+      report({ id: 'r3', source: 'sms', sender: 'd4e5f6', outcome: 'dropped', dropped: 'spam', excerpt: 'buy now [URL]' }),
+    ],
+    health: { perDay: [], dropped: {}, reportToMerged: { count: 0, medianMinutes: null } },
+  };
+  const html = r.renderIntake(data);
+  assert.equal((html.match(/data-testid="intake-row"/g) ?? []).length, 3);
+  assert.match(html, /data-outcome="filed"[\s\S]*?Checkout total is off by a cent for \[AMOUNT\][\s\S]*?from a1b2c3[\s\S]*?bug[\s\S]*?reproduction: reproduced[\s\S]*?>filed<[\s\S]*?data-testid="intake-issue"[^>]*>#7<[\s\S]*?data-testid="intake-replies"[^>]*>received, filed</);
+  assert.match(html, /data-outcome="awaiting_owner"[\s\S]*?waiting on the owner/);
+  assert.match(html, /data-outcome="dropped"[\s\S]*?data-testid="intake-dropped"[^>]*>spam</);
+  assert.match(html, /data-testid="intake-inbox-link"[^>]*>1 draft\(s\) wait in your Inbox/);
+  assert.equal((r.renderIntake(data, 'Needs the owner').match(/data-testid="intake-row"/g) ?? []).length, 1);
+  assert.equal((r.renderIntake(data, 'On an issue').match(/data-testid="intake-row"/g) ?? []).length, 1);
+  assert.match(r.renderIntake({ ...data, reports: [] }), /No reports yet[\s\S]*?off until the owner turns it on/);
+  // The health numbers, once intake has recorded anything; nothing at all before.
+  assert.equal(r.renderIntakeHealth(data.health), '');
+  const health = r.renderIntakeHealth({ perDay: [{ day: '2026-10-10', source: 'discord', reports: 2 }, { day: '2026-10-10', source: 'sms', reports: 5 }], dropped: { spam: 3, 'over the sender cap': 1 }, reportToMerged: { count: 2, medianMinutes: 150 } });
+  assert.equal((health.match(/data-testid="health-intake-day"/g) ?? []).length, 2);
+  assert.match(health, /data-testid="health-intake-dropped"[\s\S]*?spam: 3[\s\S]*?over the sender cap: 1/, 'drops by reason, most first');
+  assert.match(health, /data-testid="health-intake-merged"[^>]*>report to merged fix: median 2\.5 h over 2 report\(s\)/);
+  // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
+  assert.equal((asOther as unknown as { canReadIntake: boolean }).canReadIntake, false);
+  assert.match(r.renderIntakePage(asOther), /data-testid="intake-refused"[^>]*>Intake reports are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.equal(r.intakeRefusal(asOwner), null);
+  assert.equal(r.intakeRefusal({ ...asOwner, canReadIntake: undefined }), null, 'an older server without the flag: asked as before');
 });
 
 test('the throughput panel: merges, cost per merged PR by stage (zeros shown), the top costs with their tunings, and where PRs waited for the owner; refused to anyone else without asking', () => {

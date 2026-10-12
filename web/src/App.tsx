@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, ScrollText, Inbox as InboxIcon, ListChecks, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
 import { hub, hubInstance, selectInstance, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
@@ -15,6 +15,7 @@ import { IssueDetail } from './pages/IssueDetail';
 import { Landing } from './pages/Landing';
 import { Agents } from './pages/Agents';
 import { ActivityPage } from './pages/Activity';
+import { IntakePage } from './pages/Intake';
 import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
@@ -80,6 +81,7 @@ const NAV = [
   { to: '/waiting', label: 'Waiting on you', icon: Hourglass, chord: 'w', testId: 'nav-waiting' },
   { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd', testId: 'nav-decisions' },
   { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's', testId: 'nav-issues' },
+  { to: '/intake', label: 'Intake', icon: MessagesSquare, chord: 'n', testId: 'nav-intake' },
   { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l', testId: 'nav-land' },
   { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
   { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents' },
@@ -229,6 +231,7 @@ export function App() {
   else if (path === '/prs') page = <PullRequests state={state} />;
   else if (path === '/agents') page = <Agents state={state} />;
   else if (path === '/activity') page = <ActivityPage state={state} />;
+  else if (path === '/intake') page = <IntakePage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
   else if (path === '/settings') page = <SettingsPage />;

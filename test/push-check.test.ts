@@ -89,6 +89,19 @@ test('a CI workflow change is refused with the reason (no Workflows permission),
   assert.match(p[0]!, /no Workflows permission/);
 });
 
+test('a change that adds or edits a SKILL.md failing the skill lint is refused; a passing or deleted one is not', () => {
+  const r = repo();
+  const good = `## When to use\nx\n## Inputs and access\nx\n## Steps\nx\n## Validate\nx\n## Return\nx\n## Approval\nx\n`;
+  const ok = r.commit({ '.claude/skills/a/SKILL.md': good });
+  assert.deepEqual(pushProblems(r.work, r.baseSha, ok, limits()), []);
+  const bad = r.commit({ '.claude/skills/a/SKILL.md': good.replace('## Validate\nx\n', '## Validate\n\n') });
+  const p = pushProblems(r.work, ok, bad, limits());
+  assert.equal(p.length, 1);
+  assert.match(p[0]!, /\.claude\/skills\/a\/SKILL\.md \(the "Validate" section is empty\)/);
+  const gone = r.commit({ '.claude/skills/a/SKILL.md': null });
+  assert.deepEqual(pushProblems(r.work, bad, gone, limits()), []);
+});
+
 test('a change over max_changed_lines is refused with its size; at the limit it passes', () => {
   const r = repo();
   const head = r.commit({ 'src/a.js': 'a\nb\nc\nd\n' });
