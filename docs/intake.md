@@ -121,6 +121,29 @@ the same audit entry with `via: discord`. Who may answer from a thread is one fu
 Every post is recorded before it is sent (`discord.posting`) and after (`discord.posted`); one cut off by a
 restart is marked unknown and never resent. Posts are at most 500 characters and ping nobody.
 
+### 2.1.2 Ideas in conversation
+
+With `discord.conversation: true` (off by default), an addressed message in `discord.channels` from a mapped
+admin or writer opens a conversation instead of being triaged and filed at once (a trusted sender's included):
+
+1. The bot opens a thread on the message and runs the intake role (read-only, the same five-part draft and its
+   eval cases) on the conversation so far, with `decisions.md` (the decisions already made) in its bundle and,
+   when research repo access is on, the code. It asks only what none of them settles, all in one message per
+   turn, or it drafts.
+2. It shows the draft in the thread (each message at most 500 characters) and asks for an explicit yes. Until
+   then the draft is only in the coordinator's private store (`intake/drafts`, 0600).
+3. **Filing.** "yes" (or "yes, file it") files it `ready`, once, from the person who posted it (an admin or a
+   writer) or from any admin: `mayFileReady` in `src/intake/people.ts`. A vague reply ("ok", "sounds good", a
+   thumbs-up) files nothing and is asked back. Another writer's yes or a viewer's is recorded as a comment. An
+   unmapped person's message is ignored. "no" drops the draft; anything else from the poster or an admin is a
+   change, and the bot drafts again.
+4. **Progress.** Once filed, the same thread gets the issue's progress from the events, once each: planned
+   (`plan.posted`), PR opened (`pr.opened`), merged (`merge.done`, a landed `land.result` or a merged
+   `pr.closed`), and live (a `deploy.verified` that includes the merge).
+
+A viewer or an unmapped person can't open a conversation; nothing of theirs is stored. Each turn is one triage
+run within intake's caps (`drafts_per_day`, `max_usd_per_day`) and the daily budget.
+
 ### 2.2 In-product bug reports
 
 - A read-only pull from the project's bug-report store through the existing production read path

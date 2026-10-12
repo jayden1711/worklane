@@ -50,3 +50,12 @@ export function mayAnswerFromChat(kind: string, role: Role | null): boolean {
 export function mayAnswerAskFromChat(ask: Pick<Ask, 'kind'> & { writersMayAnswer?: boolean }, role: Role | null): boolean {
   return (ask.kind === 'question' || ask.kind === 'approve_link') && mayAnswerAsk(ask, role);
 }
+
+/** Who may add an idea (open a conversation): an admin or a writer. A viewer's or an unmapped person's never opens one. */
+export const mayAddIdea = (role: Role | null): boolean => role === 'owner' || role === 'writer';
+
+/**
+ * THE rule for filing an idea `ready` by a yes: the person who posted it (an admin or a writer), or any admin. A
+ * viewer's yes, another writer's, or an unmapped person's files nothing.
+ */
+export const mayFileReady = (role: Role | null, isPoster: boolean): boolean => role === 'owner' || (isPoster && role === 'writer');

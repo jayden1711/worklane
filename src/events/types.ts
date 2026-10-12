@@ -154,6 +154,13 @@ export const EventSchemas = {
    * answered; comment (they may not answer it: kept, redacted, as a comment); ambiguous (no single option: asked
    * back); already (decided before: refused, naming who); refused (never answered from chat).
    */
+  /**
+   * An idea's conversation (src/coordinator/conversation.ts), by its opening message's report id: opened (its
+   * thread), said (a person's message, `msg`: its report id; the text stays in the raw store), asked (the bot's
+   * questions, redacted, in `detail`), drafted (the draft waits in the private store; its title in `detail`),
+   * filed (`issue`, `by`), dropped, failed (a run that ended without a usable result, why in `detail`).
+   */
+  'discord.idea': z.strictObject({ id: z.string(), stage: z.enum(['opened', 'said', 'asked', 'drafted', 'filed', 'dropped', 'failed']), by: z.string().nullable(), msg: z.string().nullable(), issue: issue.nullable(), detail: z.string().nullable() }),
   'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),

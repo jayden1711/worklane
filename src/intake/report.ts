@@ -96,6 +96,12 @@ export const IntakeConfig = z.strictObject({
        * Absent: nothing is posted.
        */
       asks_channel: snowflake('channel').optional(),
+      /**
+       * Ideas in conversation: an addressed message in `channels` from a mapped admin or writer opens a thread where
+       * the bot asks what it must, drafts the five-part issue, shows it, and files it `ready` only on an explicit
+       * yes (src/coordinator/conversation.ts), instead of being triaged and filed at once. Off: intake as before.
+       */
+      conversation: z.boolean().default(false),
       /** The dashboard's address, for the links a post carries (a secret ask, a high-risk merge): https only. */
       dashboard_url: z.string().regex(/^https:\/\/[^\s/]+(?:\/[^\s]*)?$/, 'an https URL').optional(),
     })
