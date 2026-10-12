@@ -173,6 +173,24 @@ export const AgentsConfig = z
      * the evaluator role's model. A failed or uncertain verdict from the cheap model is judged once more by the
      * evaluator role's model before anything is rejected.
      */
+    /**
+     * Which model each kind of run uses (src/model-routing.ts); each key overrides its default. Builds: `build`
+     * (L1/L2) and `build_high_risk` (issues with a high_risk_labels label, or after escalate_after failed attempts).
+     */
+    model_routing: z
+      .strictObject({
+        build: model.optional(),
+        build_high_risk: model.optional(),
+        high_risk_labels: z.array(z.string().min(1)).optional(),
+        escalate_after: z.number().int().min(0).max(10).optional(),
+        planner: model.optional(),
+        research: model.optional(),
+        intake_triage: model.optional(),
+        intake_replier: model.optional(),
+        stage_judge: model.optional(),
+        eval_answer: model.optional(),
+      })
+      .optional(),
     eval_routing: z
       .strictObject({
         cheap_model: model.default('sonnet'),

@@ -18,6 +18,7 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../wo
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
 import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { routeBuild } from './model-routing.js';
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -440,6 +441,7 @@ export abstract class FixRuns extends Landing {
   private async conflictAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, brief: string, attempt: number): Promise<{ summary: string } | { ended: string }> {
     const n = issue.number;
     const workers = this.d.cfg.agents.roles.workers!;
+    const fixModel = routeBuild(this.d.cfg, issue.labels).model;
     const extra = [
       `Conflict fix ${attempt} for this issue's pull request (${pr.url}, branch ${pr.head}).`,
       brief,
@@ -454,7 +456,7 @@ export abstract class FixRuns extends Landing {
       prompt: issueBrief(issue, doneWhen, extra),
       appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
       cwd: path,
-      model: workers.model,
+      model: fixModel,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 100,
       maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
@@ -462,7 +464,7 @@ export abstract class FixRuns extends Landing {
       taskFile,
       stallMs: 20 * 60_000,
       timeoutMs: this.commandTimeoutMs,
-      onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: workers.model, worktree: path, pid: p, pgid: p, attempt }),
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: fixModel, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'conflict-fix', r);
     this.emit('run.finished', { issue: n, role: 'conflict-fix', reason: r.reason, detail: r.detail.slice(0, 1000) });

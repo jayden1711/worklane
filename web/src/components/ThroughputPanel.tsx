@@ -7,6 +7,8 @@ import { RecordsTable } from './patterns';
 import { Card, EST_NOTE, estUsd } from './ui';
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
+const MODEL_LABEL: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', unknown: 'Model not recorded' };
+
 const STAGE_LABEL: Record<string, string> = {
   worker: 'Worker',
   evaluator: 'Evaluator',
@@ -119,6 +121,26 @@ export function ThroughputView({ t }: { t: Throughput }) {
           </tr>
         ))}
       </RecordsTable>
+
+      {(t.cost.byModel ?? []).length > 0 && (
+        <RecordsTable testId="throughput-models" head={['Model', 'Per merged PR', 'This week', 'Share']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-28 [&_th:nth-child(4)]:w-40">
+          {(t.cost.byModel ?? []).map((m) => (
+            <tr key={m.model} className="border-b border-line last:border-0" data-testid="throughput-model" data-model={m.model}>
+              <td className="primitive-table-cell text-[13px] text-ink">{MODEL_LABEL[m.model] ?? m.model}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{m.perMergedPrUsd !== null ? estUsd(m.perMergedPrUsd) : '–'}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{estUsd(m.usd)}</td>
+              <td className="primitive-table-cell">
+                <div className="flex items-center gap-2">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-label={`${MODEL_LABEL[m.model] ?? m.model} share`} aria-valuenow={Math.round(m.share * 100)} aria-valuemin={0} aria-valuemax={100}>
+                    <div className="h-full rounded-full bg-blue" style={{ width: `${m.share * 100}%` }} />
+                  </div>
+                  <span className="w-9 text-right text-[12px] tabular-nums text-ink-3">{pct(m.share)}</span>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </RecordsTable>
+      )}
 
       <div className="space-y-1.5">
         <div className="text-[13px] font-medium text-ink">Where PRs waited for you</div>

@@ -133,6 +133,7 @@ test('replier in the coordinator: a reply that passes is sent; its run sees only
   assert.deepEqual(t.replies, ['Thanks Ada-free friend, logged as #1!']);
   assert.deepEqual(checked(t.log).map((c) => [c.stage, c.used, c.why]), [['filed', 'casual', null]]);
   const req = t.runner.calls.find((r) => r.role === REPLIER_ROLE)!;
+  assert.equal(req.model, 'haiku', 'the replier is routed to haiku');
   assert.deepEqual(req.allowedTools, []);
   assert.doesNotMatch(req.prompt, /Lovelace|ada@example\.com/, 'only redacted text');
   assert.deepEqual(JSON.parse(/```json\n([\s\S]*?)\n```/.exec(req.prompt)![1]!), { stage: 'filed', trusted: true, issue: 1 });

@@ -15,6 +15,7 @@ import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest
 import { objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from '../plan-mode.js';
 import { Recovery } from './recovery.js';
 import { laneOf, DEFAULT_REVIEW } from './shared.js';
+import { routeRun } from './model-routing.js';
 
 export abstract class Decisions extends Recovery {
   // ---------------------------------------------------------------- decisions
@@ -35,6 +36,7 @@ export abstract class Decisions extends Recovery {
     }
     const note = decided?.answer === 'revise' ? decided.note : null;
     const workers = this.d.cfg.agents.roles.workers!;
+    const planModel = routeRun(this.d.cfg, 'planner');
     const r = await this.d.runner.run({
       env: this.projectEnv(),
       role: 'planner',
@@ -42,7 +44,7 @@ export abstract class Decisions extends Recovery {
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, [...planExtra(), ...(note ? ['', `The owner asked for a revised plan: ${note}`] : [])]),
       cwd: path,
-      model: workers.model,
+      model: planModel,
       allowedTools: PLAN_TOOLS,
       disallowedTools: PLAN_DISALLOWED,
       maxTurns: 60,
@@ -50,7 +52,7 @@ export abstract class Decisions extends Recovery {
       jsonSchema: PLAN_SCHEMA,
       stallMs: 20 * 60_000,
       timeoutMs: this.commandTimeoutMs,
-      onStart: (p) => this.emit('run.started', { issue: n, role: 'planner', model: workers.model, worktree: path, pid: p, pgid: p, attempt: 1 }),
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'planner', model: planModel, worktree: path, pid: p, pgid: p, attempt: 1 }),
     });
     this.cost(n, 'planner', r);
     this.emit('run.finished', { issue: n, role: 'planner', reason: r.reason, detail: r.detail.slice(0, 1000) });

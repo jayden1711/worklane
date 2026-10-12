@@ -100,6 +100,7 @@ test('intake: a trusted sender\'s bug is filed ready and they are told; the run 
   assert.deepEqual(t.discord.replies, [{ thread: 'thread-1', text: statusReply('filed', true) }]);
   const [req] = t.runner.calls;
   assert.equal(req!.role, 'intake');
+  assert.equal(req!.model, 'sonnet', 'intake triage keeps its model (on haiku its held-out score dropped)');
   assert.deepEqual(req!.allowedTools, ['Read', 'Glob', 'Grep']);
   for (const tool of ['Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch', 'Task', 'mcp__*']) assert.ok(req!.disallowedTools!.includes(tool), tool);
   assert.equal(req!.lane, 'research', 'no repo access unless the owner turned it on');
