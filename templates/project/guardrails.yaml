@@ -31,8 +31,9 @@ fingerprints:
     command: "echo 'set guardrails.yaml fingerprints.prod-db.command' >&2; exit 1"
     key: DATABASE_URL
 
-# Agents may not write these (agent sessions only). The config folder and
-# everything under .claude/ are always protected, listed here or not.
+# Agents may not write these (agent sessions only). Always protected, listed
+# here or not: everything under .claude/, and this folder except roles/ and
+# skills/ (agents may change those; such a change always waits for a human).
 protected_paths:
   - .worklane/**
   - .claude/settings.json

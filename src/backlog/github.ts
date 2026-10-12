@@ -2,8 +2,9 @@
 // agents never see it. Errors are classified (a 403 isn't "missing
 // permission" unless it is).
 import { execFileSync } from 'node:child_process';
+import { redact } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
-import type { Backlog, CommitCheck, Issue, PullRequest } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PullRequest } from './types.js';
 
 export class GitHubError extends Error {
   constructor(
@@ -30,8 +31,12 @@ export class GitHubBacklog implements Backlog {
     private api = 'https://api.github.com',
   ) {}
 
-  /** `raw`: the response body as text (a log), not JSON. */
+  /**
+   * `raw`: the response body as text (a log), not JSON. Everything sent is redacted first (events/redact.ts): a
+   * comment, issue or pull request can carry command output, and on a public repo it's public.
+   */
   private async req<T>(method: string, path: string, body?: unknown, raw = false): Promise<T> {
+    body = body === undefined ? body : redact(body);
     const res = await this.fetchImpl(`${this.api}${path}`, {
       method,
       headers: {
@@ -207,6 +212,16 @@ export class GitHubBacklog implements Backlog {
     if (!p.draft) return;
     const r = await this.req<{ errors?: { message: string }[] }>('POST', '/graphql', { query: 'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }', variables: { id: p.node_id } });
     if (r.errors?.length) throw new GitHubError(200, 'graphql', r.errors.map((x) => x.message).join('; '));
+  }
+
+  async reviews(n: number): Promise<PrReview[]> {
+    const list = await this.req<{ id: number; user: { login: string } | null; state: string; body: string | null; submitted_at?: string }[]>('GET', `/repos/${this.repo}/pulls/${n}/reviews?per_page=100`);
+    return list.map((r) => ({ id: r.id, author: r.user?.login ?? '', state: r.state, body: r.body ?? '', at: r.submitted_at ?? '' }));
+  }
+
+  async closedBy(n: number): Promise<string | null> {
+    const i = await this.req<{ state: string; closed_by?: { login: string } | null }>('GET', `/repos/${this.repo}/issues/${n}`);
+    return i.state === 'closed' ? (i.closed_by?.login ?? null) : null;
   }
 
   async ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]> {

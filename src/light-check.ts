@@ -83,3 +83,18 @@ export function lightOutcome(r: { merged: boolean; fastPassed: boolean | null })
   if (!r.merged) return 'conflict';
   return r.fastPassed ? 'merge' : 'hold';
 }
+
+/** How many light checks one PR may start within LIGHT_CHECK_WINDOW_MS: the first, and one catch-up. */
+export const LIGHT_CHECK_BURST = 2;
+export const LIGHT_CHECK_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Debounce for light checks: a burst of moves of main runs at most LIGHT_CHECK_BURST checks for a PR within the
+ * window; any further one waits until the window has room, then checks the newest main. `startedAt`: when this
+ * PR's light checks started (ms). Returns how long to wait before starting another (0: start now).
+ */
+export function lightCheckWait(startedAt: number[], now: number): number {
+  const recent = startedAt.filter((t) => now - t < LIGHT_CHECK_WINDOW_MS).sort((a, b) => a - b);
+  if (recent.length < LIGHT_CHECK_BURST) return 0;
+  return recent[recent.length - LIGHT_CHECK_BURST]! + LIGHT_CHECK_WINDOW_MS - now;
+}
