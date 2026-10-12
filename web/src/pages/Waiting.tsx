@@ -33,8 +33,8 @@ export function waited(since: string, now = Date.now()): string {
 }
 
 /** For a viewer the state says may not read it, the refusal the server would give; null for the owner and writers. */
-export const waitingRefusal = (state: Pick<State, 'canReadDigest' | 'owners' | 'user'>) =>
-  state.canReadDigest === false ? `what waits on the owner is for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+export const waitingRefusal = (state: Pick<State, 'canReadDigest' | 'owners' | 'user' | 'role'>) =>
+  state.canReadDigest === false ? `what waits on the owner is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 function Subject({ i }: { i: WaitItem }) {
   const issue = i.issue !== null && (

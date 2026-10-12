@@ -29,8 +29,8 @@ const VIEWS: Record<string, (r: IntakeReport) => boolean> = {
 };
 
 /** For a viewer the state says may not read intake, the refusal the server would give; null for the owner and writers. */
-export const intakeRefusal = (state: Pick<State, 'canReadIntake' | 'owners' | 'user'>) =>
-  state.canReadIntake === false ? `intake reports are for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+export const intakeRefusal = (state: Pick<State, 'canReadIntake' | 'owners' | 'user' | 'role'>) =>
+  state.canReadIntake === false ? `intake reports are for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 /** The page from its data (also what the render checks render). */
 export function IntakeReports({ data, view = 'All', onView = () => {} }: { data: IntakeView; view?: string; onView?: (v: string) => void }) {

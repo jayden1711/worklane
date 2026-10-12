@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { instanceSettingsView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRole, exampleRoles } from './helpers.js';
 
 const POLICY = 'version: 1\nbudget: { daily_usd: 30 }\nagents: { max_workers: 3 }\nland_mode: pr\nsettings:\n  daily_budget_usd: 12\n';
 
@@ -23,9 +23,9 @@ function setup(user = 'example-owner', limits = { workers: { min: 1, max: 4 }, d
 }
 
 async function serve(s: ReturnType<typeof setup>, policyFile: string | null = s.policyFile) {
-  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: s.user, policyFile, limitsPath: s.limitsPath, slotsDir: join(s.dir, 'slots') });
+  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, policyFile, limitsPath: s.limitsPath, slotsDir: join(s.dir, 'slots') });
   const base = d.url.split('/?')[0]!;
-  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' };
+  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(s.user) };
   const get = async () => (await (await fetch(`${base}/api/instance-settings`, { headers: h })).json()) as Record<string, unknown> & { settings: { key: string; value: unknown; source: string }[]; canChange: boolean };
   const post = (key: string, value: unknown) => fetch(`${base}/api/instance-settings`, { method: 'POST', headers: h, body: JSON.stringify({ key, value }) });
   return { d, base, h, get, post };
@@ -33,7 +33,7 @@ async function serve(s: ReturnType<typeof setup>, policyFile: string | null = s.
 
 test('the instance settings: each value in effect and where it comes from, the bounds, and who may change them', async () => {
   const s = setup();
-  const v = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, limitsPath: s.limitsPath });
+  const v = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, role: exampleRole(s.user), limitsPath: s.limitsPath });
   assert.equal(v.available, true);
   assert.equal(v.canChange, true, 'the owner');
   assert.deepEqual(v.ceilings, { max_workers: 3, daily_usd: 30 });
@@ -64,10 +64,10 @@ test('the instance settings: each value in effect and where it comes from, the b
   assert.equal(by['research.repo_access']!.value, false, 'research has no repo access unless the owner turns it on');
   assert.deepEqual(by.daily_budget_usd, { key: 'daily_budget_usd', value: 12, source: 'instance' });
   assert.equal(by.workers!.source, 'repo', 'not set on the instance: the repo default');
-  assert.equal(instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: 'example-collaborator', limitsPath: s.limitsPath }).canChange, false, 'a writer is not the owner');
-  assert.equal(instanceSettingsView({ policyFile: null, cfg: s.cfg, user: s.user }).available, false, 'a checkout has no instance settings');
+  assert.equal(instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: 'example-collaborator', role: 'writer', limitsPath: s.limitsPath }).canChange, false, 'a writer is not the owner');
+  assert.equal(instanceSettingsView({ policyFile: null, cfg: s.cfg, user: s.user, role: exampleRole(s.user) }).available, false, 'a checkout has no instance settings');
   writeFileSync(s.limitsPath, '{not json');
-  const broken = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, limitsPath: s.limitsPath });
+  const broken = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, role: exampleRole(s.user), limitsPath: s.limitsPath });
   assert.equal(broken.canChange, false, 'unreadable machine limits: no changes');
   assert.match(String('limitsError' in broken ? broken.limitsError : ''), /unreadable/);
 });
@@ -76,7 +76,7 @@ test('where a value comes from: the instance\'s policy, else the repo\'s config 
   const s = setup();
   writeFileSync(s.policyFile, `${POLICY}  research: { max_usd_per_day: 3 }\n`);
   const sources = () => {
-    const v = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, limitsPath: s.limitsPath });
+    const v = instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, role: exampleRole(s.user), limitsPath: s.limitsPath });
     assert.ok(v.available);
     return Object.fromEntries((v.settings ?? []).map((x) => [x.key, x.source]));
   };

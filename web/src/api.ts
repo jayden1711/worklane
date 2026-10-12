@@ -192,7 +192,16 @@ export interface State {
   /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
   canReadDigest?: boolean;
   project: { name: string; repo: string; landMode: string };
+  /** Who this page is for: the signed-in person's login, or the owner's on the break-glass. */
   user: string;
+  /** Their role on this instance, read by its server from their permission on the repo; absent from an older server. */
+  role?: Role;
+  /** How they came in: signed in with GitHub, or the owner's break-glass on the machine. */
+  via?: 'session' | 'break-glass';
+  /** Whether they may write at all (viewers are read-only). */
+  canWrite?: boolean;
+  /** Whether they may read the audit log (owners only). */
+  canReadAudit?: boolean;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
   budget: number;
   slots: { cap: number; running: number; agents: { slot: string; owner: string; pid: number; acquiredAt: string }[]; fullRun: { owner: string; acquiredAt: string } | null };
@@ -300,6 +309,56 @@ function readToken(): string {
 
 export const token = readToken();
 
+/** Someone's role on an instance (src/dashboard-auth.ts): from their permission on its repo. */
+export type Role = 'owner' | 'writer' | 'viewer';
+
+/** Who is signed in to the hub: their login and this session's CSRF token; or the owner's break-glass (the token). */
+export interface Me {
+  login: string | null;
+  csrf: string | null;
+  breakGlass: boolean;
+}
+/**
+ * Who is signed in, asked only on a hub page: null when nobody is (the page then shows the sign-in), or on an
+ * instance's own dashboard (no sign-in there: its token is the owner's break-glass).
+ */
+export function probeMe(servedByHub: boolean, get: typeof fetch = fetch, auth = token): Promise<Me | null> {
+  if (!servedByHub) return Promise.resolve(null);
+  return get('/api/me', { headers: auth ? { authorization: `Bearer ${auth}` } : {} })
+    .then((r) => (r.ok ? (r.json() as Promise<Me>) : null))
+    .then((m) => (m && (m.login || m.breakGlass) ? m : null))
+    .catch(() => null);
+}
+const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
+export const me: Promise<Me | null> = probeMe(servedByHub);
+/** Whether this page needs a sign-in: a hub page, with no session and no break-glass token. */
+export const needsSignIn: Promise<boolean> = me.then((m) => servedByHub && !m);
+
+let csrf = '';
+void me.then((m) => {
+  csrf = m?.csrf ?? '';
+});
+
+/** What every API call carries: the break-glass token when there is one, and this session's CSRF token (every write needs it). */
+async function authHeaders(): Promise<Record<string, string>> {
+  await me;
+  return { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(csrf ? { 'x-csrf-token': csrf } : {}), 'content-type': 'application/json' };
+}
+
+/** A stream's URL: the break-glass token on it (EventSource sends no headers); a session's cookie goes by itself. */
+export const streamUrl = (path: string) => (token ? `${path}?t=${encodeURIComponent(token)}` : path);
+
+/** Sign out: the hub deletes the session (server-side), then the page shows the sign-in again. */
+export async function signOut(): Promise<void> {
+  await fetch('/auth/logout', { method: 'POST', headers: await authHeaders(), body: '{}' }).catch(() => undefined);
+  try {
+    sessionStorage.removeItem('dash-instance');
+  } catch {
+    // nothing kept
+  }
+  window.location.assign('/');
+}
+
 /** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */
 export interface HubInfo {
   instances: { name: string; up: boolean; error: string | null }[];
@@ -310,11 +369,11 @@ export interface HubInfo {
  */
 export function probeHub(servedByHub: boolean, get: typeof fetch = fetch, auth = token): Promise<HubInfo | null> {
   if (!servedByHub) return Promise.resolve(null);
-  return get('/api/hub', { headers: { authorization: `Bearer ${auth}` } })
+  return get('/api/hub', { headers: auth ? { authorization: `Bearer ${auth}` } : {} })
     .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
     .catch(() => null);
 }
-export const hub: Promise<HubInfo | null> = inBrowser ? probeHub(!!document.querySelector('meta[name="dashboard-hub"]')) : Promise.resolve(null);
+export const hub: Promise<HubInfo | null> = inBrowser ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null);
 
 /** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
 export const hubInstance: Promise<string | null> = hub.then((h) => {
@@ -346,14 +405,14 @@ export async function apiPath(path: string): Promise<string> {
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
 export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
@@ -382,7 +441,7 @@ export function useLiveState() {
     let closed = false;
     void apiPath('/api/stream').then((p) => {
       if (closed) return;
-      es = new EventSource(`${p}?t=${encodeURIComponent(token)}`);
+      es = new EventSource(streamUrl(p));
       es.addEventListener('hello', () => setLive(true));
       es.addEventListener('change', () => {
         window.clearTimeout(timer.current);

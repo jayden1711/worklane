@@ -345,7 +345,8 @@ export abstract class Intake extends ResearchOnDemand {
     for (const e of this.d.log.read(0, ['decision.asked'])) {
       const q = e.payload as EventPayload<'decision.asked'>;
       if (q.kind !== 'intake' || done.has(q.id)) continue;
-      const a = answers.find((x) => x.id === q.id && (x.by === this.d.instance || mayAnswer(q.owner, x.by, this.d.cfg.project.owners)));
+      // A role on the answer: the instance's own dashboard read the person as an owner or writer of its repo.
+      const a = answers.find((x) => x.id === q.id && (x.by === this.d.instance || x.role !== undefined || mayAnswer(q.owner, x.by, this.d.cfg.project.owners)));
       const rid = q.receipts.find((x) => x.startsWith('intake:'))?.slice('intake:'.length);
       if (!a || !rid || !/^[0-9a-f]{20}$/.test(rid)) continue;
       const file = join(this.d.stateDir, 'intake', 'drafts', `${rid}.json`);

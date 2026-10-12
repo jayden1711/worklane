@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
-import { hub, hubInstance, selectInstance, useLiveState, type HubInfo, type State } from './api';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote } from 'lucide-react';
+import { hub, hubInstance, needsSignIn, selectInstance, signOut, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { ago, Kbd, cx } from './components/ui';
@@ -172,7 +172,61 @@ function Item({ children, onSelect, hint, value }: { children: React.ReactNode; 
   );
 }
 
+/** The hub's sign-in page: one way in, with GitHub; what you may do then is your role on each instance's repo. */
+export function SignInPage({ brand }: { brand?: string }) {
+  return (
+    <div className="flex h-full items-center justify-center bg-canvas p-6" data-testid="sign-in">
+      <div className="w-[min(380px,100%)] rounded-card bg-surface p-6 shadow-card">
+        <h1 className="text-[17px] font-semibold text-ink">Sign in{brand ? ` to ${brand}` : ''}</h1>
+        <p className="mt-2 text-[13px] leading-5 text-ink-2">
+          Sign in with your GitHub account. You see the instances whose repo you can read; what you may do on each follows your permission there (admin: owner; write: writer; read: viewer).
+        </p>
+        <a href="/auth/login" data-testid="sign-in-github" className="mt-5 flex h-9 items-center justify-center rounded-control bg-ink text-[13.5px] font-medium text-surface hover:opacity-90">
+          Sign in with GitHub
+        </a>
+      </div>
+    </div>
+  );
+}
+
+const ROLE_LABEL: Record<string, string> = { owner: 'owner', writer: 'writer', viewer: 'viewer' };
+
+/** Who this page is for and their role here; a signed-in person can sign out (the owner's break-glass has no session). */
+export function WhoAmI({ state, onSignOut }: { state: Pick<State, 'user' | 'role' | 'via'>; onSignOut?: () => void }) {
+  const glass = state.via === 'break-glass';
+  return (
+    <div className="mx-2 flex items-center gap-2 px-2 pt-2 text-[11.5px] text-ink-3" data-testid="who-am-i">
+      <span className="min-w-0 truncate" title={glass ? "the owner's break-glass on this machine" : state.role === 'viewer' ? 'signed in with GitHub; read-only here' : 'signed in with GitHub'}>
+        <span className="font-medium text-ink-2" data-testid="who-login">@{state.user}</span>
+        {state.role && (
+          <span data-testid="who-role">
+            {' · '}
+            {ROLE_LABEL[state.role] ?? state.role}
+            {glass ? ' (break-glass)' : ''}
+          </span>
+        )}
+      </span>
+      {!glass && onSignOut && (
+        <button data-testid="sign-out" onClick={onSignOut} className="primitive-icon-button ml-auto size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" title="Sign out" aria-label="Sign out">
+          <LogOut className="size-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function App() {
+  // Known before anything asks the server for state, so a signed-out page makes no call that would be refused.
+  const [signIn, setSignIn] = useState<boolean | null>(null);
+  useEffect(() => {
+    void needsSignIn.then(setSignIn);
+  }, []);
+  if (signIn === null) return <Loading />;
+  if (signIn) return <SignInPage />;
+  return <Dashboard />;
+}
+
+function Dashboard() {
   const path = useRoute();
   const { state, error, live, pulse } = useLiveState();
   const [theme, toggleTheme] = useTheme();
@@ -267,7 +321,12 @@ export function App() {
             />
           ))}
         </nav>
-        <div className="mx-2 mt-auto mb-2 flex items-center gap-2 border-t border-line px-2 pt-3 text-[11.5px] text-ink-3">
+        {state && (
+          <div className="mt-auto border-t border-line">
+            <WhoAmI state={state} onSignOut={() => void signOut()} />
+          </div>
+        )}
+        <div className={cx('mx-2 mb-2 flex items-center gap-2 px-2 pt-2 text-[11.5px] text-ink-3', !state && 'mt-auto border-t border-line pt-3')}>
           <span data-testid="live-indicator" className={cx('inline-block size-2 rounded-full', live ? 'bg-green' : 'bg-red')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
           {live ? 'Live' : 'Reconnecting'}
           <span className="ml-auto flex items-center gap-1 tabular-nums">

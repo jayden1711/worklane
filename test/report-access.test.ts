@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { mayReadReports, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 async function serve(user: string) {
   const dir = mkdtempSync(join(tmpdir(), 'dash-report-'));
@@ -15,9 +15,9 @@ async function serve(user: string) {
   log.append('land.result', { issue: 2, outcome: 'landed', landed: 'a'.repeat(40), detail: '' }, 'coordinator');
   log.close();
   const { dir: root } = exampleProject();
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user, slotsDir: join(dir, 'slots') });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots') });
   const base = d.url.split('/?')[0]!;
-  const get = (path: string, auth = true) => fetch(`${base}${path}`, auth ? { headers: { authorization: `Bearer ${d.token}` } } : {});
+  const get = (path: string, auth = true) => fetch(`${base}${path}`, auth ? { headers: { authorization: `Bearer ${d.token}`, ...asPerson(user) } } : {});
   return { d, get };
 }
 
@@ -40,11 +40,11 @@ test('the report preview is the owner\'s and the writers\', with the throughput 
   try {
     const r = await s.get('/api/report');
     assert.equal(r.status, 403);
-    assert.match(((await r.json()) as { error: string }).error, /^the report preview is for the owner \(@example-owner\) and the project's writers; @someone-else isn't one/);
+    assert.match(((await r.json()) as { error: string }).error, /^the report preview is for the instance's owners and writers \(admin or write on its repo\); @someone-else is a viewer/);
     assert.equal(((await (await s.get('/api/state')).json()) as { canReadReports: boolean }).canReadReports, false);
   } finally {
     await s.d.close();
   }
-  assert.equal(mayReadReports('Example-Owner', { default: 'example-owner', writers: [] }), true);
-  assert.equal(mayReadReports('', { default: 'example-owner', writers: [] }), false);
+  assert.equal(mayReadReports('owner'), true);
+  assert.equal(mayReadReports(null), false);
 });

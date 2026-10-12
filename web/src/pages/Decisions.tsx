@@ -85,7 +85,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
             Answered {d.answer.answer} by @{d.answer.by} {ago(d.answer.at)}
           </span>
         ) : d.canAnswer === false ? (
-          <span className="text-ink-3">Waiting on @{d.owner}; only they or one of the project's writers can answer it.</span>
+          <span className="text-ink-3">Waiting on @{d.owner}; {d.kind === 'plan' || d.kind === 'land' ? "a held plan or a high-risk merge is for the instance's owners (admin on its repo)" : "the instance's owners and writers (write on its repo) can answer it"}.</span>
         ) : (
           <span className="text-ink-3">Click an option to answer; the coordinator acts on its next tick.</span>
         )}
