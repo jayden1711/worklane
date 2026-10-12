@@ -24,7 +24,7 @@ const OWNER_ID = '123456789012';
 const STRANGER_ID = '987654321098';
 const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 
-const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'] }, 'bug-store': { enabled: true } });
+const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: [OWNER_ID, STRANGER_ID] }, 'bug-store': { enabled: true } });
 
 let seq = 0;
 function report(o: { from?: string; name?: string; text?: string; source?: 'discord' | 'bug-store'; sourceId?: string } = {}): IncomingReport {

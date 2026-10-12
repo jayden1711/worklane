@@ -7,7 +7,7 @@ import { mayAnswer } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
 import { intakeCaps, researchRepoAccess } from '../settings.js';
-import { isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
+import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
 import { redactPii } from '../intake/redact.js';
 import { IntakeMeter, purgeRaw, purgeSeen, rawIds, readRaw, reportId, seen, storeRaw } from '../intake/store.js';
 import { candidates as intakeCandidates } from '../intake/dedupe.js';
@@ -118,7 +118,14 @@ export abstract class Intake extends ResearchRuns {
         continue;
       }
       // An adapter speaks only for its own source: trust is looked up per source. Each conversation in arrival order.
-      const batch = got.filter((x) => x.source === src.name).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      const mine = got.filter((x) => x.source === src.name);
+      // Only allowed senders, on the sender id alone: anyone else's message is never stored or replied to, only counted.
+      const notAllowed = mine.filter((r) => !isAllowed(r.sender, cfg));
+      if (notAllowed.length) {
+        const meter = new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
+        for (const _ of notAllowed) meter.countDrop('not_allowed');
+      }
+      const batch = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
       for (const r of batch) {
         if (this.halt.signal.aborted || this.stopped) break;
         try {
@@ -127,8 +134,8 @@ export abstract class Intake extends ResearchRuns {
           error(`intake ${src.name} report`, e);
         }
       }
-      // Only what is recorded (its id in the seen ledger) is acknowledged; the rest comes again.
-      const recorded = batch.filter((r) => seen(this.d.stateDir, r)).map((r) => r.sourceId);
+      // Only what is recorded (its id in the seen ledger), or dropped by rule, is acknowledged; the rest comes again.
+      const recorded = [...batch.filter((r) => seen(this.d.stateDir, r)), ...notAllowed].map((r) => r.sourceId);
       if (recorded.length && src.ack) await src.ack(recorded).catch((e: unknown) => error(`intake ${src.name} ack`, e));
       if (this.halt.signal.aborted || this.stopped) return;
     }

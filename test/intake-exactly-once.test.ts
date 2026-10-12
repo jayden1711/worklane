@@ -15,7 +15,7 @@ import { EventLog } from '../src/events/log.js';
 import { BugStoreIntake, pullBugReports, readCursor } from '../src/intake/bug-store.js';
 import { DiscordIntake, type Socket } from '../src/intake/discord.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
-import { purgeRaw, reportId, storeRaw } from '../src/intake/store.js';
+import { IntakeMeter, purgeRaw, reportId, storeRaw } from '../src/intake/store.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { repoRoot } from './helpers.js';
 
@@ -23,7 +23,7 @@ const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encod
 const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 const OWNER_ID = '123456789012';
 const STRANGER_ID = '987654321098';
-const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'] }, 'bug-store': { enabled: true } });
+const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: [OWNER_ID, STRANGER_ID] }, 'bug-store': { enabled: true } });
 
 let seq = 0;
 function report(o: { from?: string; text?: string; sourceId?: string; thread?: string; at?: string } = {}): IncomingReport {
@@ -136,7 +136,7 @@ test('end to end: the gateway sends one message twice, and again after it was ha
     return { ok: true, json: async () => ({}) };
   }) as unknown as typeof fetch;
   const sock = new FakeSocket();
-  const discord = new DiscordIntake({ token: 'tok', guild: '555555', channels: ['111111'], prefixes: ['bug:'], connect: () => sock, fetch: net, setInterval: () => 1, clearInterval: () => {} });
+  const discord = new DiscordIntake({ token: 'tok', guild: '555555', channels: ['111111'], allowedSenders: [OWNER_ID], prefixes: ['bug:'], connect: () => sock, fetch: net, setInterval: () => 1, clearInterval: () => {} });
   discord.start();
   sock.frame({ op: 0, s: 1, t: 'READY', d: { user: { id: '999999' } } });
   const create = () => sock.frame({ op: 0, s: 2, t: 'MESSAGE_CREATE', d: { id: 'm-dup', channel_id: '111111', guild_id: '555555', content: 'bug: the export button does nothing', author: { id: OWNER_ID, username: 'sam' } } });
@@ -193,6 +193,35 @@ test('bug store: a crash between the pull and the record pulls the rows again af
   assert.equal(runner.calls.length, 2, 'once each');
   assert.equal(payloads(i.log, 'intake.received').length, 2);
   assert.equal(queries.at(-1), q.replace(':after', "'42'"));
+});
+
+test('intake: a sender not on the allow-list is dropped before anything is stored: no raw file, no event, no reply, only a count (#150)', async () => {
+  const i = instance();
+  const src = fakeSource('discord', [[report({ from: '444444444444', text: 'bug: please file this' })]]);
+  const { c, runner } = coordinator(i, { sources: [src] });
+  await c.checkIntake();
+  assert.equal(runner.calls.length, 0);
+  assert.deepEqual(readdirSync(i.stateDir).includes('intake') ? readdirSync(join(i.stateDir, 'intake')).filter((f) => f === 'raw' || f === 'seen') : [], [], 'no raw store, no seen ledger');
+  assert.deepEqual(i.log.read().filter((e) => e.type.startsWith('intake.')), [], 'nothing in the event log');
+  assert.deepEqual(src.replies, []);
+  const meter = new IntakeMeter(i.stateDir, { reports_per_sender_per_day: 10, drafts_per_day: 20, max_usd_per_day: 2 });
+  assert.deepEqual(meter.dropped(), { not_allowed: 1 }, 'counted by reason only');
+});
+
+test('intake: of the allowed senders, the trusted one is filed ready and the other becomes an Inbox decision; nobody allowed, nothing taken (#150)', async () => {
+  const i = instance();
+  const { c } = coordinator(i, { sources: [fakeSource('discord', [[report({ from: OWNER_ID }), report({ from: STRANGER_ID, text: 'bug: the search box loses focus' })]])] });
+  await c.checkIntake();
+  assert.equal((await i.backlog.list('ready')).length, 1, 'trusted: filed ready');
+  assert.equal(payloads(i.log, 'decision.asked').length, 1, 'allowed, untrusted: an Inbox decision');
+  const j = instance();
+  const nobody = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'] } });
+  const src = fakeSource('discord', [[report({ from: OWNER_ID })]]);
+  const off = coordinator(j, { sources: [src] });
+  (off.c as unknown as { d: { intake: { config: () => IntakeConfig } } }).d.intake.config = () => nobody;
+  await off.c.checkIntake();
+  assert.equal(off.runner.calls.length, 0);
+  assert.deepEqual(j.log.read().filter((e) => e.type.startsWith('intake.')), []);
 });
 
 // ---------- (2) one at a time, in arrival order ----------
