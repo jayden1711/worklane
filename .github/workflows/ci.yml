@@ -124,6 +124,8 @@ jobs:
       - name: a distro image that isn't the pinned one is refused
         shell: powershell
         run: |
+          # The refusal is written to stderr, which this shell would otherwise turn into a stopping error.
+          $ErrorActionPreference = 'Continue'
           Set-Content -Path "$env:RUNNER_TEMP\fake.wsl" -Value 'not the image'
           & powershell -NoProfile -File .\scripts\setup\windows\install.ps1 -Instance demo -Repo owner/repo -DryRun -DistroFile "$env:RUNNER_TEMP\fake.wsl" *> "$env:RUNNER_TEMP\pin.log"
           if ($LASTEXITCODE -eq 0) { throw 'a mismatching image was accepted' }
