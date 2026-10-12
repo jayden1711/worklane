@@ -173,7 +173,7 @@ function specOf(input: AskInput): EventPayload<'ask.created'>['spec'] {
  * second gets 409). Checks who may answer. Exported for secrets.ts and root-steps' runner, which answer
  * their kinds only after doing the step; everything else answers through asks(log).answer.
  */
-export function recordAnswer(log: EventLog, id: string, a: { by: string; role: Role | null; answer: string; detail?: string }, check: (ask: Ask) => void = () => {}): Ask {
+export function recordAnswer(log: EventLog, id: string, a: { by: string; role: Role | null; answer: string; detail?: string }, check: (ask: Ask) => string | void = () => {}): Ask {
   if (!a.by) throw new AskError('who is answering is unknown', 403);
   log.db.exec('BEGIN IMMEDIATE');
   try {
@@ -181,8 +181,8 @@ export function recordAnswer(log: EventLog, id: string, a: { by: string; role: R
     if (!ask) throw new AskError(`no ask ${id}`, 404);
     if (!mayAnswerAsk(ask, a.role)) throw new AskError(ask.kind === 'question' && ask.writersMayAnswer ? `@${a.by} (${a.role ?? 'no role'}) may not answer this; the owner or a writer may` : `only the owner may answer this ask; @${a.by} (${a.role ?? 'no role'}) may not`, 403);
     if (ask.status !== 'open') throw new AskError(`ask ${id} is already ${ask.status}`, 409);
-    check(ask);
-    log.append('ask.answered', { id, by: a.by, role: a.role as 'owner' | 'writer', answer: a.answer, detail: (a.detail ?? '').slice(0, 2000) }, a.by, 'human');
+    const detail = check(ask) ?? a.detail ?? '';
+    log.append('ask.answered', { id, by: a.by, role: a.role as 'owner' | 'writer', answer: a.answer, detail: detail.slice(0, 2000) }, a.by, 'human');
     log.db.exec('COMMIT');
   } catch (e) {
     log.db.exec('ROLLBACK');

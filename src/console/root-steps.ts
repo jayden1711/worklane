@@ -2,6 +2,8 @@
 // (/usr/local/libexec/<cli>-machine, src/machine.ts) with exactly the arguments its sudoers rule lists
 // (scripts/setup/machine-helper.sh). Never arbitrary sudo. Anything else is refused here, before sudo is
 // reached, with what it would take: extending the helper, a reviewed change to the helper and its setup script.
+import type { EventLog } from '../events/log.js';
+import { AskError, asks, mayAnswerAsk, recordAnswer, type Ask, type Role } from './asks.js';
 import { MACHINE_HELPER, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
@@ -42,4 +44,30 @@ export function checkRootStep(command: string, args: readonly string[]): RootSte
   if (!rule) return { allowed: false, why: `${MACHINE_HELPER} has no command "${command}"; ${extend}` };
   if (!rule.allows([...args])) return { allowed: false, why: `${MACHINE_HELPER} ${[command, ...args].join(' ')} isn't on its allowlist (${rule.usage}); ${extend}` };
   return { allowed: true, rule };
+}
+
+// Root steps run one at a time per ask: the helper call takes seconds, and it runs outside the answer's
+// write transaction so the coordinator isn't kept waiting on the log.
+const running = new Set<string>();
+
+/**
+ * Run an open, allowlisted root_step ask through the helper and record the outcome (ran or failed, with its
+ * output), once. Owner only. One off the allowlist is refused before sudo is reached, and stays open.
+ */
+export function runRootStep(log: EventLog, id: string, a: { by: string; role: Role | null; exec?: Exec }): Ask {
+  const ask = asks(log).get(id);
+  if (!ask) throw new AskError(`no ask ${id}`, 404);
+  if (!mayAnswerAsk(ask, a.role)) throw new AskError(`only the owner may run a root step; @${a.by || 'unknown'} (${a.role ?? 'no role'}) may not`, 403);
+  if (ask.kind !== 'root_step') throw new AskError(`ask ${id} isn't a root_step ask`);
+  if (ask.status !== 'open') throw new AskError(`ask ${id} is already ${ask.status}`, 409);
+  const c = checkRootStep(ask.command, ask.args);
+  if (!c.allowed) throw new AskError(`not run: ${c.why}`, 403);
+  if (running.has(id)) throw new AskError(`ask ${id} is running`, 409);
+  running.add(id);
+  try {
+    const r = c.rule.run(ask.args, a.exec);
+    return recordAnswer(log, id, { by: a.by, role: a.role, answer: r.ok ? 'ran' : 'failed', detail: r.ok ? r.output : r.error });
+  } finally {
+    running.delete(id);
+  }
 }

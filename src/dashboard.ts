@@ -37,6 +37,8 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
+import { handleAskRoute } from './console/routes.js';
+import { fixedUserSession, type SessionOf } from './console/session.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -86,6 +88,12 @@ export interface DashboardOptions {
   limitsPath?: string;
   /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
   machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  /** The instance's name (the setup console's asks); the project's name when unset. */
+  instance?: string;
+  /** Who is asking (the setup console): #197's per-person session; until then, `user` with its role from project.owners. */
+  session?: SessionOf;
+  /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
+  secretsHome?: string;
 }
 
 /**
@@ -587,6 +595,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         if (!authed(req, url)) return json(res, 401, { error: 'missing or wrong token; open the URL printed by `dashboard`' });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state());
+        // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
+        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: opts.session ?? fixedUserSession(opts.user, opts.cfg.project.owners), ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machine?.exec ? { exec: opts.machine.exec } : {}) })) return;
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
