@@ -47,6 +47,10 @@ export interface Backlog {
    */
   jobLog(id: number): Promise<{ ok: true; text: string } | { ok: false; why: 'forbidden' | 'not_found' }>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
+  /** A pull request's submitted reviews, oldest first. */
+  reviews(n: number): Promise<PrReview[]>;
+  /** Who closed an issue or pull request (null: open, or unknown). */
+  closedBy(n: number): Promise<string | null>;
 }
 
 export interface PullRequest {
@@ -64,6 +68,15 @@ export interface PullRequest {
   mergeable: boolean | null;
   /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */
   mergeableState: string;
+}
+
+/** A submitted review on a pull request. `state`: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED. */
+export interface PrReview {
+  id: number;
+  author: string;
+  state: string;
+  body: string;
+  at: string;
 }
 
 /** One check on a commit, as GitHub reports it: a check run, or a commit status (completed with its state). */

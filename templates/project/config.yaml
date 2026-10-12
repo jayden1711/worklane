@@ -27,7 +27,12 @@ required_checks: []
 # Before an auto-merge, if main moved and touched what the PR touches (or imports), the fast tier
 # (tests.yaml runner.changed) runs on the combination in a scratch worktree; nothing is pushed to the PR.
 # combined_check: true
-os: auto                   # auto | macos | linux | windows-wsl
+# When a writer rejects a PR, revises or rejects a held plan, requests changes in a review, or corrects the
+# chat (a question starting "correction:"), a read-only agent proposes the strongest durable fix (a guard in
+# code > a lint/test/CI check > a skill or AGENTS.md rule > a style line) as an issue labelled `correction`,
+# built into a PR you review. A repeat is grouped with the earlier fix, never proposed twice.
+# corrections: { enabled: true, max_per_day: 10 }
+os: auto                  # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches
   writers: [your-github-handle] # only issues opened or approved by these accounts are actionable

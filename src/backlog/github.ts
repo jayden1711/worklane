@@ -3,7 +3,7 @@
 // permission" unless it is).
 import { execFileSync } from 'node:child_process';
 import { classifyGitHubError } from '../github/errors.js';
-import type { Backlog, CommitCheck, Issue, PullRequest } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PullRequest } from './types.js';
 
 export class GitHubError extends Error {
   constructor(
@@ -207,6 +207,16 @@ export class GitHubBacklog implements Backlog {
     if (!p.draft) return;
     const r = await this.req<{ errors?: { message: string }[] }>('POST', '/graphql', { query: 'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }', variables: { id: p.node_id } });
     if (r.errors?.length) throw new GitHubError(200, 'graphql', r.errors.map((x) => x.message).join('; '));
+  }
+
+  async reviews(n: number): Promise<PrReview[]> {
+    const list = await this.req<{ id: number; user: { login: string } | null; state: string; body: string | null; submitted_at?: string }[]>('GET', `/repos/${this.repo}/pulls/${n}/reviews?per_page=100`);
+    return list.map((r) => ({ id: r.id, author: r.user?.login ?? '', state: r.state, body: r.body ?? '', at: r.submitted_at ?? '' }));
+  }
+
+  async closedBy(n: number): Promise<string | null> {
+    const i = await this.req<{ state: string; closed_by?: { login: string } | null }>('GET', `/repos/${this.repo}/issues/${n}`);
+    return i.state === 'closed' ? (i.closed_by?.login ?? null) : null;
   }
 
   async ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]> {
