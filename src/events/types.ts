@@ -167,7 +167,7 @@ export const EventSchemas = {
   /** A CI fix run on a PR whose required check failed at `head`; `lease` is its claim. */
   'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
-  'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted']), head: sha.nullable(), detail: z.string() }),
+  'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted', 'claim_lost']), head: sha.nullable(), detail: z.string() }),
   /** An eval of instructions the change touches, base vs head (base null: new instructions). `error`: it couldn't run. */
   'instructions.eval': z.strictObject({
     issue,
@@ -208,7 +208,7 @@ export const EventSchemas = {
     number: z.number().int().positive(),
     base_sha: sha.nullable(),
     strategy: z.literal('merge'),
-    outcome: z.enum(['pushed', 'no_push', 'gave_up', 'interrupted']),
+    outcome: z.enum(['pushed', 'no_push', 'gave_up', 'interrupted', 'claim_lost']),
     head: sha.nullable(),
     files: z.array(z.string()),
     waits_owner: z.boolean(),

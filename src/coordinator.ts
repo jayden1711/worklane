@@ -133,6 +133,8 @@ function retryAfter(kind: 'rate_limit' | 'budget', now = Date.now()): { kind: 'r
   const d = new Date(now);
   return { kind, after: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)) };
 }
+/** How long a fix run waits on an issue claim held elsewhere (from the first time it found it so) before giving up. */
+const CLAIM_HELD_GIVE_UP_MS = 3600_000;
 
 /**
  * Run a project command without blocking the event loop: with several agents
@@ -422,6 +424,19 @@ export class Coordinator {
   /** An emergency stop is in force (read now, not only at the last check): nothing lands and nothing merges. */
   private emergencyInForce(): boolean {
     return this.halt.signal.aborted || emergencyStop(this.d.slotsDir) !== null;
+  }
+
+  /**
+   * Worker attempts already used on an issue, from the log: since its last block or decision (after which the
+   * owner relabels or answers, and the task starts with a fresh budget). Restarts and requeues don't reset it.
+   */
+  private attemptsUsed(n: number): number {
+    let used = 0;
+    for (const e of this.events(n)) {
+      if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
+      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker') used++;
+    }
+    return used;
   }
 
   private async reconcile(): Promise<number> {
@@ -876,7 +891,11 @@ export class Coordinator {
       let feedback: string[] = [];
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
       let refused: string[] | null = null;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Attempts are counted from the log, so a restart or an emergency stop's requeue continues the count
+      // instead of starting again from 1.
+      const used = this.attemptsUsed(n);
+      if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
+      for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
@@ -2640,6 +2659,23 @@ export class Coordinator {
 
   // ---------------------------------------------------------------- CI fix runs
 
+  /**
+   * A fix run found the issue's claim held elsewhere. The first time for this PR head it is recorded (`record`);
+   * it never counts toward the fix cap, so a brief collision costs nothing. Only once the claim has been held
+   * elsewhere for CLAIM_HELD_GIVE_UP_MS since that first record does this say to give up.
+   */
+  private claimHeldTooLong(type: 'ci_fix.finished' | 'conflict_fix.finished', number: number, head: string, record: () => void): boolean {
+    const first = this.d.log.read(0, [type]).find((e) => {
+      const p = e.payload as { number: number; outcome: string; head: string | null };
+      return p.number === number && p.outcome === 'claim_lost' && p.head === head;
+    });
+    if (!first) {
+      record();
+      return false;
+    }
+    return Date.now() - Date.parse(first.ts) >= CLAIM_HELD_GIVE_UP_MS;
+  }
+
   private fixGaveUp(number: number): boolean {
     return this.d.log.read(0, ['ci_fix.gave_up']).some((e) => (e.payload as { number: number }).number === number);
   }
@@ -2727,7 +2763,12 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    if (!won.won) return; // held elsewhere; the next poll tries again
+    if (!won.won) {
+      const holder = won.holder?.instance ?? 'another run';
+      const record = () => this.emit('ci_fix.finished', { issue: n, number, outcome: 'claim_lost', head: pr.headSha, detail: `the issue's claim is held by ${holder}` });
+      if (this.claimHeldTooLong('ci_fix.finished', number, pr.headSha, record)) await this.giveUpFix(w, pr.headSha, `the issue's claim has been held by ${holder} for over an hour`, failed);
+      return;
+    }
     let leaseSha = won.sha;
     this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
@@ -3009,7 +3050,12 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    if (!won.won) return; // held elsewhere; the next poll tries again
+    if (!won.won) {
+      const holder = won.holder?.instance ?? 'another run';
+      const record = () => this.emit('conflict_fix.finished', { issue: n, number, base_sha: baseSha, strategy: 'merge', outcome: 'claim_lost', head: pr.headSha, files: [], waits_owner: false, reasons: [], detail: `the issue's claim is held by ${holder}` });
+      if (this.claimHeldTooLong('conflict_fix.finished', number, pr.headSha, record)) await this.giveUpConflict(w, pr.headSha, baseSha, `the issue's claim has been held by ${holder} for over an hour`, []);
+      return;
+    }
     let leaseSha = won.sha;
     this.emit('conflict_fix.started', { issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
