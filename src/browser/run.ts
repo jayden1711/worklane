@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig, FlowStep } from '../config/schema.js';
 import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
-import { findChrome, launchChrome, portInUse, sleep, stopTree, until, type Cdp } from './cdp.js';
+import { browserTimeouts, findChrome, launchChrome, portInUse, sleep, stopTree, track, until, type Cdp } from './cdp.js';
 import { targetExpr } from './targets.js';
 import { summarizeTrace, TRACE_CATEGORIES, type TraceEvent, type TraceSummary } from './trace.js';
 
@@ -84,6 +84,7 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
   let appOut = '';
   const cmd = projectCommand(o.app.start.command, o.runAs, { PORT: String(port) });
   const app = spawn(cmd.file, cmd.args, { cwd: o.cwd, env: cmd.env, detached: spawnDetached, stdio: ['ignore', 'pipe', 'pipe'] });
+  track(app, 'the app');
   const tail = (d: Buffer) => (appOut = (appOut + d.toString()).slice(-4000));
   app.stdout?.on('data', tail);
   app.stderr?.on('data', tail);
@@ -105,7 +106,7 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
 
     browser = await launchChrome(chrome, { ...(o.noSandbox ? { noSandbox: true } : {}), ...(o.chromeProfileRoot ? { profileRoot: o.chromeProfileRoot } : {}) });
     const cdp = browser.cdp;
-    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, durationMs: 0 };
+    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, durationMs: 0, ...(browser.notes.length ? { notes: [...browser.notes] } : {}) };
     watch(cdp, ev, o.app.thresholds.slow_request_ms);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
@@ -217,7 +218,7 @@ async function evalIn(cdp: Cdp, expr: string): Promise<unknown> {
 
 /** Where a target is on the page (scrolled into view), once it's there. */
 function at(cdp: Cdp, target: string) {
-  return until(target, () => evalIn(cdp, `(() => { const e = ${targetExpr(target)}; if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`) as Promise<{ x: number; y: number } | null>, 10_000);
+  return until(target, () => evalIn(cdp, `(() => { const e = ${targetExpr(target)}; if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`) as Promise<{ x: number; y: number } | null>, browserTimeouts().stepMs);
 }
 
 async function step(cdp: Cdp, base: string, s: FlowStep) {
@@ -261,5 +262,5 @@ async function step(cdp: Cdp, base: string, s: FlowStep) {
   await until(`${target} to show "${text}"`, async () => {
     const shown = (await evalIn(cdp, `(() => { const e = ${targetExpr(target)}; return e ? e.innerText : null; })()`)) as string | null;
     return shown !== null && shown.includes(text);
-  }, 10_000);
+  }, browserTimeouts().stepMs);
 }
