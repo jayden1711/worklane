@@ -70,13 +70,14 @@ function fakeChat(batches: IncomingReport[][]) {
   const posts: { where: string; text: string }[] = [];
   const threads: { channel: string; text: string; name: string; id: string }[] = [];
   const watched = new Set<string>();
-  const src: IntakeSource & { posts: typeof posts; threads: typeof threads; watched: Set<string>; batches: IncomingReport[][] } = {
+  const src: IntakeSource & { posts: typeof posts; threads: typeof threads; watched: Set<string>; batches: IncomingReport[][]; takes: number } = {
     name: 'discord',
+    takes: 0,
     posts,
     threads,
     watched,
     batches,
-    take: async () => batches.shift() ?? [],
+    take: async () => (src.takes++, batches.shift() ?? []),
     reply: async (t, text) => (posts.push({ where: t.id, text }), true),
     openThread: async (channel, text, name) => {
       const id = String(900000 + threads.length);
@@ -89,7 +90,7 @@ function fakeChat(batches: IncomingReport[][]) {
   return src;
 }
 
-function setup(o: { source?: IntakeSource; config?: IntakeConfig } = {}) {
+function setup(o: { source?: IntakeSource; config?: IntakeConfig | null } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'chat-channel-'));
   const repo = join(base, 'checkout');
   cpSync(join(repoRoot, 'examples', 'basic'), repo, { recursive: true });
@@ -117,7 +118,7 @@ function setup(o: { source?: IntakeSource; config?: IntakeConfig } = {}) {
     slotsDir,
     machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) },
     settings: () => ({ settings: {}, error: null }),
-    intake: { config: () => o.config ?? CONFIG, sources: [source], pullMs: 0, roleOf },
+    intake: { config: () => (o.config === undefined ? CONFIG : o.config), sources: [source], pullMs: 0, roleOf },
   });
   /** One intake pass, with these messages arriving first. */
   const pass = async (...msgs: IncomingReport[]) => {
@@ -326,4 +327,40 @@ test('channel config: the mapping lives in intake.yaml, readable by its owner on
   assert.match((loadIntakeConfig(p) as { error: string }).error, /mapped to a GitHub login but not in discord.allowed_senders/);
   writeFileSync(p, yaml(`"${OWNER_ID}": "not a login!"`));
   assert.match((loadIntakeConfig(p) as { error: string }).error, /a GitHub login/);
+});
+
+test('channel: per instance and off by default: without a Discord config or a mapping, an instance posts nothing and reads nothing', async () => {
+  const none = setup({ config: null });
+  const off = setup({ config: IntakeConfig.parse({ version: 1 }) });
+  const unmapped = setup({ config: IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: [OWNER_ID], asks_channel: ASKS_CHANNEL, dashboard_url: DASH } }) });
+  for (const [name, t] of [['no intake.yaml', none], ['Discord not enabled', off], ['no mapping', unmapped]] as const) {
+    ask(t.log, 'd-q', 'question');
+    asks(t.log).create({ kind: 'question', instance: 'example', title: 'Turn nightly runs on?', detail: 'Nightly full runs.', options: ['yes', 'no'] });
+    await t.pass(reply(OWNER_ID, '900000', 'approve'));
+    assert.deepEqual([t.chat.threads.length, t.chat.posts.length], [0, 0], `${name}: nothing posted`);
+    assert.deepEqual(of(t.log, 'decision.answered'), [], `${name}: nothing answered`);
+    assert.deepEqual(of(t.log, 'discord.posted'), [], `${name}: no post recorded`);
+    assert.deepEqual(rawFiles(t.stateDir), [], `${name}: nothing stored`);
+  }
+  assert.equal(none.chat.takes, 0, 'no intake config: the source is never read');
+  assert.equal(off.chat.takes, 0, 'Discord off: the source is never read');
+});
+
+test("channel: an instance can't answer through another instance's thread or mapping", async () => {
+  const a = setup();
+  const b = setup();
+  ask(a.log, 'd-q', 'question');
+  ask(b.log, 'd-q', 'question');
+  await a.pass();
+  const threadOfA = a.chat.threads[0]!.id;
+  // B posts its own thread for its own decision, with a different id from A's.
+  b.chat.threads.push({ channel: ASKS_CHANNEL, text: '', name: '', id: 'placeholder' });
+  await b.pass();
+  assert.notEqual(b.chat.threads.at(-1)!.id, threadOfA);
+  // A reply in A's thread that reached B answers nothing in B, and isn't taken as a report there either.
+  await b.pass(reply(OWNER_ID, threadOfA, 'approve'));
+  assert.deepEqual(of(b.log, 'decision.answered'), []);
+  assert.deepEqual(of(b.log, 'discord.reply'), []);
+  assert.equal(b.log.read(0, ['intake.received']).length, 0);
+  assert.deepEqual(rawFiles(b.stateDir), []);
 });

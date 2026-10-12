@@ -67,8 +67,10 @@ senders. There are two sources: the Discord bot and in-product reports.
 
 The same bot (one server, no DMs, the same allowed senders, redaction and exactly-once store) can carry what
 waits on people: decisions and setup-console asks are posted in one channel, one thread each, and a reply in
-the thread answers them. It is on when Discord is enabled and at least one person is mapped (below); posting
-needs `asks_channel` and `dashboard_url`.
+the thread answers them. It is per instance and off by default: it is on only for an instance whose own
+`intake.yaml` enables Discord and maps at least one person (below), and posting also needs `asks_channel` and
+`dashboard_url`. An instance without them posts nothing to Discord and reads nothing from it as an answer. Each
+instance answers only in the threads it opened itself, from its own events, with its own mapping.
 
 **Who is who.** Every setting lives in the instance's `intake.yaml`, in the instance home
 (`<instances dir>/<instance>/intake.yaml`, beside `policy.yaml`), owned by the coordinator user, mode 0600: it
