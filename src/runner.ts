@@ -386,7 +386,9 @@ export class CliRunner implements AgentRunner {
     const promptDir = req.appendSystemPrompt ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-run-`)) : null;
     const systemPromptFile = promptDir ? join(promptDir, 'system-prompt.md') : undefined;
     if (promptDir && systemPromptFile) {
-      writeFileSync(systemPromptFile, req.appendSystemPrompt!, { mode: 0o644 });
+      writeFileSync(systemPromptFile, req.appendSystemPrompt!);
+      // Set explicitly: a create mode is cut by the umask, and the services' UMask=0007 would leave 0640, unreadable to the agent user.
+      chmodSync(systemPromptFile, 0o644);
       chmodSync(promptDir, 0o755);
     }
     const cleanup = () => promptDir && rmSync(promptDir, { recursive: true, force: true });
