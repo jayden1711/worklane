@@ -479,3 +479,36 @@ test('the sandbox helper clones exactly as the engine does', () => {
   assert.match(helper, /\[ "\$head" = "refs\/worklane\/test-run\/\$id\/head" \] && \[ "\$base" = "refs\/worklane\/test-run\/\$id\/base" \]/);
   assert.match(helper, /runuser -u "\$user" -- env -i PATH=[^ ]+ HOME="\$d\/home" LANG=C\.UTF-8 bash -c "\$CLONE"/, 'as the test user, with nothing of the caller\'s environment');
 });
+
+/** The PATH the helper exports for itself (its first `export PATH=` line). */
+const helperPath = () => /^export PATH=(\S+)$/m.exec(readFileSync(helperSrc, 'utf8'))?.[1]?.split(':') ?? [];
+
+test('regression: the helper finds runuser with a minimal caller PATH (runuser is in /usr/sbin on Ubuntu)', { skip: !posix && 'bash' }, () => {
+  // Its PATH used to be /usr/local/bin:/usr/bin:/bin, so on the server every probe failed with "runuser: command not found".
+  const path = helperPath();
+  for (const dir of ['/usr/sbin', '/sbin', '/usr/bin', '/bin']) assert.ok(path.includes(dir), `the helper's PATH has ${dir}: ${path.join(':')}`);
+  const runuser = ['/usr/sbin/runuser', '/sbin/runuser', '/usr/bin/runuser'].find((p) => existsSync(p));
+  if (!runuser) return; // not on this machine (macOS); the PATH check above still holds
+  const r = spawnSync('bash', [helperSrc, 'shop', 'check'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+  assert.doesNotMatch(r.stderr, /missing tool|command not found/, r.stderr);
+  assert.match(r.stderr, /no user wl-test-shop/, 'it got past the tool check to the user check');
+});
+
+test('a tool the helper needs that isn\'t there is one clear "missing tool" line, before any probe', { skip: !posix && 'bash' }, () => {
+  const empty = mkdtempSync(join(tmpdir(), 'no-tools-'));
+  const copy = join(empty, 'worklane-testrun');
+  writeFileSync(copy, readFileSync(helperSrc, 'utf8').replace(/^export PATH=\S+$/m, `export PATH=${empty}`));
+  const r = spawnSync('/bin/bash', [copy, 'shop', 'check'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /^worklane-testrun: missing tool: runuser \(PATH=/m);
+  assert.doesNotMatch(r.stderr, /probe did not run/);
+  rmSync(empty, { recursive: true, force: true });
+});
+
+test('test-user.sh sets its own PATH with the sbin directories, and checks the sbin tools it needs', { skip: !posix && 'bash' }, () => {
+  const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
+  const path = /^export PATH=(\S+)$/m.exec(sh)?.[1]?.split(':') ?? [];
+  for (const dir of ['/usr/sbin', '/sbin', '/usr/bin', '/bin']) assert.ok(path.includes(dir), `test-user.sh PATH has ${dir}`);
+  const need = [...sh.matchAll(/^\s*need_tools (.+)$/gm)].flatMap((m) => m[1]!.split(/\s+/));
+  for (const t of ['runuser', 'systemd-run', 'useradd', 'usermod', 'setfacl', 'sysctl', 'iptables', 'ip', 'newuidmap', 'slirp4netns', 'systemctl']) assert.ok(need.includes(t), `test-user.sh checks for ${t}`);
+});

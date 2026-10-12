@@ -18,7 +18,8 @@
 # other wl-* home inaccessible, no other run's workspace, no Docker socket, a private /tmp, no devices, no new
 # privileges, and an environment of exactly the variables named here (never the caller's).
 set -euo pipefail
-export PATH=/usr/local/bin:/usr/bin:/bin
+# Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 
 # Fixed paths: the installed helper takes none from its caller.
@@ -36,6 +37,10 @@ root="$BASE/$name"
 sock_dir="/run/worklane-test-$name-docker"
 # The coordinator of instance <name> only (sudo sets SUDO_USER; root running it by hand has none).
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "wl-$name" ]; then die "$SUDO_USER may not use $name's test runs"; fi
+# Every tool this helper runs, found right after the caller check, before any probe: one clear line instead of a run of failed probes.
+for tool in runuser systemd-run systemctl git getent install id stat; do
+  command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool (PATH=$PATH)"
+done
 id -u "$user" >/dev/null 2>&1 || { echo "worklane-testrun: no user $user; run scripts/setup/test-user.sh install $name" >&2; exit 1; }
 shift 2
 

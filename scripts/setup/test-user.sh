@@ -164,6 +164,11 @@ if [ -n "$print" ]; then
   exit 0
 fi
 as_root "${all_args[@]}"
+# Set here, never inherited: useradd, usermod, setfacl, sysctl, iptables and ip are in /usr/sbin or /sbin.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The tools every subcommand uses; install adds the packages for the rest and checks them after.
+need_tools() { local t; for t in "$@"; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t (PATH=$PATH)" >&2; exit 1; }; done; }
+need_tools systemctl getent install id stat
 
 put() {
   local file="$1" tmp="/etc/systemd/system/.$1.tmp" check
@@ -244,6 +249,7 @@ install_cmd() {
   say "packages from the distribution: rootless Docker's helpers, acl"
   apt-get update -q
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends uidmap slirp4netns iptables acl curl ca-certificates tar
+  need_tools useradd usermod userdel setfacl sysctl iptables ip newuidmap newgidmap slirp4netns runuser systemd-run tar sha256sum curl
 
   say "the test user $user: its own group only, no sudo, no login shell"
   ensure_user "$user"
