@@ -79,7 +79,7 @@ export const EventSchemas = {
    * A write made on the dashboard: who (their GitHub login, and the role the instance read from its repo, or the
    * owner's break-glass), on which instance, and what was done.
    */
-  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
+  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass', 'discord']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
@@ -142,6 +142,19 @@ export const EventSchemas = {
    * source took it; `unknown`: a restart cut it off mid-send, so whether it went out is unknown (it isn't resent).
    */
   'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
+  /** A chat post is about to be sent (recorded first, so a crash can't send it twice). `key`: what it is for. */
+  'discord.posting': z.strictObject({ key: z.string() }),
+  /**
+   * A chat post, once per key: a decision's or ask's thread (`thread`: its id), a notice (no thread), or a reply in a
+   * thread. `unknown`: a restart cut it off mid-send, so whether it went out is unknown (it isn't resent).
+   */
+  'discord.posted': z.strictObject({ key: z.string(), thread: z.string().nullable(), ok: z.boolean(), unknown: z.boolean().optional() }),
+  /**
+   * A reply in one of the bot's threads, from a mapped person: what it did to its target (a decision or ask).
+   * answered; comment (they may not answer it: kept, redacted, as a comment); ambiguous (no single option: asked
+   * back); already (decided before: refused, naming who); refused (never answered from chat).
+   */
+  'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   /** `provider`: the open-model provider it ran on (local runs cost 0); tokens and seconds, when claude reported them. */
