@@ -49,7 +49,7 @@ type World = ReturnType<typeof world>;
 /** A fake test-run service: a run fails tier `unit` when the commit holds a culprit's file (or `red(sha)` says so). */
 function fakeRuns(w: World, o: { culprits?: number[]; red?: (sha: string) => boolean; during?: (req: TestRunRequest) => void; hang?: () => boolean; hangPost?: (sha: string) => boolean } = {}) {
   const runs: TestRunRequest[] = [];
-  const posted: { sha: string; names: string[]; run: string }[] = [];
+  const posted: { sha: string; names: Record<string, string>; run: string }[] = [];
   let id = 0;
   const t: TestRuns = {
     async startTestRun(req) {
@@ -65,6 +65,7 @@ function fakeRuns(w: World, o: { culprits?: number[]; red?: (sha: string) => boo
       if (o.hangPost?.(sha)) return new Promise<void>(() => {});
       posted.push({ sha, names, run: result.id });
     },
+    checkNames: () => ({ lint: 'full-lint', unit: 'full' }),
   };
   return { t, runs, posted };
 }
@@ -116,7 +117,7 @@ test('a green batch: one full run of one merge commit of every PR, in queue orde
   assert.equal(git(w.repo, 'rev-parse', `${built.sha}^1^1^1`), built.base, 'one merge commit per PR, on the base');
   assert.deepEqual(git(w.repo, 'ls-tree', '--name-only', built.sha!).split('\n').sort(), ['README', 'pr-1.txt', 'pr-2.txt', 'pr-3.txt']);
   assert.deepEqual(f.posted.map((p) => p.sha), [2, 1, 3].map((n) => w.prs.get(n)!.headSha), 'the full check on each PR head');
-  assert.ok(f.posted.every((p) => p.names.join() === 'full'));
+  assert.ok(f.posted.every((p) => JSON.stringify(p.names) === JSON.stringify({ lint: 'full-lint', unit: 'full' })), 'the tier -> check name mapping');
   assert.deepEqual(tested, [2, 1, 3]);
   assert.equal(stepsOf(w, 'green').length, 1);
   assert.equal(stepsOf(w, 'finished').length, 1);
@@ -132,7 +133,7 @@ test('a sharded batch: one run per shard of the same commit, combined; any red s
   const { b } = batcher(w, f.t, { shards: 3 });
   b.enqueue(entry(w, 1));
   await pass(b);
-  assert.deepEqual(f.runs.slice(0, 3).map((r) => r.shard), [{ index: 0, total: 3 }, { index: 1, total: 3 }, { index: 2, total: 3 }]);
+  assert.deepEqual(f.runs.slice(0, 3).map((r) => r.shard), [{ index: 1, total: 3 }, { index: 2, total: 3 }, { index: 3, total: 3 }]);
   assert.equal(new Set(f.runs.slice(0, 3).map((r) => r.sha)).size, 1, 'shards of one commit');
   assert.equal(stepsOf(w, 'red')[0]?.tier, 'unit');
 });
