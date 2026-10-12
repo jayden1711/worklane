@@ -180,12 +180,23 @@ test('the PowerShell scripts have no "$name:" in strings, which PowerShell reads
   }
 });
 
+test('the PowerShell scripts never assign to their own parameters (names ignore case, and a [switch] refuses a string)', () => {
+  for (const f of ['install.ps1', 'doctor.ps1']) {
+    const text = readFileSync(join(win, f), 'utf8');
+    const block = text.slice(text.indexOf('param('), text.indexOf("$ErrorActionPreference"));
+    const params = [...block.matchAll(/\]\s*\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!);
+    assert.ok(params.length >= 2, `${f}: found its parameters`);
+    const body = text.slice(text.indexOf("$ErrorActionPreference"));
+    for (const p of params) assert.doesNotMatch(body, new RegExp(`\\$${p}\\s*=[^=]`, 'i'), `${f} assigns to its parameter $${p}`);
+  }
+});
+
 // ------------------------------------------------------------------------------------- PowerShell itself
 
 const shell = process.platform === 'win32' ? 'powershell.exe' : which('pwsh') ? 'pwsh' : null;
 const skipPs = !shell && 'no PowerShell here (CI runs these on Windows PowerShell 5.1, and pwsh on Linux and macOS)';
-const ps = (command: string) => spawnSync(shell!, ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 120_000 });
-const psFile = (file: string, args: string[]) => spawnSync(shell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(win, file), ...args], { encoding: 'utf8', timeout: 120_000 });
+const ps = (command: string) => spawnSync(shell!, ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, NO_COLOR: '1' } });
+const psFile = (file: string, args: string[]) => spawnSync(shell!, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(win, file), ...args], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, NO_COLOR: '1' } });
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 test('PowerShell: the scripts parse', { skip: skipPs }, () => {

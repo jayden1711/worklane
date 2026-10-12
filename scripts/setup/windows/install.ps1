@@ -80,8 +80,8 @@ if ($DryRun) {
 
 if ($AfterCredentials) {
   Write-Step "Linux setup, after the credentials (inside $DistroName)"
-  $yes = if ($Yes) { ' --yes' } else { '' }
-  Invoke-InDistro "bash $SetupDir/scripts/bootstrap.sh --hardened --after-credentials$yes $Instance $Repo"
+  $yesFlag = if ($Yes) { ' --yes' } else { '' }
+  Invoke-InDistro "bash $SetupDir/scripts/bootstrap.sh --hardened --after-credentials$yesFlag $Instance $Repo"
   Write-Step 'the dashboard, from Windows'
   Write-Output "   start it in a terminal: wsl -d $DistroName -u root -- bash $SetupDir/scripts/setup/dashboard.sh $Instance [<your GitHub login>]"
   Write-Output "   it listens on the distro's 127.0.0.1:$Port, which WSL forwards to Windows' 127.0.0.1:${Port}: open the URL it prints (with its token) in a Windows browser"
@@ -173,8 +173,8 @@ Invoke-Step "copy $EngineRoot\scripts and package.json to $share" {
 Invoke-InDistro "find $SetupDir -type f -name '*.sh' -exec sed -i 's/\r`$//' {} + && chown -R root:root $SetupDir && chmod -R go-w $SetupDir"
 
 Write-Step "the Linux hardened bootstrap, inside $DistroName"
-$yes = if ($Yes) { ' --yes' } else { '' }
-Invoke-InDistro "bash $SetupDir/scripts/bootstrap.sh --hardened$yes $Instance $Repo"
+$yesFlag = if ($Yes) { ' --yes' } else { '' }
+Invoke-InDistro "bash $SetupDir/scripts/bootstrap.sh --hardened$yesFlag $Instance $Repo"
 
 # ------------------------------------------------------------------------------------------------ 5. .wslconfig
 

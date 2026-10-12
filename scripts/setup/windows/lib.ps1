@@ -134,7 +134,8 @@ function ConvertFrom-WslList([string]$Text) {
     $f = ($line.TrimStart().TrimStart('*').Trim()) -split '\s+'
     if ($f.Count -ge 3) { $rows += [pscustomobject]@{ Name = $f[0]; State = $f[1]; Version = [int]$f[2]; Default = $default } }
   }
-  return , $rows
+  # One row at a time down the pipeline (callers filter them with Where-Object, and wrap the result in @()).
+  return $rows
 }
 
 # The keep-alive: a scheduled task that holds one process in the distro, so WSL never idles it out, from boot.

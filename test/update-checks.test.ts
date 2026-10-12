@@ -26,6 +26,9 @@ function pushChecks(): string[] {
     if (!push) continue;
     for (const [key, job] of Object.entries(wf.jobs ?? {})) {
       if (job.if && /event_name\s*==\s*'pull_request'/.test(job.if)) continue; // PR-only: always skipped on main
+      // Opt-in (a repo variable turns it on, e.g. wsl2-isolation's self-hosted runner): skipped until then, and a
+      // skipped required check would block every update, so the owner adds it to the required checks when enabling it.
+      if (job.if && /\bvars\./.test(job.if)) continue;
       const name = job.name ?? key;
       const matrix = job.strategy?.matrix;
       if (!matrix) {
