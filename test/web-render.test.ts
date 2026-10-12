@@ -40,6 +40,7 @@ interface Render {
   renderAgents(state: State, live: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
   renderMachine(data: unknown): string;
+  renderOnboard(run: unknown): string;
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
@@ -767,4 +768,33 @@ test('the report preview: refused to anyone but the owner and the writers withou
   assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
   assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
   assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
+});
+
+test('Add project: each step with its status, and each open ask with what answers it (a secret field never prefilled)', () => {
+  const ask = (kind: string, extra: object) => ({ id: `ask-${kind}`, kind, title: `t ${kind}`, detail: 'd', status: 'open', answer: null, ...extra });
+  const html = r.renderOnboard({
+    repo: 'acme/shop',
+    instance: 'shop',
+    running: true,
+    result: null,
+    steps: [
+      { id: 'app', title: 'GitHub App', status: 'done', detail: 'created App x (1)' },
+      { id: 'install', title: 'App installed on the repo only', status: 'pending', detail: '' },
+    ],
+    asks: [
+      ask('question', { options: ['per-project', 'shared'] }),
+      ask('approve_link', { url: 'https://github.com/apps/x/installations/new' }),
+      ask('paste_secret', { credential: 'intake-discord', where: 'the coordinator only' }),
+      ask('root_step', { command: 'add-instance', args: ['shop'], allowed: true, refusal: null }),
+      { ...ask('question', { options: ['x'] }), id: 'old', status: 'answered' },
+    ],
+  });
+  assert.equal((html.match(/data-testid="onboard-step"/g) ?? []).length, 2);
+  assert.match(html, /data-status="done"[\s\S]*GitHub App[\s\S]*created App x/);
+  assert.equal((html.match(/data-testid="onboard-ask"/g) ?? []).length, 4, 'open asks only');
+  assert.match(html, /per-project[\s\S]*shared/);
+  assert.match(html, /href="https:\/\/github\.com\/apps\/x\/installations\/new"/);
+  assert.match(html, /<textarea[^>]*data-testid="onboard-secret"[^>]*><\/textarea>/);
+  assert.match(html, /add-instance shop/);
+  assert.match(html, /Run as root \(machine helper\)/);
 });

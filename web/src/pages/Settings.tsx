@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { getSettings, useFetch } from '../api';
+import { AddProject } from '../components/AddProject';
 import { InstanceSettings } from '../components/InstanceSettings';
 import { MachineSettings } from '../components/MachineSettings';
 import { Loading } from '../components/patterns';
@@ -38,6 +39,9 @@ export function SettingsPage() {
   return (
     <div data-testid="page-settings">
       <Header title="Settings" sub={`the instance's settings, then the repo's config (read-only: change it in ${s.configDir}/ through a reviewed commit)`} />
+      <div className="px-6 pt-6">
+        <AddProject />
+      </div>
       <div className="px-6 pt-6">
         <InstanceSettings />
       </div>
