@@ -18,6 +18,8 @@ export function loadIntakeConfig(path: string): { config: IntakeConfig; warnings
   if (uid !== null) {
     const st = statSync(path);
     if (st.mode & 0o022) return { error: `${path} is writable by its group or others; it decides who is trusted, so only its owner may change it (chmod 600)` };
+    // It maps people's chat ids to their GitHub logins: nobody else on the machine reads it either.
+    if (st.mode & 0o044) return { error: `${path} is readable by its group or others; it names who is who, so only its owner may read it (chmod 600)` };
     if (st.uid !== uid && st.uid !== 0) return { error: `${path} belongs to another user; it must be this service's own file (or root's)` };
   }
   let raw: unknown;
