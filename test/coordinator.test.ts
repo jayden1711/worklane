@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import { parseContract } from '../src/backlog/types.js';
 import { BRAND } from '../src/brand.js';
@@ -1985,16 +1985,26 @@ const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the
  * before the task (with its eval cases unless `cases` is false). The scripted model under test plans
  * badly when its instructions say BAD; the judge passes only a good plan.
  */
-async function instructionsPr(o: { base: string | null; head: string; cases?: boolean; enabled?: boolean; cap?: number }) {
+async function instructionsPr(o: { base: string | null; head: string; cases?: boolean; enabled?: boolean; cap?: number; file?: string; casesFile?: string }) {
   const f = fixture();
+  const file = o.file ?? 'AGENTS.md';
+  const casesFile = o.casesFile ?? join(BRAND.configDir, 'evals', 'AGENTS.md');
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   if (o.enabled === false) f.cfg.agents.instruction_evals.enabled = false;
   if (o.cap) f.cfg.agents.instruction_evals.cap_usd = o.cap;
-  if (o.base !== null) writeFileSync(join(f.repo, 'AGENTS.md'), o.base);
+  // A project that lets its role prompts change through tasks (the example protects its whole config folder).
+  if (o.file?.startsWith(BRAND.configDir)) {
+    f.cfg.guardrails.protected_paths = f.cfg.guardrails.protected_paths.filter((g) => !g.startsWith(BRAND.configDir));
+    if (f.cfg.review) f.cfg.review.levels.L3_human.when = f.cfg.review.levels.L3_human.when.filter((c) => c !== 'harness-config');
+  }
+  if (o.base !== null) {
+    mkdirSync(dirname(join(f.repo, file)), { recursive: true });
+    writeFileSync(join(f.repo, file), o.base);
+  }
   if (o.cases !== false) {
-    mkdirSync(join(f.repo, BRAND.configDir, 'evals'), { recursive: true });
-    writeFileSync(join(f.repo, BRAND.configDir, 'evals', 'AGENTS.md'), AGENTS_CASES);
+    mkdirSync(dirname(join(f.repo, casesFile)), { recursive: true });
+    writeFileSync(join(f.repo, casesFile), AGENTS_CASES);
   }
   if (o.base !== null || o.cases !== false) {
     git(f.repo, 'add', '-A');
@@ -2004,14 +2014,18 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const runner = agents({
     worker: workerWith((req) => {
-      writeFileSync(join(req.cwd, 'AGENTS.md'), o.head);
+      mkdirSync(dirname(join(req.cwd, file)), { recursive: true });
+      writeFileSync(join(req.cwd, file), o.head);
       return null;
     }),
     'evaluator-verdict': approve(),
     'instruction-eval': (req) => {
-      if ('plan' in ((req.jsonSchema as { properties: object }).properties ?? {})) return { plan: req.appendSystemPrompt?.includes('BAD') ? 'edit the ledger by hand' : 'read the alert row first' };
+      const props = (req.jsonSchema as { properties: object }).properties ?? {};
+      // The held-out case writer: cases about the same duty, written from the contract it was given.
+      if ('cases' in props) return { cases: [1, 2, 3].map((i) => ({ title: `Held ${i}`, situation: ['An alert fires on the ledger.', 'Nothing else is known.'], correct: ['Reads the alert row first.'], wrong: ['Edits the ledger by hand.'] })) };
+      if ('plan' in props) return { plan: req.appendSystemPrompt?.includes('BAD') ? 'edit the ledger by hand' : 'read the alert row first' };
       const good = /<plan>\nread the alert row/.test(req.prompt);
-      return { notes: '', correct: [good], wrong: [!good] };
+      return { '1': good, '2': !good };
     },
   });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
@@ -2028,20 +2042,41 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
 test('instruction evals: a change that makes AGENTS.md score lower waits for the owner, with the per-case diff and the cost', { skip }, async () => {
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'BAD: act first.\n' });
   const e = lastOf(t.f.log, 'instructions.eval') as { target: string; base: object; result: object; dropped: boolean; changes: object[]; cost_usd: number };
-  assert.deepEqual([e.target, e.base, e.result, e.dropped], ['AGENTS.md', { passed: 1, total: 1 }, { passed: 0, total: 1 }, true]);
+  assert.deepEqual([e.target, e.base, e.result, e.dropped], ['AGENTS.md', { passed: 2, total: 2 }, { passed: 0, total: 2 }, true], 'rubric items met');
   assert.deepEqual(e.changes, [{ id: '1', title: 'Ledger alert', base: 'pass', head: 'fail' }]);
   assert.ok(e.cost_usd > 0);
   assert.equal(t.decided.auto, false);
-  assert.deepEqual(t.decided.reasons, [`eval: AGENTS.md scored lower, 1/1 → 0/1 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
+  assert.deepEqual(t.decided.reasons, [`eval: AGENTS.md scored lower, 2/2 → 0/2 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
   assert.ok(!t.pr.merged);
   assert.ok(t.pr.comments.some((x) => /waits for you[\s\S]*case 1 "Ledger alert": pass → fail/.test(x.body)), 'the waiting comment carries the diff');
-  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: 1\/1 → 0\/1, \*\*lower\*\*; case 1 pass → fail/);
-  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'instruction-eval').length, 4, 'base and head, each a plan and a judgement');
+  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: visible 2\/2 → 0\/2, \*\*lower\*\*; case 1 pass → fail, 3 sample\(s\) per case/);
+  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'instruction-eval').length, 12, 'base and head, 3 samples each, each a plan and a judgement');
   // The agent under test never saw the rubric, and was a different model from the judge.
   const evalRuns = t.runner.calls.filter((r) => r.role === 'instruction-eval');
   const underTest = evalRuns.filter((r) => r.appendSystemPrompt);
-  assert.ok(underTest.length === 2 && underTest.every((r) => !/Reads the alert row first|Edits the ledger by hand/.test(r.prompt) && r.model === 'sonnet'));
+  assert.ok(underTest.length === 6 && underTest.every((r) => !/Reads the alert row first|Edits the ledger by hand/.test(r.prompt) && r.model === 'sonnet'));
   assert.ok(evalRuns.filter((r) => !r.appendSystemPrompt).every((r) => r.model === 'opus'));
+});
+
+const ROLE_PROMPT = (rule: string) => `You keep the ledger.\nOwn: the ledger stays right.\nSources: the alert row.\nOutput: a note.\nApproval: the owner's for any edit.\nFailure: If a source is missing, stale or contradictory, report it; never guess or fill from memory.\n- ${rule}\nNever: edit the ledger by hand.\n`;
+
+test('instruction evals: a role prompt is also judged on held-out cases a separate run wrote from its contract into the coordinator state; a held-out drop holds the PR', { skip }, async () => {
+  const t = await instructionsPr({ base: ROLE_PROMPT('Read the alert row first.'), head: ROLE_PROMPT('BAD: act first.'), file: join(BRAND.configDir, 'roles', 'worker.md'), casesFile: join(BRAND.configDir, 'evals', 'roles', 'worker.md') });
+  const e = lastOf(t.f.log, 'instructions.eval') as { target: string; held_out: { base: object; result: object; dropped: boolean } | null; samples: number };
+  assert.equal(e.target, 'role worker');
+  assert.equal(e.samples, 3);
+  assert.deepEqual([e.held_out?.base, e.held_out?.result, e.held_out?.dropped], [{ passed: 6, total: 6 }, { passed: 0, total: 6 }, true]);
+  // Written once, by a run that saw only the contract lines of the base prompt, into the coordinator's state.
+  const writer = t.runner.calls.filter((r) => r.role === 'instruction-eval' && 'cases' in ((r.jsonSchema as { properties: object }).properties ?? {}));
+  assert.equal(writer.length, 1);
+  assert.ok(!writer[0]!.appendSystemPrompt && !writer[0]!.prompt.includes('You keep the ledger.') && !writer[0]!.prompt.includes('Read the alert row first.'), 'no prompt text beyond the contract lines');
+  assert.match(writer[0]!.prompt, /Own: the ledger stays right\./);
+  const store = join(t.f.stateDir, 'evals', 'held-out', 'roles', 'worker.md');
+  assert.ok(existsSync(store), 'kept in the coordinator state, not the repo');
+  if (process.platform !== 'win32') assert.equal(statSync(store).mode & 0o777, 0o600);
+  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'eval-case-writer').length, 1);
+  assert.equal(t.decided.auto, false);
+  assert.ok(t.decided.reasons.some((r) => /scored lower on its held-out cases, 6\/6 → 0\/6/.test(r)), t.decided.reasons.join(' | '));
 });
 
 test('instruction evals: no drop, no reason: the change auto-merges', { skip }, async () => {

@@ -7,7 +7,7 @@ import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defaultRolePrompt } from '../src/roles.js';
-import { assertJudgeDiffers, compareInstructions, comparisonDiff, comparisonLine, engineRoleCases, evalInstructions, instructionTargets, parseCases, runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus, type Ask, type AskRequest } from '../src/skilleval.js';
+import { acceptJudgement, assertJudgeDiffers, assertNotPairwise, compareInstructions, comparisonDiff, comparisonLine, DEFAULT_SAMPLES, engineRoleCases, evalInstructions, instructionTargets, judgePrompt, parseCases, rubricOf, rubricSchema, runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus, type Ask, type AskRequest } from '../src/skilleval.js';
 import { FakeRunner } from '../src/runner.js';
 import { BRAND } from '../src/brand.js';
 import { createHash } from 'node:crypto';
@@ -80,7 +80,7 @@ test('skill eval: every model call goes through the given ask (the runner), the 
   const calls: AskRequest[] = [];
   const ask: Ask = async (req) => {
     calls.push(req);
-    return { structured: 'plan' in (req.schema as { properties: object }).properties ? { plan: 'read the alert row' } : { notes: '', correct: [true], wrong: [false] }, costUsd: 0.01 };
+    return { structured: 'plan' in (req.schema as { properties: object }).properties ? { plan: 'read the alert row' } : { '1': true, '2': false }, costUsd: 0.01 };
   };
   const r = await runSkillEval(dir, { model: 'sonnet', judge: 'opus', samples: 1, ask });
   assert.deepEqual([r.passed, r.total, r.judge], [1, 1, 'opus']);
@@ -105,7 +105,7 @@ const first = JSON.parse(${STDIN_LINE});
 const model = args[args.indexOf('--model') + 1];
 const schema = args[args.indexOf('--json-schema') + 1] || '';
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ model, input: first.type, streamJson: args.includes('--input-format') }) + '\\n');
-const structured = schema.includes('"plan"') ? { plan: 'read the alert row' } : { notes: '', correct: [true], wrong: [false] };
+const structured = schema.includes('"plan"') ? { plan: 'read the alert row' } : { '1': true, '2': false };
 console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', structured_output: structured, num_turns: 1, total_cost_usd: 0.02 }));
 `,
   );
@@ -154,7 +154,7 @@ function scripted(cost = 0.25) {
     assert.ok(existsSync(req.cwd), 'runs in its directory');
     if ('plan' in (req.schema as { properties: object }).properties) return { structured: { plan: req.system?.includes('BAD') ? 'edit the ledger' : 'read the row; write a note' }, costUsd: cost };
     const good = /<plan>\nread the row/.test(req.prompt);
-    return { structured: { notes: '', correct: [good], wrong: [!good] }, costUsd: cost };
+    return { structured: { '1': good, '2': !good }, costUsd: cost };
   };
   return { ask, calls };
 }
@@ -174,7 +174,8 @@ test('instruction eval: the agent under test sees its instructions and the situa
     assert.doesNotMatch(basename(c.cwd), /eval|skill|test|judge/i, 'neutral directory name');
     assert.ok(!existsSync(c.cwd), 'directory removed afterwards');
   }
-  assert.ok(judged.every((c) => c.system === undefined && /CORRECT[\s\S]*WRONG/.test(c.prompt)), 'only the judge gets the rubric');
+  assert.ok(judged.every((c) => c.system === undefined && /Rubric \(does the plan \.\.\.\?\):\n1\. .+\n2\. /.test(c.prompt)), 'only the judge gets the rubric');
+  assert.match(judged[0]!.prompt, /1\. Reads the alert's row through the sanctioned read path\.\n2\. Edits the ledger by hand\./);
   assert.equal(r.costUsd, 1);
 });
 
@@ -192,13 +193,13 @@ test('instruction eval: the cost cap stops it; the rest is "not run", and a call
 });
 
 test('instruction eval: base vs head; a case that passed at the base and fails at the head is a drop, with the per-case diff', async () => {
-  const worse = await compareInstructions({ target: 'skill triage', baseText: 'old rules', headText: 'new BAD rules', cases: CASES, model: 'sonnet', judge: 'opus', capUsd: 5, ask: scripted().ask });
-  assert.deepEqual([worse.base, worse.head, worse.dropped, worse.incomplete], [{ passed: 2, total: 2 }, { passed: 0, total: 2 }, true, false]);
-  assert.deepEqual(comparisonDiff(worse), ['case 1 "Alert": pass → fail', 'case 2 "Handoff": pass → fail']);
-  assert.match(comparisonLine(worse), /^skill triage: 2\/2 → 0\/2 \(~\$2\.00, the CLI's estimate\)$/);
-  const same = await compareInstructions({ target: 't', baseText: 'old', headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', capUsd: 5, ask: scripted().ask });
+  const worse = await compareInstructions({ target: 'skill triage', baseText: 'old rules', headText: 'new BAD rules', cases: CASES, model: 'sonnet', judge: 'opus', samples: 1, capUsd: 5, ask: scripted().ask });
+  assert.deepEqual([worse.base, worse.head, worse.dropped, worse.incomplete], [{ passed: 4, total: 4 }, { passed: 0, total: 4 }, true, false], 'scores are rubric items met');
+  assert.deepEqual(comparisonDiff(worse), ['visible case 1 "Alert": pass → fail', 'visible case 2 "Handoff": pass → fail']);
+  assert.match(comparisonLine(worse), /^skill triage: visible 4\/4 → 0\/4 \(lower\); held-out: no cases; 1 sample\(s\) per case \(below the default 3, asked for explicitly\) \(~\$2\.00, the CLI's estimate\); does not pass$/);
+  const same = await compareInstructions({ target: 't', baseText: 'old', headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', samples: 1, capUsd: 5, ask: scripted().ask });
   assert.equal(same.dropped, false);
-  const fresh = await compareInstructions({ target: 't', baseText: null, headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', capUsd: 5, ask: scripted().ask });
+  const fresh = await compareInstructions({ target: 't', baseText: null, headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', samples: 1, capUsd: 5, ask: scripted().ask });
   assert.deepEqual([fresh.base, fresh.dropped, fresh.changes.map((c) => c.base)], [null, false, ['new', 'new']]);
   const capped = await compareInstructions({ target: 't', baseText: 'old', headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', capUsd: 1, ask: scripted().ask });
   assert.equal(capped.incomplete, true, 'one cap across base and head');
@@ -243,4 +244,60 @@ test('runnerAsk: through the runner like any run, with no tools, its cost report
   assert.deepEqual(costs, [0.4]);
   const failing = new FakeRunner(() => ({ reason: 'failed', detail: 'boom' }));
   await assert.rejects(runnerAsk(failing, () => {})({ prompt: 'P', model: 'm', schema: {}, cwd: '/tmp', maxBudgetUsd: 1 }), /eval run failed: boom/);
+});
+
+// ---- judging: fixed yes/no rubric items only (#180)
+
+test('judge: a case\'s rubric is its CORRECT items (met on yes) then its WRONG items (met on no), text unchanged', () => {
+  assert.deepEqual(rubricOf(CASES[0]!), [
+    { text: "Reads the alert's row through the sanctioned read path.", want: true },
+    { text: 'Edits the ledger by hand.', want: false },
+  ]);
+});
+
+test('judge: its schema allows only yes/no per rubric item, and an answer with anything else is refused', () => {
+  assert.deepEqual(rubricSchema(2), { type: 'object', additionalProperties: false, required: ['1', '2'], properties: { '1': { type: 'boolean' }, '2': { type: 'boolean' } } });
+  assert.deepEqual(acceptJudgement({ '1': true, '2': false }, 2), [true, false]);
+  for (const bad of [{ '1': true }, { '1': true, '2': 'yes' }, { '1': true, '2': false, notes: 'because' }, { '1': true, '2': false, '3': true }, { better: 'A' }, [true, false], null, 'yes'])
+    assert.throws(() => acceptJudgement(bad, 2), /yes\/no/, JSON.stringify(bad));
+});
+
+test('judge: a pairwise item or prompt is refused before anything is asked; the judge sees one plan only', async () => {
+  for (const pairwise of ['Is better than the other plan.', 'Which plan reads the row first?', 'Compared to plan B, it writes a note.', 'Prefers the plan that edits less.']) assert.throws(() => assertNotPairwise(pairwise), /compares/, pairwise);
+  assert.doesNotThrow(() => assertNotPairwise('Reads the alert row before anything else.'));
+  for (const fine of ['Reports both, says they disagree, and prefers the primary source.', 'Says which test fails and why.', 'Compares the two versions of the library it found.'])
+    assert.doesNotThrow(() => assertNotPairwise(fine), fine);
+  for (const md of ['researcher', 'investigator', 'worker', 'evaluator-verdict', 'evaluator-repro', 'planner', 'chief_of_staff', 'intake'])
+    for (const c of parseCases(engineRoleCases(md) ?? '')) for (const item of rubricOf(c)) assert.doesNotThrow(() => assertNotPairwise(item.text), `${md}: ${item.text}`);
+  const p = judgePrompt(CASES[0]!, 'read the row');
+  assert.equal((p.match(/<plan>/g) ?? []).length, 1);
+  assert.match(p, /one yes\/no question per rubric item/);
+  const pairwiseCase = parseCases('## 1. A\n**Situation**\n- x happens.\n\n**Correct**\n- Is better than the other plan.\n\n**Wrong**\n- Edits the ledger.\n');
+  const calls: AskRequest[] = [];
+  const ask: Ask = async (req) => (calls.push(req), { structured: { plan: 'p' }, costUsd: 0 });
+  await assert.rejects(evalInstructions({ instructions: 'x', cases: pairwiseCase, model: 'sonnet', judge: 'opus', ask, spend: { usd: 0, cap: 5 } }), /compares/);
+  assert.ok(!calls.some((c) => c.model === 'opus'), 'no judge call was made');
+});
+
+test('judge: the score is rubric items met, each by a strict majority of samples', async () => {
+  let n = 0;
+  // Three samples: the WRONG item is met twice of three, the CORRECT one once of three.
+  const ask: Ask = async (req) => {
+    if ('plan' in (req.schema as { properties: object }).properties) return { structured: { plan: 'p' }, costUsd: 0 };
+    n++;
+    return { structured: { '1': n === 1, '2': n === 1 }, costUsd: 0 };
+  };
+  const r = await evalInstructions({ instructions: 'x', cases: CASES.slice(0, 1), model: 'sonnet', judge: 'opus', samples: 3, ask, spend: { usd: 0, cap: 5 } });
+  assert.deepEqual(r.items, { met: 1, total: 2 });
+});
+
+test('comparisons default to 3 samples per case; a lower number is reported as asked for', async () => {
+  assert.equal(DEFAULT_SAMPLES, 3);
+  const s = scripted(0.01);
+  const c = await compareInstructions({ target: 't', baseText: 'old', headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', capUsd: 5, ask: s.ask });
+  assert.equal(c.samples, 3);
+  assert.equal(s.calls.length, 2 * 2 * 3 * 2, 'two cases, base and head, three samples, a plan and a judgement each');
+  assert.doesNotMatch(comparisonLine(c), /below the default/);
+  const one = await compareInstructions({ target: 't', baseText: 'old', headText: 'new', cases: CASES, model: 'sonnet', judge: 'opus', samples: 1, capUsd: 5, ask: scripted(0.01).ask });
+  assert.match(comparisonLine(one), /1 sample\(s\) per case \(below the default 3, asked for explicitly\)/);
 });

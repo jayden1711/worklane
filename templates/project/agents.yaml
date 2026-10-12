@@ -8,10 +8,13 @@ roles:
   ci_repair: { enabled: false, model: sonnet, max_fixes_per_pr: 2 }
 # A change to the agents' own instructions (.claude/skills/**, AGENTS.md, roles/*.md here) is
 # evaluated before it lands: its eval cases (a skill's evals/cases.md; evals/AGENTS.md and
-# evals/roles/<role>.md in this folder) at the base and at the head. A lower score, a cap hit
-# or no cases: the PR waits for you, with the per-case diff. The judge is never the model
-# under test (defaults: the workers' model under test, the evaluator's as judge).
-instruction_evals: { enabled: true, cap_usd: 5, samples: 1 }
+# evals/roles/<role>.md in this folder) at the base and at the head, 3 samples per case. A role
+# is also judged on its held-out cases (written from its contract by a separate agent, kept in
+# the coordinator's state where no agent reads them), and that score decides. A lower score, a
+# cap hit, no cases or no held-out cases: the PR waits for you, with the per-case diff. The
+# judge answers yes/no per rubric item and is never the model under test (defaults: the
+# workers' model under test, the evaluator's as judge).
+instruction_evals: { enabled: true, cap_usd: 10, samples: 3 }
 # Tiered evaluation, decided in code: changes at cheap_levels (L0: docs-only, tests-only, comment-only) are
 # judged by cheap_model, the rest by the evaluator's model; a failed or uncertain cheap verdict is judged once
 # more by the evaluator's model. An instance can override it in policy.yaml settings.eval_routing.
