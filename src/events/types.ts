@@ -237,6 +237,8 @@ export const EventSchemas = {
   'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
   'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable() }),
+  /** The daily "waiting on you" digest was posted (`items` waiting, `merged` on their own since the last one). */
+  'digest.posted': z.strictObject({ day: z.string(), issue: z.number().int(), items: z.number().int().nonnegative(), merged: z.number().int().nonnegative() }),
   'emergency.stop': z.strictObject({ by: z.string(), reason: z.string(), running: z.number().int() }),
   'emergency.resume': z.strictObject({ instance: z.string() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
