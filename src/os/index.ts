@@ -660,3 +660,45 @@ export function replaceFileAtomically(path: string, data: string, mode: number):
 export function cpuCount(): number {
   return availableParallelism();
 }
+
+/**
+ * Whether another process holds a flock(2) lock on `path`, without taking it (a lock file another workload, such as
+ * a simulator, holds while it runs; such files usually always exist, so existence says nothing). Linux: the file's
+ * device and inode against the FLOCK entries of /proc/locks (waiters, "->", don't hold). macOS: a non-blocking
+ * shared try-lock on the file opened read-only, released at once (a holder of an exclusive lock refuses it; a
+ * simulator's `flock -w` at worst waits microseconds). Windows: never held. Null when it can't tell: the caller
+ * treats that as held, so it never contends.
+ */
+export function flockHeld(path: string): boolean | null {
+  if (!existsSync(path)) return false;
+  if (process.platform === 'win32') return false;
+  if (process.platform === 'linux') {
+    let locks: string;
+    let dev: bigint;
+    let ino: bigint;
+    try {
+      locks = readFileSync('/proc/locks', 'utf8');
+      const st = statSync(path, { bigint: true });
+      dev = st.dev;
+      ino = st.ino;
+    } catch {
+      return null;
+    }
+    // glibc's major/minor of a dev_t.
+    const major = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & ~0xfffn);
+    const minor = (dev & 0xffn) | ((dev >> 12n) & ~0xffn);
+    for (const line of locks.split('\n')) {
+      const f = line.trim().split(/\s+/);
+      if (f[1] !== 'FLOCK') continue;
+      const id = /^([0-9a-f]+):([0-9a-f]+):(\d+)$/i.exec(f[5] ?? '');
+      if (id && BigInt(`0x${id[1]}`) === major && BigInt(`0x${id[2]}`) === minor && BigInt(id[3]!) === ino) return true;
+    }
+    return false;
+  }
+  try {
+    execFileSync('perl', ['-e', 'use Fcntl qw(:flock); open(my $f, "<", $ARGV[0]) or exit 2; exit(flock($f, LOCK_SH | LOCK_NB) ? 0 : 1)', path], { stdio: 'ignore', timeout: 5000 });
+    return false;
+  } catch (e) {
+    return (e as { status?: number }).status === 1 ? true : null;
+  }
+}

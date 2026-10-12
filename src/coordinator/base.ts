@@ -25,6 +25,8 @@ import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
 import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted } from './shared.js';
 import { cappedModel } from './model-routing.js';
+import { resolveProvider } from './providers.js';
+import { providerCost, providerOf } from '../providers.js';
 
 export abstract class CoordinatorBase {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -94,8 +96,12 @@ export abstract class CoordinatorBase {
       runner: {
         run: async (asked) => {
           if (this.halt.signal.aborted) throw new Halted();
-          // The instance's model cap holds for every run, whatever chose its model.
-          const req = { ...asked, model: cappedModel(asked.model, this.d.settings?.().settings) };
+          // A model that names an open-model provider goes to it, or to its fallback (recorded); then the instance's
+          // model cap holds for every run on an Anthropic model, whatever chose it.
+          const settings = this.d.settings?.().settings ?? {};
+          const routed = await resolveProvider(asked, { cfg: this.d.cfg, settings, stateDir: this.d.stateDir, ...(this.d.providerKeys ? { providerKeys: this.d.providerKeys } : {}) });
+          if (routed.fellBack) this.emit('provider.fallback', { issue: asked.issue ?? runIssue(asked.cwd, asked.taskFile), role: asked.role, provider: routed.fellBack.provider, reason: routed.fellBack.reason.slice(0, 500), model: routed.req.model });
+          const req = routed.req.provider ? routed.req : { ...routed.req, model: cappedModel(routed.req.model, settings) };
           // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
           const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
           // The console holds every live run's input: listed for the dashboard while it runs.
@@ -327,8 +333,27 @@ export abstract class CoordinatorBase {
     }
   }
 
-  protected cost(issue: number, role: string, r: RunResult) {
-    this.emit('run.cost', { issue, role, model: r.model, usd: r.costUsd, turns: r.turns });
+  protected cost(issue: number | null, role: string, r: RunResult) {
+    this.emit('run.cost', { issue, role, ...this.usage(r) });
+  }
+
+  /**
+   * A run's usage for run.cost: its model, turns, tokens and seconds, and its estimated cost. On an open-model
+   * provider that is the provider's price (src/providers.ts): local runs cost nothing, a hosted one without prices
+   * configured counts as 0 and says which provider it was.
+   */
+  protected usage(r: RunResult): { model: string; usd: number; turns: number; provider?: string; tokens_in?: number; tokens_out?: number; secs?: number } {
+    const named = r.provider ? providerOf(r.provider) : null;
+    const p = named ? (named.kind === 'local' ? this.d.cfg.agents.providers?.local : this.d.cfg.agents.providers?.hosted?.[named.name]) : undefined;
+    const usd = named ? (providerCost(named.kind, p ?? {}, r.tokens ?? { in: 0, out: 0 }) ?? 0) : r.costUsd;
+    return {
+      model: r.model,
+      usd,
+      turns: r.turns,
+      ...(r.provider ? { provider: r.provider } : {}),
+      ...(r.tokens ? { tokens_in: r.tokens.in, tokens_out: r.tokens.out } : {}),
+      ...(r.durationMs !== undefined ? { secs: Math.round(r.durationMs / 100) / 10 } : {}),
+    };
   }
 
   protected ownerOf(issue: number): string {

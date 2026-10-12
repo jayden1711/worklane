@@ -71,6 +71,16 @@ export const InstanceSettings = z.strictObject({
     .optional(),
   /** Caps every model this instance runs at a tier (src/model-routing.ts): a model above it runs as the cap instead. */
   model_cap: z.enum(['haiku', 'sonnet', 'opus']).optional(),
+  /**
+   * Open-model providers this instance opts into (agents.yaml providers): the local model, and hosted providers by
+   * name. Absent: none; every role keeps its normal model.
+   */
+  providers: z
+    .strictObject({
+      local: z.boolean().optional(),
+      hosted: z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,40}$/)).optional(),
+    })
+    .optional(),
   /** Tiered evaluation for this instance (agents.yaml eval_routing): the cheap model, its levels, escalation. */
   eval_routing: z
     .strictObject({
@@ -149,6 +159,12 @@ export const CredentialsFile = z.strictObject({
    * apiKeyHelper as the agent user. The coordinator can't read it, and no agent command may (the sandbox denies it).
    */
   agent_api_key: path.optional(),
+  /**
+   * Open-model providers' keys (agents.yaml providers, by credential name): each a file owned by the agent user, 0400,
+   * installed with credentials.sh <name> provider-key. claude reads it through apiKeyHelper as the agent user; it is
+   * never in an environment, the coordinator can't read it, and no agent command may (the sandbox denies it).
+   */
+  provider_keys: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/), path).optional(),
   /**
    * Work intake's credential: the chat bot's token, a file only the coordinator user can read (0400), installed
    * with credentials.sh. No agent can read it.
@@ -344,7 +360,7 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
     const runAs: RunAs | undefined = who ? { ...who } : undefined;
     const home = runAs?.home ?? process.env.HOME ?? '';
     const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude!.config_dir);
-    const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key]), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : [])];
+    const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key]), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : []), ...Object.values(i.credentials.provider_keys ?? {})];
     out[name] = { ...(runAs ? { runAs } : {}), ...(i.policy.sandbox ? { settings: sandboxSettings({ lane: { allowedDomains: lane.allowed_domains }, denyRead }) } : {}) };
   }
   return out;
@@ -370,7 +386,7 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
   const runAs = base?.runAs;
   const home = runAs?.home ?? process.env.HOME ?? '';
   const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude?.config_dir ?? join(home, '.claude'));
-  const always = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(i.credentials.eval_key ? [i.credentials.eval_key] : []), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : [])];
+  const always = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(i.credentials.eval_key ? [i.credentials.eval_key] : []), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : []), ...Object.values(i.credentials.provider_keys ?? {})];
   const noRepo = [...always, i.repo.path, join(root, 'tasks'), join(root, 'chat')];
   const settingsFor = (denyRead: string[], hook: boolean): ResearchLaneSettings => {
     const s = sandboxSettings({ lane: { allowedDomains: [] }, denyRead });

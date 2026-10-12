@@ -7,7 +7,7 @@ import { type RunControl } from '../runner.js';
 import { researchCaps, researchRepoAccess } from '../settings.js';
 import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchUsageToday, writeResearchBundle, type ResearchResult, type ResearchStep } from '../research.js';
 import { CoordinatorBase } from './base.js';
-import { routeRun } from './model-routing.js';
+import { runRoute } from './model-routing.js';
 
 export abstract class ResearchRuns extends CoordinatorBase {
   /**
@@ -46,7 +46,7 @@ export abstract class ResearchRuns extends CoordinatorBase {
       : writeResearchBundle({ instanceRoot: dirname(this.d.repo), gid: this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, run: `issue-${n}-${Date.now().toString(36)}`, issue: { number: n, title: issue.title, body: issue.body }, questions, blocklist });
     const spec = researchRun({ questions, blocklist, repoAccess, ...(bundleDir ? { bundleDir } : { worktree: path }) });
     const role = this.d.cfg.agents.roles.researcher ?? this.d.cfg.agents.roles.workers!;
-    const model = routeRun(this.d.cfg, 'research');
+    const { model, route } = runRoute(this.d.cfg, 'research');
     const meter = new ResearchMeter(usage, caps, blocklist);
     let control: RunControl | null = null;
     let runRef: string | null = null;
@@ -56,6 +56,7 @@ export abstract class ResearchRuns extends CoordinatorBase {
       stateDir: this.d.stateDir,
       issue: n,
       model,
+      route,
       maxTurns: 60,
       maxBudgetUsd: Math.max(0.1, Math.min(role.budget_usd ?? caps.max_usd_per_day, caps.max_usd_per_day - usage.usd)),
       stallMs: 20 * 60_000,

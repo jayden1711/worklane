@@ -49,6 +49,8 @@ export interface CoordinatorDeps {
   autoMerge?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
   settings?: () => { settings: InstanceSettings; error: string | null };
+  /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
+  providerKeys?: Record<string, string>;
   /** The clock (tests). */
   now?: () => Date;
   /** Nightly queuing (tests inject this). */

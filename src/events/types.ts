@@ -142,7 +142,10 @@ export const EventSchemas = {
   'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
-  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
+  /** `provider`: the open-model provider it ran on (local runs cost 0); tokens and seconds, when claude reported them. */
+  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative(), provider: z.string().optional(), tokens_in: z.number().int().nonnegative().optional(), tokens_out: z.number().int().nonnegative().optional(), secs: z.number().nonnegative().optional() }),
+  /** A run meant for an open-model provider ran on its normal model instead, and why (not opted in, no passing eval, down, slow, the GPU lock held, refused for the work). */
+  'provider.fallback': z.strictObject({ issue: issue.nullable(), role: z.string(), provider: z.string(), reason: z.string(), model: z.string() }),
   /**
    * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
    * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.

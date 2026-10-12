@@ -42,7 +42,8 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './wor
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
-import { routeBuild, routeRun } from './coordinator/model-routing.js';
+import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
+import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { Gardener } from './coordinator/gardener.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
@@ -55,7 +56,7 @@ export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
 
 /** What one worker build ends in: stop the task, or go on to inspect its change. */
-type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string };
+type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string; provider?: string };
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
@@ -179,7 +180,7 @@ export class Coordinator extends Gardener {
         until: now,
         instance: this.d.instance,
         runner: this.d.runner,
-        model: routeRun(this.d.cfg, 'stage_judge'),
+        ...(({ model, route }) => ({ model, route }))(runRoute(this.d.cfg, 'stage_judge')),
         // The judge has no tools: it reads only what the prompt carries, wherever it runs.
         cwd: this.d.repo,
         doneWhenOf: async (n) => {
@@ -532,9 +533,11 @@ export class Coordinator extends Gardener {
       // instead of starting again from 1.
       const used = this.attemptsUsed(n);
       if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
+      // Once a hosted model's change is refused, the task's later attempts run on Anthropic.
+      let noOpenModel = false;
       for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
-        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
+        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan, 0, noOpenModel);
         if (out.stop) return;
         // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
         if (out.stuck) {
@@ -554,6 +557,16 @@ export class Coordinator extends Gardener {
         }
         const change = await this.inspect(n, path, base, head, repro);
         refused = 'rejected' in change ? (change.refused ?? null) : null;
+        // A hosted open model never builds L3, money-path or agent-instructions work: such a change is refused, and the
+        // task goes on with the next attempt on the build's Anthropic model.
+        const hostedWhy = !('rejected' in change) && out.provider?.startsWith('hosted:') ? hostedChangeRefusal({ files: change.files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW }) : null;
+        if (hostedWhy) {
+          noOpenModel = true;
+          this.emit('provider.fallback', { issue: n, role: 'worker', provider: out.provider!, reason: hostedWhy, model: buildRoute(this.d.cfg, issue.labels, attempt + 1, true).model });
+          this.emit('change.rejected', { issue: n, why: hostedWhy });
+          feedback = [`Your previous attempt was rejected: ${hostedWhy}. It is being redone on the harness's own model.`];
+          continue;
+        }
         if ('rejected' in change) {
           this.emit('change.rejected', { issue: n, why: change.rejected });
           feedback = [`Your previous attempt was rejected: ${change.rejected}`];
@@ -609,8 +622,8 @@ export class Coordinator extends Gardener {
   private async investigate(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, base: string, owner: string) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
-    // Routed like a build (src/model-routing.ts): the high-risk model for a high-risk issue.
-    const { model } = routeBuild(this.d.cfg, issue.labels);
+    // Routed like a build (src/model-routing.ts): the high-risk model for a high-risk issue; never an open model.
+    const { model } = buildRoute(this.d.cfg, issue.labels, 1, true);
     const r = await this.d.runner.run({
       env: this.projectEnv(),
       role: 'investigator',
@@ -705,12 +718,12 @@ export class Coordinator extends Gardener {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0): Promise<BuildOut> {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0, noOpenModel = false): Promise<BuildOut> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
     // Routed (src/model-routing.ts): the high-risk model for an L3 or high-risk issue, or once `escalate_after`
-    // attempts have failed; the build model otherwise.
-    const { model } = routeBuild(this.d.cfg, issue.labels, attempt);
+    // attempts have failed; the build model otherwise (an open model only on the default route, src/providers.ts).
+    const { model, route } = buildRoute(this.d.cfg, issue.labels, attempt, noOpenModel);
     const remaining = Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday());
     const { runner, checks } = this.d.cfg.tests;
     const extra = [
@@ -733,6 +746,7 @@ export class Coordinator extends Gardener {
       appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
       cwd: path,
       model,
+      route,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 200,
       maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining),
@@ -777,7 +791,7 @@ export class Coordinator extends Gardener {
     // attempt resumes with the answer (or why there is none) in its brief. Past the limit, its output stands as is.
     if (s.research_request && researched < MAX_REQUESTS_PER_TASK) {
       const section = await this.answerResearch(issue, s.research_request, path, 'worker');
-      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1);
+      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1, noOpenModel);
     }
     if (s.ask) {
       await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '']);
@@ -789,7 +803,7 @@ export class Coordinator extends Gardener {
     }
     // What the worker says it verified: checked against the record at evaluation, listed in the PR's receipts.
     this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? '') });
-    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}) };
+    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}), ...(r.provider ? { provider: r.provider } : {}) };
   }
 
   /**

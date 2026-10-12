@@ -17,8 +17,8 @@ import { tryAgentSlot } from '../slots.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
+import { buildRoute } from './model-routing.js';
 import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
-import { routeBuild } from './model-routing.js';
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -441,7 +441,7 @@ export abstract class FixRuns extends Landing {
   private async conflictAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, brief: string, attempt: number): Promise<{ summary: string } | { ended: string }> {
     const n = issue.number;
     const workers = this.d.cfg.agents.roles.workers!;
-    const fixModel = routeBuild(this.d.cfg, issue.labels).model;
+    const fixModel = buildRoute(this.d.cfg, issue.labels, 1, true).model;
     const extra = [
       `Conflict fix ${attempt} for this issue's pull request (${pr.url}, branch ${pr.head}).`,
       brief,
