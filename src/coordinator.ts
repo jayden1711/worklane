@@ -38,7 +38,7 @@ import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
-import { browserChecks, changedAt } from './coordinator/browser.js';
+import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 
@@ -863,6 +863,9 @@ export class Coordinator extends MergeFlow {
     return { files, tampered, patchHash };
   }
 
+  /** Browser baselines per (base, flow), kept across a task's attempts (src/coordinator/browser.ts). */
+  private readonly browserBaselines = new Map<string, BaselineRun>();
+
   /** The coordinator's own run of the contract: it never trusts the agent's word. */
   protected async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
     const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number; kind?: 'browser' }[] = [];
@@ -903,7 +906,13 @@ export class Coordinator extends MergeFlow {
         checks.push({ check: `done_when ${JSON.stringify(unknown).slice(0, 200)}`, status: 'fail', exitCode: null, tail: 'unknown done_when kind: the coordinator has no way to check it' });
       }
     }
-    const browser = await browserChecks({ app: this.d.cfg.app, doneWhen, changed: changedAt(this.events(n), head), cwd: path, outDir: join(this.d.stateDir, 'browser', `issue-${n}`, head.slice(0, 12)), ...(this.d.commandsAs ? { runAs: this.d.commandsAs } : {}) });
+    // Browser checks (src/coordinator/browser.ts), each flow judged against its run at the change's base.
+    const change = changeAt(this.events(n), head);
+    const out = join(this.d.stateDir, 'browser', `issue-${n}`);
+    const runAs = this.d.commandsAs ? { runAs: this.d.commandsAs } : {};
+    const app = this.d.cfg.app;
+    const baseline = change && app ? (chrome: string) => worktreeBaseline({ wt: this.wt, name: `issue-${n}-browser-base`, base: change.base, app, cache: this.browserBaselines, outDir: join(out, `base-${change.base.slice(0, 12)}`), chrome, ...runAs }) : undefined;
+    const browser = await browserChecks({ app, doneWhen, changed: change?.files ?? [], cwd: path, outDir: join(out, head.slice(0, 12)), ...(baseline ? { baseline } : {}), ...runAs });
     checks.push(...browser.checks);
     if (browser.lines.length) this.emit('browser.evidence', { issue: n, head, lines: browser.lines });
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));

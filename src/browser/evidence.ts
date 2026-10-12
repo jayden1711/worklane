@@ -28,19 +28,24 @@ function listed<T>(label: string, items: T[], line: (x: T) => string): string[] 
   return [`  - ${label}:`, ...items.slice(0, LIST_MAX).map((x) => `    - ${line(x)}`), ...(items.length > LIST_MAX ? [`    - and ${items.length - LIST_MAX} more`] : [])];
 }
 
-/** The PR description's browser section. `before` is the same flow's reproduction run, for a UI fix. */
-export function browserEvidenceLines(o: { gate: BrowserGate; runs: { result: BrowserCheckResult; before?: FlowEvidence | null }[] }): string[] {
+/**
+ * The PR description's browser section. `before` is the same flow run at `base` (the commit the change is measured
+ * against); `baselineUnavailable` says why there is none, so the reader knows every error was counted as new.
+ */
+export function browserEvidenceLines(o: { gate: BrowserGate; runs: { result: BrowserCheckResult; before?: FlowEvidence | null; base?: string; baselineUnavailable?: string }[] }): string[] {
   const out = ['### BROWSER CHECKS', `- Why: ${plain(o.gate.reason, 300)}`];
   if (o.gate.uiFiles.length) out.push(`- UI files touched: ${o.gate.uiFiles.map((f) => `\`${plain(f, 120)}\``).join(', ')}`);
   if (!o.gate.flows.length) return out;
-  for (const { result: r, before } of o.runs) {
+  for (const { result: r, before, base, baselineUnavailable } of o.runs) {
     out.push(`- \`${plain(r.check, 80)}\`: ${r.status}`);
+    const at = base ? ` (base \`${plain(base, 40).slice(0, 12)}\`)` : '';
+    if (baselineUnavailable) out.push(`  - no baseline${at}: ${quoted(baselineUnavailable, 300)}, so every error was counted as new`);
     const ev = r.evidence;
     if (!ev) {
       out.push(`  - ${quoted(r.tail, 300)}`);
       continue;
     }
-    if (before) out.push(`  - before the change: ${evidenceSummary(before)}`, `  - after the change: ${evidenceSummary(ev)}`);
+    if (before) out.push(`  - before the change${at}: ${evidenceSummary(before)}`, `  - after the change: ${evidenceSummary(ev)}`);
     else out.push(`  - ${evidenceSummary(ev)}`);
     for (const reason of r.verdict?.reasons ?? []) out.push(`  - failed: ${quoted(reason, 300)}`);
     out.push(
