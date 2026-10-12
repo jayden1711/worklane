@@ -15,7 +15,7 @@ import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
 import { sh, evalLines, pushRefusal } from './shared.js';
-import { DEFER_CAP, slotDeferrals } from './wait-caps.js';
+import { slotDeferringSince } from './wait-caps.js';
 
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
@@ -171,15 +171,21 @@ export abstract class Landing extends Decisions {
       if (!gates.ok) {
         if (gates.deferred) {
           for (const q of applied) {
-            // Capped: a slot held pass after pass (a wedged run, a leaked lock) goes to the owner instead of waiting for ever.
-            const since = this.d.log.read(0, ['land.queued']).filter((e) => (e.payload as { issue: number }).issue === q.issue).at(-1)?.id ?? 0;
-            const prior = this.d.log.read(since, ['land.result']).map((e) => e.payload as EventPayload<'land.result'>).filter((r) => r.issue === q.issue);
-            const passes = slotDeferrals([...prior, { outcome: 'deferred', detail: gates.note }]);
-            if (passes < DEFER_CAP) {
+            // Capped by time: a slot held past the timeout (a wedged run, a leaked lock) goes to the owner instead of
+            // waiting for ever; a long full run that ends within it just delays the land.
+            const queuedAt = this.d.log.read(0, ['land.queued']).filter((e) => (e.payload as { issue: number }).issue === q.issue).at(-1)?.id ?? 0;
+            const prior = this.d.log
+              .read(queuedAt, ['land.result'])
+              .filter((e) => (e.payload as EventPayload<'land.result'>).issue === q.issue)
+              .map((e) => ({ ...(e.payload as EventPayload<'land.result'>), at: Date.parse(e.ts) }));
+            const now = Date.now();
+            const since = slotDeferringSince([...prior, { outcome: 'deferred', detail: gates.note, at: now }])!;
+            const timeoutMin = this.d.cfg.tests.land.defer_timeout_minutes;
+            if (now - since < timeoutMin * 60_000) {
               result(q.issue, 'deferred', null, gates.note);
               continue;
             }
-            const why = `deferred ${passes} times in a row, every time because ${gates.note.replace(/; deferred$/, '')}`;
+            const why = `deferred for ${Math.round((now - since) / 60_000)} min (tests.yaml land.defer_timeout_minutes: ${timeoutMin}), every time because ${gates.note.replace(/; deferred$/, '')}`;
             result(q.issue, 'error', null, why);
             this.emit('wait.capped', { issue: q.issue, number: null, kind: 'deferred_landing', detail: why.slice(0, 1000) });
             await this.block(q.issue, ownerOf(q.issue), `landing ${why}. Label it \`ready\` again once the slot is free.`);

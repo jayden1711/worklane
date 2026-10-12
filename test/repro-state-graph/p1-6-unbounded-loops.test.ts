@@ -11,7 +11,7 @@ import { approve, commitAll, conflictOnMain, coordinator, easyIssue, fixture, gr
 /** Treat every PR as due on the next pass (time passing between polls). */
 const pollNow = (t: OpenPr) => (t.c as unknown as { prPolled: Map<number, number> }).prPolled.clear();
 
-test('deferred landing: a land deferred on every pass (the full-run slot is held) gives up at some point', { skip }, async () => {
+test('deferred landing: a land deferred on every pass (the full-run slot is held) gives up once the wait passes the timeout, not after a number of passes', { skip }, async (tt) => {
   const f = fixture();
   f.cfg.tests.gates.land = ['full'];
   f.cfg.tests.runner.full = 'node --test --test-reporter=spec';
@@ -30,14 +30,26 @@ test('deferred landing: a land deferred on every pass (the full-run slot is held
   // Another session holds the machine-wide full-run slot for good (a wedged run, a leaked lock).
   const held = await fullRunLock('a wedged session', 1000, f.slotsDir);
   assert.ok('lock' in held);
+  const outcomes = () => f.log.read(0, ['land.result']).map((e) => (e.payload as { outcome: string }).outcome);
+  const gaveUp = () => f.log.read(0, ['issue.blocked']).some((e) => (e.payload as { issue: number }).issue === n) || outcomes().some((o) => o !== 'deferred');
   try {
+    // Passes within the timeout (a long full run in progress): deferred, however many.
     for (let i = 0; i < 4; i++) await c.tick(); // each waits 5 s for the slot
+    assert.ok(!gaveUp(), `within the timeout the land only waits; got ${JSON.stringify(outcomes())}`);
+    // Past the default timeout (3 h) since the first deferral. Only Date is mocked (timers are real), and it keeps
+    // moving, so the slot wait's own deadline still comes.
+    tt.mock.timers.enable({ apis: ['Date'], now: Date.now() + 3 * 3600_000 + 60_000 });
+    const clock = setInterval(() => tt.mock.timers.tick(250), 50);
+    try {
+      await c.tick();
+    } finally {
+      clearInterval(clock);
+      tt.mock.timers.reset();
+    }
   } finally {
     held.lock.release();
   }
-  const outcomes = f.log.read(0, ['land.result']).map((e) => (e.payload as { outcome: string }).outcome);
-  const gaveUp = f.log.read(0, ['issue.blocked']).some((e) => (e.payload as { issue: number }).issue === n) || outcomes.some((o) => o !== 'deferred');
-  assert.ok(gaveUp, `a land deferred on every pass is eventually given up and recorded; after 4 passes: land.result outcomes ${JSON.stringify(outcomes)}, no issue.blocked`);
+  assert.ok(gaveUp(), `a land deferred past the timeout is given up and recorded; land.result outcomes ${JSON.stringify(outcomes())}, no issue.blocked`);
 });
 
 test('mergeable recheck: a PR GitHub reports as still computing on every poll is decided at some point', { skip }, async () => {
