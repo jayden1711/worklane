@@ -13,6 +13,8 @@ import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
 import { computeLevel } from './review.js';
 import { defaultRolePrompt } from './roles.js';
+import { redactString } from './events/redact.js';
+import type { EventPayload, StoredEvent } from './events/types.js';
 
 /** Labels that ask for a plan before building. */
 export const PLAN_LABELS = ['size:M', 'size:L'];
@@ -73,6 +75,28 @@ export function readPlan(s: unknown): Plan | { invalid: string } {
 export function planExtra(): string[] {
   // The planner's instructions: kept with the other roles (src/roles.ts), where the instruction evals reach them.
   return [defaultRolePrompt('planner')];
+}
+
+/**
+ * The decisions already made on this project, for the planner's brief: each question with its first recorded
+ * answer (the one that stands), the newest `max`, redacted. What they settle, the planner doesn't ask again.
+ */
+export function decisionsMade(events: readonly StoredEvent[], max = 30): string[] {
+  const asked = new Map<string, EventPayload<'decision.asked'>>();
+  const lines: string[] = [];
+  const answered = new Set<string>();
+  for (const e of events) {
+    if (e.type === 'decision.asked') asked.set((e.payload as { id: string }).id, e.payload as EventPayload<'decision.asked'>);
+    else if (e.type === 'decision.answered') {
+      const a = e.payload as EventPayload<'decision.answered'>;
+      const q = asked.get(a.id);
+      if (!q || answered.has(a.id)) continue;
+      answered.add(a.id);
+      lines.push(`- ${redactString(q.question).replace(/\s+/g, ' ').slice(0, 300)} -> ${a.answer}${q.issue !== null ? ` (#${q.issue})` : ''}`);
+    }
+  }
+  if (!lines.length) return [];
+  return ['', 'Decisions already made on this project (each stands; plan within them and do not ask them again):', ...lines.slice(-max)];
 }
 
 const bullets = (xs: string[]) => xs.map((x) => `- ${x}`).join('\n');

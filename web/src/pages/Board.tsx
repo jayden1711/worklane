@@ -5,10 +5,11 @@
 // and each goes to that instance's existing routes (decide, the console), which check the role again.
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
-import { hub, instanceStream, onInstance, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
+import { hub, instanceStream, onInstance, type BoardBatch, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
+import { TestRunsPanel } from '../components/TestRuns';
 import { ago, Badge, Button, cx, Empty, LevelBadge } from '../components/ui';
 import { Header } from './Overview';
 
@@ -145,6 +146,11 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
         )}
         <span className="ml-auto flex items-center gap-1">
           {card.level && <LevelBadge level={card.level} />}
+          {card.batch && (
+            <span data-testid="board-card-batch" title={card.batch.id ? `PR batch ${card.batch.id}` : 'waiting for a PR batch'}>
+              <Badge tone={CARD_BATCH_TONE[card.batch.status]}>{CARD_BATCH_LABEL[card.batch.status]}</Badge>
+            </span>
+          )}
           {card.highRisk && <Badge tone="danger">high risk</Badge>}
         </span>
       </div>
@@ -281,11 +287,31 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
   );
 }
 
+const CARD_BATCH_LABEL: Record<NonNullable<BoardCard['batch']>['status'], string> = { queued: 'batch queued', testing: 'in batch', passed: 'batch passed', returned: 'batch failed' };
+const CARD_BATCH_TONE: Record<NonNullable<BoardCard['batch']>['status'], 'ok' | 'danger' | 'info' | 'neutral'> = { queued: 'neutral', testing: 'info', passed: 'ok', returned: 'danger' };
+const BATCH_TONE: Record<BoardBatch['status'], 'ok' | 'danger' | 'warn' | 'info' | 'neutral'> = { testing: 'info', bisecting: 'warn', green: 'ok', red: 'danger', abandoned: 'warn', empty: 'neutral' };
+
+/** The Landing column's PR batches: what is being tested now and how the last ones went (a viewer's without detail). */
+function BatchStrip({ batches }: { batches: BoardBatch[] }) {
+  if (!batches.length) return null;
+  return (
+    <ul className="space-y-1 rounded-card bg-surface p-2 shadow-card" data-testid="board-batches" aria-label="PR batches">
+      {batches.map((b, i) => (
+        <li key={`${i}:${b.id}`} className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-ink-2" data-testid="board-batch" data-status={b.status} title={b.detail || undefined}>
+          <Badge tone={BATCH_TONE[b.status]}>{b.status}</Badge>
+          <span className="truncate font-mono">{b.prs.map((n) => `#${n}`).join(' ')}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** The board from its data (also what the render checks render): the instance filter, then a column per stage. */
 export function BoardView({ boards, filter, onFilter = () => {}, now = Date.now(), onChanged = () => {} }: { boards: InstanceBoard[]; filter: string | null; onFilter?: (name: string | null) => void; now?: number; onChanged?: () => void }) {
   const hubbed = boards.some((b) => b.name !== null);
   const shown = boards.filter((b) => !filter || b.name === filter);
   const cards = shown.flatMap((b) => (b.data ? b.data.cards.map((c) => ({ card: c, instance: b.name })) : []));
+  const batches = shown.flatMap((b) => b.data?.batches ?? []);
   const failed = shown.filter((b) => b.error);
   return (
     <div className="space-y-4 p-6" data-testid="board">
@@ -326,6 +352,7 @@ export function BoardView({ boards, filter, onFilter = () => {}, now = Date.now(
                 <span className="text-[12.5px] font-medium text-ink">{col.label}</span>
                 <span className={cx('text-[11.5px] tabular-nums', col.id === 'waiting' && these.length ? 'font-medium text-orange' : 'text-ink-3')}>{these.length}</span>
               </div>
+              {col.id === 'landing' && <BatchStrip batches={batches} />}
               {these.length ? (
                 these.map((x) => <BoardCardView key={`${x.card.instance}:${x.card.issue}`} card={x.card} instance={x.instance} showInstance={hubbed} now={now} onChanged={onChanged} />)
               ) : (
@@ -413,6 +440,19 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
     <div data-testid="page-board">
       <Header title="Board" sub={`every task in flight, by stage · ${state.project.repo}`} />
       {boards ? <BoardView boards={boards} filter={filter} onFilter={pick} now={now} onChanged={() => setTick((t) => t + 1)} /> : <Loading />}
+      {/* Each instance's test runs: the queue, the slots running and each run's tiers. */}
+      {boards ? (
+        <div className="space-y-4 px-6 pb-6" data-testid="board-test-runs">
+          {boards
+            .filter((b) => !filter || b.name === filter)
+            .map((b) => (
+              <div key={b.name ?? ''} className="space-y-1">
+                {b.name && boards.length > 1 ? <div className="text-[12px] text-ink-3">{b.name}</div> : null}
+                <TestRunsPanel instance={b.name} pulse={tick + pulse} compact />
+              </div>
+            ))}
+        </div>
+      ) : null}
     </div>
   );
 }

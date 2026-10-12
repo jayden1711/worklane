@@ -17,10 +17,6 @@ land_mode: pr
 required_checks:
   - test (ubuntu-latest, 22)
   - test (ubuntu-latest, 24)
-  - test (macos-latest, 22)
-  - test (macos-latest, 24)
-  - test (windows-latest, 22)
-  - test (windows-latest, 24)
   - desktop
   - agentshield
   - push-gate

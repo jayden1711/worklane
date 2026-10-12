@@ -5,6 +5,8 @@
 
 import { project } from './projection.js';
 import { heldUpdate, updateLog, type UpdateEntry } from './updates.js';
+import { batchSummaries, type BatchSummary } from './coordinator/pr-batch.js';
+import type { StoredEvent } from './events/types.js';
 
 interface Ev {
   type: string;
@@ -78,6 +80,16 @@ export interface Digest {
   /** Since when `merged` reaches: the last digest, or 24 hours back. */
   mergedSince: string;
   merged: MergedItem[];
+  /** PR batches (PR mode with batching) running now or active since `mergedSince`, oldest first. */
+  batches: Pick<BatchSummary, 'id' | 'status' | 'prs' | 'detail' | 'at' | 'last'>[];
+}
+
+/** The PR batches running at `now` or with a step after `since`. */
+export function batchesSince(events: Ev[], since: Date, now: Date): Digest['batches'] {
+  const stored = events.filter((e) => e.type === 'pr_batch.queued' || e.type === 'pr_batch.step' || e.type === 'pr.closed').map((e, i) => ({ ...e, id: i + 1 }) as unknown as StoredEvent);
+  return batchSummaries(stored)
+    .filter((b) => b.prs.length && Date.parse(b.at) <= now.getTime() && (b.open || Date.parse(b.last) > since.getTime()))
+    .map((b) => ({ id: b.id, status: b.status, prs: b.prs, detail: b.detail, at: b.at, last: b.last }));
 }
 
 /**
@@ -242,7 +254,7 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
   // By kind, then the longest-waiting first.
   items.sort((a, b) => WAIT_KINDS.indexOf(a.kind) - WAIT_KINDS.indexOf(b.kind) || a.since.localeCompare(b.since));
   const since = o.since ?? new Date(now.getTime() - 86_400_000);
-  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedSince(evs, since, now) };
+  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedSince(evs, since, now), batches: batchesSince(evs, since, now) };
 }
 
 /** How long, in words: minutes, hours, or days. */
@@ -277,5 +289,11 @@ export function digestMarkdown(d: Digest, o: { project?: string } = {}): string 
   out.push('', `**Merged since yesterday** (${d.merged.length})`);
   if (!d.merged.length) out.push('- nothing merged on its own');
   for (const m of d.merged) out.push(`- #${m.pr} for #${m.issue} ${m.title}: ${m.level ?? 'level not recorded'}, evaluator confidence ${m.confidence ?? 'not recorded'}`);
+  // PR batches (only when batching ran): each with its status, its PRs, and what came of them.
+  const batches = d.batches ?? [];
+  if (batches.length) {
+    out.push('', `**PR batches since yesterday** (${batches.length})`);
+    for (const b of batches) out.push(`- ${b.id} ${b.status}: ${b.prs.map((x) => `#${x.number}`).join(', ')}${b.detail ? `; ${b.detail}` : ''}`);
+  }
   return `${out.join('\n')}\n`;
 }

@@ -160,6 +160,32 @@ test('git credential helper: hands git an installation token for GitHub, and not
   }
 });
 
+test('regression: under sudo -u (no instance in the environment) the helper still answers, and never lets git prompt', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
+  // sudo -u clears the environment, so WORKLANE_INSTANCE is gone: the helper used to answer nothing and git
+  // asked for a username and password on the terminal.
+  const { dir } = appInstance();
+  const gh = await fakeGitHub(['example-org/example-shop']);
+  const bare = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  delete (bare as Record<string, string | undefined>)[`${BRAND.envPrefix}_INSTANCE`];
+  const ask = 'protocol=https\nhost=github.com\n\n';
+  try {
+    // The instance named on the helper's own command line, as checkout.sh now writes it (git appends the action last).
+    const named = await run(['git-credential', '--instance', 'site', 'get'], bare, ask);
+    assert.equal(named.stdout, 'username=x-access-token\npassword=ghs_installation\n', named.stderr);
+    // An older checkout's helper line names no instance: the coordinator user's only instance is used.
+    const sole = await run(['git-credential', 'get'], bare, ask);
+    assert.equal(sole.stdout, 'username=x-access-token\npassword=ghs_installation\n', sole.stderr);
+    // No instance to be found: git is told to stop (quit), so it never falls back to a terminal prompt.
+    const none = await run(['git-credential', 'get'], { ...bare, [`${BRAND.envPrefix}_INSTANCES_DIR`]: join(dir, 'nowhere') }, ask);
+    assert.equal(none.stdout, 'quit=1\n');
+    assert.match(none.stderr, /not prompting/);
+    // Other hosts are still left to other helpers.
+    assert.equal((await run(['git-credential', '--instance', 'site', 'get'], bare, 'protocol=https\nhost=gitlab.example\n\n')).stdout, '');
+  } finally {
+    await gh.close();
+  }
+});
+
 test('instance show: an App instance reports a short-lived token and its key age, never "expires never"', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
   const { dir, home } = appInstance();
   const gh = await fakeGitHub(['example-org/example-shop']);

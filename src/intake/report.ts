@@ -23,7 +23,8 @@ export interface IncomingReport {
   sender: Sender;
   text: string;
   receivedAt: string;
-  thread?: { kind: 'channel'; id: string };
+  /** Where replies go: the channel it came from, or the bot's own thread it was a reply in (src/intake/channel.ts). */
+  thread?: { kind: 'channel' | 'thread'; id: string };
 }
 
 /** A source as the coordinator uses it: new reports since the last take, and a reply into a report's thread. */
@@ -33,6 +34,13 @@ export interface IntakeSource {
   reply(thread: NonNullable<IncomingReport['thread']>, text: string): Promise<boolean>;
   /** Tell the source these reports are recorded (their ids are in the seen ledger), so it stops redelivering them. */
   ack?(sourceIds: string[]): Promise<void>;
+  /**
+   * A chat source only: post `text` in `channel` and open a thread on it named `name` (on the message `from` when
+   * given, else on the new post). Returns the thread's id, or null when either step failed.
+   */
+  openThread?(channel: string, text: string, name: string, from?: string): Promise<string | null>;
+  /** A chat source only: take replies in this thread of the bot's (no prefix or mention needed). */
+  watch?(thread: string): void;
 }
 
 /** Intake's daily caps. The instance settings win; these (or the intake config's) are the defaults. */
@@ -46,6 +54,8 @@ export const INTAKE_DEFAULT_CAPS: IntakeCaps = { reports_per_sender_per_day: 10,
 export const TRIAGE_KINDS = ['bug', 'feature', 'question', 'duplicate', 'not_actionable', 'needs_info'] as const;
 export type TriageKind = (typeof TRIAGE_KINDS)[number];
 
+/** A GitHub login as GitHub allows them (letters, digits, dashes; at most 39), as the dashboard checks it. */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const snowflake = (what: string) => z.string().regex(/^\d{5,25}$/, `a Discord ${what} id (digits)`);
 
 export const IntakeConfig = z.strictObject({
@@ -75,8 +85,28 @@ export const IntakeConfig = z.strictObject({
       allowed_senders: z.array(snowflake('user')).default([]),
       /** In a channel, a message counts only if it mentions the bot or starts with one of these. */
       prefixes: z.array(z.string().min(1)).default(['bug:']),
+      /**
+       * Who each allowed sender is on GitHub: Discord user id -> GitHub login. Their role in a Discord thread is that
+       * login's permission on the instance's repo (admin: owner, write: writer), read as the dashboard reads it. An
+       * allowed sender not listed here is ignored in threads and conversations: nothing of theirs is stored.
+       */
+      people: z.record(snowflake('user'), z.string().regex(GITHUB_LOGIN, 'a GitHub login')).default({}),
+      /**
+       * The channel decisions and setup-console asks are posted in, one thread each, answered by a reply in the thread.
+       * Absent: nothing is posted.
+       */
+      asks_channel: snowflake('channel').optional(),
+      /**
+       * Ideas in conversation: an addressed message in `channels` from a mapped admin or writer opens a thread where
+       * the bot asks what it must, drafts the five-part issue, shows it, and files it `ready` only on an explicit
+       * yes (src/coordinator/conversation.ts), instead of being triaged and filed at once. Off: intake as before.
+       */
+      conversation: z.boolean().default(false),
+      /** The dashboard's address, for the links a post carries (a secret ask, a high-risk merge): https only. */
+      dashboard_url: z.string().regex(/^https:\/\/[^\s/]+(?:\/[^\s]*)?$/, 'an https URL').optional(),
     })
     .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
+    .refine((d) => !d.asks_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.asks_channel (posts link to it)', path: ['dashboard_url'] })
     .prefault({}),
   'bug-store': z
     .strictObject({
@@ -124,6 +154,9 @@ export const IntakeConfig = z.strictObject({
 }).superRefine((c, ctx) => {
   for (const id of c.trusted.discord) {
     if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['trusted', 'discord'], message: `${id} is trusted but not in discord.allowed_senders; a trusted sender must be allowed` });
+  }
+  for (const id of Object.keys(c.discord.people)) {
+    if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['discord', 'people'], message: `${id} is mapped to a GitHub login but not in discord.allowed_senders; a mapped person must be allowed` });
   }
 });
 export type IntakeConfig = z.infer<typeof IntakeConfig>;

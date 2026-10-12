@@ -23,7 +23,7 @@ export type MachineRequestStatus = 'pending' | 'running' | 'done' | 'failed' | '
 
 export interface MachineRequest {
   id: string;
-  /** The helper's arguments: set-slots <n>, set-updates on|off. */
+  /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>. */
   args: string[];
   by: string;
   via: 'settings' | 'ask';
@@ -47,8 +47,9 @@ export class MachineRequestError extends Error {
 /** The helper arguments a Settings change maps to, or why it can't be one. */
 export function settingArgs(what: unknown, value: unknown): string[] | { error: string } {
   if (what === 'slots') return ['set-slots', String(value)];
+  if (what === 'testSlots') return ['set-test-slots', String(value)];
   if (what === 'updates') return typeof value === 'boolean' ? ['set-updates', value ? 'on' : 'off'] : { error: 'updates is on (true) or off (false)' };
-  return { error: 'what is slots or updates' };
+  return { error: 'what is slots, testSlots or updates' };
 }
 
 /** Why these helper arguments may not run (not on the allowlist); null when they may. */

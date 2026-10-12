@@ -12,8 +12,10 @@ const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
 const { parse } = createRequire(import.meta.url)(helperSrc) as { parse: (a: string[]) => { what: string; value: unknown } | null };
 const posix = process.platform !== 'win32';
 
-test('the helper accepts exactly set-slots 1..16 and set-updates on|off', () => {
+test('the helper accepts exactly set-slots 1..16, set-updates on|off and set-test-slots 1..8', () => {
   for (let n = 1; n <= 16; n++) assert.deepEqual(parse(['set-slots', String(n)])?.value, n);
+  for (let n = 1; n <= 8; n++) assert.deepEqual(parse(['set-test-slots', String(n)]), { what: 'slots.max_test_runs', file: 'slots.json', key: 'max_test_runs', value: n });
+  for (const a of [['set-test-slots', '0'], ['set-test-slots', '9'], ['set-test-slots', '01'], ['set-test-slots', '2', 'x'], ['set-test-slots']]) assert.equal(parse(a), null, JSON.stringify(a));
   assert.equal(parse(['set-updates', 'on'])?.value, true);
   assert.equal(parse(['set-updates', 'off'])?.value, false);
   const bad = [[], ['set-slots'], ['set-slots', '0'], ['set-slots', '17'], ['set-slots', '01'], ['set-slots', '1.5'], ['set-slots', ' 1'], ['set-slots', '1 '], ['set-slots', '-1'], ['set-slots', '1e1'], ['set-slots', '1;id'], ['set-slots', '1', 'x'], ['set-updates'], ['set-updates', 'yes'], ['set-updates', 'ON'], ['set-updates', 'on', 'off'], ['set-max', '3'], ['rm', '-rf'], ['--help']];
@@ -64,7 +66,7 @@ test('a refused argument list writes and logs nothing', () => {
   for (const a of [['set-slots', '17'], ['set-slots', '2', 'extra'], ['set-updates', 'maybe'], []]) {
     const r = h.run(...a);
     assert.equal(r.status, 2, JSON.stringify(a));
-    assert.match(r.stderr, /usage: worklane-machine set-slots <1\.\.16> \| set-updates on\|off/);
+    assert.match(r.stderr, /usage: worklane-machine set-slots <1\.\.16> \| set-updates on\|off \| set-test-slots <1\.\.8>/);
   }
   assert.equal(readFileSync(join(h.etc, 'slots.json'), 'utf8'), '{"max_agents":2}\n');
   assert.ok(!existsSync(h.log));
@@ -73,11 +75,11 @@ test('a refused argument list writes and logs nothing', () => {
 const setup = join(repoRoot, 'scripts', 'setup');
 const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), ...users], { encoding: 'utf8' });
 
-test('the sudoers rule lists exactly the 18 commands, no patterns, for the named coordinators only', { skip: !posix && 'bash' }, () => {
+test('the sudoers rule lists exactly the 26 commands, no patterns, for the named coordinators only', { skip: !posix && 'bash' }, () => {
   const r = sudoers('wl-alpha', 'wl-beta');
   assert.equal(r.status, 0, r.stderr);
   const cmds = [...r.stdout.matchAll(new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
-  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`];
+  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${MACHINE_HELPER} set-test-slots ${i + 1}`)];
   assert.deepEqual(cmds, want);
   assert.doesNotMatch(r.stdout, /[*?[\]^$]|ALL\s*$|\bsh\b|bash/m, 'no wildcards, patterns or shells');
   assert.match(r.stdout, /^wl-alpha, wl-beta ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);

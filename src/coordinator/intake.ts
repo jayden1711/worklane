@@ -15,7 +15,7 @@ import { acceptTriage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
-import { ResearchOnDemand } from './research-on-demand.js';
+import { Conversation } from './conversation.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';
 
@@ -27,10 +27,8 @@ const INTAKE_KIND_LABEL: Record<string, string> = { bug: 'bug', feature: 'enhanc
 const INTAKE_OUTCOMES = ['intake.filed', 'intake.awaiting', 'intake.commented', 'intake.grouped', 'intake.asked', 'intake.dropped'] as const;
 /** What a sender is told when a restart cut off their report. */
 const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Could you send it again?";
-/** The marker in an intake issue's body that ties it to its report, so it is never filed twice. */
-const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 
-export abstract class Intake extends ResearchOnDemand {
+export abstract class Intake extends Conversation {
   // ---------------------------------------------------------------- intake
 
   /**
@@ -65,6 +63,9 @@ export abstract class Intake extends ResearchOnDemand {
   async recoverIntake(): Promise<void> {
     const it = this.d.intake;
     if (!it) return;
+    // The chat channel's posts cut off by a restart, and its threads, taken again.
+    this.channelRecover();
+    this.channelRewatch();
     const sent = new Set(this.d.log.read(0, ['intake.replied']).map((e) => `${(e.payload as { id: string }).id}\0${(e.payload as { stage: string }).stage}`));
     for (const e of this.d.log.read(0, ['intake.replying'])) {
       const p = e.payload as EventPayload<'intake.replying'>;
@@ -127,7 +128,9 @@ export abstract class Intake extends ResearchOnDemand {
         const meter = new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
         for (const _ of notAllowed) meter.countDrop('not_allowed');
       }
-      const batch = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      const sorted = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      // The chat channel first (src/coordinator/channel.ts): replies in its threads, and anyone unmapped ignored.
+      const { rest: batch, ignored } = src.name === 'discord' ? await this.channelInbound(cfg, sorted) : { rest: sorted, ignored: [] as IncomingReport[] };
       for (const r of batch) {
         if (this.halt.signal.aborted || this.stopped) break;
         try {
@@ -137,12 +140,14 @@ export abstract class Intake extends ResearchOnDemand {
         }
       }
       // Only what is recorded (its id in the seen ledger), or dropped by rule, is acknowledged; the rest comes again.
-      const recorded = [...batch.filter((r) => seen(this.d.stateDir, r)), ...notAllowed].map((r) => r.sourceId);
+      const recorded = [...sorted.filter((r) => seen(this.d.stateDir, r)), ...notAllowed, ...ignored].map((r) => r.sourceId);
       if (recorded.length && src.ack) await src.ack(recorded).catch((e: unknown) => error(`intake ${src.name} ack`, e));
       if (this.halt.signal.aborted || this.stopped) return;
     }
     await this.intakeDecisions(cfg);
     await this.intakeStatus(cfg);
+    this.channelRewatch();
+    await this.channelOutbound(cfg);
   }
 
   /** One new report, from its raw text to its action. A report already stored is never taken again. */
@@ -226,25 +231,6 @@ export abstract class Intake extends ResearchOnDemand {
         this.emit('intake.dropped', { id, reason: a.reason.slice(0, 500) });
         return;
     }
-  }
-
-  /**
-   * File a report's issue at most once: its body carries `<!-- intake:<id> -->`, and an open issue with that marker
-   * (filed before a crash, its event never written) is reused instead of filing a second one.
-   */
-  private async intakeFileOnce(id: string, title: string, body: string, labels: string[]): Promise<number> {
-    const found = await this.intakeIssueFor(id, labels);
-    if (found !== null) return found;
-    return this.d.backlog.createIssue(title, `${body}\n\n${intakeMarker(id)}`, labels);
-  }
-
-  /** The open issue filed for this report, if any, among issues with these labels. */
-  private async intakeIssueFor(id: string, labels: string[]): Promise<number | null> {
-    for (const label of labels) {
-      const hit = (await this.d.backlog.list(label)).find((i) => i.body.includes(intakeMarker(id)));
-      if (hit) return hit.number;
-    }
-    return null;
   }
 
   /**

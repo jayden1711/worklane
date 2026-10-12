@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { tiersFor } from '../src/testrun/run.js';
 import assert from 'node:assert/strict';
 import { REAL_CHROME_TIMEOUT, realChromeTests } from './browser-helpers.js';
 import { execFileSync } from 'node:child_process';
@@ -445,6 +446,17 @@ test('plan mode: a size:M issue is planned read-only first, the plan posted, and
   assert.ok((await t.f.backlog.comments(t.n)).some((x) => /The build starts now with this plan/.test(x.body)));
   assert.match(t.runner.calls.find((r) => r.role === 'worker')!.prompt, /1\. Change the totals reducer\n2\. Run the price tests/);
   assert.equal(t.f.log.read(0, ['decision.asked']).filter((e) => (e.payload as { kind: string }).kind === 'plan').length, 0);
+});
+
+test('plan mode: the planner is told the decisions already made, each with the answer that stands, so it asks none of them again', { skip }, async () => {
+  const t = plannedTask(() => PLAN);
+  t.f.log.append('decision.asked', { id: 'd-fmt', kind: 'question', issue: null, owner: 'example-owner', question: 'Which format do exports use?', options: ['csv', 'json'], recommendation: 'csv', receipts: [] }, 'coordinator');
+  t.f.log.append('decision.answered', { id: 'd-fmt', by: 'example-owner', answer: 'csv' }, 'example-owner', 'human');
+  t.f.log.append('decision.answered', { id: 'd-fmt', by: 'example-collaborator', answer: 'json' }, 'example-collaborator', 'human');
+  await t.run();
+  const planner = t.runner.calls.find((r) => r.role === 'planner')!;
+  assert.match(planner.prompt, /Decisions already made on this project[^\n]*\n- Which format do exports use\? -> csv/);
+  assert.doesNotMatch(planner.prompt, /-> json/, 'only the first answer, the one that stands');
 });
 
 test('plan mode: a plan touching an L3 path is held for the owner and builds nothing until approved; then it builds with that plan', { skip }, async () => {
@@ -2733,4 +2745,38 @@ test("the browser baseline: an app that won't start at base is said, and the flo
   assert.match(r.check.tail ?? '', /no baseline at base [0-9a-f]{12} \(the app couldn't be run at base: .*\), so every error was counted as new/);
   assert.ok(r.lines.some((l) => /^ {2}- no baseline \(base `[0-9a-f]{12}`\): `the app couldn't be run at base/.test(l)), r.lines.join('\n'));
   assert.doesNotMatch(r.worktrees, /browser-base/);
+});
+
+test('with test_run on, an agent run never starts the full suite: done_when suite full is checked with the changed suite, and the full check is the test run\'s; off, unchanged', { skip }, async () => {
+  const body = 'Orders with a zero or negative quantity are counted in totals.\n\n```done_when\n- suite: full\n```\n';
+  for (const on of [true, false]) {
+    const f = fixture();
+    const mark = join(f.base, 'suites.log');
+    const write = (what: string) => `node -e "require('fs').appendFileSync(process.argv[1], '${what}\\n')" ${JSON.stringify(mark)}`;
+    f.cfg.tests.runner.full = write('full');
+    f.cfg.tests.runner.changed = write('changed');
+    if (on) f.cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+    f.backlog.open({ title: 'Totals count negative quantities', body, author: 'example-owner', labels: ['ready'] });
+    const runner = agents();
+    const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+    await c.tick();
+    await c.idle();
+    const ran = readFileSync(mark, 'utf8').trim().split('\n');
+    const worker = runner.calls.find((r) => r.role === 'worker')!;
+    // The contract is recorded as the issue says, whichever way it runs.
+    assert.deepEqual((f.log.read(0, ['contract.agreed'])[0]!.payload as { done_when: unknown[] }).done_when, [{ suite: 'full' }]);
+    const checks = f.log.read(0, ['check.result']).flatMap((e) => (e.payload as { checks: { check: string; status: string }[] }).checks);
+    if (on) {
+      assert.ok(!ran.includes('full'), `the full suite never ran on the machine: ${ran.join(', ')}`);
+      assert.ok(ran.includes('changed'));
+      assert.ok(checks.some((x) => x.check.includes("'changed\\n'") && x.status === 'pass'), JSON.stringify(checks));
+      assert.match(worker.prompt, /\{"suite":"changed"\}/);
+      assert.doesNotMatch(worker.prompt, /"suite":"full"/, 'the agent is not asked to run it either');
+      // The full check still comes from the test run: its full tiers are what a batch runs.
+      assert.deepEqual(tiersFor(f.cfg.tests.test_run!, { kind: 'full' }).map((t) => t.name), ['suite']);
+    } else {
+      assert.ok(ran.includes('full'), 'test_run off: the full suite runs as before');
+      assert.match(worker.prompt, /\{"suite":"full"\}/);
+    }
+  }
 });

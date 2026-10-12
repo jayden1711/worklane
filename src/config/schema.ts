@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
 import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
+import { TestRunConfig } from '../testrun/config.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -402,6 +403,25 @@ export const TestsConfig = z.strictObject({
        * run), measured from its first such deferral in a row, before it goes to the owner.
        */
       defer_timeout_minutes: z.number().int().min(1).max(7 * 24 * 60).default(180),
+      /**
+       * PR mode only (coordinator/pr-batch.ts): approved PRs wait in a queue and are tested together, one full run
+       * per batch, before any of them merges. Off by default. When on, a PR merges only with every `fast_checks`
+       * check passing on its head and a passing full run from a batch that held exactly that head.
+       */
+      pr_batch: z
+        .strictObject({
+          enabled: z.boolean().default(false),
+          /** The most PRs in one batch. The size starts from the PRs' recent pass rate and never exceeds this. */
+          max: z.number().int().min(1).max(32).default(8),
+          /** Shards of each batch's full run, run in parallel slots (1: one run). */
+          shards: z.number().int().min(1).max(16).default(1),
+          /** The fast tier's check names on each PR's head: all must pass before it is queued and before it merges. */
+          fast_checks: z.array(z.string().min(1)).default([]),
+          /** The full run's check names, posted on each PR's head once its batch passes (left out of readiness until then). */
+          full_checks: z.array(z.string().min(1)).default([]),
+        })
+        .refine((b) => !b.enabled || (b.fast_checks.length > 0 && b.full_checks.length > 0), { message: 'pr_batch needs fast_checks and full_checks when enabled' })
+        .prefault({}),
     })
     .prefault({}),
   /** Which tiers gate what. Names are tiers[] entries, or "changed" / "full" (runner commands). */
@@ -463,6 +483,8 @@ export const TestsConfig = z.strictObject({
       }),
     )
     .default([]),
+  /** The coordinator's own test runs of PRs (src/testrun/, docs/test-runs.md); absent: none. */
+  test_run: TestRunConfig.optional(),
 });
 
 // ---------- review.yaml ----------

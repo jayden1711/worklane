@@ -52,6 +52,7 @@ import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVI
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
+import { localDoneWhen } from './testrun/local.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -89,6 +90,8 @@ export class Coordinator extends Gardener {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
+    await step('test runs', () => this.d.prTestRuns?.tick(), undefined);
+    await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
@@ -102,11 +105,13 @@ export class Coordinator extends Gardener {
   /** Wait for in-flight task pipelines (tests and graceful shutdown). */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
+    await this.d.prTestRuns?.idle();
     await this.chatQueue;
     await this.intakeQueue;
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;
+    await this.prBatchIdle();
   }
 
   /**
@@ -127,6 +132,9 @@ export class Coordinator extends Gardener {
 
   stop() {
     this.stopped = true;
+    // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
+    this.d.prTestRuns?.stop();
+    this.prBatchStop();
   }
 
   /**
@@ -188,7 +196,7 @@ export class Coordinator extends Gardener {
         cwd: this.d.repo,
         doneWhenOf: async (n) => {
           const c = parseContract((await this.d.backlog.get(n)).body);
-          return c.ok ? doneWhenCommands(c.done_when, this.d.cfg.tests.runner) : [];
+          return c.ok ? doneWhenCommands(localDoneWhen(c.done_when, this.d.cfg.tests), this.d.cfg.tests.runner) : [];
         },
         spentToday: () => this.spentToday(),
         dailyBudgetUsd: this.d.cfg.agents.daily_budget_usd,
@@ -471,6 +479,8 @@ export class Coordinator extends Gardener {
     let leaseSha = won.sha;
     const owner = ownerFor(issue, [], this.d.cfg.project.owners, (g, p) => globToRegExp(g).test(p));
     this.emit('contract.agreed', { issue: n, done_when: doneWhen as Record<string, unknown>[], by: issue.author });
+    // The contract as agreed is recorded; what runs here skips the full suite when the test run is the full run.
+    doneWhen = localDoneWhen(doneWhen, this.d.cfg.tests);
     this.emit('issue.claimed', { issue: n, instance: this.d.instance, lease: leaseSha, base, owner });
     await this.d.backlog.removeLabel(n, 'ready');
     await this.d.backlog.addLabels(n, ['agent:working']);

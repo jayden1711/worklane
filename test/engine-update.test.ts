@@ -71,6 +71,8 @@ test('quiet only with no live agent or full-run lock and no emergency stop', () 
   assert.deepEqual(u.quiet([{ name: 'agent-0.lock', pid: 7 }, { name: 'slots.lock', pid: 42 }], alive), { quiet: true }, 'a dead holder and the slot guard don\'t count');
   assert.equal(u.quiet([{ name: 'agent-1.lock', pid: 42 }], alive).quiet, false);
   assert.equal(u.quiet([{ name: 'full-run.lock', pid: 42 }], alive).quiet, false);
+  assert.deepEqual(u.quiet([{ name: 'test-0.lock', pid: 42 }], alive), { quiet: false, why: 'a test run is going' });
+  assert.equal(u.quiet([{ name: 'test-0.lock', pid: 7 }], alive).quiet, true, 'a dead test-run holder doesn\'t count');
   assert.equal(u.quiet([{ name: 'STOP', pid: null }], alive).quiet, false);
 });
 

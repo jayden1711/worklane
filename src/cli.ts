@@ -627,19 +627,34 @@ async function main(argv: string[]): Promise<number> {
 
     case 'git-credential': {
       // git's credential helper protocol, for an App instance's coordinator: hand git a fresh installation token.
-      if (sub !== 'get') return 0;
+      // git appends the action last: `git-credential [--instance <name>] get`.
+      const args = [sub, ...rest].filter((a): a is string => a !== undefined);
+      if (args.at(-1) !== 'get') return 0;
       const input = await readStdin();
       const host = /^host=(.*)$/m.exec(input)?.[1] ?? '';
       const api = new URL(process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com');
       if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
-      const name = process.env[`${BRAND.envPrefix}_INSTANCE`];
-      if (!name) return 0;
-      const i = loadInstanceCredentials(name);
-      const g = i.credentials.github;
-      if (g.kind !== 'app') return 0;
-      const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
-      process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
-      return 0;
+      // A GitHub request this helper can't answer stops git (quit): it must never fall back to a terminal prompt.
+      // The instance comes from the helper's own command line, then the environment, and then, because
+      // `sudo -u` clears the environment, the coordinator user's only instance.
+      const refuse = (why: string) => {
+        console.error(`${BRAND.cli} git-credential: ${why}; not prompting for a password`);
+        process.stdout.write('quit=1\n');
+        return 0;
+      };
+      const mine = listInstances();
+      const name = option(args, '--instance') ?? process.env[`${BRAND.envPrefix}_INSTANCE`] ?? (mine.length === 1 ? mine[0] : undefined);
+      if (!name) return refuse(mine.length ? `this user has ${mine.length} instances; name one with --instance` : 'no instance for this user');
+      try {
+        const i = loadInstanceCredentials(name);
+        const g = i.credentials.github;
+        if (g.kind !== 'app') return 0; // a gh-config-dir instance authenticates through gh's own helper
+        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
+        process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
+        return 0;
+      } catch (e) {
+        return refuse(`instance ${name}: ${(e as Error).message.split('\n')[0]}`);
+      }
     }
 
     case 'stop-all': {

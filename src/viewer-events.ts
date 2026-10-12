@@ -26,9 +26,14 @@ export const VIEWER_EVENTS: Readonly<Record<string, readonly string[]>> = Object
   'pr.ready': ['issue', 'number'],
   'pr.closed': ['issue', 'number', 'merged'],
   'merge.done': ['issue', 'number', 'url', 'title'],
+  // PR batches: their status only, never their runs, tiers, commits or why a PR came back.
+  'pr_batch.queued': ['issue', 'number'],
+  'pr_batch.step': ['id', 'step'],
   'deploy.requested': ['issue', 'env', 'sha'],
   'deploy.verified': ['issue', 'env', 'sha'],
   'deploy.failed': ['issue', 'env', 'sha', 'why'],
+  // A test run's outcome: each tier's pass or fail (results holds { tier, ok } only), never its log or summary.
+  'testrun.finished': ['id', 'sha', 'kind', 'prs', 'ok', 'outcome', 'results'],
 });
 
 export const viewerMaySee = (type: string) => Object.hasOwn(VIEWER_EVENTS, type);
@@ -68,6 +73,8 @@ export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
 
 /** A decision's fields a viewer sees: the question and its answer, never its receipts (run and agent detail). */
 export const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'issue', 'owner', 'question', 'options', 'recommendation', 'askedAt', 'answer', 'canAnswer']);
+/** A batch as a viewer sees it: its status and what is in it, never its detail (test output, culprits' tiers) or commit. */
+export const VIEWER_BATCH_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'issues', 'prs', 'outcome', 'at']);
 /** The machine's slots as a viewer sees them: how many are in use and how many there are, not which agents hold them. */
 export const VIEWER_SLOT_FIELDS: readonly string[] = Object.freeze(['cap', 'running']);
 
@@ -75,6 +82,7 @@ const pick = (o: Record<string, unknown>, keys: readonly string[]) => Object.fro
 const each = (keys: readonly string[]) => (xs: unknown) => (Array.isArray(xs) ? xs.map((x) => pick(x as Record<string, unknown>, keys)) : []);
 const tasksOnly = each(VIEWER_TASK_FIELDS);
 const decisionsOnly = each(VIEWER_DECISION_FIELDS);
+const batchesOnly = each(VIEWER_BATCH_FIELDS);
 
 /**
  * A state as a viewer may have it: only the allowlisted keys; tasks and decisions (also the inbox's) with only
@@ -84,6 +92,7 @@ export function stateForViewer(state: Record<string, unknown>): Record<string, u
   const out = pick(state, VIEWER_STATE_KEYS);
   if ('tasks' in out) out.tasks = tasksOnly(out.tasks);
   if ('decisions' in out) out.decisions = decisionsOnly(out.decisions);
+  if ('batches' in out) out.batches = batchesOnly(out.batches);
   if (out.slots && typeof out.slots === 'object') out.slots = pick(out.slots as Record<string, unknown>, VIEWER_SLOT_FIELDS);
   if (out.inbox && typeof out.inbox === 'object') {
     const ib = out.inbox as Record<string, unknown>;

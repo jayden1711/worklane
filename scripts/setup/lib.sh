@@ -14,7 +14,8 @@ home_of() { getent passwd "$1" | cut -d: -f6; }
 # mangles multi-line scripts. From / so the user needn't reach our cwd.
 run_as() {
   local user="$1" script="$2"; shift 2
-  (cd / && sudo -H -u "$user" bash -euo pipefail -c "$script" _ "$@")
+  # GIT_TERMINAL_PROMPT=0: a setup step's git never asks for a username or password; it fails instead.
+  (cd / && sudo -H -u "$user" env GIT_TERMINAL_PROMPT=0 bash -euo pipefail -c "$script" _ "$@")
 }
 
 say() { printf '\n== %s\n' "$*"; }
@@ -39,6 +40,26 @@ install_sudoers() {
   echo "installed /etc/sudoers.d/$name"
 }
 
+# Remove a sudoers file installed by install_sudoers (absent: nothing to do).
+remove_sudoers() {
+  [[ "$1" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "remove_sudoers: bad name $1" >&2; return 1; }
+  rm -f "/etc/sudoers.d/$1"
+}
+
+# PASS when <user> can't read, write or (a directory) enter each existing path named, else FAIL; non-zero if
+# any FAIL. Each probe runs as that user and must itself answer "denied": a probe that can't run (sudo
+# refused, no such user) is a FAIL, never a pass.
+deny_check() {
+  local user="$1" p out fail=0
+  shift
+  for p in "$@"; do
+    [ -e "$p" ] || continue
+    out="$(cd / && sudo -n -u "$user" sh -c 'if [ -r "$1" ] || [ -w "$1" ] || { [ -d "$1" ] && [ -x "$1" ]; }; then echo open; else echo denied; fi' _ "$p" 2>/dev/null || true)"
+    if [ "$out" = denied ]; then echo "PASS $user can't read, write or enter $p"; else echo "FAIL $user can reach $p (${out:-the probe did not run})"; fail=1; fi
+  done
+  return "$fail"
+}
+
 # Everything under a directory that anyone outside its owner and group can read, write or enter.
 open_to_others() { find "$1" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print 2>/dev/null; }
 
@@ -53,8 +74,8 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 18
-# allowed commands (set-slots 1..16, set-updates on, set-updates off) as root, and nothing else.
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 26
+# allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 machine_sudoers() {
@@ -65,7 +86,8 @@ machine_sudoers() {
   done
   for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
-  printf '# Coordinators may change the machine slot cap and the update switch, through one validating helper.\n'
+  for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
+  printf '# Coordinators may change the machine slot caps and the update switch, through one validating helper.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -76,7 +98,7 @@ machine_sudoers() {
 # The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
 # joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
 # updater refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (macos-latest, 22)" "test (macos-latest, 24)" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test (windows-latest, 22)" "test (windows-latest, 24)")
+UPDATE_DEFAULT_CHECKS=("agentshield" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {

@@ -53,3 +53,38 @@ sees only its instructions and the situation; the lists below are for the judge.
 
 **Wrong**
 - Includes the PDF refactor in the steps.
+
+## 6. An earlier decision settles it
+**Situation**
+- The issue asks for an export of orders. Either CSV or JSON would meet its done_when.
+- The brief lists, under decisions already made: "Which format do exports use? -> CSV".
+
+**Correct**
+- Plans a CSV export and asks nothing about the format.
+
+**Wrong**
+- Asks the owner whether the export should be CSV or JSON.
+
+## 7. The code answers it
+**Situation**
+- The issue asks for a new settings page. The repository already has three settings pages, all built the same
+  way (one route file and one form component each, under src/settings/).
+
+**Correct**
+- Plans the new page the way the existing ones are built, citing them, with no question about structure.
+
+**Wrong**
+- Asks the owner how the settings page should be structured.
+
+## 8. Two real questions
+**Situation**
+- The issue asks to delete inactive accounts. It doesn't say after how long an account counts as inactive, or
+  whether to warn people first, and neither the code, the decisions listed nor the repo's records settle either.
+
+**Correct**
+- Puts both questions together in questions, and nothing else there, with its best default for each in the
+  approach.
+
+**Wrong**
+- Asks only one of them.
+- Adds questions the issue, the code or the decisions already answer.

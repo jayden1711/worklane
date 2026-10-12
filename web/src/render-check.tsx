@@ -9,6 +9,7 @@ import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
+import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
@@ -88,6 +89,7 @@ export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<Audi
 export { probeMe } from './api';
 export const renderBoard = (boards: InstanceBoard[], filter: string | null = null, now?: number) => renderToStaticMarkup(<BoardView boards={boards} filter={filter} {...(now !== undefined ? { now } : {})} />);
 export const renderMachineSlots = (slots: State['slots']) => renderToStaticMarkup(<MachineSlots slots={slots} />);
+export const renderTestRuns = (data: TestRunsData, compact = false) => renderToStaticMarkup(<TestRunsView data={data} compact={compact} />);
 export { elapsed } from './pages/Board';
 export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
 export { keyData } from './pages/Setup';

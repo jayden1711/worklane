@@ -79,7 +79,7 @@ export const EventSchemas = {
    * A write made on the dashboard: who (their GitHub login, and the role the instance read from its repo, or the
    * owner's break-glass), on which instance, and what was done.
    */
-  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
+  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass', 'discord']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
@@ -142,6 +142,26 @@ export const EventSchemas = {
    * source took it; `unknown`: a restart cut it off mid-send, so whether it went out is unknown (it isn't resent).
    */
   'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
+  /** A chat post is about to be sent (recorded first, so a crash can't send it twice). `key`: what it is for. */
+  'discord.posting': z.strictObject({ key: z.string() }),
+  /**
+   * A chat post, once per key: a decision's or ask's thread (`thread`: its id), a notice (no thread), or a reply in a
+   * thread. `unknown`: a restart cut it off mid-send, so whether it went out is unknown (it isn't resent).
+   */
+  'discord.posted': z.strictObject({ key: z.string(), thread: z.string().nullable(), ok: z.boolean(), unknown: z.boolean().optional() }),
+  /**
+   * A reply in one of the bot's threads, from a mapped person: what it did to its target (a decision or ask).
+   * answered; comment (they may not answer it: kept, redacted, as a comment); ambiguous (no single option: asked
+   * back); already (decided before: refused, naming who); refused (never answered from chat).
+   */
+  /**
+   * An idea's conversation (src/coordinator/conversation.ts), by its opening message's report id: opened (its
+   * thread), said (a person's message, `msg`: its report id; the text stays in the raw store), asked (the bot's
+   * questions, redacted, in `detail`), drafted (the draft waits in the private store; its title in `detail`),
+   * filed (`issue`, `by`), dropped, failed (a run that ended without a usable result, why in `detail`).
+   */
+  'discord.idea': z.strictObject({ id: z.string(), stage: z.enum(['opened', 'said', 'asked', 'drafted', 'filed', 'dropped', 'failed']), by: z.string().nullable(), msg: z.string().nullable(), issue: issue.nullable(), detail: z.string().nullable() }),
+  'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   /** `provider`: the open-model provider it ran on (local runs cost 0); tokens and seconds, when claude reported them. */
@@ -342,6 +362,36 @@ export const EventSchemas = {
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
+  /** PR mode with batching (coordinator/pr-batch.ts): a PR ready on its fast checks waits, at this head, for a batch. */
+  'pr_batch.queued': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  /**
+   * One step of a PR batch. built: the batch's merge commit (`sha`, on `base`) of `prs`, in queue order; green/red: its
+   * full run (`run`); checks_posted: the passing full check posted on that PR's head; culprit: the PR the bisection
+   * found, returned with the failing `tier`; dropped: a PR whose head changed (or that closed) left the batch; conflict:
+   * it does not merge onto the base; requeued: back in the queue for the next batch; abandoned: cut off by a restart
+   * before its run ended; resumed: a green batch's checks finished after a restart; error: the batch could not be
+   * built or run; finished: nothing more to do; stale: after the batch passed, main is no longer what it tested for
+   * these PRs (something else landed, a PR ahead of them didn't merge, or merged as another tree), so they are tested
+   * again. `parent`: the batch a bisection step tests a prefix of. `trees` (built): the tree after each PR's merge.
+   */
+  'pr_batch.step': z.strictObject({
+    id: z.string(),
+    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale']),
+    prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha })),
+    sha: sha.nullable(),
+    base: sha.nullable(),
+    parent: z.string().nullable(),
+    tier: z.string().nullable(),
+    run: z
+      .strictObject({
+        id: z.string(),
+        ok: z.boolean(),
+        tiers: z.array(z.strictObject({ tier: z.string(), ok: z.boolean(), durationMs: z.number().nonnegative(), summary: z.string(), logRef: z.string() })),
+      })
+      .nullable(),
+    detail: z.string(),
+    trees: z.array(sha).optional(),
+  }),
   /** `issue`: the issue whose landing triggered it (absent on older events and manual deploys). */
   'deploy.requested': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
   'deploy.verified': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
@@ -371,6 +421,31 @@ export const EventSchemas = {
   /** A held task started (or stopped being ready): how long it waited, on which files. */
   'hotspot.released': z.strictObject({ issue, waited_ms: z.number().int().nonnegative(), files: z.array(z.string()), started: z.boolean() }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
+  // test runs (src/testrun/): a project's CI run by the coordinator, as the sandboxed test user
+  'testrun.queued': z.strictObject({ id: z.string(), sha, kind: z.enum(['fast', 'full']), prs: z.array(z.number().int().positive()), shard: z.strictObject({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable() }),
+  /** It has a slot and the full-run lock (shared); `lock_wait_ms`: how long an exclusive holder kept it waiting. */
+  'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative() }),
+  /** One tier's outcome. `summary`: the end of its output; `log_ref`: its full log in the instance's state (never a viewer's). */
+  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable() }),
+  /** `results`: each tier's pass or fail, all a viewer sees of a run. */
+  'testrun.finished': z.strictObject({
+    id: z.string(),
+    sha,
+    kind: z.enum(['fast', 'full']),
+    prs: z.array(z.number().int().positive()),
+    ok: z.boolean(),
+    outcome: z.enum(['done', 'cancelled', 'error', 'interrupted']),
+    results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
+    detail: z.string().max(2000),
+  }),
+  'testrun.wipe_failed': z.strictObject({ id: z.string(), left: z.array(z.string()) }),
+  'testrun.checks_posted': z.strictObject({ id: z.string(), sha, checks: z.array(z.strictObject({ name: z.string(), conclusion: z.enum(['success', 'failure', 'cancelled']) })) }),
+  /** no_permission: the App lacks Checks: write (the owner adds it); the checks were not posted. */
+  'testrun.checks_failed': z.strictObject({ id: z.string(), sha, reason: z.enum(['no_permission', 'error']), detail: z.string().max(1000) }),
+  /** The App's Checks permission on the repo, as GitHub reports it. */
+  'testrun.checks_permission': z.strictObject({ level: z.enum(['write', 'read', 'none', 'unknown']), detail: z.string().max(500) }),
+  /** The sandbox's own check (the helper's `check`): no run starts until it passed. */
+  'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000) }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;

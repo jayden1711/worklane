@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Worklane" width="200">
+</p>
+
 # Worklane
 
 **Know who's on every task.**
