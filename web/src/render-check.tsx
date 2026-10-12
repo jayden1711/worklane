@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
+import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, StopBanner } from './App';
@@ -26,6 +26,7 @@ import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
 import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
+import { SetupConsoleView } from './pages/Setup';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -76,3 +77,5 @@ export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
 export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(<WaitingView w={w} {...(now !== undefined ? { now } : {})} />);
 export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);
+export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
+export { keyData } from './pages/Setup';

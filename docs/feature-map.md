@@ -20,6 +20,7 @@ is there and its heading (`[data-testid="page-title"]`, inside
 | `inbox` | `/inbox` | `web/src/pages/Inbox.tsx` | Inbox | `g i` | `[data-testid="page-inbox"]` | `Inbox` |
 | `waiting` | `/waiting` | `web/src/pages/Waiting.tsx` | Waiting on you | `g w` | `[data-testid="page-waiting"]` | `Waiting on you` |
 | `decisions` | `/decisions` | `web/src/pages/Decisions.tsx` | Decisions | `g d` | `[data-testid="page-decisions"]` | `Decisions` |
+| `setup` | `/setup` | `web/src/pages/Setup.tsx` | Setup console | `g u` | `[data-testid="page-setup"]` | `Setup console` |
 | `issues` | `/issues` | `web/src/pages/Issues.tsx` | Issues | `g s` | `[data-testid="page-issues"]` | `Issues` |
 | `intake` | `/intake` | `web/src/pages/Intake.tsx` | Intake | `g n` | `[data-testid="page-intake"]` | `Intake` |
 | `issue-detail` | `/issues/<n>` | `web/src/pages/IssueDetail.tsx` | – | `Enter` on an issue row | `[data-testid="page-issue-detail"]` | `#<n>` |
@@ -40,7 +41,7 @@ Any other path shows Overview.
 | Feature | Where | How a person reaches it | Keys | Selector |
 |---|---|---|---|---|
 | Page heading | every page | the bar at the top of the page | – | `[data-testid="page-title"]` |
-| Sidebar navigation | every page | the left column; the current page is highlighted. Rows: `nav-overview`, `nav-inbox`, `nav-waiting`, `nav-decisions`, `nav-issues`, `nav-intake`, `nav-land`, `nav-prs`, `nav-agents`, `nav-activity`, `nav-deploys`, `nav-reports`, `nav-logs`, `nav-settings` | `g` then the page's key (table above) | `[data-testid="nav-overview"]`, `[data-testid="nav-inbox"]`, `[data-testid="nav-waiting"]`, `[data-testid="nav-decisions"]`, `[data-testid="nav-issues"]`, `[data-testid="nav-intake"]`, `[data-testid="nav-land"]`, `[data-testid="nav-prs"]`, `[data-testid="nav-agents"]`, `[data-testid="nav-activity"]`, `[data-testid="nav-deploys"]`, `[data-testid="nav-reports"]`, `[data-testid="nav-logs"]`, `[data-testid="nav-settings"]` |
+| Sidebar navigation | every page | the left column; the current page is highlighted. Rows: `nav-overview`, `nav-inbox`, `nav-waiting`, `nav-decisions`, `nav-setup`, `nav-issues`, `nav-intake`, `nav-land`, `nav-prs`, `nav-agents`, `nav-activity`, `nav-deploys`, `nav-reports`, `nav-logs`, `nav-settings` | `g` then the page's key (table above) | `[data-testid="nav-overview"]`, `[data-testid="nav-inbox"]`, `[data-testid="nav-waiting"]`, `[data-testid="nav-decisions"]`, `[data-testid="nav-setup"]`, `[data-testid="nav-issues"]`, `[data-testid="nav-intake"]`, `[data-testid="nav-land"]`, `[data-testid="nav-prs"]`, `[data-testid="nav-agents"]`, `[data-testid="nav-activity"]`, `[data-testid="nav-deploys"]`, `[data-testid="nav-reports"]`, `[data-testid="nav-logs"]`, `[data-testid="nav-settings"]` |
 | Pull requests count | every page | the Pull requests row shows how many PRs wait for you | `g p` | `[data-testid="nav-prs"]` |
 | Command menu | every page | the sidebar's Search field | `⌘K` / `Ctrl+K` | `[data-testid="search-button"]`, `[data-testid="command-menu"]` |
 | Theme toggle | every page | sun/moon button at the bottom of the sidebar | – | `[data-testid="theme-toggle"]` |
@@ -59,6 +60,8 @@ Any other path shows Overview.
 | Cited event | `activity` | every event is a row; a chat citation of an event opens Activity with it marked (`data-cited`), or says it is older than the page lists | – | `[data-testid="activity-row"]`, `[data-testid="activity-cited-missing"]` |
 | Instance switcher | every page, hub only | the list at the top of the sidebar | – | `[data-testid="instance-switcher"]`, `[data-testid="instance-row"]` |
 | Emergency-stop banner | every page, while a stop is in force | shown at the top of the page | – | `[data-testid="emergency-stop"]` |
+| Setup console asks | `setup` | what the harness needs from the owner and can't do itself, each with its status (waiting, its answer and who gave it, withdrawn): paste a secret (a password field; the value goes to the instance's credential store and is never shown), open and approve a link, answer a question, run a machine step through the helper (one off its allowlist says it needs the helper extended and can't run). Only the owner answers, except questions that let writers | – | `[data-testid="ask-card"]`, `[data-testid="ask-secret"]`, `[data-testid="ask-link"]`, `[data-testid="ask-option"]`, `[data-testid="ask-run"]`, `[data-testid="ask-refusal"]`, `[data-testid="ask-answered"]` |
+| Owner terminal (owner, hub only) | `setup` | Open: a login shell as the machine's admin user over a WebSocket, after a GitHub sign-in in the last 5 minutes; refused, saying why, otherwise; every command audited; closes after 10 minutes idle | – | `[data-testid="owner-terminal"]`, `[data-testid="terminal-open"]` |
 | Decision answers | `decisions`, `inbox` | one button per option on a decision card | `1`–`9`, `a` approve, `r` reject, `j`/`k` move | `[data-testid="decision-card"]`, `[data-testid="decision-option"]` |
 | Show answered | `decisions` | header button | – | `[data-testid="show-answered"]` |
 | Issue tabs and views | `issues` | Current / Planning / Backlog / Done tabs, built-in and saved views | – | `[data-testid="issues-tab"]` |
