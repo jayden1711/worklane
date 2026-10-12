@@ -152,6 +152,7 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
                 </div>
               )}
             </Card>
+            {run.role === 'researcher' && <RunResearch id={run.id} />}
             <Card className="primitive-card-pad" data-testid="run-final">
               <div className="text-[12px] font-medium text-ink-3">Final message</div>
               <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{run.final || <span className="text-ink-3">none</span>}</div>
@@ -161,4 +162,93 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
       </div>
     </div>
   );
+}
+
+/** What a research run searched and fetched (GET /api/runs/:id/research): the owner's only. */
+export interface RunResearchData {
+  searches: string[];
+  fetches: { url: string; host: string; refused: string | null }[];
+  capped: string[];
+}
+
+/** Only http(s) addresses become links; anything else an agent asked for is shown as text. */
+const linkable = (url: string) => /^https?:\/\//i.test(url);
+
+/** The research section from its data; null while loading. Who may see it is the run page's (the runs gate). */
+export function RunResearchView({ data }: { data: RunResearchData | { error: string } | null }) {
+  if (data === null) return null;
+  if ('error' in data) {
+    return (
+      <Card className="primitive-card-pad text-[13px] text-red" data-testid="run-research">
+        Can't load the research: {data.error}
+      </Card>
+    );
+  }
+  const refused = data.fetches.filter((f) => f.refused).length;
+  return (
+    <Card className="primitive-card-pad space-y-3" data-testid="run-research">
+      <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
+        <span className="text-[13px] font-medium text-ink">Research</span>
+        <span className="tabular-nums">
+          {data.searches.length} search(es), {data.fetches.length - refused} page(s) fetched{refused ? `, ${refused} refused` : ''}
+        </span>
+      </div>
+      {data.capped.map((why, i) => (
+        <div key={i} role="alert" className="rounded-control bg-orange-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="run-research-capped">
+          <span className="font-medium text-orange">Stopped at a cap:</span> {why}
+        </div>
+      ))}
+      {!data.searches.length && !data.fetches.length ? (
+        <div className="text-[13px] text-ink-3">No searches or fetches recorded.</div>
+      ) : (
+        <>
+          {!!data.searches.length && (
+            <div>
+              <div className="text-[12px] font-medium text-ink-3">Searches</div>
+              <ol className="mt-1 space-y-0.5 text-[13px] text-ink">
+                {data.searches.map((q, i) => (
+                  <li key={i} className="break-words" data-testid="run-research-search">
+                    {q}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {!!data.fetches.length && (
+            <div>
+              <div className="text-[12px] font-medium text-ink-3">Pages</div>
+              <ul className="mt-1 divide-y divide-line">
+                {data.fetches.map((f, i) => (
+                  <li key={i} className="flex flex-wrap items-start gap-2 py-1.5 text-[12.5px]" data-testid="run-research-fetch" {...(f.refused ? { 'data-refused': '' } : {})}>
+                    <Badge tone={f.refused ? 'danger' : 'ok'}>{f.refused ? 'refused' : 'fetched'}</Badge>
+                    <div className="min-w-0 flex-1">
+                      {linkable(f.url) && !f.refused ? (
+                        <a href={f.url} target="_blank" rel="noopener noreferrer" className="break-all text-blue-ink hover:underline">
+                          {f.url}
+                        </a>
+                      ) : (
+                        <span className="break-all font-mono text-[12px] text-ink-2">{f.url}</span>
+                      )}
+                      {f.refused && <div className="text-[11.5px] text-ink-3">{f.refused}</div>}
+                    </div>
+                    <span className="text-[11.5px] text-ink-3">{f.host}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+function RunResearch({ id }: { id: string }) {
+  const [data, setData] = useState<RunResearchData | { error: string } | null>(null);
+  useEffect(() => {
+    api<RunResearchData>(`/api/runs/${encodeURIComponent(id)}/research`)
+      .then(setData)
+      .catch((e: Error) => setData({ error: e.message }));
+  }, [id]);
+  return <RunResearchView data={data} />;
 }

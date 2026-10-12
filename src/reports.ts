@@ -11,6 +11,7 @@ import { mergeMetrics } from './merge-metrics.js';
 import { offsiteLine, offsiteStatus } from './offsite-backup.js';
 import { project } from './projection.js';
 import { readRun, RUNS_DIR, type RunRecord } from './run-record.js';
+import { throughput, throughputMarkdown } from './throughput.js';
 
 const fmtH = (h: number) => (h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(h < 10 ? 1 : 0)}h`);
 const money = (n: number) => `$${n.toFixed(2)}`;
@@ -145,6 +146,8 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
     lines.push('', ...failureModesMarkdown(f));
     // What resolving and avoiding conflicts cost per merged PR, flagged with a suggestion when it adds more than a few minutes.
     lines.push('', ...mergeCostMarkdown(mergeMetrics(events, { since: weekAgo })));
+    // Merged PRs, cost per merged PR by stage, where PRs waited for the owner, and the top costs with a tuning each.
+    lines.push('', ...throughputMarkdown(throughput(events, { now })));
   }
 
   return { markdown: lines.join('\n'), proposals };

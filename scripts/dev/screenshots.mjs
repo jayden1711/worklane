@@ -197,6 +197,28 @@ if (record?.RunRecorder && stateDir) {
   runId = r.id;
 }
 
+// A research run with its searches and pages (one refused) and a cap it stopped at, for its run page.
+let researchRunId = null;
+if (record?.RunRecorder && stateDir && eventsMod?.EventLog) {
+  const r = new record.RunRecorder(stateDir, { role: 'researcher', model: 'sonnet', cwd: join(stateDir, 'research'), issue });
+  r.finish({ reason: 'succeeded', costUsd: 0.18, turns: 9, model: 'sonnet', final: 'Rounding half-up to the cent is what the payment provider expects; sources below.' });
+  const log = new eventsMod.EventLog(join(stateDir, 'events.db'));
+  try {
+    const add = (type, payload) => log.append(type, { issue, run: r.id, ...payload }, 'screenshots');
+    add('research.searched', { query: 'payment totals rounding half-up or banker\'s rounding' });
+    add('research.fetched', { url: 'https://en.wikipedia.org/wiki/Rounding', host: 'en.wikipedia.org', refused: null });
+    add('research.searched', { query: 'currency minor units ISO 4217' });
+    add('research.fetched', { url: 'https://www.iso.org/iso-4217-currency-codes.html', host: 'www.iso.org', refused: null });
+    add('research.fetched', { url: 'https://paste.example.net/raw/abc', host: 'paste.example.net', refused: 'not on the allowed hosts' });
+    add('research.capped', { why: 'searches: 2 of 2 today' });
+    researchRunId = r.id;
+  } catch (e) {
+    console.error(`no research events in this engine (${e.message.split('\n')[0]}); the research run shot is skipped`);
+  } finally {
+    log.close();
+  }
+}
+
 // The demo as an instance too, for what only an instance has (its settings): an instance of the
 // demo's checkout in the temporary state dir, its policy within the demo's config, one setting
 // changed by the owner through its server (so Activity shows it). Only where this engine has settings.
@@ -287,6 +309,7 @@ const pages = [
   ['logs', '/logs'],
   ['settings', '/settings'],
   ...(runId ? [['run-detail', `/runs/${runId}`]] : []),
+  ...(researchRunId ? [['run-research', `/runs/${researchRunId}`]] : []),
   ...(chatId ? [['chat', `/issues?chat=${chatId}`]] : []),
   ...(liveId ? [['live-run', `/runs/${liveId}`]] : []),
 ];
