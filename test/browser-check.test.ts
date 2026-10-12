@@ -120,6 +120,9 @@ createServer((req, res) => {
       version: 1,
       start: { command: `BROKEN=${broken ? 1 : 0} "${process.execPath}" server.mjs`, port: await freePort(), ready: { timeout_s: 20 } },
       ui_paths: ['web/**'],
+      // A slow CI machine can run one task past the 200 ms default; this test is about errors and requests
+      // (judgeFlow's own tests cover the timing limits), so its long-task limit is generous.
+      thresholds: { max_long_task_ms: 10_000 },
       flows: { buy: [{ goto: '/' }, { click: 'testid:go' }, { wait: 300 }] },
     });
   const ok = await runBrowserCheck({ item: { browser: 'buy' }, app: await config(false), cwd: dir, outDir: join(dir, 'ok'), chrome });
