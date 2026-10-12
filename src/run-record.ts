@@ -49,7 +49,7 @@ export interface RunRecord {
   otherTools: number;
   /**
    * What the session looked at, repo-relative, each once: files it opened with Read and files a `git diff` or
-   * `git show` named. Bounded; older records have none.
+   * `git show` named, each counted only once that call succeeded. Bounded; older records have none.
    */
   read?: string[];
   /** It ran a `git diff`/`git show` over a whole range with no path: every changed file's diff was shown. */
@@ -57,6 +57,8 @@ export interface RunRecord {
   final: string;
   /** Some steps were dropped to keep the record bounded. */
   truncated: boolean;
+  /** The longest run of byte-identical tool calls the stuck-run guard saw (absent: the guard was off, or no call repeated). */
+  stuck?: { repeats: number; failures: number; tool: string; input: string };
 }
 
 export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'startedAt' | 'endedAt' | 'reason' | 'costUsd' | 'turns' | 'files' | 'truncated'> & { commands: number; failedCommands: number };
@@ -107,6 +109,8 @@ export function runIssue(cwd: string, taskFile?: string): number | null {
 export class RunRecorder {
   private rec: RunRecord;
   private pending = new Map<string, RunStep>();
+  /** Reads waiting on their tool's result: a file counts as read only once the call that read it succeeded. */
+  private pendingReads = new Map<string, { paths: string[]; all: boolean }>();
   private cwd: string;
 
   constructor(
@@ -138,10 +142,9 @@ export class RunRecorder {
           if (tool === 'Bash') {
             step = { kind: 'command', tool, what: clip(String(input.command ?? ''), MAX_COMMAND), status: 'no result', exitCode: null, output: '' };
             const seen = gitDiffReads(String(input.command ?? ''));
-            if (seen.all) this.rec.diffedAll = true;
-            for (const p of seen.paths) this.noteRead(p);
+            if ((seen.all || seen.paths.length) && typeof c.id === 'string') this.pendingReads.set(c.id, seen);
           } else if (tool === 'Read') {
-            this.noteRead(String(input.file_path ?? ''));
+            if (typeof c.id === 'string') this.pendingReads.set(c.id, { paths: [String(input.file_path ?? '')], all: false });
             this.rec.otherTools++;
           } else if (WRITE_TOOLS.has(tool)) {
             const file = this.relative(String(input.file_path ?? input.notebook_path ?? ''));
@@ -159,6 +162,12 @@ export class RunRecorder {
       } else if (m.type === 'user') {
         for (const c of content) {
           if (c.type !== 'tool_result' || typeof c.tool_use_id !== 'string') continue;
+          const reads = this.pendingReads.get(c.tool_use_id);
+          this.pendingReads.delete(c.tool_use_id);
+          if (reads && !c.is_error) {
+            if (reads.all) this.rec.diffedAll = true;
+            for (const p of reads.paths) this.noteRead(p);
+          }
           const step = this.pending.get(c.tool_use_id);
           if (!step) continue;
           this.pending.delete(c.tool_use_id);
@@ -175,9 +184,10 @@ export class RunRecorder {
   }
 
   /** Write the record when the run ends; keeps only the newest KEEP_RUNS. Never throws. */
-  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string }, now = new Date()): string | null {
+  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string; stuck?: RunRecord['stuck'] }, now = new Date()): string | null {
     try {
       Object.assign(this.rec, { endedAt: now.toISOString(), reason: end.reason, costUsd: end.costUsd, turns: end.turns, model: end.model });
+      if (end.stuck && end.stuck.repeats > 1) this.rec.stuck = { ...end.stuck };
       // The session's own result text is its final message; else the last thing it said.
       if (end.final?.trim()) this.rec.final = clip(end.final, MAX_FINAL);
       const dir = join(this.stateDir, RUNS_DIR);

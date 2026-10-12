@@ -17,8 +17,10 @@ export type Stage = (typeof STAGES)[number];
 export function stageOf(role: string, attempt = 1): Stage {
   if (role === 'worker') return attempt > 1 ? 'retries' : 'worker';
   if (role === 'evaluator-verdict' || role === 'evaluator-repro' || role === 'investigator') return 'evaluator';
+  if (role === 'evaluator-escalated') return 'evaluator';
   if (role === 'planner') return 'plan';
   if (role === 'researcher') return 'research';
+  if (role === 'research-on-demand') return 'research';
   if (role === 'intake') return 'intake';
   if (role === 'gardener') return 'gardener';
   if (role === 'chat') return 'chat';

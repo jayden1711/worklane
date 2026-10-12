@@ -388,8 +388,8 @@ export const ReviewConfig = z.strictObject({
       /** false: every PR waits for a human, whatever the instance policy says. */
       auto: z.boolean().default(true),
       /** Over either and the PR waits. */
-      max_lines: z.number().int().positive().default(400),
-      max_files: z.number().int().positive().default(10),
+      max_lines: z.number().int().positive().default(800),
+      max_files: z.number().int().positive().default(20),
       /** Categories (built-in or from `categories`) that wait, on top of the L3 ones, ci-config and dependency. */
       wait_categories: z.array(z.string()).default([]),
     })

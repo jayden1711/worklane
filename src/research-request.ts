@@ -5,19 +5,8 @@
 import { redactString } from './events/redact.js';
 import { researchCapHold, researchUsageToday, type ResearchCaps, type ResearchResult } from './research.js';
 
-/** The field a worker's or evaluator's output may carry (merged into their output schemas). */
-export const RESEARCH_REQUEST_FIELD = {
-  research_request: {
-    type: 'object',
-    description: 'Instead of guessing: one precise question that needs current outside information (docs, versions, an API), and why the task needs it.',
-    properties: {
-      question: { type: 'string', maxLength: 500 },
-      why: { type: 'string', maxLength: 500 },
-    },
-    required: ['question', 'why'],
-    additionalProperties: false,
-  },
-} as const;
+/** The field a worker's or evaluator's output may carry (merged into their output schemas, in roles.ts). */
+export { RESEARCH_REQUEST_FIELD } from './roles.js';
 
 /** Research requests answered per task, at most. */
 export const MAX_REQUESTS_PER_TASK = 2;

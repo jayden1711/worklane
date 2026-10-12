@@ -18,6 +18,6 @@ levels:
 #   push to the branch, or a push limit hit
 merge:
   auto: true
-  max_lines: 400
-  max_files: 10
+  max_lines: 800
+  max_files: 20
   wait_categories: []

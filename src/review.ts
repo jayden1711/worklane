@@ -37,6 +37,8 @@ export interface ChangeFile {
   removed: number;
   /** Added lines, for content checks (data deletion). */
   addedLines?: string[];
+  /** Removed lines, for telling a comment-only change from a code change. */
+  removedLines?: string[];
 }
 
 export interface LevelInput {

@@ -381,6 +381,9 @@ test('the research settings: readable names, bounds from the machine\'s limits, 
   assert.deepEqual(r.parseEntry('research.max_fetches_per_day', '1.5'), { error: 'a whole number' });
   assert.deepEqual(r.parseEntry('research.max_usd_per_day', '2.75'), { value: 2.75 });
   assert.deepEqual(r.parseEntry('research.repo_access', 'on'), { value: true });
+  // The stuck-run guard's mode: one of three words, never a number or a switch.
+  assert.deepEqual(r.parseEntry('stuck_guard', 'dry-run'), { value: 'dry-run' });
+  assert.deepEqual(r.parseEntry('stuck_guard', 'maybe'), { error: 'off, dry-run, on' });
   assert.equal(r.boundsOf('research.max_usd_per_day', { ...data, limits: { ...data.limits, research: undefined } }), '', 'no research limits sent: no bounds line, not a wrong one');
   // Every setting key the server has gets a readable name, so a new one never shows as its raw key.
   assert.deepEqual(SETTING_KEYS.filter((k) => !r.LABEL[k]), []);

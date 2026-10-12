@@ -13,10 +13,11 @@ import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
+import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
 import { allowedDomainsOf, withAllowedDomains } from './sandbox.js';
 
-export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'stopped';
+export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'stopped' | 'stuck';
 
 export interface RunRequest {
   role: string;
@@ -58,6 +59,11 @@ export interface RunRequest {
   issue?: number;
   /** Every stream-json line of the session, as it arrives (the same stream the run record and the live feed read). */
   onLine?: (line: unknown) => void;
+  /**
+   * The stuck-run guard (stuck.ts): each verdict goes to onVerdict with what was done about it. Only mode 'on'
+   * stops a run (reason 'stuck'); dry-run only reports. The run record keeps the longest streak either way.
+   */
+  stuck?: { mode: StuckMode; onVerdict?: (v: StuckVerdict, action: 'log' | 'stop') => void };
 }
 
 export interface RunResult {
@@ -72,6 +78,8 @@ export interface RunResult {
   transient?: boolean;
   /** Hosts the run was refused (outside its allowlist), each once: for the owner to decide on. */
   refusedHosts?: RefusedRequest[];
+  /** Why the stuck-run guard stopped it (reason 'stuck'). */
+  stuck?: StuckVerdict;
 }
 
 /**
@@ -392,6 +400,8 @@ export class CliRunner implements AgentRunner {
     const settings = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
+    // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
+    const stuck = req.stuck && req.stuck.mode !== 'off' ? { mode: req.stuck.mode, detector: new StuckDetector(), stopped: null as StuckVerdict | null } : null;
     return new Promise((resolve) => {
       const argv = cliArgs(req, settings, systemPromptFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
@@ -461,6 +471,21 @@ export class CliRunner implements AgentRunner {
           record?.line(j);
           feed?.line(j);
           refusals.line(j);
+          if (stuck) {
+            for (const v of stuck.detector.line(j)) {
+              const action = stuckAction(stuck.mode, v);
+              if (!action) continue;
+              try {
+                req.stuck?.onVerdict?.(v, action);
+              } catch {
+                // reporting a verdict never affects the run
+              }
+              if (action === 'stop' && !stuck.stopped) {
+                stuck.stopped = v;
+                kill('stuck');
+              }
+            }
+          }
           req.onLine?.(j);
           if (j.type === 'result') {
             result = j as ResultLine;
@@ -487,11 +512,15 @@ export class CliRunner implements AgentRunner {
         const model = Object.keys(r?.modelUsage ?? {})[0] ?? req.model;
         const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}) };
         const done = (o: RunResult) => {
-          const out: RunResult = refusals.refused.length ? { ...o, refusedHosts: refusals.refused } : o;
-          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}) });
+          const out: RunResult = { ...o, ...(refusals.refused.length ? { refusedHosts: refusals.refused } : {}), ...(o.reason === 'stuck' && stuck?.stopped ? { stuck: stuck.stopped } : {}) };
+          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}), ...(stuck ? { stuck: { ...stuck.detector.longest } } : {}) });
           feed?.end({ reason: out.reason, costUsd: out.costUsd, turns: out.turns });
           resolve(out);
         };
+        if (ended === 'stuck' && stuck?.stopped) {
+          const v = stuck.stopped;
+          return done({ reason: 'stuck', detail: `stopped as stuck: the same ${v.tool} call failed ${v.failures} times in a row: ${v.input.slice(0, 200)}`, ...base });
+        }
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
         if (rateLimited || r?.api_error_status === 429) return done({ reason: 'rate_limited', detail: 'usage or rate limit reached', ...base });
         if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
@@ -504,14 +533,33 @@ export class CliRunner implements AgentRunner {
   }
 }
 
-/** Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. */
+/** What a scripted run returns; `reads` are the files its session opened, kept in its run record. */
+export type FakeResult = Partial<RunResult> & { reads?: string[] };
+
+/**
+ * Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. A run
+ * that read files gets a run record (with a state dir), as a real session would: the files in `reads`, or,
+ * when the script doesn't say, the `files_reviewed` it reports (an honest reviewer reads what it says).
+ */
 export class FakeRunner implements AgentRunner {
   readonly calls: RunRequest[] = [];
-  constructor(private script: (req: RunRequest) => Promise<Partial<RunResult>> | Partial<RunResult>) {}
+  constructor(private script: (req: RunRequest) => Promise<FakeResult> | FakeResult) {}
   async run(req: RunRequest): Promise<RunResult> {
     this.calls.push(req);
     req.onStart?.(process.pid);
-    const r = await this.script(req);
-    return { reason: 'succeeded', detail: '', costUsd: 0.01, turns: 1, model: req.model, ...r };
+    const { reads, ...r } = await this.script(req);
+    const reviewed = (r.structured as { files_reviewed?: unknown } | undefined)?.files_reviewed;
+    const read = reads ?? (Array.isArray(reviewed) ? reviewed.map(String) : null);
+    const out: RunResult = { reason: 'succeeded', detail: '', costUsd: 0.01, turns: 1, model: req.model, ...r };
+    if (read && req.stateDir) {
+      const rec = new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) });
+      read.forEach((p, i) => {
+        rec.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `r${i}`, name: 'Read', input: { file_path: join(req.cwd, p) } }] } });
+        rec.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `r${i}`, content: '' }] } });
+      });
+      rec.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model });
+      req.onControl?.({ runId: rec.id, send: () => ({ queued: false, why: 'a scripted run takes no messages' }), stop: () => {} });
+    }
+    return out;
   }
 }

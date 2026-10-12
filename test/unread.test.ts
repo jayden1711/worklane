@@ -17,22 +17,29 @@ test('what a git command showed: named paths, rev:path, a whole range, and never
   assert.deepEqual(gitDiffReads('cd repo && git diff abc..def -- "src/d.ts" | head -50'), { all: false, paths: ['src/d.ts'] });
 });
 
-test('the run record keeps the files the session read, relative to its worktree', () => {
+test('the run record keeps the files the session read, relative to its worktree, once each call succeeded', () => {
   const state = mkdtempSync(join(tmpdir(), 'state-'));
   const cwd = join(tmpdir(), 'wt', 'issue-9');
   const r = new RunRecorder(state, { role: 'evaluator-verdict', model: 'opus', cwd });
-  const use = (id: string, name: string, input: object) => r.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+  const use = (id: string, name: string, input: object, error = false) => {
+    r.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+    r.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: error ? 'no such file' : 'ok', is_error: error }] } });
+  };
   use('t1', 'Read', { file_path: join(cwd, 'src', 'a.ts') });
   use('t2', 'Bash', { command: 'git diff abc..def -- src/b.ts' });
   use('t3', 'Bash', { command: 'git show def:src/c.ts' });
   use('t4', 'Bash', { command: 'git diff --stat abc..def' });
   use('t5', 'Read', { file_path: join(cwd, 'src', 'a.ts') });
   use('t6', 'Grep', { pattern: 'x' });
+  use('t7', 'Read', { file_path: join(cwd, 'src', 'e.ts') }, true);
+  use('t8', 'Bash', { command: 'git diff abc..def -- src/f.ts' }, true);
+  use('t9', 'Bash', { command: 'git diff abc..def' }, true);
+  r.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't10', name: 'Read', input: { file_path: join(cwd, 'src', 'g.ts') } }] } });
   r.finish({ reason: 'succeeded', costUsd: 0.1, turns: 3, model: 'opus' });
   const rec = readRun(state, r.id)!;
-  assert.deepEqual(rec.read, ['src/a.ts', 'src/b.ts', 'src/c.ts'], 'each once; the stat listing is not a read');
-  assert.equal(rec.diffedAll, undefined);
-  assert.equal(rec.otherTools, 3, 'reads and searches still counted as before');
+  assert.deepEqual(rec.read, ['src/a.ts', 'src/b.ts', 'src/c.ts'], 'each once; the stat listing, failed calls and a call with no result are not reads');
+  assert.equal(rec.diffedAll, undefined, 'a failed whole-range diff showed nothing');
+  assert.equal(rec.otherTools, 5, 'reads and searches still counted as before');
 });
 
 test('unread: changed files the run never read, from the record, not from what the reviewer says it reviewed', () => {

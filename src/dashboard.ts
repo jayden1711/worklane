@@ -262,6 +262,7 @@ const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = 
   'ci_repair.enabled': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'enabled'] },
   'ci_repair.max_fixes_per_pr': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'max_fixes_per_pr'] },
   run_windows: { file: 'config.yaml', path: ['agent_runtime', 'run_windows'] },
+  stuck_guard: null,
   'research.max_searches_per_day': null,
   'research.max_fetches_per_day': null,
   'research.max_usd_per_day': null,

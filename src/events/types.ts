@@ -34,12 +34,13 @@ export const EventSchemas = {
   /** The worker found nothing to change, and the coordinator's own checks pass on the unchanged base. */
   'issue.no_change': z.strictObject({ issue, owner: z.string(), base: sha, why: z.string(), checks: z.array(CheckRunSchema) }),
   // runs
-  'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int() }),
+  /** `resumed`: the run continues the same attempt after research it asked for (it doesn't count as an attempt). */
+  'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int(), resumed: z.literal('research').optional() }),
   'run.heartbeat': z.strictObject({ issue, role: z.string(), note: z.string() }),
   'run.finished': z.strictObject({
     issue,
     role: z.string(),
-    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped']),
+    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped', 'stuck']),
     detail: z.string(),
   }),
   /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
@@ -53,6 +54,22 @@ export const EventSchemas = {
     cause: z.enum(['token_refresh', 'rate_limit', 'overloaded', 'server_error', 'network', 'other']),
     wait_ms: z.number().int().nonnegative(),
     detail: z.string(),
+  }),
+  /**
+   * The stuck-run guard's verdict on a run: `flag` at 5 identical calls (or failures) in a row, `stop` at 8 identical
+   * failures. `action` is what was done: `log` only (dry-run, or a flag), or `stop` (mode on). `run` is the run record's id.
+   */
+  'run.stuck': z.strictObject({
+    issue: issue.nullable(),
+    role: z.string(),
+    run: z.string().nullable(),
+    kind: z.enum(['flag', 'stop']),
+    mode: z.enum(['dry-run', 'on']),
+    action: z.enum(['log', 'stop']),
+    tool: z.string(),
+    input: z.string(),
+    repeats: z.number().int().nonnegative(),
+    failures: z.number().int().nonnegative(),
   }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
@@ -80,6 +97,8 @@ export const EventSchemas = {
   'research.fetched': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), url: z.string(), host: z.string(), refused: z.string().nullable() }),
   /** A research run was held or stopped by a daily cap (searches, fetches or spend). */
   'research.capped': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), why: z.string() }),
+  /** A worker or evaluator asked for research instead of guessing; `held`: why it wasn't answered (a cap, the per-task limit, a refused request). */
+  'research.requested': z.strictObject({ issue, role: z.enum(['worker', 'evaluator']), question: z.string(), why: z.string(), held: z.string().nullable() }),
   /** A research report was accepted and posted: its sources, the fields it returned that were dropped, and the report. */
   'research.reported': z.strictObject({ issue, run: z.string().nullable(), sources: z.number().int(), ignored: z.array(z.string()), report: z.string() }),
   // work intake (docs/intake.md): ids are report ids; senders only as a short hash; text only redacted
@@ -117,6 +136,19 @@ export const EventSchemas = {
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
+  /**
+   * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
+   * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.
+   */
+  'run.stage_labeled': z.strictObject({
+    run: z.string(),
+    issue: issue.nullable(),
+    role: z.string(),
+    instance: z.string(),
+    stage: z.enum(['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness']),
+    reason: z.string(),
+    by: z.enum(['code', 'judge']),
+  }),
   // verification
   'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),
@@ -142,6 +174,9 @@ export const EventSchemas = {
     /** The evaluator's binding design-level flag; absent (an older or failed verdict) counts as doubt. */
     design_change: z.boolean().optional(),
     design_reason: z.string().optional(),
+    /** The model whose verdict this is (tiered evaluation), and the cheap model it was escalated from, if it was. */
+    model: z.string().optional(),
+    escalated_from: z.string().optional(),
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
@@ -242,6 +277,8 @@ export const EventSchemas = {
   'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
   'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable() }),
+  /** The daily "waiting on you" digest was posted (`items` waiting, `merged` on their own since the last one). */
+  'digest.posted': z.strictObject({ day: z.string(), issue: z.number().int(), items: z.number().int().nonnegative(), merged: z.number().int().nonnegative() }),
   'emergency.stop': z.strictObject({ by: z.string(), reason: z.string(), running: z.number().int() }),
   'emergency.resume': z.strictObject({ instance: z.string() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),

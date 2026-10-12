@@ -158,7 +158,7 @@ export const DEFAULT_REVIEW = {
     L2_notify: { when: ['app-non-money-large', 'dependency', 'test-machinery'] },
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
-  merge: { auto: true, max_lines: 400, max_files: 10, wait_categories: [] as string[] },
+  merge: { auto: true, max_lines: 800, max_files: 20, wait_categories: [] as string[] },
 };
 
 /** The PR body's lines for instruction evals: base and head scores, the cost, and every case that changed. */

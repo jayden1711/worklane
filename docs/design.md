@@ -332,7 +332,7 @@ How each level is cleared:
 - **Auto-merge (PR mode).** The harness may now merge its own PRs, under a policy. The instance's `policy.yaml` `auto_merge` is the kill switch (default off; read at every decision), and `review.yaml` `merge` can only narrow it. A ready PR (see PR watch) **waits for a human** if any of these holds:
   - high-risk: an L3 category, `ci-config`, or the repo's `merge.wait_categories`
   - design-level: the evaluator's `design_change` flag, which is binding; dependency manifests; a new top-level module
-  - big: over `merge.max_lines` (400) or `merge.max_files` (10)
+  - big: over `merge.max_lines` (800) or `merge.max_files` (20)
   - doubt: confidence below high, a failed or uncertain verdict, no design answer, a CI fix run on the PR, a push by anyone but the harness, or a push-limit hit
   - GitHub can't merge it cleanly
 

@@ -14,6 +14,7 @@ import { InstanceSettings, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
 import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
+import type { StuckMode } from './stuck.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = `/etc/${BRAND.cli}/limits.json`;
@@ -148,7 +149,7 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
   };
 }
 
-export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access', 'intake.reports_per_sender_per_day', 'intake.drafts_per_day', 'intake.max_usd_per_day'] as const;
+export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access', 'intake.reports_per_sender_per_day', 'intake.drafts_per_day', 'intake.max_usd_per_day', 'stuck_guard'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 
 /** A setting's value in effect: the instance's if set, else the repo's. */
@@ -175,7 +176,14 @@ export function currentValue(cfg: Config, s: InstanceSettings, key: SettingKey):
     case 'intake.drafts_per_day':
     case 'intake.max_usd_per_day':
       return intakeCaps(s)[key.slice('intake.'.length) as keyof IntakeCaps];
+    case 'stuck_guard':
+      return stuckMode(s);
   }
+}
+
+/** The stuck-run guard's mode: the instance's, else dry-run (logs what it would stop, stops nothing). */
+export function stuckMode(s: InstanceSettings): StuckMode {
+  return s.stuck_guard ?? 'dry-run';
 }
 
 /** Intake's daily caps in force: the instance's settings, else the intake config's values, else the engine's defaults. */
