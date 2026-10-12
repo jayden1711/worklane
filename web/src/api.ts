@@ -469,7 +469,7 @@ export interface Throughput {
   since: string;
   until: string;
   merged: { total: number; perDay: { day: string; merged: number }[]; perWeek: { week: string; merged: number }[] };
-  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; byModel?: { model: string; usd: number; perMergedPrUsd: number | null; share: number }[]; evaluatorOnL0Usd: number };
+  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; byModel?: { model: string; usd: number; perMergedPrUsd: number | null; share: number; tokensIn?: number; tokensOut?: number; secs?: number; perMergedPrTokens?: number | null }[]; evaluatorOnL0Usd: number };
   waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
 }

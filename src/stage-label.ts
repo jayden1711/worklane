@@ -106,6 +106,7 @@ export function stagePrompt(f: FailedRun): string {
 export interface LabelOptions {
   runner: AgentRunner;
   model?: string;
+  route?: RunRequest['route'];
   cwd: string;
   /** Called before each judge call: false means the day's cap is reached and no call is made. */
   allowed: () => boolean;
@@ -123,6 +124,7 @@ export async function labelFailedRun(f: FailedRun, o: LabelOptions): Promise<Sta
     prompt: stagePrompt(f),
     cwd: o.cwd,
     model: o.model ?? 'sonnet',
+    ...(o.route ? { route: o.route } : {}),
     allowedTools: [],
     disallowedTools: ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Read', 'Glob', 'Grep', 'Task'],
     maxTurns: 2,

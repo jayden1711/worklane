@@ -18,6 +18,11 @@
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
 #       The eval user's API key; only once evals are on.
 #   bash scripts/setup/credentials.sh <name> api-key [<key-file>]
+#   bash scripts/setup/credentials.sh <name> provider-key <credential> [<key-file>]
+#       An open-model provider's key (agents.yaml providers, docs/providers.md), pasted (not shown) or read from
+#       <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory of its own). Runs on that
+#       provider read it through apiKeyHelper, as the agent user: never an environment variable, and the coordinator
+#       only knows the path. Prints the credentials.yaml line to add.
 #       Bill the agents' runs to an Anthropic API key instead of the agent user's Claude login. The key is pasted
 #       (not shown) or read from <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory
 #       of its own). claude reads it through apiKeyHelper, as the agent user: it is never in an environment, the
@@ -35,8 +40,8 @@
 # too. No webhook.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|github|eval-key|intake-discord ...}"
-what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|github|eval-key|intake-discord ...}"
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord ...}"
+what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -124,6 +129,26 @@ JS
     printf '%s' "$key" | sudo -u "$eval_user" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; cat > "$1"; chmod 0400 "$1"' _ "$file"
     unset key
     echo "set credentials.yaml eval_key: $file   (readable only by $eval_user)"
+    ;;
+  provider-key)
+    id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    cred="${3:?usage: credentials.sh <name> provider-key <credential> [<key-file>]}"
+    [[ "$cred" =~ ^[a-z][a-z0-9_-]{0,40}$ ]] || { echo "a credential name is lowercase letters, digits, _ or -; nothing installed" >&2; exit 1; }
+    dir="/home/$agent/.config/$name-provider-keys"
+    file="$dir/$cred"
+    if [ -n "${4:-}" ]; then
+      [ -f "$4" ] || { echo "$4: no such file" >&2; exit 1; }
+      key="$(tr -d '[:space:]' < "$4")"
+    else
+      read -rsp "Paste the provider's API key for $cred, then Enter (it is not shown): " key; echo
+    fi
+    [ "${#key}" -ge 16 ] || { unset key; echo "that key is too short to be real; nothing installed" >&2; exit 1; }
+    say "install the key for $agent only ($file, 0400, in a 0700 directory)"
+    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$1"; chmod 0700 "$1"; rm -f "$2"; cat > "$2"; chmod 0400 "$2"' _ "$dir" "$file"
+    unset key
+    echo "In credentials.yaml set (beside any others):"
+    echo "  provider_keys: { $cred: $file }"
+    echo "then opt the instance in (policy.yaml settings.providers) and restart it."
     ;;
   api-key)
     id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }

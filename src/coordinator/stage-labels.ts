@@ -5,7 +5,7 @@
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { classifyRuns, type ClassifiedRun } from '../failure-modes.js';
 import type { RunRecord } from '../run-record.js';
-import type { AgentRunner } from '../runner.js';
+import type { AgentRunner, RunRequest } from '../runner.js';
 import { labelFailedRun, type FailedRun } from '../stage-label.js';
 
 /** Judge calls per report at most, whatever the budget left: the weekly section needs a sample, not every run. */
@@ -55,6 +55,8 @@ export interface StageLabelDeps {
   runner: AgentRunner;
   cwd: string;
   model?: string;
+  /** The judge's route, for a model that names an open-model provider (src/providers.ts). */
+  route?: RunRequest['route'];
   /** The issue's done_when command lines; [] when it has none or can't be read. */
   doneWhenOf: (issue: number) => Promise<string[]>;
   spentToday: () => number;
@@ -73,6 +75,7 @@ export async function labelWeek(d: StageLabelDeps): Promise<number> {
       runner: d.runner,
       cwd: d.cwd,
       ...(d.model ? { model: d.model } : {}),
+      ...(d.route ? { route: d.route } : {}),
       allowed: () => {
         if (!allowed()) return false;
         calls++;
