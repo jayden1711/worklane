@@ -53,6 +53,20 @@ refuse_if_open() {
   exit 1
 }
 
+# PASS when <user> can't read, write or (a directory) enter each existing path named, else FAIL; non-zero if
+# any FAIL. Each probe runs as that user and must itself answer "denied": a probe that can't run (sudo
+# refused, no such user) is a FAIL, never a pass.
+deny_check() {
+  local user="$1" p out fail=0
+  shift
+  for p in "$@"; do
+    [ -e "$p" ] || continue
+    out="$(cd / && sudo -n -u "$user" sh -c 'if [ -r "$1" ] || [ -w "$1" ] || { [ -d "$1" ] && [ -x "$1" ]; }; then echo open; else echo denied; fi' _ "$p" 2>/dev/null || true)"
+    if [ "$out" = denied ]; then echo "PASS $user can't read, write or enter $p"; else echo "FAIL $user can reach $p (${out:-the probe did not run})"; fail=1; fi
+  done
+  return "$fail"
+}
+
 # The sudoers rule for the machine helper: each coordinator user named may run exactly the 18
 # allowed commands (set-slots 1..16, set-updates on, set-updates off) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
