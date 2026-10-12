@@ -110,7 +110,8 @@ else {
 # ------------------------------------------------------------------------------------------------ 2. the distro
 
 Write-Step "the $DistroName distro ($($Pins.Distro.Name), sha256 $($Pins.Distro.Sha256))"
-$existing = if ($DryRun) { @() } else { @(Get-Distros | Where-Object Name -EQ $DistroName) }
+# @(): an empty result is $null otherwise, and .Count on $null throws under strict mode in Windows PowerShell 5.1.
+$existing = @(if (-not $DryRun) { Get-Distros | Where-Object Name -EQ $DistroName })
 if ($existing.Count -and $existing[0].Version -ne 2) { throw "a $DistroName distro exists but runs WSL $($existing[0].Version); remove it (wsl --unregister $DistroName) or convert it (wsl --set-version $DistroName 2)" }
 if ($existing.Count) { Write-Output "   ok: $DistroName is imported (WSL 2)" }
 else {
