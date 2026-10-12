@@ -286,15 +286,17 @@ export abstract class CoordinatorBase {
     return [...latest.values()];
   }
 
-  /** Each file the change base..head touches, with its line counts and added lines (for content checks). */
+  /** Each file the change base..head touches, with its line counts and added and removed lines (for content checks). */
   protected changeFiles(cwd: string, base: string, head: string): ChangeFile[] {
     return this.git(cwd, 'diff', '--numstat', `${base}..${head}`)
       .split('\n')
       .filter(Boolean)
       .map((l) => {
         const [a, r, p] = l.split('\t');
-        const added = this.git(cwd, 'diff', '-U0', `${base}..${head}`, '--', p!).split('\n').filter((x) => x.startsWith('+') && !x.startsWith('+++')).map((x) => x.slice(1));
-        return { path: p!, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added };
+        const diff = this.git(cwd, 'diff', '-U0', `${base}..${head}`, '--', p!).split('\n');
+        const added = diff.filter((x) => x.startsWith('+') && !x.startsWith('+++')).map((x) => x.slice(1));
+        const removed = diff.filter((x) => x.startsWith('-') && !x.startsWith('---')).map((x) => x.slice(1));
+        return { path: p!, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added, removedLines: removed };
       });
   }
 

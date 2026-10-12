@@ -137,6 +137,9 @@ export const EventSchemas = {
     /** The evaluator's binding design-level flag; absent (an older or failed verdict) counts as doubt. */
     design_change: z.boolean().optional(),
     design_reason: z.string().optional(),
+    /** The model whose verdict this is (tiered evaluation), and the cheap model it was escalated from, if it was. */
+    model: z.string().optional(),
+    escalated_from: z.string().optional(),
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions

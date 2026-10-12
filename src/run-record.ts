@@ -49,7 +49,7 @@ export interface RunRecord {
   otherTools: number;
   /**
    * What the session looked at, repo-relative, each once: files it opened with Read and files a `git diff` or
-   * `git show` named. Bounded; older records have none.
+   * `git show` named, each counted only once that call succeeded. Bounded; older records have none.
    */
   read?: string[];
   /** It ran a `git diff`/`git show` over a whole range with no path: every changed file's diff was shown. */
@@ -107,6 +107,8 @@ export function runIssue(cwd: string, taskFile?: string): number | null {
 export class RunRecorder {
   private rec: RunRecord;
   private pending = new Map<string, RunStep>();
+  /** Reads waiting on their tool's result: a file counts as read only once the call that read it succeeded. */
+  private pendingReads = new Map<string, { paths: string[]; all: boolean }>();
   private cwd: string;
 
   constructor(
@@ -138,10 +140,9 @@ export class RunRecorder {
           if (tool === 'Bash') {
             step = { kind: 'command', tool, what: clip(String(input.command ?? ''), MAX_COMMAND), status: 'no result', exitCode: null, output: '' };
             const seen = gitDiffReads(String(input.command ?? ''));
-            if (seen.all) this.rec.diffedAll = true;
-            for (const p of seen.paths) this.noteRead(p);
+            if ((seen.all || seen.paths.length) && typeof c.id === 'string') this.pendingReads.set(c.id, seen);
           } else if (tool === 'Read') {
-            this.noteRead(String(input.file_path ?? ''));
+            if (typeof c.id === 'string') this.pendingReads.set(c.id, { paths: [String(input.file_path ?? '')], all: false });
             this.rec.otherTools++;
           } else if (WRITE_TOOLS.has(tool)) {
             const file = this.relative(String(input.file_path ?? input.notebook_path ?? ''));
@@ -159,6 +160,12 @@ export class RunRecorder {
       } else if (m.type === 'user') {
         for (const c of content) {
           if (c.type !== 'tool_result' || typeof c.tool_use_id !== 'string') continue;
+          const reads = this.pendingReads.get(c.tool_use_id);
+          this.pendingReads.delete(c.tool_use_id);
+          if (reads && !c.is_error) {
+            if (reads.all) this.rec.diffedAll = true;
+            for (const p of reads.paths) this.noteRead(p);
+          }
           const step = this.pending.get(c.tool_use_id);
           if (!step) continue;
           this.pending.delete(c.tool_use_id);
