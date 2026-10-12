@@ -971,7 +971,7 @@ export class Coordinator extends MergeFlow {
    * Otherwise the result of the check on that exact head and branch tip (started in the background if there is
    * none yet: 'pending'). The PR is never changed: a pass merges the unchanged head that already passed CI.
    */
-  protected async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | { hold: string }> {
+  protected async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | 'conflict' | { hold: string }> {
     if (!this.d.cfg.project.combined_check) return 'merge';
     const { number } = w;
     const baseRef = pr.base || this.branch;
@@ -999,7 +999,7 @@ export class Coordinator extends MergeFlow {
       .at(-1);
     if (done?.outcome === 'merge') return 'merge';
     if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
-    if (done?.outcome === 'conflict') return 'pending'; // GitHub reports the conflict next, and the conflict path takes it
+    if (done?.outcome === 'conflict') return 'conflict'; // GitHub should report it next, and the conflict path take it (capped in mergeOrWait)
     if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
       this.lightRunning.add(number);
       void this.lightCheck(w, pr, baseRef, mainSha, plan.overlap)

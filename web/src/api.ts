@@ -97,7 +97,7 @@ export interface PrView {
   waitReasons: string[];
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
-  mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
+  mainResult: { at: string; outcome: 'green' | 'red' | 'timed_out'; failed: string[] } | null;
   conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: string[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
   lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: string[]; outcome: string | null; waitMs: number | null; detail: string } | null;
   phase: 'waiting' | 'fixing' | 'resolving' | 'light_check' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';

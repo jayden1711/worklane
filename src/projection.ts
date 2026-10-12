@@ -514,7 +514,7 @@ export interface PrView {
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   /** After an auto-merge: the default branch's required checks on the merge commit. */
-  mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
+  mainResult: { at: string; outcome: 'green' | 'red' | 'timed_out'; failed: string[] } | null;
   /**
    * The last conflict with main and its fix: detected, being resolved (a merge of main, attempt n), or done with
    * its outcome, the files it touched, and whether the result waits for a person (and why).
@@ -596,7 +596,7 @@ export function prsView(events: StoredEvent[]): PrsView {
         if (pr) pr.mergeFailed = { at: e.ts, why: String(p.why) };
         break;
       case 'merge.main_result':
-        if (pr) pr.mainResult = { at: e.ts, outcome: p.outcome as 'green' | 'red', failed: p.failed as string[] };
+        if (pr) pr.mainResult = { at: e.ts, outcome: p.outcome as 'green' | 'red' | 'timed_out', failed: p.failed as string[] };
         break;
       case 'pr.closed':
         if (pr) {

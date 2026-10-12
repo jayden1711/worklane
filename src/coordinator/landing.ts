@@ -15,6 +15,7 @@ import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
 import { sh, evalLines, pushRefusal } from './shared.js';
+import { DEFER_CAP, slotDeferrals } from './wait-caps.js';
 
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
@@ -169,7 +170,20 @@ export abstract class Landing extends Decisions {
       const gates = await this.runGates(path, this.gateTiers(applied));
       if (!gates.ok) {
         if (gates.deferred) {
-          for (const q of applied) result(q.issue, 'deferred', null, gates.note);
+          for (const q of applied) {
+            // Capped: a slot held pass after pass (a wedged run, a leaked lock) goes to the owner instead of waiting for ever.
+            const since = this.d.log.read(0, ['land.queued']).filter((e) => (e.payload as { issue: number }).issue === q.issue).at(-1)?.id ?? 0;
+            const prior = this.d.log.read(since, ['land.result']).map((e) => e.payload as EventPayload<'land.result'>).filter((r) => r.issue === q.issue);
+            const passes = slotDeferrals([...prior, { outcome: 'deferred', detail: gates.note }]);
+            if (passes < DEFER_CAP) {
+              result(q.issue, 'deferred', null, gates.note);
+              continue;
+            }
+            const why = `deferred ${passes} times in a row, every time because ${gates.note.replace(/; deferred$/, '')}`;
+            result(q.issue, 'error', null, why);
+            this.emit('wait.capped', { issue: q.issue, number: null, kind: 'deferred_landing', detail: why.slice(0, 1000) });
+            await this.block(q.issue, ownerOf(q.issue), `landing ${why}. Label it \`ready\` again once the slot is free.`);
+          }
           this.emit('land.batch', { id, issues, tip, outcome: 'deferred', detail: gates.note.slice(0, 500) });
           return;
         }
