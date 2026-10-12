@@ -25,7 +25,8 @@
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
 // --with-prs (add pull-request history for the PR views), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
-// demo's owner, example-owner: e.g. someone-else to see what anyone but the owner and writers gets).
+// demo's owner, example-owner; the token is the owner's break-glass, so this only names who answers),
+// --as owner|writer|viewer (through the hub instead: sign in with GitHub, a fake one, as that role; see signin-fake.mjs).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,7 @@ const option = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : fallback;
 };
-const VALUE_OPTIONS = ['--engine', '--chrome', '--theme', '--out', '--screenshot', '--baseline'];
+const VALUE_OPTIONS = ['--engine', '--chrome', '--theme', '--out', '--screenshot', '--baseline', '--user', '--as'];
 const positional = argv.filter((a, i) => !a.startsWith('--') && !VALUE_OPTIONS.includes(argv[i - 1]));
 const [command = 'help', ...rest] = positional;
 const engine = resolve(option('--engine', fileURLToPath(new URL('../..', import.meta.url))));
@@ -76,7 +77,10 @@ async function start() {
     const seeded = spawnSync(process.execPath, [cli, 'demo', join(work, 'demo')], { encoding: 'utf8', env });
     const root = seeded.stdout.match(/project (.+)/)?.[1]?.trim();
     if (seeded.status !== 0 || !root) throw new Error(`seeding the demo failed:\n${seeded.stdout}${seeded.stderr}`);
-    const dash = spawn(process.execPath, [cli, 'dashboard', '--root', root, '--user', option('--user', 'example-owner'), '--no-open', '--port', String(await freePort())], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const as = option('--as');
+    const dash = as
+      ? spawn(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'signin-fake.mjs'), root, as, engine, join(work, 'hub')], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn(process.execPath, [cli, 'dashboard', '--root', root, '--user', option('--user', 'example-owner'), '--no-open', '--port', String(await freePort())], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     procs.push(dash);
     let printed = '';
     dash.stdout.on('data', (d) => (printed += d));
@@ -84,9 +88,12 @@ async function start() {
     const shown = await until('the dashboard URL', () => printed.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/)?.[0], 20_000).catch((e) => {
       throw new Error(`${e.message}\n${printed}`);
     });
-    const base = shown.split('/?')[0];
+    // With --as, the browser goes through the hub and signs in; the token here only seeds the run below.
+    const hub = as ? await until('the hub URL', () => printed.match(/^hub (http:\/\/127\.0\.0\.1:\d+)$/m)?.[1], 20_000) : null;
+    const direct = shown.split('/?')[0];
     const token = shown.split('?t=')[1];
-    const state = await (await fetch(`${base}/api/state`, { headers: { authorization: `Bearer ${token}` } })).json();
+    const base = hub ?? direct;
+    const state = await (await fetch(`${direct}/api/state`, { headers: { authorization: `Bearer ${token}` } })).json();
     const issue = state.tasks.find((t) => t.status === 'awaiting_decision')?.issue ?? state.tasks[0]?.issue;
     const run = await seedRun(root, issue);
     if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
@@ -116,7 +123,7 @@ async function start() {
     });
     const targets = await until('a page target', async () => (await (await fetch(`http://127.0.0.1:${devtools}/json/list`)).json()).find((t) => t.type === 'page'));
     const cdp = await Cdp.connect(targets.webSocketDebuggerUrl);
-    return { cdp, base, token, issue, run, stop, work };
+    return { cdp, base, token: hub ? null : token, signIn: !!hub, issue, run, stop, work };
   } catch (e) {
     stop();
     throw e;
@@ -221,8 +228,15 @@ class Controller {
     if (!found) throw new Error(`no page ${JSON.stringify(which)} in docs/feature-map.md`);
     const params = { ...this.params(found.page), ...found.params };
     const path = which.startsWith('/') ? which : pagePath(found.page, params);
+    // Signing in (--as): once, through the hub's GitHub sign-in (the fake GitHub says yes at once).
+    if (this.signIn && !this.signedIn) {
+      await this.cdp.send('Page.navigate', { url: `${this.base}/auth/login` });
+      await until('the sign-in to come back to the hub', () => this.eval(`location.origin === ${JSON.stringify(this.base)} && location.pathname === '/' && !!document.querySelector('[data-testid="who-am-i"]')`), 20_000);
+      this.signedIn = true;
+      this.opened = true;
+    }
     // The token goes on the first load only; the page moves it to session storage.
-    const url = `${this.base}${path}${this.opened ? '' : `${path.includes('?') ? '&' : '?'}t=${this.token}`}`;
+    const url = `${this.base}${path}${this.opened || !this.token ? '' : `${path.includes('?') ? '&' : '?'}t=${this.token}`}`;
     await this.cdp.send('Page.navigate', { url });
     this.opened = true;
     const want = readyText(found.page, params);

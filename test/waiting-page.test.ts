@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { mayReadDigest, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 async function serve(user: string) {
   const dir = mkdtempSync(join(tmpdir(), 'dash-waiting-'));
@@ -16,9 +16,9 @@ async function serve(user: string) {
   log.append('merge.stopped', { reason: 'main went red', number: null, sha: null, revert: null }, 'coordinator');
   log.close();
   const { dir: root } = exampleProject();
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user, slotsDir: join(dir, 'slots') });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots') });
   const base = d.url.split('/?')[0]!;
-  const get = (path: string, auth = true) => fetch(`${base}${path}`, auth ? { headers: { authorization: `Bearer ${d.token}` } } : {});
+  const get = (path: string, auth = true) => fetch(`${base}${path}`, auth ? { headers: { authorization: `Bearer ${d.token}`, ...asPerson(user) } } : {});
   return { d, get };
 }
 
@@ -43,11 +43,11 @@ test('what waits on the owner, and the digest\'s Markdown, are the owner\'s and 
   try {
     const r = await s.get('/api/waiting');
     assert.equal(r.status, 403);
-    assert.match(((await r.json()) as { error: string }).error, /^what waits on the owner is for the owner \(@example-owner\) and the project's writers; @someone-else isn't one/);
+    assert.match(((await r.json()) as { error: string }).error, /^what waits on the owner is for the instance's owners and writers \(admin or write on its repo\); @someone-else is a viewer/);
     assert.equal(((await (await s.get('/api/state')).json()) as { canReadDigest: boolean }).canReadDigest, false);
   } finally {
     await s.d.close();
   }
-  assert.equal(mayReadDigest('Example-Collaborator', { default: 'example-owner', writers: ['example-collaborator'] }), true);
-  assert.equal(mayReadDigest('', { default: 'example-owner', writers: [] }), false);
+  assert.equal(mayReadDigest('writer'), true);
+  assert.equal(mayReadDigest(null), false);
 });

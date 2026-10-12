@@ -71,6 +71,11 @@ export const EventSchemas = {
     repeats: z.number().int().nonnegative(),
     failures: z.number().int().nonnegative(),
   }),
+  /**
+   * A write made on the dashboard: who (their GitHub login, and the role the instance read from its repo, or the
+   * owner's break-glass), on which instance, and what was done.
+   */
+  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
@@ -191,7 +196,8 @@ export const EventSchemas = {
   'plan.decided': z.strictObject({ issue, decision: z.string(), answer: z.enum(['approve', 'revise', 'reject']), by: z.string(), note: z.string() }),
   /** The owner (or a writer) objected to a plan that was built at once: the task stopped. */
   'plan.objected': z.strictObject({ issue, by: z.string(), why: z.string() }),
-  'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
+  /** `role`: answered on the dashboard by someone it read as an owner or writer of the instance's repo. */
+  'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string(), role: z.enum(['owner', 'writer']).optional() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),

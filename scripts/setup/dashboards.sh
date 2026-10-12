@@ -12,20 +12,41 @@
 #     gets nothing else: no read of any log, config or credential, and no
 #     write anywhere. No instance user gets any new access, so no instance
 #     can write, or read, another's log.
+#   - People sign in to the hub with their own GitHub account, through a
+#     GitHub App used only for sign-in (its client id here; its client secret
+#     installed first with credentials.sh dashboard-signin). Each instance's
+#     dashboard reads their role from their permission on its repo.
+#   - Both listen on 127.0.0.1 only: the hub's sign-in port 4399, which
+#     tailscale serve forwards over HTTPS, and the owner's break-glass port
+#     4398 (the token, on this machine only), which it never forwards.
 #
-#   bash scripts/setup/dashboards.sh <your GitHub login> <name> [<name>...]
+#   bash scripts/setup/credentials.sh dashboard-signin      (first, once)
+#   bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
 #
-# Then from your laptop: ssh -N -L 4399:127.0.0.1:4399 <you>@<this-host>
-# and open the URL this prints.
+# Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-login="${1:?usage: dashboards.sh <your GitHub login> <name> [<name>...]}"
-shift
-[ "$#" -ge 1 ] || { echo "usage: dashboards.sh <your GitHub login> <name> [<name>...]" >&2; exit 2; }
-[[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || { echo "GitHub login: letters, digits and dashes" >&2; exit 2; }
+usage="usage: dashboards.sh --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
+client_id="" public_url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --client-id) client_id="${2:-}"; shift 2 ;;
+    --public-url) public_url="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    -*) echo "$usage" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[ "$#" -ge 1 ] && [ -n "$client_id" ] && [ -n "$public_url" ] || { echo "$usage" >&2; exit 2; }
+[[ "$client_id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "--client-id: the sign-in App's client id (letters, digits, dots, dashes)" >&2; exit 2; }
+[[ "$public_url" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin, as browsers reach it through tailscale serve (https://<machine>.<tailnet>.ts.net)" >&2; exit 2; }
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
+signin_dir="/home/$viewer/.config/dashboard-signin"
+for f in client-secret session-secret; do
+  [ -s "$signin_dir/$f" ] || { echo "no $signin_dir/$f: run credentials.sh dashboard-signin first" >&2; exit 1; }
+done
 
 state_of() { local coord="wl-$1"; echo "/home/$coord/.local/state/worklane/instances/$1/state"; }
 for name in "$@"; do
@@ -39,7 +60,7 @@ done
 dash_unit() {
   cat <<EOF
 [Unit]
-Description=worklane dashboard for instance $1 (read its log, record answers), loopback only
+Description=worklane dashboard for instance $1 (read its log, record answers; roles from its repo), loopback only
 After=network.target
 
 [Service]
@@ -48,7 +69,7 @@ User=wl-$1
 Group=wl-$1
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --instance $1 --service --user $login
+ExecStart=/usr/local/bin/worklane dashboard --instance $1 --service
 Restart=on-failure
 UMask=0007
 RestartSec=10
@@ -64,7 +85,7 @@ EOF
 hub_unit() {
   cat <<EOF
 [Unit]
-Description=worklane dashboard hub: one view over $*, forwarding to each instance's own dashboard
+Description=worklane dashboard hub: sign-in with GitHub, one view over $*, forwarding to each instance's own dashboard
 After=network.target
 
 [Service]
@@ -73,7 +94,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir
 Restart=on-failure
 UMask=0007
 RestartSec=10
@@ -146,6 +167,9 @@ for name in "$@"; do
 done
 
 echo
-echo "hub: http://127.0.0.1:4399/?t=$(cat "$hub_token_file")"
-echo "from your laptop: ssh -N -L 4399:127.0.0.1:4399 <you>@<this-host>, then open the hub URL above"
+echo "sign-in: $public_url (people sign in with GitHub; their role on each instance is their permission on its repo)"
+echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS and HTTPS certificates on; docs/dashboard.md)"
+echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
+echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/?t=<the token in $hub_token_file>"
+echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"
 echo "logs: journalctl -u worklane-dashboard-hub.service; journalctl -u worklane-dashboard-<name>.service"

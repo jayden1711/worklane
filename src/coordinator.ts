@@ -263,7 +263,8 @@ export class Coordinator extends MergeFlow {
     for (const q of takeRequests(this.d.stateDir)) {
       const refuse = (why: string) => this.emit('console.request_refused', { request: q.id, kind: q.kind, run: q.run, by: q.by, why });
       const owner = this.d.cfg.project.owners.default;
-      if (q.by.toLowerCase() !== owner.toLowerCase()) {
+      // The default owner, or one the instance's own dashboard read as an owner (admin on the repo).
+      if (q.by.toLowerCase() !== owner.toLowerCase() && q.owner !== true) {
         refuse(`only the owner (@${owner}) may use the console`);
         continue;
       }

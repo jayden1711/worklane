@@ -17,6 +17,11 @@
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
 #       The eval user's API key; only once evals are on.
+#   bash scripts/setup/credentials.sh dashboard-signin [--rotate-session]
+#       The dashboard hub's sign-in (docs/dashboard.md), once per machine, not per instance: the sign-in GitHub
+#       App's client secret (pasted, not shown) and a session secret (generated the first time; --rotate-session
+#       makes a new one, which signs everyone out), each 0400 for the hub's viewer user wl-dash only, in its home.
+#       The client id isn't secret: it goes to dashboards.sh --client-id.
 #   bash scripts/setup/credentials.sh <name> intake-discord
 #       Work intake (docs/intake.md): the chat bot's token. Pasted (not shown) and installed for wl-<name>
 #       only, 0400, in the instance home, which no agent user can read. Prints the credentials.yaml line to add.
@@ -29,7 +34,25 @@
 # too. No webhook.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ...}"
+if [ "${1:-}" = dashboard-signin ]; then
+  viewer=wl-dash
+  dir="/home/$viewer/.config/dashboard-signin"
+  # Write one secret for the viewer only: 0400, in a 0700 directory of its own, never echoed.
+  put_secret() { sudo -u "$viewer" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$1"; }
+  say "the dashboard sign-in App's secrets, for $viewer only ($dir, 0400)"
+  ensure_user "$viewer"
+  read -rsp "Paste the sign-in App's client secret, then Enter (it is not shown): " secret; echo
+  [[ "$secret" =~ ^[A-Za-z0-9_]{20,100}$ ]] || { unset secret; echo "that doesn't look like a GitHub App client secret; nothing installed" >&2; exit 1; }
+  printf '%s' "$secret" | put_secret "$dir/client-secret"; unset secret
+  echo "installed $dir/client-secret"
+  if [ "${2:-}" = --rotate-session ] || ! sudo -u "$viewer" test -s "$dir/session-secret"; then
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | put_secret "$dir/session-secret"
+    echo "generated $dir/session-secret (signs out every session made under an earlier one)"
+  fi
+  echo "then: dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name>..."
+  exit 0
+fi
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ... | credentials.sh dashboard-signin}"
 what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"

@@ -12,7 +12,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
 import { SETTING_KEYS } from '../src/settings.js';
-import { repoRoot } from './helpers.js';
+import { asPerson, exampleRoles, repoRoot } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -46,6 +46,10 @@ interface Render {
   boundsOf(key: string, d: unknown): string;
   LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  probeMe(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  renderSignIn(): string;
+  renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
+  renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
   actionHref(a: unknown): string | null;
@@ -91,9 +95,9 @@ before(async () => {
     else process.env[`${BRAND.envPrefix}_STATE_DIR`] = prev;
   });
   const state = async (user: string) => {
-    const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'web-render-state-')), user, slotsDir: mkdtempSync(join(tmpdir(), 'web-render-slots-')) });
+    const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'web-render-state-')), user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'web-render-slots-')) });
     try {
-      return (await (await fetch(`${d.url.split('/?')[0]}/api/state`, { headers: { authorization: `Bearer ${d.token}` } })).json()) as State;
+      return (await (await fetch(`${d.url.split('/?')[0]}/api/state`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(user) } })).json()) as State;
     } finally {
       await d.close();
     }
@@ -195,6 +199,41 @@ test('the PR page: what waits for you and exactly why, what is moving, what auto
   for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-gave-up-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
     assert.match(html, new RegExp(`data-testid="${id}"`), `data-testid ${id}`);
   }
+});
+
+test('sign-in: the hub page shows a GitHub sign-in when nobody is signed in; the signed-in person, their role and a sign-out; the owners\' audit log', async () => {
+  // Who is signed in is asked only on a hub page; a 401 there means: show the sign-in.
+  const asked: string[] = [];
+  const signedOut = async (url: string) => (asked.push(url), { ok: true, json: async () => ({ login: null, csrf: null, breakGlass: false }) });
+  assert.equal(await r.probeMe(false, signedOut), null);
+  assert.deepEqual(asked, [], "an instance's own dashboard has no sign-in: nothing asked");
+  assert.equal(await r.probeMe(true, signedOut, ''), null, 'not signed in');
+  assert.deepEqual(asked, ['/api/me']);
+  const signedIn = async () => ({ ok: true, json: async () => ({ login: 'example-collaborator', csrf: 'c', breakGlass: false }) });
+  assert.deepEqual(await r.probeMe(true, signedIn, ''), { login: 'example-collaborator', csrf: 'c', breakGlass: false });
+
+  const page = r.renderSignIn();
+  assert.match(page, /data-testid="sign-in"/);
+  assert.match(page, /<a href="\/auth\/login" data-testid="sign-in-github"[^>]*>Sign in with GitHub<\/a>/);
+
+  // The state the server gives each person: their login and role, read from the repo.
+  assert.equal(asOther.decisions.some((d) => d.canAnswer), false, 'a viewer may answer nothing');
+  const me = r.renderWhoAmI({ user: 'example-collaborator', role: 'writer', via: 'session' });
+  assert.match(me, /data-testid="who-login">@example-collaborator</);
+  assert.match(me, /data-testid="who-role"> · writer</);
+  assert.match(me, /data-testid="sign-out"/, 'a signed-in person can sign out');
+  const viewer = r.renderWhoAmI({ user: 'someone-else', role: 'viewer', via: 'session' });
+  assert.match(viewer, /data-testid="who-role"> · viewer</);
+  const glass = r.renderWhoAmI({ user: 'example-owner', role: 'owner', via: 'break-glass' });
+  assert.match(glass, /owner \(break-glass\)/);
+  assert.doesNotMatch(glass, /sign-out/, 'the break-glass has no session to end');
+
+  const audit = r.renderAudit([{ id: 2, at: new Date().toISOString(), login: 'example-collaborator', role: 'writer', via: 'session', instance: 'a', action: 'decision.answered', detail: { id: 'd-1', answer: 'approve' } }]);
+  assert.match(audit, /data-testid="audit-log"/);
+  assert.match(audit, /@example-collaborator/);
+  assert.match(audit, /decision\.answered/);
+  assert.match(audit, /id d-1, answer approve/);
+  assert.match(r.renderAudit([]), /No writes recorded yet/);
 });
 
 test('the UI asks for hub instances only when a hub served the page (no 404 on an instance\'s own dashboard)', async () => {
@@ -642,7 +681,7 @@ test('the Intake page: each report redacted with what became of it, views, a lin
   assert.match(health, /data-testid="health-intake-merged"[^>]*>report to merged fix: median 2\.5 h over 2 report\(s\)/);
   // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
   assert.equal((asOther as unknown as { canReadIntake: boolean }).canReadIntake, false);
-  assert.match(r.renderIntakePage(asOther), /data-testid="intake-refused"[^>]*>Intake reports are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderIntakePage(asOther), /data-testid="intake-refused"[^>]*>Intake reports are for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.equal(r.intakeRefusal(asOwner), null);
   assert.equal(r.intakeRefusal({ ...asOwner, canReadIntake: undefined }), null, 'an older server without the flag: asked as before');
 });
@@ -682,15 +721,15 @@ test('the throughput panel: merges, cost per merged PR by stage (zeros shown), t
   assert.match(html, /data-kind="merge"[\s\S]*?touches a high-risk area/);
   assert.match(html, /data-testid="throughput-other-wait"[^>]*>Also: 1 task\(s\) held behind another task/);
   assert.match(r.renderThroughput({ ...t, waits: [] }), /data-testid="throughput-no-waits"/);
-  assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderThroughputPanel(asOwner), /throughput-refused/);
 });
 
 test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
-  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  const msg = "agent runs are for the instance's owners and writers (admin or write on its repo); @someone-else is a viewer";
   assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
   assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
-  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\.</);
   // From the state, before asking: the demo's dashboard for someone who is neither the owner nor a writer.
   assert.equal((asOther as unknown as { canReadRuns: boolean }).canReadRuns, false);
   assert.equal((asOwner as unknown as { canReadRuns: boolean }).canReadRuns, true);
@@ -759,12 +798,12 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   assert.match(r.renderWaiting({ ...w, merged: [] }, now), /Nothing merged on its own/);
   // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
   assert.equal((asOther as unknown as { canReadDigest: boolean }).canReadDigest, false);
-  assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
 });
 
 test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
   assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
-  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
 });

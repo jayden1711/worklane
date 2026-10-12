@@ -20,8 +20,8 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 /** For a viewer the state says may not read throughput, the refusal the server would give; null for the owner and writers. */
-export const throughputRefusal = (state: Pick<State, 'canReadThroughput' | 'owners' | 'user'>) =>
-  state.canReadThroughput === false ? `throughput is for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+export const throughputRefusal = (state: Pick<State, 'canReadThroughput' | 'owners' | 'user' | 'role'>) =>
+  state.canReadThroughput === false ? `throughput is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 /** Merged PRs per day as one quiet series of bars (each hoverable), labelled at the ends. */
 function MergedBars({ days }: { days: Throughput['merged']['perDay'] }) {

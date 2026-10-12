@@ -1,8 +1,12 @@
 // The local dashboard server: static UI plus a small API over the event
-// log. It binds to 127.0.0.1, requires a per-install token, reads the log
-// read-only, and pushes changes over one SSE stream. Its only write is a
-// human answering a decision, recorded as an event like the CLI does, and
-// only by that decision's owner or one of the project's writers.
+// log. It binds to loopback only and requires a per-install token, which only
+// two kinds of caller hold: the hub, which names the signed-in person on each
+// request (their role here is then read from their permission on this
+// instance's repo, never taken from the caller), and the owner on this machine
+// (the break-glass: no person named, never through a proxy; it grants owner).
+// It reads the log read-only, pushes changes over one SSE stream, and records
+// every write a person makes (answers, settings, chat, console) in the audit.
+// See dashboard-auth.ts.
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -37,6 +41,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
+import { assertLoopbackHost, breakGlassAllowed, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type Role, type RoleOf } from './dashboard-auth.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -66,7 +71,17 @@ export interface DashboardOptions {
   cfg: Config;
   eventsDb: string;
   stateDir: string;
+  /** The login recorded for the break-glass (the token used on this machine with no person named): the owner's. */
   user: string;
+  /**
+   * A signed-in person's role on this instance, from their permission on its repo (cached at most 5 minutes);
+   * none when unset, so every person the hub names is refused.
+   */
+  roleOf?: RoleOf;
+  /** The instance this server serves (recorded in the audit); none for a checkout. */
+  instance?: string;
+  /** Where it listens: loopback only (127.0.0.1 when unset); anything else is refused. */
+  host?: string;
   port?: number;
   webDir?: string;
   pollMs?: number;
@@ -107,34 +122,30 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 
 export { mayAnswer };
 
-/** Who may read the next report's preview (spend, and the throughput section): the project's owner or one of its writers. */
-export function mayReadReports(user: string, owners: { default: string; writers: string[] }): boolean {
-  return mayAnswer(owners.default, user, owners);
+/** Who is asking: a signed-in person the hub named (their role read from the repo), or the owner's break-glass. */
+export interface Who {
+  login: string;
+  role: Role;
+  via: 'session' | 'break-glass';
 }
 
-/** Who may read intake reports (redacted, but people's words): the project's owner or one of its writers. */
-export function mayReadIntake(user: string, owners: { default: string; writers: string[] }): boolean {
-  return mayAnswer(owners.default, user, owners);
-}
-
-/** Who may read throughput (what runs cost, where PRs waited): the project's owner or one of its writers. */
-export function mayReadThroughput(user: string, owners: { default: string; writers: string[] }): boolean {
-  return mayAnswer(owners.default, user, owners);
-}
-
-/** Who may read what waits on the owner (the digest): the project's owner or one of its writers. */
-export function mayReadDigest(user: string, owners: { default: string; writers: string[] }): boolean {
-  return mayAnswer(owners.default, user, owners);
-}
-
+/** Who may read the next report's preview (spend, and the throughput section): the instance's owners and writers. */
+export const mayReadReports = (role: Role | null | undefined) => isWriter(role);
+/** Who may read intake reports (redacted, but people's words): the instance's owners and writers. */
+export const mayReadIntake = (role: Role | null | undefined) => isWriter(role);
+/** Who may read throughput (what runs cost, where PRs waited): the instance's owners and writers. */
+export const mayReadThroughput = (role: Role | null | undefined) => isWriter(role);
+/** Who may read what waits on the owner (the digest): the instance's owners and writers. */
+export const mayReadDigest = (role: Role | null | undefined) => isWriter(role);
 /**
  * Who may read agent runs (every route under /api/runs: a run's record, its live feed, a research run's
- * searches and pages): the project's owner or one of its writers. Writing to a run (a console message, a
- * stop) stays the owner's alone, checked on those routes as well.
+ * searches and pages): the instance's owners and writers. Writing to a run (a console message, a stop)
+ * stays the owner's alone, checked on those routes as well.
  */
-export function mayReadRuns(user: string, owners: { default: string; writers: string[] }): boolean {
-  return mayAnswer(owners.default, user, owners);
-}
+export const mayReadRuns = (role: Role | null | undefined) => isWriter(role);
+
+/** Why a reader is refused something that is the owners' and writers' to read. */
+const writersOnly = (what: string, who: Who) => `${what} for the instance's owners and writers (admin or write on its repo); @${who.login} is a ${who.role}`;
 
 /**
  * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
@@ -161,14 +172,16 @@ const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(ne
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog } {
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf } {
   const i = instance ? loadInstance(instance, dir) : null;
   const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
   const logs = { unit: instance ? `${BRAND.cli}-${instance}.service` : null, file: join(s.stateDir, 'coordinator.log') };
   // The backlog the coordinator files to, made when first needed: an instance's with its App's tokens.
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog };
+  // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
+  const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com' })) : undefined;
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
 }
 
 /**
@@ -197,14 +210,14 @@ export function healthStats(o: { serviceUnit: string | null; root: string; state
  * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
  * the helper's change log and the updater's log, newest first.
  */
-export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'>) {
+export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'> & { role?: Role | null }) {
   const owner = o.cfg.project.owners.default;
   const slots = slotStatus(o.slotsDir);
   const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
   return {
     owner,
     user: o.user,
-    canChange: !!o.user && o.user.toLowerCase() === owner.toLowerCase(),
+    canChange: isOwner(o.role),
     helper: MACHINE_HELPER,
     slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
     updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
@@ -214,9 +227,9 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
 }
 
 /** The runs live now, for the Agents page; their held messages' text only for the owner, who may control them. */
-export function liveView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>) {
+export function liveView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'> & { role?: Role | null }) {
   const owner = o.cfg.project.owners.default;
-  const canControl = !!o.user && o.user.toLowerCase() === owner.toLowerCase();
+  const canControl = isOwner(o.role);
   return { owner, canControl, runs: liveRuns(o.stateDir).map((r) => ({ ...r, pending: canControl ? r.pending : r.pending.map((m) => ({ id: m.id, by: m.by, at: m.at, text: '' })) })) };
 }
 
@@ -237,9 +250,9 @@ function feedOrWait(o: Pick<DashboardOptions, 'stateDir'>, run: string, after: n
  * stop it, its messages held until the agent's turn ends, and the console's events for it (queued, delivered,
  * dropped, stopped, refused), oldest first.
  */
-export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user' | 'eventsDb'>, run: string) {
+export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user' | 'eventsDb'> & { role?: Role | null }, run: string) {
   const owner = o.cfg.project.owners.default;
-  const canControl = !!o.user && o.user.toLowerCase() === owner.toLowerCase();
+  const canControl = isOwner(o.role);
   const live = liveRuns(o.stateDir).find((r) => r.run === run) ?? null;
   const events = readEvents(o.eventsDb)
     .filter((e) => e.type.startsWith('console.') && ((e.payload as { run?: string }).run === run))
@@ -314,9 +327,9 @@ export function settingSource(key: SettingKey, instance: unknown, repo: (file: s
  * instance's policy, the repo's config, or the engine's default), the bounds a new value must keep (the machine's limits and
  * the policy's own ceilings), and whether this dashboard's user, the owner, may change them.
  */
-export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'cfg' | 'user' | 'limitsPath'>) {
+export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'cfg' | 'user' | 'limitsPath'> & { role?: Role | null }) {
   const owner = o.cfg.project.owners.default;
-  const base = { owner, user: o.user, canChange: !!o.policyFile && !!o.user && o.user.toLowerCase() === owner.toLowerCase(), keys: [...SETTING_KEYS] };
+  const base = { owner, user: o.user, canChange: !!o.policyFile && isOwner(o.role), keys: [...SETTING_KEYS] };
   if (!o.policyFile) return { ...base, available: false as const, why: "settings belong to an instance: this dashboard serves a checkout, whose config comes from the repo" };
   let limits: ReturnType<typeof loadLimits> | null = null;
   let limitsError: string | null = null;
@@ -541,41 +554,81 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; token: string; close: () => Promise<void> }> {
+  const host = opts.host ?? '127.0.0.1';
+  try {
+    assertLoopbackHost(host);
+  } catch (e) {
+    return Promise.reject(e);
+  }
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   const clients = new Set<ServerResponse>();
   let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
 
-  const authed = (req: IncomingMessage, url: URL) => tokenGiven(req, url, token);
+  const owners = opts.cfg.project.owners;
+  const repo = opts.cfg.project.project.repo;
 
-  const state = () => {
+  /**
+   * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
+   * their role is their permission on this instance's repo, never one the caller sends; without, it is the
+   * owner's break-glass, accepted only from this machine's loopback and never through a proxy.
+   */
+  const identify = async (req: IncomingMessage, url: URL): Promise<Who | { status: number; error: string; login?: string }> => {
+    if (!tokenGiven(req, url, token)) return { status: 401, error: 'missing or wrong token; sign in through the hub, or open the URL printed by `dashboard` on this machine' };
+    const named = req.headers[LOGIN_HEADER];
+    if (named !== undefined) {
+      if (!validLogin(named)) return { status: 400, error: 'not a GitHub login' };
+      const role = opts.roleOf ? await opts.roleOf(named) : null;
+      if (!role) return { status: 403, login: named, error: `@${named} has no access to this instance: it needs at least read access to ${repo}` };
+      return { login: named, role, via: 'session' };
+    }
+    if (!breakGlassAllowed(req)) return { status: 403, error: "the token is the owner's break-glass: accepted only on this machine, never through a proxy" };
+    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass' };
+  };
+
+  /** Every write a person makes, recorded with who (login and role), how they came in, the instance and what was done. */
+  const audit = (who: Who, action: string, detail: Record<string, unknown>) => {
+    const log = new EventLog(opts.eventsDb);
+    try {
+      log.append('dashboard.audit', { login: who.login, role: who.role, via: who.via, instance: opts.instance ?? null, action, detail }, who.login, 'human');
+    } finally {
+      log.close();
+    }
+  };
+
+  const state = (who: Who) => {
     const events = readEvents(opts.eventsDb);
     const p = project(events);
     const slots = slotStatus(opts.slotsDir);
     return {
       brand: { name: BRAND.name, cli: BRAND.cli },
       project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
-      user: opts.user,
+      user: who.login,
+      role: who.role,
+      via: who.via,
       owners: opts.cfg.project.owners,
       budget: opts.cfg.agents.daily_budget_usd,
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
-      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
-      canReadIntake: mayReadIntake(opts.user, opts.cfg.project.owners),
+      canReadIntake: mayReadIntake(who.role),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
-      canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
+      canReadThroughput: mayReadThroughput(who.role),
       // Whether this viewer may read the report preview, so the page asks for it only when it will get it.
-      canReadReports: mayReadReports(opts.user, opts.cfg.project.owners),
+      canReadReports: mayReadReports(who.role),
       // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
-      canReadRuns: mayReadRuns(opts.user, opts.cfg.project.owners),
+      canReadRuns: mayReadRuns(who.role),
       // Whether this viewer may read what waits on the owner, so the page asks only when it will get it.
-      canReadDigest: mayReadDigest(opts.user, opts.cfg.project.owners),
+      canReadDigest: mayReadDigest(who.role),
+      // Whether this viewer may write at all (viewers are read-only), and see the audit log (owners only).
+      canWrite: isWriter(who.role),
+      canReadAudit: isOwner(who.role),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
-      inbox: inbox(p, opts.user),
+      inbox: inbox(p, who.login),
       // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
       prCounts: prCounts(prsView(events).prs),
     };
@@ -585,13 +638,27 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     try {
       if (url.pathname.startsWith('/api/')) {
-        if (!authed(req, url)) return json(res, 401, { error: 'missing or wrong token; open the URL printed by `dashboard`' });
-        if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state());
+        const id = await identify(req, url);
+        // The hub asks this of each instance, to list only the ones the person has a role on.
+        if (url.pathname === '/api/role' && req.method === 'GET') {
+          if ('status' in id) return id.status === 403 && id.login ? json(res, 200, { login: id.login, role: null }) : json(res, id.status, { error: id.error });
+          return json(res, 200, { login: id.login, role: id.role, via: id.via });
+        }
+        if ('status' in id) return json(res, id.status, { error: id.error });
+        const who = id;
+        const isOwnerHere = isOwner(who.role);
+        // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
+        if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
+        if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // The audit log: every write made on this dashboard, newest first; the owners' to read.
+        if (url.pathname === '/api/audit' && req.method === 'GET') {
+          if (!isOwnerHere) return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
+          return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
+        }
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
-          const owners = opts.cfg.project.owners;
-          if (!mayReadReports(opts.user, owners)) return json(res, 403, { error: `the report preview is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          if (!mayReadReports(who.role)) return json(res, 403, { error: writersOnly('the report preview is', who) });
           const events = readEvents(opts.eventsDb);
           const last = [...events].reverse().find((e) => e.type === 'report.posted');
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
@@ -608,9 +675,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
         }
         // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
-        if (isRunsPath(url.pathname) && !mayReadRuns(opts.user, opts.cfg.project.owners)) {
-          return json(res, 403, { error: `agent runs are for the owner (@${opts.cfg.project.owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
-        }
+        if (isRunsPath(url.pathname) && !mayReadRuns(who.role)) return json(res, 403, { error: writersOnly('agent runs are', who) });
         // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
         if (url.pathname === '/api/runs' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
@@ -623,7 +688,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const body = (await readBody(req)) as { question?: string; key?: unknown };
           try {
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
-            return json(res, 200, askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: opts.user, ...(body.key !== undefined ? { key: String(body.key) } : {}) }));
+            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}) });
+            audit(who, 'chat.asked', { id: asked.id });
+            return json(res, 200, asked);
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
             throw e;
@@ -631,17 +698,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         const chat = url.pathname.match(/^\/api\/chat\/([0-9]+-[a-f0-9]+)(\/file-issue)?$/);
         if (chat) {
-          const owner = opts.cfg.project.owners.default;
-          const isOwner = !!opts.user && opts.user.toLowerCase() === owner.toLowerCase();
           const f = chatAnswer(opts.stateDir, chat[1]!);
           if (!f) return json(res, 404, { error: `no chat question ${chat[1]}` });
           if (!chat[2] && req.method === 'GET') {
             const rec = existsSync(filedPath(opts.stateDir, chat[1]!)) ? (JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as { number?: number }) : null;
             const filed = typeof rec?.number === 'number' ? { number: rec.number } : null;
-            return json(res, 200, { ...chatAnswerFor(f, isOwner), owner: isOwner, filed });
+            return json(res, 200, { ...chatAnswerFor(f, isOwnerHere), owner: isOwnerHere, filed });
           }
           if (chat[2] && req.method === 'POST') {
-            if (!isOwner) return json(res, 403, { error: `only the owner (@${owner}) may file a draft; @${opts.user || 'unknown'} may not` });
+            if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may file a draft; @${who.login} is a ${who.role}` });
             if (f.state !== 'answered' || !f.answer.issueDraft) return json(res, 400, { error: 'this answer has no issue draft' });
             if (existsSync(filedPath(opts.stateDir, chat[1]!))) return json(res, 409, { error: 'this draft was filed already', ...(JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as object) });
             // The draft as the answer file has it, never one from the request, checked again as the harness will.
@@ -651,7 +716,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
             mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
             try {
-              writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ filing: true, at: new Date().toISOString(), by: opts.user }), { mode: 0o600, flag: 'wx' });
+              writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ filing: true, at: new Date().toISOString(), by: who.login }), { mode: 0o600, flag: 'wx' });
             } catch {
               return json(res, 409, { error: 'this draft is being filed already' });
             }
@@ -662,7 +727,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               rmSync(filedPath(opts.stateDir, chat[1]!), { force: true });
               throw e;
             }
-            writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ number, at: new Date().toISOString(), by: opts.user }), { mode: 0o600 });
+            writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ number, at: new Date().toISOString(), by: who.login }), { mode: 0o600 });
+            audit(who, 'chat.draft_filed', { id: chat[1]!, issue: number });
             return json(res, 200, { ok: true, number });
           }
         }
@@ -671,7 +737,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
         if (research && req.method === 'GET') return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
         // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
-        if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView(opts));
+        if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView({ ...opts, user: who.login, role: who.role }));
         const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
         if (con) {
           const [, run, what] = con as unknown as [string, string, string];
@@ -679,7 +745,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             if (!(e instanceof ConsoleError)) throw e;
             return json(res, /only the owner/.test(e.message) ? 403 : /isn't live|no feed/.test(e.message) ? 404 : 400, { error: e.message });
           };
-          if (what === 'console' && req.method === 'GET') return json(res, 200, consoleView(opts, run));
+          if (what === 'console' && req.method === 'GET') return json(res, 200, consoleView({ ...opts, user: who.login, role: who.role }, run));
           if (what === 'feed' && req.method === 'GET') {
             try {
               return json(res, 200, feedOrWait(opts, run, Number(url.searchParams.get('after') ?? -1)));
@@ -731,7 +797,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if ((what === 'message' || what === 'stop') && req.method === 'POST') {
             const body = (await readBody(req)) as { text?: string };
             try {
-              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: opts.user }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: opts.user });
+              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: who.login, owner: isOwnerHere }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: who.login, owner: isOwnerHere });
+              audit(who, what === 'message' ? 'console.message' : 'console.stop', { run, request: r.id });
               return json(res, 200, { ok: true, ...r });
             } catch (e) {
               return consoleError(e);
@@ -750,23 +817,20 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Intake: each report (redacted) and what became of it, and the numbers for the health panel. The owner's
         // and the writers' to read, like the runs.
         if (url.pathname === '/api/intake' && req.method === 'GET') {
-          const owners = opts.cfg.project.owners;
-          if (!mayReadIntake(opts.user, owners)) return json(res, 403, { error: `intake reports are for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          if (!mayReadIntake(who.role)) return json(res, 403, { error: writersOnly('intake reports are', who) });
           const events = readEvents(opts.eventsDb);
           return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events) });
         }
         // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
         // tuning each. The owner's and the writers' to read, like the runs it is made of.
         if (url.pathname === '/api/throughput' && req.method === 'GET') {
-          const owners = opts.cfg.project.owners;
-          if (!mayReadThroughput(opts.user, owners)) return json(res, 403, { error: `throughput is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
-          const owners = opts.cfg.project.owners;
-          if (!mayReadDigest(opts.user, owners)) return json(res, 403, { error: `what waits on the owner is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          if (!mayReadDigest(who.role)) return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
           const digest = waitingOnYou(readEvents(opts.eventsDb));
           return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
         }
@@ -780,12 +844,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }), docs: { backups: docsUrl('backups') } });
         }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
-        if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView(opts));
+        if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
         if (url.pathname === '/api/instance-settings' && req.method === 'POST') {
           if (!opts.policyFile) return json(res, 400, { error: 'settings are an instance\'s: this dashboard serves a checkout' });
           const body = (await readBody(req)) as { key?: string; value?: unknown };
           try {
-            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: opts.user, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
+            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
+            audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
             return json(res, 200, { ok: true, ...r });
           } catch (e) {
             if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
@@ -794,10 +859,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Machine-wide settings (the slot cap, engine updates) and their history. A change goes through the
         // machine helper (sudo, src/machine.ts) as this server's user, the instance's coordinator; only the owner may ask.
-        if (url.pathname === '/api/machine' && req.method === 'GET') return json(res, 200, machineView(opts));
+        const machine = () => machineView({ ...opts, user: who.login, role: who.role });
+        if (url.pathname === '/api/machine' && req.method === 'GET') return json(res, 200, machine());
         if (url.pathname === '/api/machine' && req.method === 'POST') {
-          const owner = opts.cfg.project.owners.default;
-          if (!opts.user || opts.user.toLowerCase() !== owner.toLowerCase()) return json(res, 403, { error: `only the owner (@${owner}) may change machine settings; @${opts.user || 'unknown'} may not` });
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may change machine settings; @${who.login} is a ${who.role}` });
           const body = (await readBody(req)) as { what?: string; value?: unknown };
           const exec = opts.machine?.exec;
           let r;
@@ -806,7 +871,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             if (typeof body.value !== 'boolean') return json(res, 400, { error: 'updates is on (true) or off (false)' });
             r = setUpdates(body.value, ...(exec ? [exec] : []));
           } else return json(res, 400, { error: 'what is slots or updates' });
-          return r.ok ? json(res, 200, { ok: true, output: r.output, machine: machineView(opts) }) : json(res, 400, { error: r.error });
+          if (!r.ok) return json(res, 400, { error: r.error });
+          audit(who, 'machine.changed', { what: body.what, value: body.value });
+          return json(res, 200, { ok: true, output: r.output, machine: machine() });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
@@ -825,13 +892,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const body = (await readBody(req)) as { id?: string; answer?: string };
           const log = new EventLog(opts.eventsDb);
           try {
-            const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === body.id)?.payload as { options: string[]; owner: string } | undefined;
+            const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === body.id)?.payload as { options: string[]; owner: string; kind: string } | undefined;
             if (!q) return json(res, 404, { error: `no decision ${body.id}` });
-            if (!mayAnswer(q.owner, opts.user, opts.cfg.project.owners)) return json(res, 403, { error: `@${opts.user} can't answer this: it's for @${q.owner} (or one of the project's writers)` });
+            if (!mayAnswerKind(q.kind, who.role)) return json(res, 403, { error: `@${who.login} can't answer this: a ${q.kind === 'plan' ? 'held plan' : 'high-risk merge'} is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
             if (!body.answer || !q.options.includes(body.answer)) return json(res, 400, { error: `answer must be one of ${q.options.join(', ')}` });
             const answered = log.read(0, ['decision.answered']).some((e) => (e.payload as { id: string }).id === body.id);
             if (answered) return json(res, 409, { error: 'already answered' });
-            const e = log.append('decision.answered', { id: body.id!, by: opts.user, answer: body.answer }, opts.user, 'human');
+            // With the role this server read, so the coordinator acts on a writer's answer (an intake approval) too.
+            const e = log.append('decision.answered', { id: body.id!, by: who.login, answer: body.answer, role: who.role === 'owner' ? 'owner' : 'writer' }, who.login, 'human');
+            audit(who, 'decision.answered', { id: body.id!, kind: q.kind, answer: body.answer });
             return json(res, 200, { ok: true, event: e.id });
           } finally {
             log.close();
@@ -843,6 +912,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const views = await readBody(req);
             if (!Array.isArray(views) || views.length > 50) return json(res, 400, { error: 'views must be an array (max 50)' });
             writeFileSync(viewsFile, JSON.stringify(views, null, 2));
+            audit(who, 'views.saved', { count: views.length });
             return json(res, 200, { ok: true });
           }
         }
@@ -869,12 +939,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   }, 25_000);
 
   return new Promise((resolveStart) => {
-    server.listen(opts.port ?? 0, '127.0.0.1', () => {
+    server.listen(opts.port ?? 0, host, () => {
       const addr = server.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
       resolveStart({
         server,
-        url: `http://127.0.0.1:${port}/?t=${token}`,
+        url: `http://${host.includes(':') ? `[${host}]` : host}:${port}/?t=${token}`,
         token,
         close: () =>
           new Promise<void>((r) => {
