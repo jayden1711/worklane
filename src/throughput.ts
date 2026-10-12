@@ -20,6 +20,7 @@ export function stageOf(role: string, attempt = 1): Stage {
   if (role === 'evaluator-escalated') return 'evaluator';
   if (role === 'planner') return 'plan';
   if (role === 'researcher') return 'research';
+  if (role === 'research-on-demand') return 'research';
   if (role === 'intake') return 'intake';
   if (role === 'gardener') return 'gardener';
   if (role === 'chat') return 'chat';
