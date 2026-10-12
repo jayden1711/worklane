@@ -20,7 +20,7 @@ import { IntakePage } from './pages/Intake';
 import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
-import { LogsPage } from './pages/Logs';
+import { LogsPage, logsRefusal } from './pages/Logs';
 import { RunDetail, runsRefusal } from './pages/RunDetail';
 import { PullRequests } from './pages/PullRequests';
 
@@ -268,7 +268,7 @@ function Dashboard() {
       '/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
       '/land': state?.landQueue.length ?? 0,
       '/prs': state?.prCounts?.needYou ?? 0,
-      '/agents': state?.runs.active.length ?? 0,
+      '/agents': state?.runs?.active.length ?? 0,
     }),
     [state],
   );
@@ -292,7 +292,7 @@ function Dashboard() {
   else if (path === '/deploys') page = <Deploys state={state} />;
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
   else if (path === '/settings') page = <SettingsPage />;
-  else if (path === '/logs') page = <LogsPage />;
+  else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
   else page = <Overview state={state} pulse={pulse} />;
 
   return (

@@ -41,7 +41,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
-import { forViewers, viewerActivity, viewerMaySee } from './viewer-events.js';
+import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 
@@ -632,7 +632,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const events = readEvents(opts.eventsDb);
     const p = project(events);
     const slots = slotStatus(opts.slotsDir);
-    return {
+    const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
       user: who.login,
@@ -658,6 +658,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // Whether this viewer may write at all (viewers are read-only), and see the audit log (owners only).
       canWrite: isWriter(who.role),
       canReadAudit: isOwner(who.role),
+      // Whether this viewer may read the service log and the machine settings (the owners' and writers').
+      canReadLogs: isWriter(who.role),
+      canReadMachine: isWriter(who.role),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -665,6 +668,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
       prCounts: prCounts(prsView(events).prs),
     };
+    // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
+    return isWriter(who.role) ? full : stateForViewer(full);
   };
 
   const server = createServer(async (req, res) => {
@@ -712,6 +717,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, issue ? evs.filter((e) => (e.payload as { issue?: number }).issue === Number(issue)) : evs.slice(-500));
         }
         if (url.pathname === '/api/logs' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the service log is', who) });
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
         }
@@ -882,7 +888,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          return json(res, 200, { ...healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }), docs: { backups: docsUrl('backups') } });
+          const view = healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } });
+          // Costs are the owners' and writers': a viewer's usage per day has no estimated cost.
+          const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
+          return json(res, 200, { ...view, usage, docs: { backups: docsUrl('backups') } });
         }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
@@ -901,7 +910,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Machine-wide settings (the slot cap, engine updates) and their history. A change goes through the
         // machine helper (sudo, src/machine.ts) as this server's user, the instance's coordinator; only the owner may ask.
         const machine = () => machineView({ ...opts, user: who.login, role: who.role });
-        if (url.pathname === '/api/machine' && req.method === 'GET') return json(res, 200, machine());
+        if (url.pathname === '/api/machine' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
+          return json(res, 200, machine());
+        }
         if (url.pathname === '/api/machine' && req.method === 'POST') {
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may change machine settings; @${who.login} is a ${who.role}` });
           const body = (await readBody(req)) as { what?: string; value?: unknown };

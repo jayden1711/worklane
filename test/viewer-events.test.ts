@@ -10,7 +10,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { EventSchemas, type StoredEvent } from '../src/events/types.js';
-import { forViewer, VIEWER_EVENTS } from '../src/viewer-events.js';
+import { forViewer, stateForViewer, VIEWER_EVENTS } from '../src/viewer-events.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const seen = { issue: 1, title: 'Fix rounding', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' };
@@ -28,7 +28,8 @@ async function serve() {
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), pollMs: 50 });
   const base = d.url.split('/?')[0]!;
   const get = async <T>(path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<T>;
-  return { d, log, base, get };
+  const status = async (path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).status;
+  return { d, log, base, get, status };
 }
 
 type Ev = { type: string; payload: Record<string, unknown> };
@@ -117,4 +118,49 @@ test('an event type not on the allowlist is hidden from viewers: every schema ty
   for (const t of ['run.started', 'run.finished', 'run.cost', 'research.fetched', 'chat.turn', 'console.message_queued', 'change.proposed']) assert.ok(!(t in VIEWER_EVENTS), `${t} is never a viewer's`);
   const kept = forViewer(ev('issue.seen', { ...seen, secret: 'not on the list' }))!;
   assert.deepEqual(Object.keys(kept.payload as object).sort(), ['actionable', 'author', 'issue', 'labels', 'owner', 'title', 'why'], 'a field added later is dropped too');
+});
+
+test('the service log and the machine settings are the writers\' and the owner\'s: a viewer gets 403, and the state tells the page', async () => {
+  const s = await serve();
+  try {
+    for (const path of ['/api/logs', '/api/machine']) {
+      assert.equal(await s.status(path, 'someone-else'), 403, `a viewer is refused ${path}`);
+      for (const who of ['example-collaborator', 'example-owner']) assert.equal(await s.status(path, who), 200, `${who} reads ${path}`);
+    }
+    const flags = async (who: string) => s.get<{ canReadLogs: boolean; canReadMachine: boolean }>('/api/state', who);
+    assert.deepEqual(await flags('someone-else'), { ...(await flags('someone-else')), canReadLogs: false, canReadMachine: false });
+    const w = await flags('example-collaborator');
+    assert.deepEqual([w.canReadLogs, w.canReadMachine], [true, true]);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('a viewer\'s state has no costs, spend, budget or agent runs; a writer\'s and the owner\'s have them', async () => {
+  const s = await serve();
+  try {
+    type St = Record<string, unknown> & { tasks: Record<string, unknown>[] };
+    const v = await s.get<St>('/api/state', 'someone-else');
+    for (const k of ['budget', 'spendToday', 'spendByRole', 'runs']) assert.ok(!(k in v), `no ${k} for a viewer`);
+    assert.ok(v.tasks.length && v.tasks.every((t) => !('costUsd' in t)), "no task's cost");
+    assert.equal(v.tasks[0]!.title, 'Fix rounding', 'the task itself is still there');
+    assert.ok(!JSON.stringify(v).includes('1.25'), 'the run cost appears nowhere');
+    for (const who of ['example-collaborator', 'example-owner']) {
+      const full = await s.get<St>('/api/state', who);
+      for (const k of ['budget', 'spendToday', 'spendByRole', 'runs']) assert.ok(k in full, `${who} has ${k}`);
+      assert.equal(full.tasks[0]!.costUsd, 1.25);
+    }
+    // The health view's usage per day: the runs, never their estimated cost, for a viewer.
+    type H = { usage: { days: Record<string, unknown>[] } };
+    const vh = await s.get<H>('/api/health', 'someone-else');
+    assert.ok(vh.usage.days.length && vh.usage.days.every((d) => !('estimatedUsd' in d) && typeof d.runs === 'number'));
+    for (const who of ['example-collaborator', 'example-owner']) assert.equal((await s.get<H>('/api/health', who)).usage.days[0]!.estimatedUsd, 1.25);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('a state key or task field added later is hidden from viewers until allowed', () => {
+  const st = stateForViewer({ project: { name: 'x' }, futureSecret: 'hidden', runs: { active: [], recent: [] }, tasks: [{ issue: 1, title: 't', costUsd: 2, futureField: 'hidden' }], inbox: { decisions: [], blocked: [{ issue: 1, costUsd: 2 }], notify: [] } });
+  assert.deepEqual(st, { project: { name: 'x' }, tasks: [{ issue: 1, title: 't' }], inbox: { decisions: [], blocked: [{ issue: 1 }], notify: [] } });
 });

@@ -50,3 +50,32 @@ export function viewerActivity(events: StoredEvent[]) {
     .reverse()
     .map((e) => ({ id: e.id, ts: e.ts, type: e.type, actor: e.actor, issue: typeof (e.payload as { issue?: unknown }).issue === 'number' ? (e.payload as { issue: number }).issue : null, summary: summarize(e) }));
 }
+
+/**
+ * The dashboard state as a viewer sees it: an allowlist of its keys, and of each task's fields. Costs and spend
+ * (tasks' costUsd, spendToday, spendByRole), the budget and agent runs are the owners' and writers' (like
+ * /api/runs and /api/throughput), so they are not on it; a key or task field added later stays hidden until allowed.
+ */
+export const VIEWER_STATE_KEYS: readonly string[] = Object.freeze([
+  'brand', 'project', 'user', 'role', 'via', 'owners', 'slots', 'lastId', 'tasks', 'decisions', 'landedToday', 'baseline', 'deploys',
+  'coordinator', 'errors', 'activity', 'landQueue', 'batches', 'governor', 'emergency', 'reports', 'inbox', 'prCounts', 'costBasis',
+  'canReadIntake', 'canReadThroughput', 'canReadReports', 'canReadRuns', 'canReadDigest', 'canReadLogs', 'canReadMachine', 'canWrite', 'canReadAudit',
+]);
+export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
+  'issue', 'title', 'labels', 'author', 'owner', 'delegate', 'status', 'actionable', 'why', 'level', 'levelReasons', 'doneWhen', 'verdict',
+  'attempts', 'head', 'landed', 'deployed', 'repro', 'openDecision', 'blockedReason', 'lastActivity', 'firstSeen', 'eventIds',
+]);
+
+const pick = (o: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
+const tasksOnly = (ts: unknown) => (Array.isArray(ts) ? ts.map((t) => pick(t as Record<string, unknown>, VIEWER_TASK_FIELDS)) : []);
+
+/** A state as a viewer may have it: only the allowlisted keys; tasks (also the inbox's) with only the allowlisted fields. */
+export function stateForViewer(state: Record<string, unknown>): Record<string, unknown> {
+  const out = pick(state, VIEWER_STATE_KEYS);
+  if ('tasks' in out) out.tasks = tasksOnly(out.tasks);
+  if (out.inbox && typeof out.inbox === 'object') {
+    const ib = out.inbox as Record<string, unknown>;
+    out.inbox = { decisions: ib.decisions, blocked: tasksOnly(ib.blocked), notify: tasksOnly(ib.notify) };
+  }
+  return out;
+}

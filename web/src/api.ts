@@ -18,7 +18,8 @@ export interface Task {
   levelReasons: string[];
   doneWhen: Record<string, unknown>[];
   verdict: { patch_correct: boolean; test_correct: boolean; confidence: string; advice: string } | null;
-  costUsd: number;
+  /** Absent for a viewer: costs are the owners' and writers'. */
+  costUsd?: number;
   attempts: number;
   head: string | null;
   landed: string | null;
@@ -123,7 +124,8 @@ export interface HealthView {
     rule: string;
   };
   usage: {
-    days: { day: string; runs: number; estimatedUsd: number; turns: number; rateLimited: number; authProblems: number; retries: Record<string, number>; retryWaitMs: number; lockWaits: number; lockWaitMs: number }[];
+    /** estimatedUsd: absent for a viewer (costs are the owners' and writers'). */
+    days: { day: string; runs: number; estimatedUsd?: number; turns: number; rateLimited: number; authProblems: number; retries: Record<string, number>; retryWaitMs: number; lockWaits: number; lockWaitMs: number }[];
     quotaNote: string;
   };
   /** The off-machine backup (src/offsite-backup.ts): null when it was never set up (no attempt recorded). */
@@ -204,16 +206,20 @@ export interface State {
   canWrite?: boolean;
   /** Whether they may read the audit log (owners only). */
   canReadAudit?: boolean;
+  /** Whether they may read the service log and the machine settings (owners and writers). */
+  canReadLogs?: boolean;
+  canReadMachine?: boolean;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
-  budget: number;
+  /** Absent for a viewer (the budget, spend and agent runs are the owners' and writers'). */
+  budget?: number;
   slots: { cap: number; running: number; agents: { slot: string; owner: string; pid: number; acquiredAt: string }[]; fullRun: { owner: string; acquiredAt: string } | null };
   lastId: number;
   tasks: Task[];
   decisions: Decision[];
   /** Every cost figure is an estimate (the agent CLI's own per-run cost estimate), not money billed. */
   costBasis: 'estimate';
-  spendToday: number;
-  spendByRole: Record<string, number>;
+  spendToday?: number;
+  spendByRole?: Record<string, number>;
   landedToday: number;
   baseline: { sha: string; failing: string[]; at: string } | null;
   deploys: { env: string; sha: string; status: string; why?: string; at: string }[];
@@ -221,7 +227,7 @@ export interface State {
   errors: { at: string; where: string; message: string }[];
   activity: Activity[];
   inbox: { decisions: Decision[]; blocked: Task[]; notify: Task[] };
-  runs: { active: Run[]; recent: Run[] };
+  runs?: { active: Run[]; recent: Run[] };
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;

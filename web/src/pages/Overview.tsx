@@ -25,7 +25,11 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
   const open = state.decisions.filter((d) => !d.answer);
   const blocked = state.tasks.filter((t) => t.status === 'blocked');
   const queued = state.tasks.filter((t) => t.status === 'queued');
-  const budgetPct = Math.min(100, (state.spendToday / Math.max(state.budget, 0.01)) * 100);
+  // Absent for a viewer: spend and the budget are the owners' and writers'.
+  const spend = state.spendToday !== undefined && state.budget !== undefined ? { today: state.spendToday, budget: state.budget, byRole: state.spendByRole ?? {} } : null;
+  // The budget is a configured cap, not a cost: shown as is.
+  const budget = spend?.budget ?? 0;
+  const budgetPct = spend ? Math.min(100, (spend.today / Math.max(spend.budget, 0.01)) * 100) : 0;
   const stale = state.coordinator?.lastTick ? Date.now() - Date.parse(state.coordinator.lastTick) > 5 * 60_000 : true;
 
   return (
@@ -41,18 +45,19 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
         </div>
 
         <div className="grid gap-3 lg:grid-cols-3">
+          {spend ? (
           <Card className="p-3">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span title={EST_NOTE}>Estimated spend today</span>
               <span className="tabular-nums" title={EST_NOTE}>
-                {estUsd(state.spendToday)} of {usd(state.budget)}
+                {estUsd(spend.today)} of {usd(budget)}
               </span>
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-valuenow={Math.round(budgetPct)} aria-valuemin={0} aria-valuemax={100}>
               <div className={cx('h-full rounded-full', budgetPct > 90 ? 'bg-red' : budgetPct > 70 ? 'bg-orange' : 'bg-blue')} style={{ width: `${budgetPct}%` }} />
             </div>
             <div className="mt-3 space-y-1">
-              {Object.entries(state.spendByRole)
+              {Object.entries(spend.byRole)
                 .sort((a, b) => b[1] - a[1])
                 .map(([role, v]) => (
                   <div key={role} className="flex justify-between text-xs">
@@ -62,6 +67,11 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
                 ))}
             </div>
           </Card>
+          ) : (
+            <Card className="p-3 text-[12.5px] text-ink-3" data-testid="spend-viewer-only">
+              Costs, spend and the budget are for the instance's owners and writers (write on its repo).
+            </Card>
+          )}
           <Card className="p-3">
             <div className="text-xs text-muted-foreground">Main's baseline</div>
             {state.baseline ? (

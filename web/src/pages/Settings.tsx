@@ -44,7 +44,8 @@ export function SettingsPage() {
         <InstanceSettings />
       </div>
       <div className="px-6 pt-6">
-        <MachineSettings />
+        {/* The machine settings are the owners' and writers' (a viewer isn't sent them). */}
+        {full && <MachineSettings />}
       </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <Section title="Project">

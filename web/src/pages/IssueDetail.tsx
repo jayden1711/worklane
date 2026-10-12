@@ -223,7 +223,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
             </Prop>
             <Prop label="Repro test">{t.repro ? <span className="font-mono text-xs">{t.repro}</span> : <span className="text-xs text-muted-foreground">none</span>}</Prop>
             <Prop label="Est. cost">
-              <span className="tabular-nums" title={EST_NOTE}>{estUsd(t.costUsd)}</span>
+              {t.costUsd !== undefined && <span className="tabular-nums" title={EST_NOTE}>{estUsd(t.costUsd)}</span>}
               <span className="ml-2 text-xs text-muted-foreground">{t.attempts ? `${t.attempts} attempt(s)` : ''}</span>
             </Prop>
             <Prop label="Change">
