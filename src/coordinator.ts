@@ -90,7 +90,8 @@ export class Coordinator extends Gardener {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
-    await step('test runs', () => this.d.testRuns?.tick(), undefined);
+    await step('test runs', () => this.d.prTestRuns?.tick(), undefined);
+    await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
@@ -104,12 +105,13 @@ export class Coordinator extends Gardener {
   /** Wait for in-flight task pipelines (tests and graceful shutdown). */
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
-    await this.d.testRuns?.idle();
+    await this.d.prTestRuns?.idle();
     await this.chatQueue;
     await this.intakeQueue;
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;
+    await this.prBatchIdle();
   }
 
   /**
@@ -131,7 +133,8 @@ export class Coordinator extends Gardener {
   stop() {
     this.stopped = true;
     // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
-    this.d.testRuns?.stop();
+    this.d.prTestRuns?.stop();
+    this.prBatchStop();
   }
 
   /**
