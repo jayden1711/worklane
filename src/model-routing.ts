@@ -1,7 +1,8 @@
-// Model routing, decided in code: which model each kind of run uses. Haiku for the intake replier and the
-// stage-label judge; Sonnet for L1/L2 builds, planning, research and eval answering; Opus for L3 and high-risk
-// builds, and for a build that already failed twice on its usual model. Intake triage stays on the model it had
-// (the researcher's, else the workers'): its held-out score dropped on haiku. The evaluator's model is
+// Model routing, decided in code: which model each kind of run uses. Haiku for the intake replier; Sonnet for
+// L1/L2 builds, planning, research, eval answering and the stage-label judge; Opus for L3 and high-risk builds,
+// and for a build that already failed twice on its usual model. Intake triage stays on the model it had (the
+// researcher's, else the workers'): its held-out score dropped on haiku. The stage-label judge stays on sonnet:
+// on haiku it missed a case of its eval in two samples of three. The evaluator's model is
 // tiered separately (src/eval-routing.ts). The repo's agents.yaml `model_routing` overrides any of these; the
 // instance's `model_cap` (policy.yaml settings) caps every run's model at a tier (in the coordinator's runner,
 // so no run escapes it), never raises one.
@@ -48,7 +49,7 @@ export function modelRouting(agents: Pick<AgentsConfig, 'roles' | 'model_routing
     // Stays on its current model: on haiku its held-out score dropped (20/20 to 19/20; model routing PR).
     intake_triage: r.intake_triage ?? agents.roles.researcher?.model ?? workers?.model ?? 'sonnet',
     intake_replier: r.intake_replier ?? 'haiku',
-    stage_judge: r.stage_judge ?? 'haiku',
+    stage_judge: r.stage_judge ?? 'sonnet',
     eval_answer: r.eval_answer ?? 'sonnet',
   };
 }

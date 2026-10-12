@@ -22,11 +22,11 @@ const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refu
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const agents = (o: object = {}) => AgentsConfig.parse({ daily_budget_usd: 10, roles: { workers: { enabled: true, model: 'sonnet', hard_issues_model: 'opus' }, evaluator: { enabled: true, model: 'opus' } }, ...o });
 
-test('defaults: haiku for intake replies and the stage judge; sonnet for planning, research, eval answers and builds; opus for high-risk builds; triage keeps its model', () => {
+test('defaults: haiku for intake replies; sonnet for planning, research, eval answers, the stage judge and builds; opus for high-risk builds; triage keeps its model', () => {
   const r = modelRouting(loadConfig(exampleProject().dir).agents);
   assert.deepEqual(
     { build: r.build, build_high_risk: r.build_high_risk, planner: r.planner, research: r.research, intake_triage: r.intake_triage, intake_replier: r.intake_replier, stage_judge: r.stage_judge, eval_answer: r.eval_answer, escalate_after: r.escalate_after },
-    { build: 'sonnet', build_high_risk: 'opus', planner: 'sonnet', research: 'sonnet', intake_triage: 'sonnet', intake_replier: 'haiku', stage_judge: 'haiku', eval_answer: 'sonnet', escalate_after: 2 },
+    { build: 'sonnet', build_high_risk: 'opus', planner: 'sonnet', research: 'sonnet', intake_triage: 'sonnet', intake_replier: 'haiku', stage_judge: 'sonnet', eval_answer: 'sonnet', escalate_after: 2 },
   );
   assert.deepEqual(r.high_risk_labels, DEFAULT_HIGH_RISK_LABELS);
   assert.equal(routedModel(r, 'intake_replier'), 'haiku');

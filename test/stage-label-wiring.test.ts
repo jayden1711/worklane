@@ -141,7 +141,7 @@ test('the coordinator labels before the Monday report: events recorded, the judg
   const labels = f.log.read(0, ['run.stage_labeled']).map((e) => e.payload as EventPayload<'run.stage_labeled'>);
   assert.deepEqual(labels.map((l) => [l.run, l.stage, l.by, l.instance]), [['ra', 'wrong or incomplete change', 'judge', 'alice'], ['rb', 'verification', 'code', 'alice']]);
   assert.deepEqual(runner.calls.map((r) => r.role), ['stage-judge'], 'one judge call, for the run that ran its check');
-  assert.equal(runner.calls[0]!.model, 'haiku', 'the stage-label judge is routed to haiku');
+  assert.equal(runner.calls[0]!.model, 'sonnet', 'the stage-label judge stays on sonnet (on haiku it missed an eval case)');
   assert.ok(f.log.read(0, ['run.cost']).some((e) => (e.payload as { role: string; usd: number }).role === 'stage-judge'), 'the judge call counts as spend');
   const report = (await f.backlog.list('report'))[0]!;
   assert.ok((await f.backlog.comments(report.number)).some((x) => /Where failed runs first went wrong/.test(x.body) && /- verification: 1 \(alice 1\)/.test(x.body)));
