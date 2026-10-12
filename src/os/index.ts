@@ -211,6 +211,19 @@ export function homeDir(): string {
   return homedir();
 }
 
+/** Where Chrome or Chromium is usually installed on this OS, most likely first (then the PATH is searched). */
+export function chromeCandidates(): string[] {
+  if (process.platform === 'darwin') return ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'];
+  if (process.platform === 'win32') {
+    return [
+      join(process.env.PROGRAMFILES ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ];
+  }
+  return [];
+}
+
 /** Spawn children in their own process group where the OS supports it, so a timeout kills the whole tree. */
 export const spawnDetached = process.platform !== 'win32';
 
