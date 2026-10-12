@@ -2352,6 +2352,27 @@ test('push limits on the change: refused before any check runs, the worker is to
   assert.match(comment, /the push was refused:\n- touches paths that are never pushed \(data\/dump\.json\)/);
 });
 
+test('a failing pre-land step that prints secrets: the block comment and the land.result event carry its tail with the secrets redacted (#130)', { skip }, async () => {
+  const f = fixture();
+  // The secrets exist only in the step's output, joined at run time.
+  f.cfg.tests.land.pre = [`node -e "console.log('building'); console.log('DATABASE_URL=postgres://app:' + 'hunter2pass' + '@db.example.invalid/shop'); console.log('auth ghp_' + 'Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2J3k4'); console.log('end of output'); process.exit(1)"`];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => /the pre-land step/.test(b));
+  assert.ok(comment, (await f.backlog.comments(n)).map((x) => x.body).join('\n---\n'));
+  const event = JSON.stringify(f.log.read(0, ['land.result']).at(-1)!.payload);
+  for (const [where, text] of [['comment', comment], ['land.result', event]] as const) {
+    // (The step's own command, quoted in the comment, holds the pieces apart; the joined secret is what it printed.)
+    assert.ok(!text.includes('app:hunter2pass@'), `${where}: no connection-string password`);
+    assert.ok(!/ghp_Q7w8E9r0T1y2/.test(text), `${where}: no token`);
+    assert.match(text, /end of output/, `${where}: the rest of the tail is kept`);
+    assert.match(text, /postgres:\/\/app:\[REDACTED\]@db\.example\.invalid/, `${where}: redacted in place`);
+  }
+});
+
 test('push limits at the push: a pre-land step that adds a refused file stops the landing; main is untouched and the issue blocked', { skip }, async () => {
   const f = fixture();
   f.cfg.guardrails.push.refuse_paths = ['gen/**'];

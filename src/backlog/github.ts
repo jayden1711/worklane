@@ -2,6 +2,7 @@
 // agents never see it. Errors are classified (a 403 isn't "missing
 // permission" unless it is).
 import { execFileSync } from 'node:child_process';
+import { redact } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
 import type { Backlog, CommitCheck, Issue, PullRequest } from './types.js';
 
@@ -30,8 +31,12 @@ export class GitHubBacklog implements Backlog {
     private api = 'https://api.github.com',
   ) {}
 
-  /** `raw`: the response body as text (a log), not JSON. */
+  /**
+   * `raw`: the response body as text (a log), not JSON. Everything sent is redacted first (events/redact.ts): a
+   * comment, issue or pull request can carry command output, and on a public repo it's public.
+   */
   private async req<T>(method: string, path: string, body?: unknown, raw = false): Promise<T> {
+    body = body === undefined ? body : redact(body);
     const res = await this.fetchImpl(`${this.api}${path}`, {
       method,
       headers: {

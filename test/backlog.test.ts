@@ -49,3 +49,30 @@ test('GitHub backlog surfaces classified errors, not "missing permission" for ev
   const role = new GitHubBacklog('o/r', () => 't', fake(403, {}, { message: 'Resource not accessible by integration' }) as typeof fetch);
   await assert.rejects(role.addLabels(1, ['x']), (e: GitHubError) => e.kind === 'insufficient_role');
 });
+
+test('what the harness writes to the backlog is redacted first: comments, issues and pull requests, on GitHub and in the file backlog', async () => {
+  const token = 'ghp_' + 'Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2J3k4';
+  const dsn = 'postgres://app:' + 'hunter2pass' + '@db.example.invalid:5432/shop';
+  const text = `step failed\nconnecting to ${dsn}\nauth ${token}\nend of output`;
+  const sent: string[] = [];
+  const capture = (async (_url: string, init?: RequestInit) => {
+    sent.push(String(init?.body ?? ''));
+    return new Response(JSON.stringify({ number: 7, html_url: 'https://example.invalid/pr/7', draft: false, node_id: 'x' }), { status: 201 });
+  }) as typeof fetch;
+  const gh = new GitHubBacklog('o/r', () => 't', capture);
+  await gh.comment(1, text);
+  await gh.createIssue('t', text, []);
+  await gh.openPr('h', 'main', 't', text);
+  assert.ok(sent.length >= 3);
+  for (const b of sent) {
+    assert.ok(!b.includes(token) && !b.includes('hunter2pass'), b);
+  }
+  assert.match(sent[0]!, /step failed[\s\S]*postgres:\/\/app:\[REDACTED\]@db\.example\.invalid[\s\S]*end of output/, 'the rest of the text is kept');
+  const f = new FileBacklog(join(mkdtempSync(join(tmpdir(), 'bl-')), 'b.json'), 'harness');
+  const n = f.open({ title: 'x', body: '', author: 'a' });
+  await f.comment(n, text);
+  const pr = await f.openPr('h', 'main', 't', text);
+  const written = JSON.stringify([await f.comments(n), (await f.get(pr.number)).body, (await f.get(await f.createIssue('t', text, []))).body]);
+  assert.ok(!written.includes(token) && !written.includes('hunter2pass'), written);
+  assert.match(written, /end of output/);
+});
