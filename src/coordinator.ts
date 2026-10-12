@@ -12,7 +12,7 @@ import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, ty
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { protectedPaths } from './guardrails/engine.js';
+import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
@@ -889,8 +889,7 @@ export class Coordinator extends Gardener {
     const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
-    const protectedRes = protectedPaths(this.d.cfg.guardrails).map((g) => globToRegExp(g));
-    const prot = names.filter((f) => protectedRes.some((re) => re.test(f)));
+    const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
     if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
     const scan = await scanRange(path, `${base}..${head}`);
     if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };

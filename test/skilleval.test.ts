@@ -215,6 +215,11 @@ test('instruction targets: skills (any file of one), AGENTS.md and project role 
       ['role evaluator-verdict', `${BRAND.configDir}/roles/evaluator-verdict.md`, `${BRAND.configDir}/evals/roles/evaluator-verdict.md`],
     ],
   );
+  // A skill in the config folder (agents may change those), its cases beside it; the .claude form stays.
+  assert.deepEqual(
+    instructionTargets([`${BRAND.configDir}/skills/triage/SKILL.md`, `${BRAND.configDir}/skills/triage/evals/cases.md`, `${BRAND.configDir}/skills/README.md`]).map((t) => [t.target, t.file, t.cases]),
+    [[`skill triage (${BRAND.configDir})`, `${BRAND.configDir}/skills/triage/SKILL.md`, `${BRAND.configDir}/skills/triage/evals/cases.md`]],
+  );
 });
 
 test('the engine ships eval cases for the worker, evaluator, investigator and reproduction role prompts', () => {

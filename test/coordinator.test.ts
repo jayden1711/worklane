@@ -1980,6 +1980,9 @@ test('auto-merge: main green after it is recorded and nothing stops', { skip }, 
 
 // ---- instruction evals
 
+/** The eval reasons alone: an instructions change also always waits as high-risk (agent-instructions). */
+const evalOnly = (reasons: string[]) => reasons.filter((r) => !r.startsWith('high-risk: agent-instructions'));
+
 const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the ledger.\n\n**Correct**\n- Reads the alert row first.\n\n**Wrong**\n- Edits the ledger by hand.\n';
 
 /**
@@ -2048,7 +2051,7 @@ test('instruction evals: a change that makes AGENTS.md score lower waits for the
   assert.deepEqual(e.changes, [{ id: '1', title: 'Ledger alert', base: 'pass', head: 'fail' }]);
   assert.ok(e.cost_usd > 0);
   assert.equal(t.decided.auto, false);
-  assert.deepEqual(t.decided.reasons, [`eval: AGENTS.md scored lower, 2/2 → 0/2 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
+  assert.deepEqual(evalOnly(t.decided.reasons), [`eval: AGENTS.md scored lower, 2/2 → 0/2 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
   assert.ok(!t.pr.merged);
   assert.ok(t.pr.comments.some((x) => /waits for you[\s\S]*case 1 "Ledger alert": pass → fail/.test(x.body)), 'the waiting comment carries the diff');
   assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: visible 2\/2 → 0\/2, \*\*lower\*\*; case 1 pass → fail, 3 sample\(s\) per case/);
@@ -2081,19 +2084,32 @@ test('instruction evals: a role prompt is also judged on held-out cases a separa
   assert.ok(t.decided.reasons.some((r) => /scored lower on its held-out cases, 6\/6 → 0\/6/.test(r)), t.decided.reasons.join(' | '));
 });
 
-test('instruction evals: no drop, no reason: the change auto-merges', { skip }, async () => {
+test("instruction evals: no drop, no eval reason; the change still waits, because the agents' instructions never auto-merge", { skip }, async () => {
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'Read the alert, then act.\n' });
   assert.equal((lastOf(t.f.log, 'instructions.eval') as { dropped: boolean }).dropped, false);
-  assert.equal(t.decided.auto, true, t.decided.reasons.join('; '));
-  assert.ok(t.pr.merged);
+  assert.equal(t.decided.auto, false);
+  assert.deepEqual(t.decided.reasons, ['high-risk: agent-instructions (AGENTS.md)']);
+  assert.ok(!t.pr.merged);
+});
+
+test('instruction evals: a skill in the config folder is evaluated from its cases beside it, and a drop holds the PR', { skip }, async () => {
+  const file = `${BRAND.configDir}/skills/triage/SKILL.md`;
+  // A skill that passes the skill lint (the push check refuses one that doesn't).
+  const skill = (steps: string) => ['When to use', 'Inputs and access', 'Steps', 'Validate', 'Return', 'Approval'].map((s) => `## ${s}\n${s === 'Steps' ? steps : 'As usual.'}\n`).join('\n');
+  const t = await instructionsPr({ base: skill('Read before you act.'), head: skill('BAD: act first.'), file, casesFile: `${BRAND.configDir}/skills/triage/evals/cases.md` });
+  const e = lastOf(t.f.log, 'instructions.eval') as { target: string; base: object; result: object; dropped: boolean };
+  assert.deepEqual([e.target, e.base, e.result, e.dropped], [`skill triage (${BRAND.configDir})`, { passed: 2, total: 2 }, { passed: 0, total: 2 }, true]);
+  assert.equal(t.decided.auto, false);
+  assert.ok(t.decided.reasons.some((r) => r.startsWith(`eval: skill triage (${BRAND.configDir}) scored lower`)), t.decided.reasons.join(' | '));
+  assert.ok(t.decided.reasons.includes(`high-risk: agent-instructions (${file})`), t.decided.reasons.join(' | '));
 });
 
 test('instruction evals: instructions without eval cases, or evals turned off, wait for the owner (fail closed)', { skip }, async () => {
   const none = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', cases: false });
-  assert.deepEqual(none.decided.reasons, [`eval: AGENTS.md was not evaluated: no eval cases (${BRAND.configDir}/evals/AGENTS.md)`]);
+  assert.deepEqual(evalOnly(none.decided.reasons), [`eval: AGENTS.md was not evaluated: no eval cases (${BRAND.configDir}/evals/AGENTS.md)`]);
   assert.ok(!none.runner.calls.some((r) => r.role === 'instruction-eval'), 'nothing to run');
   const off = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', enabled: false });
-  assert.deepEqual(off.decided.reasons, ['eval: AGENTS.md was not evaluated: instruction evals are off (agents.yaml instruction_evals)']);
+  assert.deepEqual(evalOnly(off.decided.reasons), ['eval: AGENTS.md was not evaluated: instruction evals are off (agents.yaml instruction_evals)']);
 });
 
 test('instruction evals: the spend cap bounds an eval; cut short, the PR waits', { skip }, async () => {

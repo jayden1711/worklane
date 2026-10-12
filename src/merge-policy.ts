@@ -3,7 +3,7 @@
 // big or in doubt waits for a human; so does everything while the instance's
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
-import type { LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -95,9 +95,12 @@ export interface MergeDecision {
 
 const paths = (p: string[]) => `${p.slice(0, 3).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
 
-/** The categories that always wait for a human: review.yaml's L3, CI config, and the repo's merge.wait_categories. */
+/**
+ * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;
+ * no review.yaml removes it), and the repo's merge.wait_categories.
+ */
 export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] } }; merge: { wait_categories: string[] } }): string[] {
-  return [...review.levels.L3_human.when, 'ci-config', ...review.merge.wait_categories];
+  return [...new Set([...review.levels.L3_human.when, 'ci-config', AGENT_INSTRUCTIONS, ...review.merge.wait_categories])];
 }
 
 /**
@@ -107,7 +110,8 @@ export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] 
  */
 export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: string[]; design?: { flag: boolean | undefined; reason?: string | undefined; by: string }; newTopLevel: string[] }): string[] {
   const reasons: string[] = [];
-  for (const c of o.waitCategories) {
+  // The agents' own instructions always count, whatever list a caller passes (the floor).
+  for (const c of new Set([...o.waitCategories, AGENT_INSTRUCTIONS])) {
     const hit = o.level.categories[c];
     if (hit?.length) reasons.push(`high-risk: ${c} (${paths(hit)})`);
   }

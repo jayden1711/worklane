@@ -141,7 +141,7 @@ export abstract class MergeFlow extends FixRuns {
       repoOn: review.merge.auto,
       stopped: this.autoMergeStopped(),
       level,
-      waitCategories: [...review.levels.L3_human.when, 'ci-config', ...review.merge.wait_categories],
+      waitCategories: waitCategoriesOf(review),
       limits: { max_lines: review.merge.max_lines, max_files: review.merge.max_files },
       lines: files.reduce((s, f) => s + f.added + f.removed, 0),
       files: files.length,

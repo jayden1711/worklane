@@ -388,7 +388,7 @@ export function comparisonDiff(c: EvalComparison): string[] {
   return [...diff('visible', c, true), ...(c.heldOut ? diff('held-out', c.heldOut, false) : [])];
 }
 
-/** Instructions an agent works under, which a change can touch: a skill, AGENTS.md, a project's role prompt. */
+/** Instructions an agent works under, which a change can touch: a skill (in .claude/skills or the config folder's skills), AGENTS.md, a project's role prompt. */
 export interface InstructionTarget {
   target: string;
   /** The instructions file, repo-relative. */
@@ -405,7 +405,10 @@ export function instructionTargets(changed: string[]): InstructionTarget[] {
   const cfg = BRAND.configDir;
   for (const p of changed) {
     const skill = /^\.claude\/skills\/([^/]+)\//.exec(p);
+    // A skill in the config folder (where agents may change skills; .claude/ is theirs to read only), cases beside it.
+    const own = new RegExp(`^${cfg.replace(/\./g, '\\.')}/skills/([^/]+)/`).exec(p);
     if (skill) out.set(`skill ${skill[1]}`, { target: `skill ${skill[1]}`, file: `.claude/skills/${skill[1]}/SKILL.md`, cases: `.claude/skills/${skill[1]}/evals/cases.md` });
+    else if (own) out.set(`skill ${own[1]} (${cfg})`, { target: `skill ${own[1]} (${cfg})`, file: `${cfg}/skills/${own[1]}/SKILL.md`, cases: `${cfg}/skills/${own[1]}/evals/cases.md` });
     else if (p === 'AGENTS.md' || p === `${cfg}/evals/AGENTS.md`) out.set('AGENTS.md', { target: 'AGENTS.md', file: 'AGENTS.md', cases: `${cfg}/evals/AGENTS.md` });
     else {
       const role = new RegExp(`^${cfg.replace(/\./g, '\\.')}/(?:roles|evals/roles)/([^/]+)\\.md$`).exec(p);
