@@ -107,10 +107,6 @@ export interface DashboardOptions {
   limitsPath?: string;
   /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
   machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
-  /** The instance's name (the setup console's asks); the project's name when unset. */
-  instance?: string;
-  /** Who is asking (the setup console): #197's per-person session; until then, `user` with its role from project.owners. */
-  session?: SessionOf;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
 }
