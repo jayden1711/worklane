@@ -134,6 +134,7 @@ export class Coordinator extends Gardener {
     this.stopped = true;
     // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
     this.d.prTestRuns?.stop();
+    this.prBatchStop();
   }
 
   /**
