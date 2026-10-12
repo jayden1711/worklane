@@ -49,6 +49,54 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: cargo test --locked --manifest-path desktop/Cargo.toml
 
+  bootstrap:
+    # A fresh install, end to end (scripts/bootstrap.sh): on a clean runner, this commit's engine packed as a
+    # release ships it, set up in examples/basic, ending at doctor green; run twice, the second changing nothing;
+    # then the demo from the installed package. No GitHub: a stand-in gh that refuses, and no token.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: pack this commit's engine (dist/ and the web UI built, as in a release)
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build && npm run build:web
+          npm pack --pack-destination "$RUNNER_TEMP" > /dev/null
+          ls "$RUNNER_TEMP"/*.tgz
+      - name: the Docker image (the same bootstrap, with the pinned release engine)
+        if: runner.os == 'Linux'
+        run: |
+          docker build -t worklane-trial .
+          docker run --rm worklane-trial worklane --version
+          docker run --rm worklane-trial sh -c 'gitleaks version && claude --version && node --version'
+      - name: no GitHub from here on
+        run: |
+          mkdir -p "$RUNNER_TEMP/fake"
+          printf '#!/bin/sh\necho "gh: GitHub is not reachable in this job" >&2\nexit 1\n' > "$RUNNER_TEMP/fake/gh"
+          chmod +x "$RUNNER_TEMP/fake/gh"
+          echo "$RUNNER_TEMP/fake" >> "$GITHUB_PATH"
+      - name: bootstrap, twice
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          cp -r examples/basic "$RUNNER_TEMP/example" && git -C "$RUNNER_TEMP/example" init -q
+          tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
+          bash scripts/bootstrap.sh --dry-run --engine "$tgz" "$RUNNER_TEMP/example"
+          bash scripts/bootstrap.sh --engine "$tgz" "$RUNNER_TEMP/example"
+          bash scripts/bootstrap.sh --engine "$tgz" "$RUNNER_TEMP/example" | tee "$RUNNER_TEMP/second.log"
+          # The second run installs nothing and keeps the repo's config.
+          if grep -E 'added [0-9]+ package|would download' "$RUNNER_TEMP/second.log"; then echo "the second run installed something" >&2; exit 1; fi
+          grep -q 'kept .worklane/' "$RUNNER_TEMP/second.log"
+      - name: the demo, from the installed package
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          worklane --version
+          worklane demo "$RUNNER_TEMP/demo"
+
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.
     runs-on: ubuntu-latest

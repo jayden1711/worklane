@@ -18,6 +18,7 @@
     "dist/src",
     "dist/web",
     "templates",
+    "examples/basic",
     "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md"
