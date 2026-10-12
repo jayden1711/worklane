@@ -481,14 +481,33 @@ export class CliRunner implements AgentRunner {
   }
 }
 
-/** Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. */
+/** What a scripted run returns; `reads` are the files its session opened, kept in its run record. */
+export type FakeResult = Partial<RunResult> & { reads?: string[] };
+
+/**
+ * Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. A run
+ * that read files gets a run record (with a state dir), as a real session would: the files in `reads`, or,
+ * when the script doesn't say, the `files_reviewed` it reports (an honest reviewer reads what it says).
+ */
 export class FakeRunner implements AgentRunner {
   readonly calls: RunRequest[] = [];
-  constructor(private script: (req: RunRequest) => Promise<Partial<RunResult>> | Partial<RunResult>) {}
+  constructor(private script: (req: RunRequest) => Promise<FakeResult> | FakeResult) {}
   async run(req: RunRequest): Promise<RunResult> {
     this.calls.push(req);
     req.onStart?.(process.pid);
-    const r = await this.script(req);
-    return { reason: 'succeeded', detail: '', costUsd: 0.01, turns: 1, model: req.model, ...r };
+    const { reads, ...r } = await this.script(req);
+    const reviewed = (r.structured as { files_reviewed?: unknown } | undefined)?.files_reviewed;
+    const read = reads ?? (Array.isArray(reviewed) ? reviewed.map(String) : null);
+    const out: RunResult = { reason: 'succeeded', detail: '', costUsd: 0.01, turns: 1, model: req.model, ...r };
+    if (read && req.stateDir) {
+      const rec = new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) });
+      read.forEach((p, i) => {
+        rec.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `r${i}`, name: 'Read', input: { file_path: join(req.cwd, p) } }] } });
+        rec.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `r${i}`, content: '' }] } });
+      });
+      rec.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model });
+      req.onControl?.({ runId: rec.id, send: () => ({ queued: false, why: 'a scripted run takes no messages' }), stop: () => {} });
+    }
+    return out;
   }
 }

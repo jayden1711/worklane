@@ -12,7 +12,8 @@ import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, ty
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { computeLevel, loadMoneyPaths, type Level } from './review.js';
+import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { type RunResult } from './runner.js';
@@ -510,7 +511,7 @@ export class Coordinator extends MergeFlow {
           feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
           continue;
         }
-        const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path));
+        const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files);
         if (!verdict.patch_correct && attempt < maxAttempts) {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
@@ -902,9 +903,10 @@ export class Coordinator extends MergeFlow {
     return checks;
   }
 
-  protected async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[], opts: { extra?: string[]; schema?: object } = {}) {
+  protected async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], files: ChangeFile[], opts: { extra?: string[]; schema?: object } = {}) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.evaluator!;
+    const changed = files.map((f) => f.path);
     const unverified = this.unverifiedClaims(n, checks);
     const extra = [
       `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
@@ -914,27 +916,43 @@ export class Coordinator extends MergeFlow {
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
       ...(opts.extra ?? []),
     ];
-    const r = await this.d.runner.run({
-      env: this.projectEnv(),
-      role: 'evaluator-verdict',
+    type Out = { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
+    // The model is chosen in code from the change's level; a cheap verdict that isn't a confident pass is judged
+    // once more by the evaluator role's model. What the run read comes from its record, not from its own list.
+    const judged = await judge({
+      level: evalLevel({ files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, tampered }),
+      strongModel: role.model,
+      routing: this.d.cfg.agents.eval_routing,
+      changed,
       stateDir: this.d.stateDir,
-      prompt: issueBrief(issue, doneWhen, extra),
-      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
-      cwd: path,
-      model: role.model,
-      allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
-      disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
-      maxTurns: 60,
-      maxBudgetUsd: role.budget_usd ?? 5,
-      jsonSchema: opts.schema ?? VERDICT_SCHEMA,
-      stallMs: 15 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      verdictOf: (r) => (r.reason === 'succeeded' && r.structured ? { patch_correct: (r.structured as Out)?.patch_correct === true, confidence: (r.structured as Out)?.confidence ?? 'low' } : null),
+      run: async (model, costRole) => {
+        let runId: string | null = null;
+        const r = await this.d.runner.run({
+          env: this.projectEnv(),
+          role: 'evaluator-verdict',
+          stateDir: this.d.stateDir,
+          prompt: issueBrief(issue, doneWhen, extra),
+          appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
+          cwd: path,
+          model,
+          allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
+          disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+          maxTurns: 60,
+          maxBudgetUsd: role.budget_usd ?? 5,
+          jsonSchema: opts.schema ?? VERDICT_SCHEMA,
+          stallMs: 15 * 60_000,
+          timeoutMs: COMMAND_TIMEOUT_MS,
+          onControl: (c) => void (runId = c.runId),
+        });
+        this.cost(n, costRole, r);
+        return { r, runId };
+      },
     });
-    this.cost(n, 'evaluator-verdict', r);
-    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[]; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
+    const r = judged.r;
+    const s = r.structured as Out;
     // A review that didn't read every changed file can't pass on its own: those files go to a human.
-    const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
-    const unread = changed.filter((f) => !reviewed.has(f));
+    const unread = judged.unread;
     // No verdict is a failed verdict, never a pass.
     // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
     const v = {
@@ -946,7 +964,7 @@ export class Coordinator extends MergeFlow {
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design });
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}) });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
   }
 

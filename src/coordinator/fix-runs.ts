@@ -165,7 +165,7 @@ export abstract class FixRuns extends Landing {
       const checks = await this.verify(n, path, head, doneWhen, repro);
       const red = checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped');
       if (red.length) return await give(`the fix doesn't pass the coordinator's own checks: ${red.map((c) => `${c.check} ${c.status}`).join(', ')}`);
-      const verdict = await this.evaluate(issue, doneWhen, path, claimed.base, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path));
+      const verdict = await this.evaluate(issue, doneWhen, path, claimed.base, head, change.patchHash, checks, repro, change.tampered, change.files);
       if (!verdict.patch_correct) return await give(`the evaluator rejected the fix: ${verdict.advice || 'no reason given'}`);
       const push = checkedPush({ cwd: path, remote: this.remote, base: claimed.base, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, expect: pr.headSha });
       if (!push.ok && 'refused' in push) {
@@ -399,7 +399,7 @@ export abstract class FixRuns extends Landing {
       const checks = await this.verify(n, path, head, doneWhen, repro);
       const red = checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped');
       if (red.length) return await give(`the resolution doesn't pass the coordinator's own checks: ${red.map((c) => `${c.check} ${c.status}`).join(', ')}`);
-      const verdict = await this.evaluate(issue, doneWhen, path, baseSha, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path), {
+      const verdict = await this.evaluate(issue, doneWhen, path, baseSha, head, change.patchHash, checks, repro, change.tampered, change.files, {
         extra: [
           `This head merges ${baseRef} (${baseSha.slice(0, 8)}) into the pull request to resolve a conflict. Judge the change against the new base, and answer both_sides_kept: does the resolution keep what this pull request does AND what ${baseRef} changed?`,
           resolution,
