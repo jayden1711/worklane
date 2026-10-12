@@ -136,6 +136,19 @@ export const EventSchemas = {
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
+  /**
+   * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
+   * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.
+   */
+  'run.stage_labeled': z.strictObject({
+    run: z.string(),
+    issue: issue.nullable(),
+    role: z.string(),
+    instance: z.string(),
+    stage: z.enum(['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness']),
+    reason: z.string(),
+    by: z.enum(['code', 'judge']),
+  }),
   // verification
   'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),

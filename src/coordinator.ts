@@ -33,7 +33,7 @@ import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
-import { buildReport, dueSlot, recentRunRecords } from './reports.js';
+import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
@@ -44,6 +44,8 @@ import { MergeFlow } from './coordinator/merge-flow.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
+import { labelWeek } from './coordinator/stage-labels.js';
+import { doneWhenCommands } from './stage-label.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -137,8 +139,10 @@ export class Coordinator extends MergeFlow {
     if (posted.some((e) => (e.payload as { day: string; slot: string }).day === day && (e.payload as { slot: string }).slot === slot)) return;
     const last = posted.at(-1);
     const since = last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000);
-    const events = this.d.log.read();
     const runRecords = recentRunRecords(this.d.stateDir, new Date(now.getTime() - 7 * 86_400_000));
+    // The weekly section groups the week's failed runs by their earliest failed stage: label the new ones first.
+    if (weeklyDue(this.d.cfg.project.reports.times, slot, now)) await this.labelStages(now, runRecords);
+    const events = this.d.log.read();
     const report = buildReport(events, this.d.cfg, { since, now, slot, runRecords, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}), ...(this.d.appKeyPath ? { appKeyPath: this.d.appKeyPath } : {}) });
     // A fix proposed for a repeated failure goes to the owner's Inbox once; it changes nothing until answered.
     const asked = new Set(events.filter((e) => e.type === 'decision.asked').flatMap((e) => (e.payload as { receipts: string[] }).receipts));
@@ -154,6 +158,31 @@ export class Coordinator extends MergeFlow {
     if (issue === null) issue = await this.d.backlog.createIssue(`${BRAND.name} reports`, `Scheduled ${BRAND.name} reports are posted here as comments (${this.d.cfg.project.reports.times.join(' and ')}).`, ['report']);
     await this.d.backlog.comment(issue, `${report.markdown}\n\n${mention}`.trim());
     this.emit('report.posted', { day, slot, issue });
+  }
+
+  /** Label the week's unlabelled failed worker runs (coordinator/stage-labels.ts); a problem never stops the report. */
+  private async labelStages(now: Date, runRecords: ReturnType<typeof recentRunRecords>) {
+    try {
+      await labelWeek({
+        events: this.d.log.read(),
+        records: runRecords,
+        since: new Date(now.getTime() - 7 * 86_400_000),
+        until: now,
+        instance: this.d.instance,
+        runner: this.d.runner,
+        // The judge has no tools: it reads only what the prompt carries, wherever it runs.
+        cwd: this.d.repo,
+        doneWhenOf: async (n) => {
+          const c = parseContract((await this.d.backlog.get(n)).body);
+          return c.ok ? doneWhenCommands(c.done_when, this.d.cfg.tests.runner) : [];
+        },
+        spentToday: () => this.spentToday(),
+        dailyBudgetUsd: this.d.cfg.agents.daily_budget_usd,
+        emit: (type, payload) => this.emit(type, payload),
+      });
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'stage labels', kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
   }
 
   /** Queue the nightly runs once a day, after tests.yaml nightly_at. */
