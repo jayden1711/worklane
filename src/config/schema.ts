@@ -396,6 +396,59 @@ export const ReviewConfig = z.strictObject({
     .prefault({}),
 });
 
+// ---------- app.yaml ----------
+//
+// How to run the project's app in a worktree and drive it in a browser (Track B). Off when the file is absent:
+// a project without an app pays nothing. Flows name stable targets only (a data-testid or visible text), and
+// address the app by path, never by host: the browser only ever opens the app on localhost.
+
+/** A stable target: `testid:<data-testid>` or `text:<visible text>`, as the dashboard's control script drives them. */
+const AppTarget = z.string().regex(/^(testid|text):\S/, 'a stable target: testid:<data-testid> or text:<visible text>, never a CSS path');
+/** A path on the app (the host is always localhost), e.g. /cart?item=3. */
+const AppPath = z.string().regex(/^\/(?!\/)\S*$/, 'a path on the app, starting with one /: the host is always localhost');
+
+export const FlowStep = z.union([
+  z.strictObject({ goto: AppPath }),
+  z.strictObject({ click: AppTarget }),
+  z.strictObject({ type: z.strictObject({ target: AppTarget, text: z.string() }) }),
+  z.strictObject({ key: z.string().min(1) }),
+  /** A target to appear, or a pause in milliseconds (at most a minute). */
+  z.strictObject({ wait: z.union([AppTarget, z.number().int().positive().max(60_000)]) }),
+  z.strictObject({ expect_text: z.strictObject({ target: AppTarget, text: z.string().min(1) }) }),
+]);
+export type FlowStep = z.infer<typeof FlowStep>;
+
+export const AppConfig = z.strictObject({
+  version: z.literal(1),
+  start: z.strictObject({
+    /** Run in the worktree to serve the app on `port`, e.g. `npm run dev -- --port 5173`. */
+    command: z.string().min(1),
+    port: z.number().int().min(1024).max(65_535),
+    /** Ready once this path answers 2xx on localhost:port, within timeout_s. */
+    ready: z.strictObject({ path: AppPath.default('/'), timeout_s: z.number().int().positive().max(600).default(60) }).prefault({}),
+  }),
+  /** Repo-relative globs of the app's UI: a PR touching none of them runs no browser check. */
+  ui_paths: z.array(z.string().min(1)).min(1),
+  /** What a browser check holds a flow to, besides no new console errors and no failed requests. */
+  thresholds: z
+    .strictObject({
+      /** No single main-thread task longer than this. */
+      max_long_task_ms: z.number().int().positive().default(200),
+      /** At most this share of frames dropped while the flow runs. */
+      max_dropped_frame_pct: z.number().min(0).max(100).default(25),
+      /** A request slower than this is reported as slow. */
+      slow_request_ms: z.number().int().positive().default(3_000),
+    })
+    .prefault({}),
+  /** Named flows: what a person does in the app, step by step. */
+  flows: z.record(z.string(), z.array(FlowStep).min(1)).superRefine((f, ctx) => {
+    const names = Object.keys(f);
+    if (!names.length) ctx.addIssue({ code: 'custom', message: 'at least one flow' });
+    for (const n of names) if (!/^[a-z0-9][a-z0-9-]*$/.test(n)) ctx.addIssue({ code: 'custom', path: [n], message: `"${n}" isn't a flow name: lowercase letters, digits and dashes` });
+  }),
+});
+export type AppConfig = z.infer<typeof AppConfig>;
+
 // ---------- deploy.yaml ----------
 
 export const DeployConfig = z.strictObject({
@@ -437,4 +490,5 @@ export const FILES = {
   'tests.yaml': TestsConfig,
   'review.yaml': ReviewConfig,
   'deploy.yaml': DeployConfig,
+  'app.yaml': AppConfig,
 } as const;
