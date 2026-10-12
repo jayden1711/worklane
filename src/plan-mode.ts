@@ -12,6 +12,7 @@ import { BRAND } from './brand.js';
 import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
 import { computeLevel } from './review.js';
+import { defaultRolePrompt } from './roles.js';
 
 /** Labels that ask for a plan before building. */
 export const PLAN_LABELS = ['size:M', 'size:L'];
@@ -70,10 +71,8 @@ export function readPlan(s: unknown): Plan | { invalid: string } {
 
 /** The plan run's brief, after the issue: plan, don't build. */
 export function planExtra(): string[] {
-  return [
-    'This issue is large enough to plan first. Read the code you would change and write a plan: the approach, the steps in order, the files you expect to change, and the risks. Do not edit anything; a worker builds from your plan next.',
-    'Ask a question only for a real decision the owner must make; otherwise choose and say why in the approach.',
-  ];
+  // The planner's instructions: kept with the other roles (src/roles.ts), where the instruction evals reach them.
+  return [defaultRolePrompt('planner')];
 }
 
 const bullets = (xs: string[]) => xs.map((x) => `- ${x}`).join('\n');

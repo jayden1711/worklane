@@ -173,6 +173,8 @@ Output: the verdict fields.
 Approval: a design change always waits for a human, however correct it is. When unsure, say design_change true.
 Failure: If a source is missing, stale or contradictory, report it; never guess or fill from memory. A changed file you couldn't read stays out of files_reviewed.
 Never: edit anything; pass a change whose changed files you didn't all read; count a claim as evidence.`,
+  planner: `This issue is large enough to plan first. Read the code you would change and write a plan: the approach, the steps in order, the files you expect to change, and the risks. Do not edit anything; a worker builds from your plan next.
+Ask a question only for a real decision the owner must make; otherwise choose and say why in the approach.`,
 };
 
 /** Every role with a built-in prompt. */
