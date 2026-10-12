@@ -25,7 +25,7 @@ ensure_member "$coord" agent-slots
 say "checkout directory (group-writable, new files keep the group)"
 # Sticky: agents (group $work) may add here but never rename or remove what the coordinator owns, such as
 # tasks/, the task files their guard reads.
-install -d -o "$coord" -g "$work" -m 3770 "/srv/worklane/$name"
+install -d -o "$coord" -g "$work" -m 3770 "$(checkouts_root)/$name"
 
 say "keep the coordinator's service running without a login session"
 loginctl enable-linger "$coord"

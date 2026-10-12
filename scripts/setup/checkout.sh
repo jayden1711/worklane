@@ -12,7 +12,7 @@ as_root "$@"
 name="${1:?usage: checkout.sh <name> <owner/repo>}"
 repo="${2:?the instance repo (owner/name) missing}"
 coord="wl-$name" work="wl-$name-work"
-dest="/srv/worklane/$name/${repo#*/}"
+dest="$(checkouts_root)/$name/${repo#*/}"
 
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
 run_as "$coord" '

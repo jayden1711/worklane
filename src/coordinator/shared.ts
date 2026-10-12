@@ -62,6 +62,7 @@ export interface CoordinatorDeps {
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number };
 }
 
+/** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */
 export const COMMAND_TIMEOUT_MS = 2 * 3600_000;
 /** How often the worktree pool is checked against main's tip. */
 export const POOL_CHECK_MS = 5 * 60_000;

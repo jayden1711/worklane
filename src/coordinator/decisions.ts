@@ -14,7 +14,7 @@ import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
 import { objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from '../plan-mode.js';
 import { Recovery } from './recovery.js';
-import { COMMAND_TIMEOUT_MS, laneOf, DEFAULT_REVIEW } from './shared.js';
+import { laneOf, DEFAULT_REVIEW } from './shared.js';
 
 export abstract class Decisions extends Recovery {
   // ---------------------------------------------------------------- decisions
@@ -49,7 +49,7 @@ export abstract class Decisions extends Recovery {
       maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
       jsonSchema: PLAN_SCHEMA,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'planner', model: workers.model, worktree: path, pid: p, pgid: p, attempt: 1 }),
     });
     this.cost(n, 'planner', r);
