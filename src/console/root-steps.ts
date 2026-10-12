@@ -3,7 +3,8 @@
 // (scripts/setup/machine-helper.sh). Never arbitrary sudo. Anything else is refused here, before sudo is
 // reached, with what it would take: extending the helper, a reviewed change to the helper and its setup script.
 import type { EventLog } from '../events/log.js';
-import { AskError, asks, mayAnswerAsk, recordAnswer, type Ask, type Role } from './asks.js';
+import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
+import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import { MACHINE_HELPER, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
@@ -58,15 +59,12 @@ export function checkRootStep(command: string, args: readonly string[]): RootSte
   return { allowed: true, rule };
 }
 
-// Root steps run one at a time per ask: the helper call takes seconds, and it runs outside the answer's
-// write transaction so the coordinator isn't kept waiting on the log.
-const running = new Set<string>();
-
 /**
- * Run an open, allowlisted root_step ask through the helper and record the outcome (ran or failed, with its
- * output), once. Owner only. One off the allowlist is refused before sudo is reached, and stays open.
+ * Ask the coordinator to run an open, allowlisted root_step ask through the helper (src/machine-requests.ts):
+ * the dashboard can't sudo, and never tries. Owner only. One off the allowlist is refused here, and again by
+ * the coordinator. The coordinator answers the ask (ran or failed, with the output) once it has run.
  */
-export function runRootStep(log: EventLog, id: string, a: { by: string; role: Role | null; exec?: Exec }): Ask {
+export function requestRootStep(log: EventLog, id: string, a: { by: string; role: Role | null }): { ask: Ask; request: MachineRequest } {
   const ask = asks(log).get(id);
   if (!ask) throw new AskError(`no ask ${id}`, 404);
   if (!mayAnswerAsk(ask, a.role)) throw new AskError(`only the owner may run a root step; @${a.by || 'unknown'} (${a.role ?? 'no role'}) may not`, 403);
@@ -74,12 +72,10 @@ export function runRootStep(log: EventLog, id: string, a: { by: string; role: Ro
   if (ask.status !== 'open') throw new AskError(`ask ${id} is already ${ask.status}`, 409);
   const c = checkRootStep(ask.command, ask.args);
   if (!c.allowed) throw new AskError(`not run: ${c.why}`, 403);
-  if (running.has(id)) throw new AskError(`ask ${id} is running`, 409);
-  running.add(id);
   try {
-    const r = c.rule.run(ask.args, a.exec);
-    return recordAnswer(log, id, { by: a.by, role: a.role, answer: r.ok ? 'ran' : 'failed', detail: r.ok ? r.output : r.error });
-  } finally {
-    running.delete(id);
+    return { ask, request: requestMachineChange(log, { args: [ask.command, ...ask.args], by: a.by, via: 'ask', ask: id }) };
+  } catch (e) {
+    if (e instanceof MachineRequestError) throw new AskError(e.message, e.status);
+    throw e;
   }
 }

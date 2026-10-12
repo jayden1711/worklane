@@ -2,16 +2,16 @@
 //   GET  /api/asks                 every ask, with its status and whether this person may answer it
 //   POST /api/asks/<id>/answer     {answer}: an approve_link (approved|declined), a question, or declining a root step
 //   POST /api/asks/<id>/secret     {value}: a pasted secret, to the credential store; owner only
-//   POST /api/asks/<id>/run        a root step, through the machine helper; owner only
+//   POST /api/asks/<id>/run        a root step: recorded for the coordinator, which runs the machine helper; owner only
 // Writes are the owner's, except a question that lets writers answer. A secret's value appears in no event,
 // response or error: the secret route's errors are fixed texts or AskErrors, which never quote the body.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { EventLog } from '../events/log.js';
 import { ASK_EVENTS, AskError, asks, asksFrom, mayAnswerAsk } from './asks.js';
-import { runRootStep } from './root-steps.js';
+import { requestRootStep } from './root-steps.js';
+import { MACHINE_EVENTS, machineRequests } from '../machine-requests.js';
 import { readSecretBody, secretsDir, storeSecret } from './secrets.js';
 import type { SessionOf } from './session.js';
-import type { Exec } from '../machine.js';
 
 export interface AskRouteContext {
   eventsDb: string;
@@ -20,8 +20,6 @@ export interface AskRouteContext {
   session: SessionOf;
   /** The coordinator user's home, where secrets go (secretsDir); the process's own when unset. */
   secretsHome?: string;
-  /** How the machine helper is run; sudo when unset. */
-  exec?: Exec;
 }
 
 const send = (res: ServerResponse, status: number, body: unknown) => {
@@ -59,7 +57,9 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
     const log = new EventLog(ctx.eventsDb);
     try {
       const all = asksFrom(log.read(0, [...ASK_EVENTS]));
-      send(res, 200, { role: who.role, login: who.login, asks: all.map((a) => ({ ...a, canAnswer: a.status === 'open' && mayAnswerAsk(a, who.role) })) });
+      // A root step waiting on the coordinator shows its machine request (pending, running, or how it ended).
+      const reqs = machineRequests(log.read(0, [...MACHINE_EVENTS]));
+      send(res, 200, { role: who.role, login: who.login, asks: all.map((a) => ({ ...a, canAnswer: a.status === 'open' && mayAnswerAsk(a, who.role), request: reqs.filter((r) => r.ask === a.id).at(-1) ?? null })) });
     } finally {
       log.close();
     }
@@ -91,7 +91,7 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
       ask = storeSecret(log, id, { by: who.login, role: who.role, value, dir: secretsDir(asks(log).get(id)?.instance ?? ctx.instance, ctx.secretsHome) });
     } else if (what === 'run') {
       req.resume();
-      ask = runRootStep(log, id, { by: who.login, role: who.role, ...(ctx.exec ? { exec: ctx.exec } : {}) });
+      ask = requestRootStep(log, id, { by: who.login, role: who.role }).ask;
     } else {
       const body = await readJson(req);
       ask = asks(log).answer(id, { by: who.login, role: who.role, answer: String(body.answer ?? '') });
