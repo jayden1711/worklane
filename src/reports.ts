@@ -5,8 +5,8 @@ import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
-import type { StoredEvent } from './events/types.js';
-import { failureModes, failureModesMarkdown, mergeCostMarkdown, type FailureProposal } from './failure-modes.js';
+import type { EventPayload, StoredEvent } from './events/types.js';
+import { failureModes, failureModesMarkdown, mergeCostMarkdown, stageLabelsMarkdown, type FailureProposal } from './failure-modes.js';
 import { mergeMetrics } from './merge-metrics.js';
 import { offsiteLine, offsiteStatus } from './offsite-backup.js';
 import { project } from './projection.js';
@@ -144,6 +144,9 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
     const f = failureModes(events, { since: weekAgo, until: now, records: opts.runRecords ?? [] });
     proposals = f.proposals;
     lines.push('', ...failureModesMarkdown(f));
+    // Where the week's failed runs first went wrong (labelled by the coordinator before the report).
+    const labels = events.filter((e) => e.type === 'run.stage_labeled' && Date.parse(e.ts) > weekAgo.getTime()).map((e) => e.payload as EventPayload<'run.stage_labeled'>);
+    if (labels.length) lines.push('', ...stageLabelsMarkdown(labels.map((l) => ({ run: l.run, stage: l.stage, reason: l.reason, by: l.by, costUsd: 0, instance: l.instance }))));
     // What resolving and avoiding conflicts cost per merged PR, flagged with a suggestion when it adds more than a few minutes.
     lines.push('', ...mergeCostMarkdown(mergeMetrics(events, { since: weekAgo })));
   }

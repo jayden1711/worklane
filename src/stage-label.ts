@@ -5,6 +5,7 @@
 // set nor clear those. Every other failed run gets one cheap judge call; it may still say verification for a run
 // that ran its checks but misread or ignored the results. The judge reads only the run's redacted record, never the
 // repo or the web, and every call counts against the day's cap.
+import type { DoneWhenList } from './backlog/types.js';
 import type { AgentRunner, RunRequest } from './runner.js';
 
 export const STAGES = ['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness'] as const;
@@ -61,6 +62,11 @@ export interface FailedRun {
 }
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+
+/** The command lines that run an issue's done_when checks, as a run would type them: its commands, its test files (any command naming one), the project's suite. */
+export function doneWhenCommands(list: DoneWhenList, runner: { changed: string; full: string }): string[] {
+  return list.flatMap((d) => ('command' in d ? [d.command] : 'test' in d ? [d.test] : 'suite' in d ? [d.suite === 'full' ? runner.full : runner.changed] : []));
+}
 
 /** Whether any line of any done_when command appears in a command the run ran. */
 export function ranDoneWhen(doneWhen: string[], commands: string[]): boolean {
