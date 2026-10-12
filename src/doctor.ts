@@ -11,6 +11,7 @@ import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER, HOOK_MARKER } from './install.js';
 import { policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
+import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
 export type Level = 'ok' | 'warn' | 'fail';
 export interface DoctorCheck {
@@ -122,6 +123,16 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (existsSync(claudeMd)) {
     const approxTokens = Math.round(readFileSync(claudeMd, 'utf8').length / 4);
     add('CLAUDE.md', approxTokens > CLAUDE_MD_TOKEN_BUDGET ? 'warn' : 'ok', `~${approxTokens} tokens (target <= ${CLAUDE_MD_TOKEN_BUDGET}; move detail into skills and module docs)`);
+  }
+
+  // Skills: every SKILL.md has the six sections, none empty.
+  try {
+    const bad = lintSkills(root);
+    const n = trackedSkills(root).length;
+    if (bad.length) add('skills', 'fail', skillLintReport(bad));
+    else if (n) add('skills', 'ok', `${n} SKILL.md file(s) pass the skill lint`);
+  } catch {
+    // not a git repository: reported under pre-commit
   }
 
   if (opts.agentshield) out.push(agentShield(root));

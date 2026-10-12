@@ -19,6 +19,7 @@ import { listJobs, queueJob, runJob } from './queue.js';
 import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
 import { runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus } from './skilleval.js';
+import { lintSkills, SKILL_SECTIONS, skillLintReport, trackedSkills } from './skill-lint.js';
 import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
@@ -62,6 +63,8 @@ usage: ${BRAND.cli} <command> [options]
   skill eval <skill-dir> [--model m] [--judge m] [--samples k]
                                    run a skill's evals (evals/cases.md); writes evals/results.json
   skill status                     each project skill: evaluated, failing, stale or draft
+  skill lint                       every SKILL.md has When to use, Inputs and access, Steps, Validate,
+                                   Return and Approval, none empty; exits 1 otherwise (for CI)
   queue full-run [--max-load n] [-- <command>]
                                    queue the full test run; starts by itself when the machine-wide
                                    full-run slot is free and tests.yaml idle_probe passes
@@ -269,8 +272,15 @@ async function main(argv: string[]): Promise<number> {
         for (const d of readdirSync(dir, { withFileTypes: true }).filter((x) => x.isDirectory())) console.log(`${skillStatus(join(dir, d.name)).padEnd(9)} ${d.name}`);
         return 0;
       }
+      if (sub === 'lint') {
+        // Every tracked SKILL.md in the repo; exits 1 if any fails, so a project's own CI can run it.
+        const bad = lintSkills(root);
+        if (bad.length) console.error(skillLintReport(bad));
+        else console.log(`skill lint: ${trackedSkills(root).length} SKILL.md file(s) pass (${SKILL_SECTIONS.join(', ')})`);
+        return bad.length ? 1 : 0;
+      }
       if (sub !== 'eval' || !rest[0]) {
-        console.error('usage: skill eval <skill-dir> [--model m] [--judge m] | skill status');
+        console.error('usage: skill eval <skill-dir> [--model m] [--judge m] | skill status | skill lint');
         return 2;
       }
       const model = option(rest, '--model') ?? SKILL_EVAL_DEFAULTS.model;

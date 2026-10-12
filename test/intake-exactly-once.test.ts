@@ -22,7 +22,7 @@ import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-const DRAFT = { title: 'Totals ignore discounts', body: 'Totals are wrong when a discount applies.\n\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n' };
+const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 const OWNER_ID = '123456789012';
 const STRANGER_ID = '987654321098';
 const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID], sms: ['+15550001111'] }, discord: { enabled: true }, sms: { enabled: true }, 'bug-store': { enabled: true } });

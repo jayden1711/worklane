@@ -12,3 +12,7 @@ roles:
 # or no cases: the PR waits for you, with the per-case diff. The judge is never the model
 # under test (defaults: the workers' model under test, the evaluator's as judge).
 instruction_evals: { enabled: true, cap_usd: 5, samples: 1 }
+# Tiered evaluation, decided in code: changes at cheap_levels (L0: docs-only, tests-only, comment-only) are
+# judged by cheap_model, the rest by the evaluator's model; a failed or uncertain cheap verdict is judged once
+# more by the evaluator's model. An instance can override it in policy.yaml settings.eval_routing.
+eval_routing: { cheap_model: sonnet, cheap_levels: [L0], escalate: true }

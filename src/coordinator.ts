@@ -31,7 +31,8 @@ import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pic
 import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
 import { abortMerge, changedFiles, mergeBaseInto } from './merge-base.js';
 import { importsOf, lightCheckPlan, lightOutcome } from './light-check.js';
-import { runIssue } from './run-record.js';
+import { readRun, runIssue, runsForIssue } from './run-record.js';
+import { claimsOf, lowerConfidence, receiptLines, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow, intakeCaps, researchCaps, researchRepoAccess } from './settings.js';
 import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchTrigger, researchUsageToday, writeResearchBundle } from './research.js';
 import type { InstanceSettings } from './instance.js';
@@ -133,6 +134,8 @@ function retryAfter(kind: 'rate_limit' | 'budget', now = Date.now()): { kind: 'r
   const d = new Date(now);
   return { kind, after: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)) };
 }
+/** How long a fix run waits on an issue claim held elsewhere (from the first time it found it so) before giving up. */
+const CLAIM_HELD_GIVE_UP_MS = 3600_000;
 
 /**
  * Run a project command without blocking the event loop: with several agents
@@ -419,6 +422,24 @@ export class Coordinator {
     this.stopped = true;
   }
 
+  /** An emergency stop is in force (read now, not only at the last check): nothing lands and nothing merges. */
+  private emergencyInForce(): boolean {
+    return this.halt.signal.aborted || emergencyStop(this.d.slotsDir) !== null;
+  }
+
+  /**
+   * Worker attempts already used on an issue, from the log: since its last block or decision (after which the
+   * owner relabels or answers, and the task starts with a fresh budget). Restarts and requeues don't reset it.
+   */
+  private attemptsUsed(n: number): number {
+    let used = 0;
+    for (const e of this.events(n)) {
+      if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
+      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker') used++;
+    }
+    return used;
+  }
+
   private async reconcile(): Promise<number> {
     // Tasks whose issue was closed elsewhere are cancelled, never re-dispatched.
     let n = 0;
@@ -686,8 +707,14 @@ export class Coordinator {
       this.endHotspotHold(issue.number, true);
       this.taskHotspots.set(issue.number, hotspots);
       const p = this.runTask(issue, contract.done_when)
-        .catch((e: Error) => {
+        .catch(async (e: Error) => {
           this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}`, kind: 'error', message: e.message.slice(0, 500) });
+          // Never left silently claimed: the owner is told on the issue, and the claim released.
+          try {
+            await this.block(issue.number, this.ownerOf(issue.number), `the task failed: ${e.message.slice(0, 300)}`);
+          } catch (e2) {
+            this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}: blocking it`, kind: 'error', message: (e2 as Error).message.slice(0, 500) });
+          }
         })
         .finally(() => {
           slot.release();
@@ -865,7 +892,11 @@ export class Coordinator {
       let feedback: string[] = [];
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
       let refused: string[] | null = null;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Attempts are counted from the log, so a restart or an emergency stop's requeue continues the count
+      // instead of starting again from 1.
+      const used = this.attemptsUsed(n);
+      if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
+      for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
@@ -1171,6 +1202,8 @@ export class Coordinator {
       await this.block(n, owner, s.blocked);
       return { stop: true as const };
     }
+    // What the worker says it verified: checked against the record at evaluation, listed in the PR's receipts.
+    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? '') });
     return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}) };
   }
 
@@ -1389,10 +1422,12 @@ export class Coordinator {
   private async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[], opts: { extra?: string[]; schema?: object } = {}) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.evaluator!;
+    const unverified = this.unverifiedClaims(n, checks);
     const extra = [
       `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
       `Reproduction test: ${repro?.path || 'none'}`,
       `Coordinator's check results: ${checks.map((c) => `${c.check}=${c.status}`).join(', ') || 'none'}`,
+      ...(unverified.length ? [`NOT VERIFIED (the worker claimed these; no recorded command or check backs them, so they are not evidence): ${unverified.map((c) => `"${c}"`).join('; ')}`] : []),
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
       ...(opts.extra ?? []),
     ];
@@ -1418,16 +1453,31 @@ export class Coordinator {
     const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
     const unread = changed.filter((f) => !reviewed.has(f));
     // No verdict is a failed verdict, never a pass.
+    // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
     const v = {
       patch_correct: r.reason === 'succeeded' && s?.patch_correct === true,
       test_correct: r.reason === 'succeeded' && s?.test_correct !== false,
-      confidence: (r.reason === 'succeeded' && s?.confidence) || 'low',
+      confidence: lowerConfidence((r.reason === 'succeeded' && s?.confidence) || 'low', unverified.length),
       advice: r.reason === 'succeeded' ? (s?.advice ?? '') : `evaluator run ${r.reason}: ${r.detail}`,
+      ...(unverified.length ? { unverified_claims: unverified } : {}),
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
     this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
+  }
+
+  /**
+   * The latest worker's claims that no record backs: not the coordinator's passing checks, nor a command the
+   * worker's last run recorded as succeeding.
+   */
+  private unverifiedClaims(n: number, checks: { check: string; status: string }[]): string[] {
+    const claims = (this.events(n).filter((e) => e.type === 'worker.claims').at(-1)?.payload as EventPayload<'worker.claims'> | undefined)?.claims ?? [];
+    if (!claims.length) return [];
+    const run = this.d.stateDir ? runsForIssue(this.d.stateDir, n).filter((r) => r.role === 'worker').at(-1) : undefined;
+    const steps = run ? (readRun(this.d.stateDir!, run.id)?.steps ?? []) : [];
+    const commands = steps.filter((st) => st.kind === 'command' && st.status === 'ok').map((st) => st.what);
+    return unbackedClaims(claims, { checks: checks as CheckRecord[], commands });
   }
 
   private cost(issue: number, role: string, r: RunResult) {
@@ -2116,7 +2166,8 @@ export class Coordinator {
   }
 
   private async landNext() {
-    if (this.landing) return;
+    // Safety floor: under an emergency stop the queue waits; it lands once the stop is lifted.
+    if (this.landing || this.emergencyInForce()) return;
     const queue = this.landQueue();
     if (!queue.length) return;
     this.landing = true;
@@ -2197,7 +2248,10 @@ export class Coordinator {
     let split = false;
     try {
       if (setupErrors.length) {
-        for (const n of issues) result(n, 'error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+        for (const n of issues) {
+          result(n, 'error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+          await this.block(n, ownerOf(n), `landing failed: the land worktree's setup failed: ${setupErrors.join('; ')}`);
+        }
         return;
       }
       for (const q of batch) {
@@ -2215,7 +2269,10 @@ export class Coordinator {
       for (const step of this.d.cfg.tests.land.pre) {
         const r = await this.project(step, path);
         if (r.code !== 0) {
-          for (const q of applied) result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
+          for (const q of applied) {
+            result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
+            await this.block(q.issue, ownerOf(q.issue), `landing failed: the pre-land step \`${step}\` failed\n${r.tail.split('\n').slice(-5).join('\n')}`);
+          }
           return;
         }
       }
@@ -2243,10 +2300,18 @@ export class Coordinator {
       }
       const scan = await scanRange(path, `${tip}..HEAD`);
       if (scan.status !== 'clean') {
-        for (const q of applied) result(q.issue, 'rejected', null, `secret scan ${scan.status} at landing`);
+        for (const q of applied) {
+          result(q.issue, 'rejected', null, `secret scan ${scan.status} at landing`);
+          await this.block(q.issue, ownerOf(q.issue), `landing failed: the secret scan at landing found ${scan.status === 'leaks' ? 'possible secrets' : 'it could not run'}; nothing was pushed`);
+        }
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
+      // A stop that came in while the gates ran: left queued, landed once it's lifted.
+      if (this.emergencyInForce()) {
+        for (const q of applied) result(q.issue, 'deferred', null, 'emergency stop in force; lands once it is lifted');
+        return;
+      }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
       const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push });
       if (!push.ok && 'refused' in push) {
@@ -2301,8 +2366,9 @@ export class Coordinator {
     }
     const last = <T>(type: Parameters<EventLog['read']>[1] extends (infer U)[] | undefined ? U : never) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
     const lvl = last<{ level: string; reasons: string[] }>('review.level_set');
-    const verdict = last<{ patch_correct: boolean; confidence: string; advice: string }>('eval.verdict');
-    const checks = last<{ checks: { check: string; status: string }[] }>('check.result');
+    const verdict = last<EventPayload<'eval.verdict'>>('eval.verdict');
+    const checks = last<EventPayload<'check.result'>>('check.result');
+    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
     const issue = await this.d.backlog.get(n);
     const body = [
       `Closes #${n}`,
@@ -2310,9 +2376,10 @@ export class Coordinator {
       `Opened by ${BRAND.name}. It merges this itself only if the instance's merge policy allows (required checks green on the evaluated commit, nothing high-risk, design-level, big or in doubt); otherwise it waits for a human.`,
       '',
       `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
-      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
-      `**Checks run by the harness:** ${checks?.checks.map((c) => `${c.check} ${c.status}`).join(', ') || 'none'}`,
+      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.unverified_claims?.length ? ` (lowered: ${verdict.unverified_claims.length} unverified claim(s))` : ''}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
       ...evalLines(this.instructionResults(n)),
+      '',
+      ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
     ].join('\n');
     let url: string;
     try {
@@ -2478,6 +2545,8 @@ export class Coordinator {
    * it merges cleanly; otherwise ask the owner once per head, saying why.
    */
   private async mergeOrWait(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+    // Safety floor: nothing auto-merges under an emergency stop; the next poll after it's lifted decides.
+    if (this.emergencyInForce()) return;
     const { issue: n, number } = w;
     const prior = this.d.log
       .read(0, ['merge.decided'])
@@ -2506,6 +2575,8 @@ export class Coordinator {
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
+    // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
+    if (this.emergencyInForce()) return;
     const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
@@ -2610,6 +2681,23 @@ export class Coordinator {
 
   // ---------------------------------------------------------------- CI fix runs
 
+  /**
+   * A fix run found the issue's claim held elsewhere. The first time for this PR head it is recorded (`record`);
+   * it never counts toward the fix cap, so a brief collision costs nothing. Only once the claim has been held
+   * elsewhere for CLAIM_HELD_GIVE_UP_MS since that first record does this say to give up.
+   */
+  private claimHeldTooLong(type: 'ci_fix.finished' | 'conflict_fix.finished', number: number, head: string, record: () => void): boolean {
+    const first = this.d.log.read(0, [type]).find((e) => {
+      const p = e.payload as { number: number; outcome: string; head: string | null };
+      return p.number === number && p.outcome === 'claim_lost' && p.head === head;
+    });
+    if (!first) {
+      record();
+      return false;
+    }
+    return Date.now() - Date.parse(first.ts) >= CLAIM_HELD_GIVE_UP_MS;
+  }
+
   private fixGaveUp(number: number): boolean {
     return this.d.log.read(0, ['ci_fix.gave_up']).some((e) => (e.payload as { number: number }).number === number);
   }
@@ -2697,7 +2785,12 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    if (!won.won) return; // held elsewhere; the next poll tries again
+    if (!won.won) {
+      const holder = won.holder?.instance ?? 'another run';
+      const record = () => this.emit('ci_fix.finished', { issue: n, number, outcome: 'claim_lost', head: pr.headSha, detail: `the issue's claim is held by ${holder}` });
+      if (this.claimHeldTooLong('ci_fix.finished', number, pr.headSha, record)) await this.giveUpFix(w, pr.headSha, `the issue's claim has been held by ${holder} for over an hour`, failed);
+      return;
+    }
     let leaseSha = won.sha;
     this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
@@ -2979,7 +3072,12 @@ export class Coordinator {
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
-    if (!won.won) return; // held elsewhere; the next poll tries again
+    if (!won.won) {
+      const holder = won.holder?.instance ?? 'another run';
+      const record = () => this.emit('conflict_fix.finished', { issue: n, number, base_sha: baseSha, strategy: 'merge', outcome: 'claim_lost', head: pr.headSha, files: [], waits_owner: false, reasons: [], detail: `the issue's claim is held by ${holder}` });
+      if (this.claimHeldTooLong('conflict_fix.finished', number, pr.headSha, record)) await this.giveUpConflict(w, pr.headSha, baseSha, `the issue's claim has been held by ${holder} for over an hour`, []);
+      return;
+    }
     let leaseSha = won.sha;
     this.emit('conflict_fix.started', { issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
