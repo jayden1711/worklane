@@ -32,6 +32,24 @@ export const SIGNIN_STATE_MS = 10 * 60_000;
 
 /** The header the hub names the signed-in person with when it forwards to an instance's own server (token-authenticated). */
 export const LOGIN_HEADER = 'x-dashboard-login';
+/** On the hub's role check (/api/role): read the permission from GitHub now, not the instance's cache. */
+export const FRESH_HEADER = 'x-dashboard-fresh-role';
+/** The header the hub passes the person's sign-in time with (ms since the epoch), alongside LOGIN_HEADER. */
+export const AUTH_AT_HEADER = 'x-dashboard-authenticated-at';
+
+/**
+ * Who is asking, in the shape the setup console (src/console/session.ts) reads: the login, the role on this
+ * instance (read from the repo, never the client), when they last signed in with GitHub, and whether this write
+ * carries the session's CSRF token. Structurally the same as that module's ConsoleSession and SessionOf.
+ */
+export interface ConsoleSession {
+  login: string;
+  role: Role | null;
+  authenticatedAt: number | null;
+  csrfOk: boolean;
+}
+export type SessionOf = (req: IncomingMessage, instance: string) => ConsoleSession | null;
+
 /** The header every write carries its CSRF token in. */
 export const CSRF_HEADER = 'x-csrf-token';
 /** The session cookie: __Host- binds it to this origin, Path=/, Secure, with no Domain. */
@@ -73,7 +91,8 @@ export const isWriter = (r: Role | null | undefined) => r === 'owner' || r === '
 export const OWNER_DECISIONS: ReadonlySet<string> = new Set(['plan', 'land']);
 export const mayAnswerKind = (kind: string, r: Role | null | undefined) => (OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r));
 
-export type RoleOf = (login: string) => Promise<Role | null>;
+/** `fresh`: ask GitHub now, not the cache (the hub's role check, so its own copy is never older than the cache allows). */
+export type RoleOf = (login: string, o?: { fresh?: boolean }) => Promise<Role | null>;
 type Fetch = typeof fetch;
 
 /**
@@ -98,11 +117,11 @@ export function repoPermission(o: { repo: string; token: () => Promise<string>; 
 /** Roles from a permission lookup, cached per login for at most `ttl`; an error refuses (and is retried after ROLE_ERROR_CACHE_MS). */
 export function cachedRoles(permission: (login: string) => Promise<string>, now: () => number = Date.now, ttl = ROLE_CACHE_MS): RoleOf {
   const cache = new Map<string, { role: Role | null; until: number }>();
-  return async (login) => {
+  return async (login, o = {}) => {
     if (!validLogin(login)) return null;
     const key = login.toLowerCase();
     const hit = cache.get(key);
-    if (hit && now() < hit.until) return hit.role;
+    if (hit && now() < hit.until && !o.fresh) return hit.role;
     let role: Role | null;
     let until: number;
     try {

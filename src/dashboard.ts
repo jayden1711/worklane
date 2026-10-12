@@ -41,7 +41,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
-import { assertLoopbackHost, breakGlassAllowed, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type Role, type RoleOf } from './dashboard-auth.js';
+import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -80,6 +80,11 @@ export interface DashboardOptions {
   roleOf?: RoleOf;
   /** The instance this server serves (recorded in the audit); none for a checkout. */
   instance?: string;
+  /**
+   * Who is asking, for routes that need a ConsoleSession (the setup console): `dashboardSession` when unset, the
+   * identity this server resolved for the request (login and role from the repo; sign-in time from the hub).
+   */
+  session?: SessionOf;
   /** Where it listens: loopback only (127.0.0.1 when unset); anything else is refused. */
   host?: string;
   port?: number;
@@ -127,7 +132,20 @@ export interface Who {
   login: string;
   role: Role;
   via: 'session' | 'break-glass';
+  /** When they signed in with GitHub, as the hub says (null for the break-glass: no sign-in). */
+  authenticatedAt: number | null;
 }
+
+/** The identity each request was resolved to, for as long as the request lives. */
+const resolved = new WeakMap<IncomingMessage, ConsoleSession>();
+
+/**
+ * The session behind a request on an instance's dashboard, once the server has resolved it (after the token
+ * check): the person and their role from the repo, the hub's sign-in time. CSRF is the hub's to check (it
+ * refuses a write without the session's token before forwarding), and the break-glass is a bearer token, not
+ * a cookie, so csrfOk is true for any request that got here. Null before or without that.
+ */
+export const dashboardSession: SessionOf = (req) => resolved.get(req) ?? null;
 
 /** Who may read the next report's preview (spend, and the throughput section): the instance's owners and writers. */
 export const mayReadReports = (role: Role | null | undefined) => isWriter(role);
@@ -579,12 +597,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const named = req.headers[LOGIN_HEADER];
     if (named !== undefined) {
       if (!validLogin(named)) return { status: 400, error: 'not a GitHub login' };
-      const role = opts.roleOf ? await opts.roleOf(named) : null;
+      const fresh = url.pathname === '/api/role' && req.headers[FRESH_HEADER] === '1';
+      const role = opts.roleOf ? await opts.roleOf(named, { fresh }) : null;
       if (!role) return { status: 403, login: named, error: `@${named} has no access to this instance: it needs at least read access to ${repo}` };
-      return { login: named, role, via: 'session' };
+      const at = Number(req.headers[AUTH_AT_HEADER]);
+      return { login: named, role, via: 'session', authenticatedAt: Number.isSafeInteger(at) && at > 0 ? at : null };
     }
     if (!breakGlassAllowed(req)) return { status: 403, error: "the token is the owner's break-glass: accepted only on this machine, never through a proxy" };
-    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass' };
+    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', authenticatedAt: null };
   };
 
   /** Every write a person makes, recorded with who (login and role), how they came in, the instance and what was done. */
@@ -640,9 +660,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);
         // The hub asks this of each instance, to list only the ones the person has a role on.
+        if (!('status' in id)) resolved.set(req, { login: id.login, role: id.role, authenticatedAt: id.authenticatedAt, csrfOk: true });
+        const sessionOf = opts.session ?? dashboardSession;
         if (url.pathname === '/api/role' && req.method === 'GET') {
           if ('status' in id) return id.status === 403 && id.login ? json(res, 200, { login: id.login, role: null }) : json(res, id.status, { error: id.error });
-          return json(res, 200, { login: id.login, role: id.role, via: id.via });
+          const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
+          return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via, authenticatedAt: s?.authenticatedAt ?? null });
         }
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;

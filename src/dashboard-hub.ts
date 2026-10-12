@@ -25,7 +25,7 @@ import { createServer, request, type IncomingMessage, type Server, type ServerRe
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
-import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SignInConfig } from './dashboard-auth.js';
+import { assertLoopbackHost, AUTH_AT_HEADER, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 
 export interface HubInstance {
   name: string;
@@ -48,6 +48,11 @@ export interface HubOptions {
   webDir?: string;
   /** Sign-in with GitHub; without it, the hub's port refuses every API call and only the break-glass works. */
   signIn?: SignInConfig | null;
+  /**
+   * The owner terminal (the setup console) reads who is asking on the hub's port through a SessionOf: the hub's
+   * own (`session` on what startHub returns) unless one is given here.
+   */
+  terminal?: { session?: SessionOf };
   now?: () => number;
 }
 
@@ -108,7 +113,7 @@ const readToken = (i: HubInstance): string | null => {
  * `login`: the signed-in person, named to the instance, which reads their role itself; null for the break-glass.
  * Only the headers the instance needs go upstream, built here: never a cookie, a CSRF token or a client's own login header.
  */
-function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null): void {
+function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null, authenticatedAt: number | null = null): void {
   const token = readToken(i);
   if (!token) return json(res, 502, { error: `can't read instance ${i.name}'s dashboard token (${i.tokenFile}): is its dashboard running, and the hub allowed to read it?` });
   search.delete('t');
@@ -116,6 +121,7 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'content-type': req.headers['content-type'] ?? 'application/json' };
   if (req.headers['last-event-id']) headers['last-event-id'] = String(req.headers['last-event-id']);
   if (login) headers[LOGIN_HEADER] = login;
+  if (login && authenticatedAt) headers[AUTH_AT_HEADER] = String(authenticatedAt);
   const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers }, (r) => {
     const h: Record<string, string> = { 'cache-control': 'no-store' };
     if (r.headers['content-type']) h['content-type'] = r.headers['content-type'];
@@ -135,7 +141,7 @@ function probe(i: HubInstance, login: string | null): Promise<{ up: boolean; err
   const token = readToken(i);
   if (!token) return Promise.resolve({ up: false, error: "can't read its dashboard token", role: null });
   return new Promise((done) => {
-    const r = request({ host: '127.0.0.1', port: i.port, path: '/api/role', headers: { authorization: `Bearer ${token}`, ...(login ? { [LOGIN_HEADER]: login } : {}) }, timeout: 3000 }, (res) => {
+    const r = request({ host: '127.0.0.1', port: i.port, path: '/api/role', headers: { authorization: `Bearer ${token}`, ...(login ? { [LOGIN_HEADER]: login, [FRESH_HEADER]: '1' } : {}) }, timeout: 3000 }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c: string) => (body += c));
@@ -175,7 +181,7 @@ const listen = (server: Server, port: number, host: string) =>
     });
   });
 
-export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; token: string; close: () => Promise<void> }> {
+export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; token: string; session: SessionOf; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
@@ -186,6 +192,39 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   const sessions = signIn ? new Sessions({ secret: signIn.sessionSecret, file: join(opts.stateDir, 'sessions.json'), now }) : null;
   const states = new SignInStates(now);
   const origin = signIn ? new URL(signIn.publicUrl).origin : null;
+
+  // Each person's role per instance, as that instance just read it from the repo (fresh, not from its cache),
+  // kept no longer than the role cache allows.
+  const roles = new Map<string, { role: Role | null; until: number }>();
+  const roleKey = (instance: string, login: string) => `${instance}\n${login.toLowerCase()}`;
+  const learn = (instance: string, login: string, role: Role | null) => roles.set(roleKey(instance, login), { role, until: now() + ROLE_CACHE_MS });
+  const knownRole = (instance: string, login: string) => {
+    const r = roles.get(roleKey(instance, login));
+    return r && now() < r.until ? r : null;
+  };
+  /** The person's role on an instance: the hub's fresh copy, else the instance asked again. */
+  const roleOn = async (i: HubInstance, login: string) => {
+    const k = knownRole(i.name, login);
+    if (k) return k.role;
+    const p = await probe(i, login);
+    if (p.up) learn(i.name, login, p.role);
+    return p.role;
+  };
+  const writeOk = (req: IncomingMessage, sid: string) => (req.headers.origin === undefined || req.headers.origin === origin) && sessions!.csrfOk(sid, req.headers[CSRF_HEADER]);
+
+  /**
+   * Who is asking on the hub's port, for the owner terminal: the signed-in person, their role on `instance` as
+   * that instance read it from its repo (null until the hub has asked, or once 5 minutes old: refused), when they
+   * signed in with GitHub, and whether the request carries this session's CSRF token from this site.
+   */
+  const hubSession: SessionOf = (req, instance) => {
+    if (!sessions) return null;
+    const sid = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+    const s = sid ? sessions.get(sid) : null;
+    if (!s || !sid) return null;
+    return { login: s.login, role: byName.has(instance) ? (knownRole(instance, s.login)?.role ?? null) : null, authenticatedAt: s.created, csrfOk: writeOk(req, sid) };
+  };
+  const session = opts.terminal?.session ?? hubSession;
 
   /** The hub's port: sign-in, sessions, and the instances as the signed-in person sees them. Never the token. */
   const server = createServer(async (req, res) => {
@@ -217,9 +256,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
       // Every write: from this site (when the browser says where from) and with this session's CSRF token.
       if (write && (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/'))) {
         if (!session || !sid) return json(res, 401, { error: 'sign in first', signIn: '/auth/login' });
-        const from = req.headers.origin;
-        if (from !== undefined && from !== origin) return json(res, 403, { error: 'a write from another site is refused' });
-        if (!sessions!.csrfOk(sid, req.headers[CSRF_HEADER])) return json(res, 403, { error: 'missing or wrong CSRF token: reload the page' });
+        if (!writeOk(req, sid)) return json(res, 403, { error: req.headers.origin !== undefined && req.headers.origin !== origin ? 'a write from another site is refused' : 'missing or wrong CSRF token: reload the page' });
       }
       if (url.pathname === '/auth/logout' && req.method === 'POST') {
         sessions!.delete(sid);
@@ -235,13 +272,14 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (url.pathname === '/api/hub' && req.method === 'GET') {
           // Only the instances where this person has a role: each instance reads it from its own repo.
           const all = await Promise.all(opts.instances.map(async (i) => ({ name: i.name, ...(await probe(i, session.login)) })));
+          for (const i of all) if (i.up) learn(i.name, session.login, i.role);
           return json(res, 200, { instances: all.filter((i) => i.role) });
         }
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
         if (m) {
           const inst = byName.get(m[1]!);
-          if (!inst) return json(res, 403, { error: `no access to instance ${m[1]}` });
-          return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login);
+          if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${m[1]}` });
+          return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, session.created);
         }
         return json(res, 404, { error: 'not found: the hub serves /api/me, /api/hub and /api/i/<instance>/...' });
       }
@@ -293,6 +331,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     url: `http://${shown}:${port}/`,
     breakGlassUrl: `http://${shown}:${bgPort}/?t=${token}`,
     token,
+    session,
     close: () =>
       Promise.all(
         [server, breakGlass].map(

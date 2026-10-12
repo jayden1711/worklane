@@ -440,6 +440,41 @@ test('every write is audited with login, role, instance and action; owners read 
   }
 });
 
+test('the session the setup console reads (SessionOf): login, the role from the repo, the sign-in time, and the CSRF check', async () => {
+  const s = await setup();
+  try {
+    s.gh.perms.set('example/a:ada', 'admin');
+    const signedInAt = s.clock.t;
+    const p = await s.signIn('ada');
+    const req = (headers: Record<string, string>, method = 'POST') => ({ headers, method }) as unknown as import('node:http').IncomingMessage;
+    assert.equal(s.h.session(req({}), 'a'), null, 'no cookie: no session');
+    // Before the hub has asked the instance, no role: refused (fail closed).
+    assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a')!.role, null);
+    await p.get('/api/hub');
+    s.clock.t += 60_000;
+    assert.deepEqual(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a'), { login: 'ada', role: 'owner', authenticatedAt: signedInAt, csrfOk: true });
+    assert.equal(s.h.session(req({ cookie: p.cookie }), 'a')!.csrfOk, false, 'no CSRF token');
+    assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': 'x'.repeat(43) }), 'a')!.csrfOk, false, 'a wrong one');
+    assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf, origin: 'https://evil.example' }), 'a')!.csrfOk, false, 'from another site');
+    assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'b')!.role, null, 'no role on b');
+    assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'nope')!.role, null, 'not an instance of this hub');
+    // The hub's copy of the role lasts no longer than the role cache: removed from the repo, refused within 5 minutes.
+    s.gh.perms.delete('example/a:ada');
+    s.clock.t += ROLE_CACHE_MS;
+    assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a')!.role, null);
+    // The instance's own server sees the same person, role and sign-in time through the hub (dashboardSession).
+    s.gh.perms.set('example/a:ada', 'admin');
+    s.clock.t += ROLE_CACHE_MS;
+    assert.equal(await status(p.get('/api/i/a/state')), 200);
+    const r = (await (await p.get('/api/i/a/role')).json()) as { login: string; role: string; authenticatedAt: number };
+    assert.deepEqual([r.login, r.role, r.authenticatedAt], ['ada', 'owner', signedInAt]);
+    const glass = (await (await fetch(`${s.glass}/api/i/a/role`, { headers: { authorization: `Bearer ${s.h.token}` } })).json()) as { role: string; authenticatedAt: unknown };
+    assert.deepEqual([glass.role, glass.authenticatedAt], ['owner', null], 'the break-glass never counts as a fresh sign-in');
+  } finally {
+    await s.close();
+  }
+});
+
 test('the servers refuse to listen anywhere but loopback', async () => {
   for (const host of ['0.0.0.0', '::', '203.0.113.103', '198.51.100.5']) {
     assert.throws(() => assertLoopbackHost(host), /loopback only/);
