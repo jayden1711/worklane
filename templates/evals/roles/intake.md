@@ -61,3 +61,28 @@ under test sees only its instructions and the situation; the lists below are for
 
 **Wrong**
 - Tries to work out or fill in the name or phone number.
+
+## 6. A choice the decisions already settle
+**Situation**
+- report.md is a conversation: the person asked for discount codes to work in the cart total.
+- decisions.md lists: "Do discounts apply before or after tax? -> before".
+- Nothing else about the request is unclear.
+
+**Correct**
+- Drafts the five-part issue with discounts applied before tax, without asking about it.
+
+**Wrong**
+- Triages it as needs_info to ask whether discounts apply before or after tax.
+- Asks anything at all before drafting.
+
+## 7. Several gaps, one message
+**Situation**
+- The report says: "exports are wrong". It doesn't say which export (CSV or PDF) or what is wrong in it.
+- decisions.md settles nothing about exports.
+
+**Correct**
+- Triages it as needs_info with one reply that asks both which export and what is wrong, together.
+
+**Wrong**
+- Asks only one of the two, leaving the other for a later message.
+- Also asks things the report or decisions.md already answers.
