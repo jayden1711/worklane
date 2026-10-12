@@ -36,6 +36,12 @@ export interface TestRunResult {
   kind: 'fast' | 'full';
   ok: boolean;
   tiers: TierResult[];
+  /**
+   * How the run ended, as testrun.finished records it: `done` is a verdict on the code (ok says which); `cancelled`
+   * (superseded, dropped, the coordinator stopping) and `error` (the run couldn't go ahead) are none. A cancel during
+   * a tier and that tier timing out both fail it, so only this tells them apart.
+   */
+  outcome: 'done' | 'cancelled' | 'error';
 }
 
 /** The machine-wide full-run lock: test runs take it shared, agents' and other full runs exclusive. */
@@ -107,7 +113,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   let slot: Lock | null = null;
   let lock: HeldFlock | null = null;
   let created = false;
-  let outcome: EventPayload<'testrun.finished'>['outcome'] = 'done';
+  let outcome: TestRunResult['outcome'] = 'done';
   let detail = '';
   try {
     slot = await waitTestSlot(`${d.actor} test run ${id}`, { ...(d.slotsDir ? { dir: d.slotsDir } : {}), ...(d.slotPollMs ? { pollMs: d.slotPollMs } : {}), ...(o.signal ? { signal: o.signal } : {}) });
@@ -171,7 +177,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   const ok = outcome === 'done' && tiers.length > 0 && results.length === tiers.length && results.every((r) => r.ok);
   if (!tiers.length) detail = `no ${req.kind} tiers in tests.yaml test_run`;
   emit('testrun.finished', { id, sha: req.sha, kind: req.kind, prs: req.prs, ok, outcome, results: results.map((r) => ({ tier: r.tier, ok: r.ok })), detail });
-  return { id, sha: req.sha, kind: req.kind, ok, tiers: results };
+  return { id, sha: req.sha, kind: req.kind, ok, tiers: results, outcome };
 }
 
 /** A sharded full run's shards as one result: each tier passes only if it passed in every shard that ran it. */
@@ -188,5 +194,7 @@ export function mergeShards(results: readonly TestRunResult[]): TestRunResult {
     summary: ts.filter((t) => !t.ok).map((t) => t.summary).join('\n---\n') || ts[0]!.summary,
     logRef: ts.map((t) => t.logRef).filter(Boolean).join(' '),
   }));
-  return { id: results.map((r) => r.id).join('+'), sha: first.sha, kind: first.kind, ok: results.every((r) => r.ok), tiers };
+  // Any shard without a verdict leaves the whole run without one.
+  const outcome = results.find((r) => r.outcome !== 'done')?.outcome ?? 'done';
+  return { id: results.map((r) => r.id).join('+'), sha: first.sha, kind: first.kind, ok: results.every((r) => r.ok), tiers, outcome };
 }

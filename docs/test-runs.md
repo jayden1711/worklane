@@ -67,7 +67,7 @@ test_run:
 ```ts
 interface TestRunRequest { repo: string; sha: string; kind: 'fast' | 'full'; prs: number[]; changedFiles?: string[]; shard?: { index: number; total: number } }  // index is 1-based
 interface TierResult { tier: string; ok: boolean; durationMs: number; summary: string; logRef: string }
-interface TestRunResult { id: string; sha: string; kind: 'fast'|'full'; ok: boolean; tiers: TierResult[] }
+interface TestRunResult { id: string; sha: string; kind: 'fast'|'full'; ok: boolean; tiers: TierResult[]; outcome: 'done' | 'cancelled' | 'error' }  // anything but done: no verdict
 startTestRun(req, opts?: { signal?: AbortSignal }): Promise<TestRunResult>
 postChecks(sha, result, checkNames): Promise<void>
 ```

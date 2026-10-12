@@ -186,7 +186,7 @@ test('sharding: shardable full tiers split by 1-based shard, the rest run once, 
   assert.equal(tierCommand(c.tiers[1]!, { index: 2, total: 3 }, null), 'npm test -- --shard=2/3');
   assert.equal(tierCommand(c.tiers[2]!, { index: 3, total: 3 }, null), 'npm test -- --timing 3/3');
   assert.equal(tierCommand({ ...c.tiers[0]!, command: "plan {changed_files}" }, { index: 1, total: 1 }, "/r/it's"), `plan '/r/it'\\''s'`);
-  const shard = (id: string, ok: boolean[]): TestRunResult => ({ id, sha: 'a'.repeat(40), kind: 'full', ok: ok.every(Boolean), tiers: ok.map((x, i) => ({ tier: ['suite', 'timing'][i]!, ok: x, durationMs: 1000 * (i + 1), summary: x ? 'ok' : 'boom', logRef: `${id}/t${i}` })) });
+  const shard = (id: string, ok: boolean[]): TestRunResult => ({ id, sha: 'a'.repeat(40), kind: 'full', ok: ok.every(Boolean), outcome: 'done', tiers: ok.map((x, i) => ({ tier: ['suite', 'timing'][i]!, ok: x, durationMs: 1000 * (i + 1), summary: x ? 'ok' : 'boom', logRef: `${id}/t${i}` })) });
   const m = mergeShards([shard('s1', [true, true]), shard('s2', [false, true])]);
   assert.equal(m.ok, false);
   assert.deepEqual(m.tiers.map((t) => [t.tier, t.ok]), [['suite', false], ['timing', true]]);
@@ -237,6 +237,7 @@ test('checks are posted per tier with the right conclusion; tiers sharing a chec
     sha,
     kind: 'full',
     ok: false,
+    outcome: 'done',
     tiers: [
       { tier: 'isolated-db', ok: true, durationMs: 61_000, summary: 'secret log line', logRef: 'x' },
       { tier: 'timing', ok: false, durationMs: 5000, summary: 'secret log line', logRef: 'y' },
@@ -261,7 +262,7 @@ test('checks are posted per tier with the right conclusion; tiers sharing a chec
 test('a missing Checks: write permission is detected and said plainly in health; nothing pretends the checks were posted', async () => {
   const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'tr-checks-')), 'events.db'));
   const gh = fakeGitHub(403, { message: 'Resource not accessible by integration' });
-  const result: TestRunResult = { id: 'fast-cccc-1', sha: 'c'.repeat(40), kind: 'fast', ok: true, tiers: [{ tier: 'chain', ok: true, durationMs: 1, summary: '', logRef: '' }] };
+  const result: TestRunResult = { id: 'fast-cccc-1', sha: 'c'.repeat(40), kind: 'fast', ok: true, outcome: 'done', tiers: [{ tier: 'chain', ok: true, durationMs: 1, summary: '', logRef: '' }] };
   await assert.rejects(postChecks({ repo: 'o/r', token: async () => 't', log, actor: 'test', fetch: gh.f }, result.sha, result, {}), ChecksPermissionMissing);
   assert.equal((log.read(0, ['testrun.checks_failed'])[0]!.payload as EventPayload<'testrun.checks_failed'>).reason, 'no_permission');
   assert.equal(log.read(0, ['testrun.checks_posted']).length, 0);
@@ -308,7 +309,7 @@ function prRig(log = new EventLog(join(mkdtempSync(join(tmpdir(), 'tr-prs-')), '
     start: (req, o) =>
       new Promise((resolve) => {
         started.push({ pr: req.prs[0]!, sha: req.sha, signal: o.signal, resolve });
-        o.signal.addEventListener('abort', () => resolve({ id: 'x', sha: req.sha, kind: 'fast', ok: false, tiers: [] }));
+        o.signal.addEventListener('abort', () => resolve({ id: 'x', sha: req.sha, kind: 'fast', ok: false, tiers: [], outcome: 'cancelled' }));
       }),
     post: async (sha, r) => void posted.push([sha, r.ok]),
   });
@@ -333,7 +334,7 @@ test('the tick runs the fast tier on every open PR (the harness\'s, the owner\'s
   assert.deepEqual(t.started, [2]);
   assert.equal(r.started.find((s) => s.sha === b)!.signal.aborted, true);
   assert.equal(r.started.find((s) => s.sha === b2)!.signal.aborted, false);
-  for (const s of r.started.filter((x) => !x.signal.aborted)) s.resolve({ id: 'r', sha: s.sha, kind: 'fast', ok: true, tiers: [] });
+  for (const s of r.started.filter((x) => !x.signal.aborted)) s.resolve({ id: 'r', sha: s.sha, kind: 'fast', ok: true, tiers: [], outcome: 'done' });
   await r.runs.idle();
   assert.deepEqual(r.posted.sort(), [[a, true], [b2, true]], 'checks only on heads that are still the PR\'s');
   // A finished head isn't run again.
@@ -389,4 +390,26 @@ test('the recommended test-run slot count for the machine: cores after the agent
   assert.deepEqual(r, { slots: 2, byCpu: 2, byMemory: 3, freeCores: 10, freeMemGb: 8 });
   assert.equal(recommendTestSlots({ cores: 8, memGb: 8, instanceCapsGb: [8], agentSlots: 4, perRun: { cores: 4, memGb: 2 } }).slots, 1, 'never below one');
   assert.equal(testSlotCap(mkdtempSync(join(tmpdir(), 'tr-noslots-'))), 2, 'without a setting: the default');
+});
+
+test('the result says how the run ended: a cancel during the last tier is cancelled, a tier that really failed is done and not ok', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig({ tiers: [{ name: 'first', command: 'true', kind: 'fast' }, { name: 'last', command: 'sleep 30', kind: 'fast', timeout_s: 30 }] });
+  const c = new AbortController();
+  const p = runTestRun(r.deps, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [1] }, { signal: c.signal });
+  for (let i = 0; i < 100 && !r.events('testrun.tier').length; i++) await new Promise((res) => setTimeout(res, 100));
+  await new Promise((res) => setTimeout(res, 300));
+  c.abort();
+  const cancelled = await p;
+  assert.equal(cancelled.outcome, 'cancelled', 'cancelled while its last tier ran');
+  assert.equal(cancelled.ok, false);
+  assert.deepEqual(cancelled.tiers.map((t) => [t.tier, t.ok]), [['first', true], ['last', false]], 'the same tiers a timeout would show: only outcome tells them apart');
+  assert.equal(r.events('testrun.finished').at(-1)!.payload.outcome, cancelled.outcome, 'the same value testrun.finished records');
+  const r2 = rig({ tiers: [{ name: 'first', command: 'true', kind: 'fast' }, { name: 'last', command: 'exit 1', kind: 'fast' }] });
+  const failed = await runTestRun(r2.deps, { repo: r2.dir, sha: r2.sha, kind: 'fast', prs: [1] });
+  assert.deepEqual([failed.outcome, failed.ok], ['done', false], 'a real failure is a verdict');
+  const missing = await runTestRun({ ...r2.deps, lockPath: join(r2.base, 'nope.lock') }, { repo: r2.dir, sha: r2.sha, kind: 'fast', prs: [1] });
+  assert.equal(missing.outcome, 'error', 'a run that could not go ahead is no verdict');
+  const shard = (o: TestRunResult['outcome']): TestRunResult => ({ id: o, sha: r.sha, kind: 'full', ok: o === 'done', tiers: [], outcome: o });
+  assert.equal(mergeShards([shard('done'), shard('cancelled')]).outcome, 'cancelled', 'one shard without a verdict: the run has none');
+  assert.equal(mergeShards([shard('done'), shard('done')]).outcome, 'done');
 });
