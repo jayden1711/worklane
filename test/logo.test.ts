@@ -21,6 +21,8 @@ test('the logo: README shows it, and the dashboard uses the 512px square as its 
   const icon = join(repoRoot, 'web', 'public', 'icon-512.png');
   assert.deepEqual(pngSize(icon), [512, 512]);
   assert.ok(readFileSync(icon).equals(readFileSync(join(repoRoot, 'docs', 'assets', 'logo-512.png'))), 'the icon is the same 512px logo');
+  // The repo's social preview (uploaded by hand in the repo settings): GitHub's 1280x640.
+  assert.deepEqual(pngSize(join(repoRoot, 'docs', 'assets', 'social-preview.png')), [1280, 640]);
   const html = readFileSync(join(repoRoot, 'web', 'index.html'), 'utf8');
   assert.match(html, /<link rel="icon" type="image\/png" href="\/icon-512\.png" \/>/);
   assert.match(html, /<link rel="apple-touch-icon" href="\/icon-512\.png" \/>/);
