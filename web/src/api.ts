@@ -233,7 +233,8 @@ export interface State {
   inbox: { decisions: Decision[]; blocked: Task[]; notify: Task[] };
   runs?: { active: Run[]; recent: Run[] };
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
-  batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
+  /** Direct landing's batches (`land`) and PR mode's (`pr`, with its PRs); a viewer's have no tip or detail. */
+  batches: { id: string; kind?: 'land' | 'pr'; issues: number[]; prs?: number[]; tip?: string; outcome: string; detail?: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
   /** The machine-wide emergency stop, read-only: in force now, and whether this coordinator has halted for it. */
   /** Open PRs, and those needing a person (waiting on review, or a CI fix that gave up). */
@@ -605,8 +606,22 @@ export interface Waiting {
   items: WaitItem[];
   mergedSince: string;
   merged: MergedItem[];
+  /** PR batches running now or active since `mergedSince`. */
+  batches?: { id: string; status: PrBatchStatus; prs: { issue: number; number: number }[]; detail: string; at: string; last: string }[];
   /** The daily digest as posted to GitHub. */
   markdown: string;
+}
+
+/** A PR batch's status (src/coordinator/pr-batch.ts). */
+export type PrBatchStatus = 'testing' | 'bisecting' | 'green' | 'red' | 'abandoned' | 'empty';
+/** A Landing-column PR batch; a viewer's has no detail. */
+export interface BoardBatch {
+  id: string;
+  status: PrBatchStatus;
+  prs: number[];
+  issues: number[];
+  at: string;
+  detail?: string;
 }
 
 /** The Board (GET /api/board, src/board.ts): one instance's tasks in flight by stage, with what this person may do on each. */
@@ -629,6 +644,8 @@ export interface BoardCard {
   waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
+  /** Its PR head with the PR batches: queued, being tested, passed or returned (absent from older servers). */
+  batch?: { status: 'queued' | 'testing' | 'passed' | 'returned'; id: string | null } | null;
   highRisk: boolean;
   actions: { watch: 'feed' | null; steer: boolean; answer: boolean; approve: { decision: string; options: string[] } | { merge: string } | null };
 }
@@ -639,6 +656,8 @@ export interface BoardData {
   columns: { id: BoardColumn; label: string }[];
   cards: BoardCard[];
   slots: { cap: number; running: number };
+  /** The Landing column's PR batches (absent from older servers). */
+  batches?: BoardBatch[];
 }
 
 /** A call to one instance: through the hub to the named one (`/api/i/<name>/...`), or this page's own server (null). */

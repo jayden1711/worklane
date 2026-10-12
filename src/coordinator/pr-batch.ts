@@ -147,6 +147,89 @@ export function batchState(events: StoredEvent[]): BatchState {
 /** The tier name a base-red check records: the base fails the full run with no PR in it. */
 const BASE_TIER = '(base)';
 
+// ---------------------------------------------------------------- reporting (projection, digest, board)
+
+/** A batch as reports show it: testing, bisecting (red, being split), green, red, abandoned, or empty (nothing built). */
+export type BatchStatus = 'testing' | 'bisecting' | 'green' | 'red' | 'abandoned' | 'empty';
+
+export interface BatchSummary {
+  id: string;
+  status: BatchStatus;
+  open: boolean;
+  prs: { issue: number; number: number }[];
+  /** PRs whose full check this batch (or a prefix of it) posted, and the culprit(s) it returned. */
+  passed: number[];
+  culprits: { number: number; tier: string | null }[];
+  requeued: number[];
+  dropped: number[];
+  at: string;
+  last: string;
+  /** One line on what happened, for the owner's views (never a viewer's: src/viewer-events.ts). */
+  detail: string;
+}
+
+/** Each batch the queue started (bisection steps folded into theirs), oldest first. */
+export function batchSummaries(events: StoredEvent[]): BatchSummary[] {
+  const st = batchState(events);
+  const rootOf = (id: string): string => {
+    const b = st.batches.get(id);
+    return b?.parent ? rootOf(b.parent) : id;
+  };
+  const extra = new Map<string, { passed: number[]; culprits: BatchSummary['culprits']; requeued: number[]; dropped: number[] }>();
+  for (const e of events) {
+    if (e.type !== 'pr_batch.step') continue;
+    const s = e.payload as Step;
+    const x = extra.get(rootOf(s.id)) ?? { passed: [], culprits: [], requeued: [], dropped: [] };
+    extra.set(rootOf(s.id), x);
+    const nums = s.prs.map((p) => p.number);
+    if (s.step === 'checks_posted') x.passed.push(...nums);
+    if (s.step === 'culprit') x.culprits.push(...nums.map((number) => ({ number, tier: s.tier })));
+    if (s.step === 'requeued') x.requeued.push(...nums);
+    if (s.step === 'dropped') x.dropped.push(...nums);
+  }
+  const out: BatchSummary[] = [];
+  for (const b of st.batches.values()) {
+    if (b.parent) continue;
+    const x = extra.get(b.id) ?? { passed: [], culprits: [], requeued: [], dropped: [] };
+    const status: BatchStatus = b.steps.includes('abandoned')
+      ? 'abandoned'
+      : b.steps.includes('green')
+        ? 'green'
+        : b.steps.includes('red')
+          ? b.open
+            ? 'bisecting'
+            : 'red'
+          : b.steps.includes('built')
+            ? b.open
+              ? 'testing'
+              : 'empty'
+            : 'empty';
+    const list = (ns: number[]) => [...new Set(ns)].map((n) => `#${n}`).join(', ');
+    const parts = [
+      x.passed.length ? `passed ${list(x.passed)}` : '',
+      ...x.culprits.map((c) => `returned #${c.number} (${c.tier ?? 'full run'} failed)`),
+      x.requeued.length ? `re-batched ${list(x.requeued)}` : '',
+      x.dropped.length ? `dropped ${list(x.dropped)} (head changed or closed)` : '',
+    ].filter(Boolean);
+    out.push({ id: b.id, status, open: b.open, prs: b.prs.map((p) => ({ issue: p.issue, number: p.number })), passed: [...new Set(x.passed)], culprits: x.culprits, requeued: [...new Set(x.requeued)], dropped: [...new Set(x.dropped)], at: b.at, last: b.last, detail: parts.join('; ') });
+  }
+  return out;
+}
+
+/** Where one PR head stands with the batches: queued, in a batch being tested, passed, returned, or not in them. */
+export function prBatchStatus(events: StoredEvent[], number: number, head: string): { status: 'queued' | 'testing' | 'passed' | 'returned'; batch: string | null } | null {
+  const st = batchState(events);
+  const k = key(number, head);
+  const posted = st.posted.get(k);
+  if (posted) return { status: 'passed', batch: posted };
+  const back = st.returned.get(k);
+  if (back) return { status: 'returned', batch: back.id };
+  const open = [...st.batches.values()].find((b) => b.open && !b.parent && b.prs.some((p) => p.number === number && p.head === head));
+  if (open) return { status: 'testing', batch: open.id };
+  if (st.queue.some((q) => q.number === number && q.head === head)) return { status: 'queued', batch: null };
+  return null;
+}
+
 // ---------------------------------------------------------------- batch size
 
 /** The pass rate assumed before there is history, and how many PRs' worth of weight it carries. */

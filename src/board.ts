@@ -10,6 +10,7 @@ import { waitingOnYou, WAIT_LABEL, type WaitKind } from './digest.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
 import type { LiveRun } from './console.js';
 import type { ProcessGroupUsage } from './os/stats.js';
+import { batchSummaries, prBatchStatus, type BatchStatus } from './coordinator/pr-batch.js';
 
 export const BOARD_COLUMNS = ['planning', 'building', 'verifying', 'waiting', 'landing'] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
@@ -65,6 +66,8 @@ export interface BoardCard {
   /** The open decision on it. */
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
+  /** Its PR's head with the PR batches (PR mode with batching): queued, being tested, passed or returned; null when not in them. */
+  batch: { status: 'queued' | 'testing' | 'passed' | 'returned'; id: string | null } | null;
   /** A high-risk change that waits for the owner: an L3 review level, or a landing decision (direct mode). */
   highRisk: boolean;
   /**
@@ -89,7 +92,21 @@ export interface BoardView {
   cards: BoardCard[];
   /** The machine's agent slots (every instance and harness on it). */
   slots: { cap: number; running: number };
+  /** The Landing column's PR batches: those running, then the last few, newest first; `detail` not for viewers. */
+  batches: BoardBatch[];
 }
+
+export interface BoardBatch {
+  id: string;
+  status: BatchStatus;
+  prs: number[];
+  issues: number[];
+  at: string;
+  detail: string;
+}
+
+/** How many finished PR batches the Landing column shows beside those running. */
+const RECENT_BATCHES = 5;
 
 export interface BoardInput {
   events: StoredEvent[];
@@ -192,6 +209,7 @@ export function boardView(i: BoardInput): BoardView {
     const group = r ? pgid.get(`${r.issue}:${r.role}`) : undefined;
     const d = t.openDecision ? (p.decisions.find((x) => x.id === t.openDecision && !x.answer) ?? null) : null;
     const highRisk = t.level === 'L3' || d?.kind === 'land';
+    const batch = pr && pr.state === 'open' ? prBatchStatus(i.events, pr.number, pr.head) : null;
     const startedAt = claimedAt.get(t.issue) ?? t.firstSeen;
 
     // Approve/Merge: the owner's, on a high-risk change that waits for them. A landing decision is answered through
@@ -218,6 +236,7 @@ export function boardView(i: BoardInput): BoardView {
       waiting: wait ? { kind: wait.kind, label: WAIT_LABEL[wait.kind], detail: i.canReadDigest ? wait.detail : null, since: wait.since } : null,
       decision: d ? { id: d.id, kind: d.kind, question: d.question, options: d.options, recommendation: d.recommendation } : null,
       level: t.level,
+      batch: batch ? { status: batch.status, id: batch.batch } : null,
       highRisk,
       actions: {
         watch: live && isWriter(i.role) ? 'feed' : null,
@@ -230,7 +249,9 @@ export function boardView(i: BoardInput): BoardView {
   }
   // Oldest first in each column: what has waited longest is on top.
   cards.sort((a, b) => BOARD_COLUMNS.indexOf(a.column) - BOARD_COLUMNS.indexOf(b.column) || a.since.localeCompare(b.since) || a.issue - b.issue);
-  return { instance: i.instance, role: i.role, at: now.toISOString(), columns: BOARD_COLUMNS.map((id) => ({ id, label: COLUMN_LABEL[id] })), cards, slots: i.slots };
+  const summaries = batchSummaries(i.events).filter((b) => b.prs.length);
+  const batches = [...summaries.filter((b) => b.open).reverse(), ...summaries.filter((b) => !b.open).slice(-RECENT_BATCHES).reverse()].map((b) => ({ id: b.id, status: b.status, prs: b.prs.map((x) => x.number), issues: b.prs.map((x) => x.issue), at: b.at, detail: b.detail }));
+  return { instance: i.instance, role: i.role, at: now.toISOString(), columns: BOARD_COLUMNS.map((id) => ({ id, label: COLUMN_LABEL[id] })), cards, slots: i.slots, batches };
 }
 
 /**
@@ -240,11 +261,14 @@ export function boardView(i: BoardInput): BoardView {
  * checks' outcomes, which come from events viewers don't get; and they may do nothing from it. A field added to
  * cards later stays hidden from viewers until it is put here.
  */
-export const VIEWER_CARD_FIELDS: readonly string[] = Object.freeze(['instance', 'issue', 'title', 'column', 'status', 'pr', 'startedAt', 'since', 'waiting', 'decision', 'level', 'highRisk']);
+export const VIEWER_CARD_FIELDS: readonly string[] = Object.freeze(['instance', 'issue', 'title', 'column', 'status', 'pr', 'startedAt', 'since', 'waiting', 'decision', 'level', 'batch', 'highRisk']);
 const VIEWER_PR_FIELDS: readonly string[] = Object.freeze(['number', 'url']);
 const VIEWER_WAIT_FIELDS: readonly string[] = Object.freeze(['kind', 'label', 'since']);
 const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'question', 'options', 'recommendation']);
-export const VIEWER_BOARD_KEYS: readonly string[] = Object.freeze(['instance', 'role', 'at', 'columns', 'cards', 'slots']);
+export const VIEWER_BOARD_KEYS: readonly string[] = Object.freeze(['instance', 'role', 'at', 'columns', 'cards', 'slots', 'batches']);
+/** A PR batch as a viewer sees it: its status (src/viewer-events.ts), not what happened in it. */
+const VIEWER_BOARD_BATCH_FIELDS: readonly string[] = Object.freeze(['id', 'status', 'prs', 'issues', 'at']);
+const VIEWER_CARD_BATCH_FIELDS: readonly string[] = Object.freeze(['status', 'id']);
 
 const pick = (o: unknown, keys: readonly string[]) => (o && typeof o === 'object' ? Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, (o as Record<string, unknown>)[k]])) : null);
 
@@ -256,7 +280,9 @@ export function boardForViewer(b: BoardView): Record<string, unknown> {
     if (v.pr) v.pr = pick(v.pr, VIEWER_PR_FIELDS);
     if (v.waiting) v.waiting = { ...pick(v.waiting, VIEWER_WAIT_FIELDS), detail: null };
     if (v.decision) v.decision = pick(v.decision, VIEWER_DECISION_FIELDS);
+    if (v.batch) v.batch = pick(v.batch, VIEWER_CARD_BATCH_FIELDS);
     return { ...v, actions: { watch: null, steer: false, answer: false, approve: null } };
   });
+  out.batches = (b.batches ?? []).map((x) => pick(x, VIEWER_BOARD_BATCH_FIELDS));
   return out;
 }

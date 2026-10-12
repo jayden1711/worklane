@@ -3,7 +3,7 @@ import { navigate } from '../App';
 import { ago, Badge, Card, Empty, LevelBadge, StatusBadge } from '../components/ui';
 import { Header } from './Overview';
 
-const BATCH_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'info' | 'neutral'> = { landed: 'ok', red: 'danger', split: 'warn', deferred: 'warn', started: 'info' };
+const BATCH_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'info' | 'neutral'> = { landed: 'ok', green: 'ok', red: 'danger', split: 'warn', bisecting: 'warn', deferred: 'warn', abandoned: 'warn', started: 'info', testing: 'info' };
 const REVIEW = new Set(['verifying', 'evaluating', 'awaiting_decision']);
 
 function IssueLink({ n }: { n: number }) {
@@ -75,6 +75,7 @@ export function Landing({ state }: { state: State }) {
                   <li key={b.id} className="space-y-1 px-4 py-2 text-sm">
                     <div className="flex items-center gap-2">
                       <Badge tone={BATCH_TONE[b.outcome] ?? 'neutral'}>{b.outcome}</Badge>
+                      {b.kind === 'pr' && <span className="text-xs text-muted-foreground" title="a PR batch: one full run for every PR in it">PRs {b.prs?.map((n) => `#${n}`).join(' ')}</span>}
                       <span className="flex flex-wrap gap-1.5">
                         {b.issues.map((n) => (
                           <IssueLink key={n} n={n} />
