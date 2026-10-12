@@ -17,7 +17,8 @@ dest="/srv/worklane/$name/${repo#*/}"
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
-  helper="!/usr/local/bin/worklane git-credential"
+  # The instance is on the helper line itself: `sudo -u <coordinator> git ...` clears the environment.
+  helper="!/usr/local/bin/worklane git-credential --instance $1"
   if [ ! -d "$2/.git" ]; then
     git -c credential.helper= -c "credential.helper=$helper" clone -q "https://github.com/$3.git" "$2"
   fi
