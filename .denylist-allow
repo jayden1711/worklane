@@ -6,6 +6,8 @@ SECURITY.md jayden1711
 .github/ISSUE_TEMPLATE/config.yml jayden1711
 docs/design.md jayden1711
 docs/names.md jayden1711
+# This repo's own harness config names its owner (owners, reports).
+.worklane/config.yaml jayden1711
 # Code of Conduct reporting contact.
 CODE_OF_CONDUCT.md jaydenvasquez1711@gmail.com
 # Fixtures in the denylist's own tests.
