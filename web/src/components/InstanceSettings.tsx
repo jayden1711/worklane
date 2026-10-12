@@ -39,7 +39,11 @@ export const LABEL: Record<string, string> = {
   'intake.reports_per_sender_per_day': 'Reports per sender per day',
   'intake.drafts_per_day': 'Intake drafts per day',
   'intake.max_usd_per_day': 'Intake spend per day (estimated, USD)',
+  stuck_guard: 'Stuck-run guard',
 };
+
+/** Settings picked from a fixed list of words. */
+const CHOICES: Record<string, string[]> = { stuck_guard: ['off', 'dry-run', 'on'] };
 
 /** On/off settings: picked from two buttons, never typed. */
 const SWITCHES = new Set(['ci_repair.enabled', 'research.repo_access']);
@@ -74,6 +78,8 @@ export function boundsOf(key: string, d: InstanceSettingsData): string {
       return l.research ? `up to $${l.research.max_usd_per_day} (machine limit)` : '';
     case 'research.repo_access':
       return 'on or off; off keeps research runs to the web';
+    case 'stuck_guard':
+      return 'off, dry-run (only logs what it would stop) or on (stops a run after 8 identical failed calls)';
     case 'intake.reports_per_sender_per_day':
     case 'intake.drafts_per_day':
       return l.intake ? `1–${l.intake[key.slice('intake.'.length) as 'reports_per_sender_per_day' | 'drafts_per_day']} (machine limit)` : '';
@@ -88,6 +94,8 @@ export function boundsOf(key: string, d: InstanceSettingsData): string {
 export function parseEntry(key: string, raw: string): { value: unknown } | { error: string } {
   const t = raw.trim();
   if (SWITCHES.has(key)) return t === 'on' ? { value: true } : t === 'off' ? { value: false } : { error: 'on or off' };
+  const choices = CHOICES[key];
+  if (choices) return choices.includes(t) ? { value: t } : { error: choices.join(', ') };
   if (key === 'run_windows') {
     if (!t) return { value: [] };
     const out: Windows = [];

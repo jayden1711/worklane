@@ -43,12 +43,13 @@ import { seen } from './intake/store.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { stuckFeedback } from './coordinator/stuck-guard.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
 
 /** What one worker build ends in: stop the task, or go on to inspect its change. */
-type BuildOut = { stop: true } | { stop: false; raise?: Level; noChange?: string };
+type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string };
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
@@ -495,6 +496,11 @@ export class Coordinator extends MergeFlow {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
+        // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
+        if (out.stuck) {
+          feedback = stuckFeedback(out.stuck);
+          continue;
+        }
         removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
         // A finding of "no change" counts only for a branch with nothing on it: work an earlier attempt committed is
@@ -714,6 +720,7 @@ export class Coordinator extends MergeFlow {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, true, r.reason === 'rate_limited' ? retryAfter('rate_limit') : r.reason === 'budget_exhausted' ? retryAfter('budget') : undefined);
       return { stop: true as const };
     }
+    if (r.reason === 'stuck') return { stop: false as const, stuck: r.detail };
     // A run that failed almost at once and committed nothing never got to work: another attempt would fail the
     // same way, so say what claude reported instead of spending the attempts on "no passing change".
     const secs = Math.round((Date.now() - started) / 1000);

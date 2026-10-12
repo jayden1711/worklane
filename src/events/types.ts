@@ -40,7 +40,7 @@ export const EventSchemas = {
   'run.finished': z.strictObject({
     issue,
     role: z.string(),
-    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped']),
+    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped', 'stuck']),
     detail: z.string(),
   }),
   /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
@@ -54,6 +54,22 @@ export const EventSchemas = {
     cause: z.enum(['token_refresh', 'rate_limit', 'overloaded', 'server_error', 'network', 'other']),
     wait_ms: z.number().int().nonnegative(),
     detail: z.string(),
+  }),
+  /**
+   * The stuck-run guard's verdict on a run: `flag` at 5 identical calls (or failures) in a row, `stop` at 8 identical
+   * failures. `action` is what was done: `log` only (dry-run, or a flag), or `stop` (mode on). `run` is the run record's id.
+   */
+  'run.stuck': z.strictObject({
+    issue: issue.nullable(),
+    role: z.string(),
+    run: z.string().nullable(),
+    kind: z.enum(['flag', 'stop']),
+    mode: z.enum(['dry-run', 'on']),
+    action: z.enum(['log', 'stop']),
+    tool: z.string(),
+    input: z.string(),
+    repeats: z.number().int().nonnegative(),
+    failures: z.number().int().nonnegative(),
   }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),

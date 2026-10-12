@@ -71,6 +71,8 @@ export const InstanceSettings = z.strictObject({
       escalate: z.boolean().optional(),
     })
     .optional(),
+  /** The stuck-run guard (stuck.ts): off, dry-run (log only) or on (a stuck run is stopped). Absent: dry-run. */
+  stuck_guard: z.enum(['off', 'dry-run', 'on']).optional(),
   /** Daily caps on work intake (reports per sender, drafts, estimated spend). Absent: the intake config's values. */
   intake: z
     .strictObject({
