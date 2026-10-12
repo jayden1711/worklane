@@ -39,7 +39,7 @@ test('console-shell.sh: refuses a NOPASSWD admin, installs the shell root-owned 
 
 test('dashboards.sh: the hub gets --console-user only when set, and only then drops its sandbox', () => {
   const sh = readFileSync(join(setup, 'dashboards.sh'), 'utf8');
-  assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --hub \$hub_arg --service\$\{console_user:\+ --console-user \$console_user\}/);
+  assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --hub \$hub_arg --service\$\{console_user:\+ --console-user \$console_user\}\$\{console_devices:\+ --console-devices \$console_devices\}/);
   assert.match(sh, /if \[ -n "\$console_user" \]; then\n\s+echo "NoNewPrivileges=no"\n\s+return\n\s+fi\n\s+cat <<EOF\nNoNewPrivileges=yes/);
   assert.match(sh, /"\$console_user" != root && "\$console_user" != wl-\*/);
 });

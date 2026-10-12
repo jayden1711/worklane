@@ -13,11 +13,14 @@
 #     write anywhere. No instance user gets any new access, so no instance
 #     can write, or read, another's log.
 #
-#   bash scripts/setup/dashboards.sh [--console-user <admin user>] <your GitHub login> <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--console-user <admin user> [--console-devices <tags,names>]] <your GitHub login> <name> [<name>...]
 #
 #   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh
 #     with the same user first. Without it the terminal never opens. With it, the hub's unit drops
 #     NoNewPrivileges and its read-only filesystem: sudo (to start the terminal, and in it) needs both.
+#   --console-devices (console_devices): the Tailscale devices the terminal may be opened from, as Tailscale
+#     tags (tag:owner-laptop) and/or MagicDNS node names, comma-separated. Prefer tags you alone own in the
+#     tailnet policy. Empty or missing: every device is refused. Kept in the hub's unit on this machine only.
 #
 # Then from your laptop: ssh -N -L 4399:127.0.0.1:4399 <you>@<this-host>
 # and open the URL this prints.
@@ -30,6 +33,14 @@ if [ "${1:-}" = --console-user ]; then
   [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
   [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
 fi
+console_devices=""
+if [ "${1:-}" = --console-devices ]; then
+  console_devices="${2:?--console-devices takes Tailscale tags and/or node names, comma-separated}"
+  shift 2
+  [ -n "$console_user" ] || { echo "--console-devices goes with --console-user (put --console-user first)" >&2; exit 2; }
+  [[ "$console_devices" =~ ^[a-z0-9:.,-]+$ ]] || { echo "--console-devices: Tailscale tags (tag:x) and/or node names, comma-separated, lowercase" >&2; exit 2; }
+fi
+[ -z "$console_user" ] || [ -n "$console_devices" ] || echo "note: no --console-devices, so the owner terminal refuses every device until you list yours" >&2
 login="${1:?usage: dashboards.sh [--console-user <admin user>] <your GitHub login> <name> [<name>...]}"
 shift
 [ "$#" -ge 1 ] || { echo "usage: dashboards.sh <your GitHub login> <name> [<name>...]" >&2; exit 2; }
@@ -84,7 +95,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service${console_user:+ --console-user $console_user}
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}${console_devices:+ --console-devices $console_devices}
 Restart=on-failure
 UMask=0007
 RestartSec=10
