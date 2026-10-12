@@ -131,9 +131,12 @@ test('the coordinator labels before the Monday report: events recorded, the judg
   seed(m, 'rb', [step('ls', 'ok')]);
   const runner = new FakeRunner((req) => (req.role === 'stage-judge' ? { structured: { stage: 'wrong or incomplete change', reason: 'check-a still fails on the same case' }, costUsd: 0.04 } : {}));
   const c = coordinator(f, runner);
+  // The first Monday noon after now, so the runs seeded just now fall inside its 7-day window (on a Monday
+  // morning that's today, not next week).
   const monday = new Date();
-  monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7 || 7));
   monday.setHours(12, 0, 0, 0);
+  monday.setDate(monday.getDate() + ((8 - monday.getDay()) % 7));
+  if (monday.getTime() <= Date.now()) monday.setDate(monday.getDate() + 7);
   await c.maybeReport(monday);
   const labels = f.log.read(0, ['run.stage_labeled']).map((e) => e.payload as EventPayload<'run.stage_labeled'>);
   assert.deepEqual(labels.map((l) => [l.run, l.stage, l.by, l.instance]), [['ra', 'wrong or incomplete change', 'judge', 'alice'], ['rb', 'verification', 'code', 'alice']]);
