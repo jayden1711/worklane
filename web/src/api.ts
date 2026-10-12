@@ -264,7 +264,9 @@ export interface Settings {
   deploy: { environments: { name: string; production: boolean }[]; prodRead: boolean } | null;
 }
 
-export const getSettings = () => api<Settings>('/api/settings');
+/** What a viewer (read on the repo) gets of the settings: the project part only. */
+export type ViewerSettings = Pick<Settings, 'configDir' | 'project' | 'owners' | 'reports'> & { forViewer: true };
+export const getSettings = () => api<Settings | ViewerSettings>('/api/settings');
 
 /** Fetch once, and again whenever `dep` changes (e.g. the live pulse). */
 export function useFetch<T>(fn: () => Promise<T>, dep: unknown = 0): { data: T | null; error: string | null } {

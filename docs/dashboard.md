@@ -60,7 +60,7 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 | --- | --- | --- |
 | admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message, stop), filing chat drafts, the audit log |
 | maintain, write | writer | read runs, throughput, reports, intake and the digest; ask the chat; answer ordinary decisions and intake approvals; save views |
-| triage, read | viewer | read the rest; no writes at all |
+| triage, read | viewer | the tasks, decisions, PRs and deploys; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part. No writes at all |
 | none, or any error looking it up | none | nothing: the instance isn't listed, and any call to it gets 403 |
 
 - The permission is read with the instance's own installation token (`GET /repos/{owner}/{repo}/collaborators/{login}/permission`), never with the person's token, and cached at most 5 minutes per instance and login. So someone removed from the repo loses access within 5 minutes.

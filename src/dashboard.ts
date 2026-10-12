@@ -41,6 +41,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
+import { forViewers, viewerActivity, viewerMaySee } from './viewer-events.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 
@@ -49,6 +50,12 @@ import { handleAskRoute } from './console/routes.js';
  * Commands, connection fingerprints and deploy details stay out; editing
  * happens in the project's config folder, through review like any change.
  */
+/** The settings as a viewer (read on the repo) sees them: the project part the Settings page shows them, nothing else. */
+export function settingsForViewer(cfg: Config) {
+  const v = settingsView(cfg);
+  return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
+}
+
 export function settingsView(cfg: Config) {
   return {
     configDir: BRAND.configDir,
@@ -584,7 +591,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
-  const clients = new Set<ServerResponse>();
+  /** Each live-stream client, with its role: a viewer is told only of the event types it may see. */
+  const clients = new Map<ServerResponse, Role>();
   let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
 
   const owners = opts.cfg.project.owners;
@@ -634,6 +642,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       budget: opts.cfg.agents.daily_budget_usd,
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
+      // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
+      activity: isWriter(who.role) ? p.activity : viewerActivity(events),
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
       canReadIntake: mayReadIntake(who.role),
@@ -691,9 +701,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const last = [...events].reverse().find((e) => e.type === 'report.posted');
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, settingsView(opts.cfg));
+        // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg) : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
-          const evs = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
+          const all = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
+          // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
+          const evs = isWriter(who.role) ? all : forViewers(all);
           const issue = url.searchParams.get('issue');
           // One issue's whole history, or the recent tail of everything.
           return json(res, 200, issue ? evs.filter((e) => (e.payload as { issue?: number }).issue === Number(issue)) : evs.slice(-500));
@@ -912,7 +925,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           const since = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? lastId);
           res.write(`retry: 3000\nid: ${Math.max(since, lastId)}\nevent: hello\ndata: {}\n\n`);
-          clients.add(res);
+          clients.set(res, who.role);
           req.on('close', () => clients.delete(res));
           return;
         }
@@ -959,11 +972,17 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     if (!fresh.length) return;
     lastId = fresh.at(-1)!.id;
     const visible = fresh.filter((e) => e.type !== 'coordinator.tick');
-    const msg = `id: ${lastId}\nevent: change\ndata: ${JSON.stringify({ lastId, types: [...new Set(visible.map((e) => e.type))] })}\n\n`;
-    for (const c of clients) c.write(msg);
+    const change = (types: string[]) => `id: ${lastId}\nevent: change\ndata: ${JSON.stringify({ lastId, types: [...new Set(types)] })}\n\n`;
+    const all = change(visible.map((e) => e.type));
+    const forViewer = visible.filter((e) => viewerMaySee(e.type));
+    const viewer = forViewer.length ? change(forViewer.map((e) => e.type)) : null;
+    for (const [c, role] of clients) {
+      if (isWriter(role)) c.write(all);
+      else if (viewer) c.write(viewer);
+    }
   }, opts.pollMs ?? 1000);
   const ping = setInterval(() => {
-    for (const c of clients) c.write(': ping\n\n');
+    for (const c of clients.keys()) c.write(': ping\n\n');
   }, 25_000);
 
   return new Promise((resolveStart) => {
@@ -978,7 +997,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           new Promise<void>((r) => {
             clearInterval(poll);
             clearInterval(ping);
-            for (const c of clients) c.end();
+            for (const c of clients.keys()) c.end();
             server.close(() => r());
           }),
       });
