@@ -47,6 +47,13 @@ export interface RunRecord {
   files: string[];
   /** Tool calls that were neither commands nor writes (reads, searches): counted, not listed. */
   otherTools: number;
+  /**
+   * What the session looked at, repo-relative, each once: files it opened with Read and files a `git diff` or
+   * `git show` named. Bounded; older records have none.
+   */
+  read?: string[];
+  /** It ran a `git diff`/`git show` over a whole range with no path: every changed file's diff was shown. */
+  diffedAll?: boolean;
   final: string;
   /** Some steps were dropped to keep the record bounded. */
   truncated: boolean;
@@ -57,6 +64,35 @@ export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'st
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)} …` : s);
 const firstLines = (s: string) => clip(s.trim().split('\n').slice(0, MAX_OUTPUT_LINES).join('\n'), MAX_OUTPUT);
 const text = (c: unknown): string => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x && typeof x === 'object' && 'text' in x ? String((x as { text: unknown }).text ?? '') : '')).join('') : '');
+
+/** At most this many files read are kept per run. */
+const MAX_READ = 500;
+
+/** git diff / git show options that list names or counts, not contents: they don't count as reading. */
+const NAMES_ONLY = /^--(stat|shortstat|numstat|name-only|name-status|summary|dirstat|compact-summary)(=|$)/;
+
+/**
+ * What a shell command showed of the repo's files through git: the paths after `--`, `rev:path` arguments, and
+ * `all` for a diff or show of a range with no path (every changed file's diff). Each part of a compound command
+ * (&&, ;, |) is read on its own. A listing of names or counts shows no contents and counts for nothing.
+ */
+export function gitDiffReads(command: string): { all: boolean; paths: string[] } {
+  let all = false;
+  const paths: string[] = [];
+  for (const part of command.split(/&&|\|\||;|\|/)) {
+    const words = part.trim().split(/\s+/).map((w) => w.replace(/^['"]|['"]$/g, ''));
+    const at = words.findIndex((w, i) => w === 'git' && (words[i + 1] === 'diff' || words[i + 1] === 'show'));
+    if (at < 0) continue;
+    const args = words.slice(at + 2);
+    if (args.some((a) => NAMES_ONLY.test(a))) continue;
+    const dash = args.indexOf('--');
+    const named = dash >= 0 ? args.slice(dash + 1) : [];
+    const revPaths = (dash >= 0 ? args.slice(0, dash) : args).filter((a) => !a.startsWith('-') && /^[^:]+:.+$/.test(a)).map((a) => a.slice(a.indexOf(':') + 1));
+    paths.push(...named.filter(Boolean), ...revPaths);
+    if (!named.length && !revPaths.length) all = true;
+  }
+  return { all, paths };
+}
 
 /** The issue a run belongs to, from its worktree or task file (issue-<n>). */
 export function runIssue(cwd: string, taskFile?: string): number | null {
@@ -99,8 +135,15 @@ export class RunRecorder {
           const input = (c.input ?? {}) as Record<string, unknown>;
           const tool = String(c.name);
           let step: RunStep | null = null;
-          if (tool === 'Bash') step = { kind: 'command', tool, what: clip(String(input.command ?? ''), MAX_COMMAND), status: 'no result', exitCode: null, output: '' };
-          else if (WRITE_TOOLS.has(tool)) {
+          if (tool === 'Bash') {
+            step = { kind: 'command', tool, what: clip(String(input.command ?? ''), MAX_COMMAND), status: 'no result', exitCode: null, output: '' };
+            const seen = gitDiffReads(String(input.command ?? ''));
+            if (seen.all) this.rec.diffedAll = true;
+            for (const p of seen.paths) this.noteRead(p);
+          } else if (tool === 'Read') {
+            this.noteRead(String(input.file_path ?? ''));
+            this.rec.otherTools++;
+          } else if (WRITE_TOOLS.has(tool)) {
             const file = this.relative(String(input.file_path ?? input.notebook_path ?? ''));
             if (file && !this.rec.files.includes(file)) this.rec.files.push(file);
             step = { kind: 'write', tool, what: file, status: 'no result', exitCode: null, output: '' };
@@ -149,6 +192,13 @@ export class RunRecorder {
     } catch {
       return null;
     }
+  }
+
+  private noteRead(p: string): void {
+    const file = this.relative(p).replace(/\\/g, '/').replace(/^\.\//, '');
+    if (!file) return;
+    const read = (this.rec.read ??= []);
+    if (!read.includes(file) && read.length < MAX_READ) read.push(file);
   }
 
   private relative(p: string): string {

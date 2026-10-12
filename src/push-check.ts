@@ -1,11 +1,13 @@
 // Push limits. Every push of agent-written code goes through checkedPush,
 // which first refuses a range that is too big, carries an oversized or
 // refused file in any of its commits (one added and later deleted still
-// counts: it stays in the history that's pushed), or changes CI workflows.
+// counts: it stays in the history that's pushed), changes CI workflows, or
+// leaves a SKILL.md that fails the skill lint.
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { globToRegExp } from './guardrails/glob.js';
+import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 
 export interface PushLimits {
   max_file_mb: number;
@@ -61,6 +63,16 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
       return s + (Number(a) || 0) + (Number(r) || 0);
     }, 0);
   if (lines > limits.max_changed_lines) problems.push(`changes ${lines} lines, over the ${limits.max_changed_lines}-line limit (push.max_changed_lines); split it into smaller changes`);
+
+  // Skills the change adds or edits must pass the skill lint as they stand at head.
+  const badSkills: string[] = [];
+  for (const p of touched.filter((t) => t === 'SKILL.md' || t.endsWith('/SKILL.md'))) {
+    const r = spawnSync('git', ['show', `${head}:${p}`], { cwd, encoding: 'utf8', maxBuffer: 16 * MB });
+    if (r.status !== 0) continue; // deleted by the change
+    const lint = lintSkill(r.stdout);
+    if (lint.length) badSkills.push(`${p} (${lint.join('; ')})`);
+  }
+  if (badSkills.length) problems.push(`has skills that fail the skill lint: ${list(badSkills, 5)}. Every SKILL.md needs these sections, none empty: ${SKILL_SECTIONS.join(', ')}`);
   return problems;
 }
 

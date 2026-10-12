@@ -34,6 +34,7 @@ import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
+import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 
 /**
@@ -104,6 +105,11 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 }
 
 export { mayAnswer };
+
+/** Who may read intake reports (redacted, but people's words): the project's owner or one of its writers. */
+export function mayReadIntake(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
 
 /** Who may read throughput (what runs cost, where PRs waited): the project's owner or one of its writers. */
 export function mayReadThroughput(user: string, owners: { default: string; writers: string[] }): boolean {
@@ -544,6 +550,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
+      canReadIntake: mayReadIntake(opts.user, opts.cfg.project.owners),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
       canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
       // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
@@ -719,6 +727,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
+        // Intake: each report (redacted) and what became of it, and the numbers for the health panel. The owner's
+        // and the writers' to read, like the runs.
+        if (url.pathname === '/api/intake' && req.method === 'GET') {
+          const owners = opts.cfg.project.owners;
+          if (!mayReadIntake(opts.user, owners)) return json(res, 403, { error: `intake reports are for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          const events = readEvents(opts.eventsDb);
+          return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events) });
+        }
         // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
         // tuning each. The owner's and the writers' to read, like the runs it is made of.
         if (url.pathname === '/api/throughput' && req.method === 'GET') {

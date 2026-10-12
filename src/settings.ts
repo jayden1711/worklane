@@ -90,6 +90,16 @@ export function applySettings(cfg: Config, s: InstanceSettings): Config {
     agents: {
       ...cfg.agents,
       ...(s.daily_budget_usd !== undefined ? { daily_budget_usd: s.daily_budget_usd } : {}),
+      ...(s.eval_routing
+        ? {
+            eval_routing: {
+              ...cfg.agents.eval_routing,
+              ...(s.eval_routing.cheap_model !== undefined ? { cheap_model: s.eval_routing.cheap_model } : {}),
+              ...(s.eval_routing.cheap_levels !== undefined ? { cheap_levels: s.eval_routing.cheap_levels } : {}),
+              ...(s.eval_routing.escalate !== undefined ? { escalate: s.eval_routing.escalate } : {}),
+            },
+          }
+        : {}),
       roles: {
         ...cfg.agents.roles,
         ...(workers && s.workers !== undefined ? { workers: { ...workers, count: s.workers } } : {}),
