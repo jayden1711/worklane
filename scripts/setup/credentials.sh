@@ -44,7 +44,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # Mint a token as the coordinator user (who alone can read the key) and check what it reaches and may do.
 verify_app() { (cd / && sudo -u "$coord" node --input-type=module - "$@" < "$here/app-permissions.mjs"); }
 # Intake secrets: one file each, for the coordinator user only (0400), in a 0700 directory of its own.
-intake_dir="$(home_of "$coord" 2>/dev/null || echo "/home/$coord")/.config/$name-intake"
+intake_dir="$(home_of "$coord")/.config/$name-intake"
 install_secret() {
   local file="$1" secret="$2"
   printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"

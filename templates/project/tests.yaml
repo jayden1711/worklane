@@ -20,12 +20,14 @@ worktree:
   est_size_gb: 1
 land:
   pre: []
+  # defer_timeout_minutes: 180  # a land waiting on the machine-wide full-run slot goes to the owner after this long
 # How the runner lists failures; enables the baseline gate (no NEW failures vs main).
 # failures: { section: '^✖ failing tests:', item: '^✖ (.+?) \(\d' }   # node --test with --test-reporter=spec (Node 22 defaults to TAP without a TTY)
 # idle_probe: "..."        # exits 0 when no full test run is live on this machine; queued full runs wait for it
 # Variables for the project's agent sessions (and the hooks they run) and its commands. Never secrets;
 # harness and system variables (PATH, HOME, GIT_*, proxies, ...) are refused.
 # post_edit: "npx eslint {file}"  # a fast check of one file after each agent edit; its findings go back to the agent (never blocks; 20 s)
-env: {}                     # e.g. { PYTEST_XDIST_AUTO_NUM_WORKERS: "6" }
+env: {}                     # e.g. { PYTEST_XDIST_AUTO_NUM_WORKERS: "{cores}" }  ({cores}: this task's share of the cores)
+# command_timeout_s: 7200    # how long a check, suite, setup step or agent run may take (default 2 hours)
 checks: []                  # project lints for the PR gate, e.g. node .worklane/checks/my-lint.mjs
 tiers: []

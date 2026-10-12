@@ -26,8 +26,8 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
     what: "set the machine's agent slot cap",
-    usage: `set-slots <${SLOTS_MIN}..${SLOTS_MAX}>`,
-    allows: (a) => a.length === 1 && /^(?:[1-9]|1[0-6])$/.test(a[0]!) && Number(a[0]) >= SLOTS_MIN && Number(a[0]) <= SLOTS_MAX,
+    usage: `set-slots <${SLOTS_MIN}..${SLOTS_MAX()}>`,
+    allows: (a) => a.length === 1 && /^[1-9][0-9]?$/.test(a[0]!) && Number(a[0]) >= SLOTS_MIN && Number(a[0]) <= SLOTS_MAX(),
     run: (a, exec) => setSlotCap(Number(a[0]), exec),
   },
   {

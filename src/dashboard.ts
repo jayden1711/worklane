@@ -209,7 +209,7 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     user: o.user,
     canChange: !!o.user && o.user.toLowerCase() === owner.toLowerCase(),
     helper: MACHINE_HELPER,
-    slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
+    slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX() },
     updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),

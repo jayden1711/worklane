@@ -15,6 +15,7 @@ import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
 import { sh, evalLines, pushRefusal } from './shared.js';
+import { slotDeferringSince } from './wait-caps.js';
 
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
@@ -169,7 +170,26 @@ export abstract class Landing extends Decisions {
       const gates = await this.runGates(path, this.gateTiers(applied));
       if (!gates.ok) {
         if (gates.deferred) {
-          for (const q of applied) result(q.issue, 'deferred', null, gates.note);
+          for (const q of applied) {
+            // Capped by time: a slot held past the timeout (a wedged run, a leaked lock) goes to the owner instead of
+            // waiting for ever; a long full run that ends within it just delays the land.
+            const queuedAt = this.d.log.read(0, ['land.queued']).filter((e) => (e.payload as { issue: number }).issue === q.issue).at(-1)?.id ?? 0;
+            const prior = this.d.log
+              .read(queuedAt, ['land.result'])
+              .filter((e) => (e.payload as EventPayload<'land.result'>).issue === q.issue)
+              .map((e) => ({ ...(e.payload as EventPayload<'land.result'>), at: Date.parse(e.ts) }));
+            const now = Date.now();
+            const since = slotDeferringSince([...prior, { outcome: 'deferred', detail: gates.note, at: now }])!;
+            const timeoutMin = this.d.cfg.tests.land.defer_timeout_minutes;
+            if (now - since < timeoutMin * 60_000) {
+              result(q.issue, 'deferred', null, gates.note);
+              continue;
+            }
+            const why = `deferred for ${Math.round((now - since) / 60_000)} min (tests.yaml land.defer_timeout_minutes: ${timeoutMin}), every time because ${gates.note.replace(/; deferred$/, '')}`;
+            result(q.issue, 'error', null, why);
+            this.emit('wait.capped', { issue: q.issue, number: null, kind: 'deferred_landing', detail: why.slice(0, 1000) });
+            await this.block(q.issue, ownerOf(q.issue), `landing ${why}. Label it \`ready\` again once the slot is free.`);
+          }
           this.emit('land.batch', { id, issues, tip, outcome: 'deferred', detail: gates.note.slice(0, 500) });
           return;
         }
@@ -254,6 +274,7 @@ export abstract class Landing extends Decisions {
     const lvl = last<{ level: string; reasons: string[] }>('review.level_set');
     const verdict = last<EventPayload<'eval.verdict'>>('eval.verdict');
     const checks = last<EventPayload<'check.result'>>('check.result');
+    const browser = last<EventPayload<'browser.evidence'>>('browser.evidence');
     const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
     const issue = await this.d.backlog.get(n);
     const body = [
@@ -266,6 +287,7 @@ export abstract class Landing extends Decisions {
       ...evalLines(this.instructionResults(n)),
       '',
       ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
+      ...(browser?.head === q.head ? ['', ...browser.lines] : []),
     ].join('\n');
     let url: string;
     try {
@@ -306,29 +328,37 @@ export abstract class Landing extends Decisions {
       this.emit('issue.released', { issue: n, instance: this.d.instance, why: 'landed' });
       return;
     }
-    const ok = await this.deploy(staging.name, staging.trigger!, staging.verify, sha);
+    const ok = await this.deploy(staging.name, staging.trigger!, staging.verify, sha, n);
     await this.d.backlog.comment(n, ok ? `[${BRAND.cli}] Landed \`${sha.slice(0, 8)}\` and verified it on ${staging.name}.` : `[${BRAND.cli}] @${owner} landed \`${sha.slice(0, 8)}\` but ${staging.name} is NOT serving it. Not closing.`);
     if (ok) await this.d.backlog.close(n);
-    else await this.d.backlog.addLabels(n, ['blocked']);
+    else {
+      await this.d.backlog.addLabels(n, ['blocked']);
+      // Released (the claim already was, above), so relabelling it `ready` requeues it.
+      this.emit('issue.released', { issue: n, instance: this.d.instance, why: `deploy to ${staging.name} failed` });
+    }
   }
 
-  /** Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. */
-  async deploy(env: string, trigger: string, verify: string, sha: string, polls = 60, pollMs = 15_000): Promise<boolean> {
-    this.emit('deploy.requested', { env, sha });
+  /**
+   * Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. `issue`:
+   * the issue whose landing triggered it, recorded on each deploy event (so deploy.verified ends that task).
+   */
+  async deploy(env: string, trigger: string, verify: string, sha: string, issue?: number, polls = 60, pollMs = 15_000): Promise<boolean> {
+    const of = issue === undefined ? {} : { issue };
+    this.emit('deploy.requested', { env, sha, ...of });
     const t = await sh(trigger, this.d.repo);
     if (t.code !== 0) {
-      this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}` });
+      this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}`, ...of });
       return false;
     }
     for (let i = 0; i < polls; i++) {
       const v = await sh(verify, this.d.repo, 120_000);
       if (v.code === 0 && v.out.includes(sha)) {
-        this.emit('deploy.verified', { env, sha });
+        this.emit('deploy.verified', { env, sha, ...of });
         return true;
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
-    this.emit('deploy.failed', { env, sha, why: `${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min` });
+    this.emit('deploy.failed', { env, sha, why: `${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min`, ...of });
     return false;
   }
 }

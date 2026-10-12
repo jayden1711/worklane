@@ -11,7 +11,7 @@ import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { stateDir, userExists } from './os/index.js';
+import { defaultAgentPath, homeOf, homesRoot, stateDir, userExists } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
@@ -37,7 +37,13 @@ export const InstanceFile = z.strictObject({
       claude_config_dir: z.string().min(1).optional(),
       /** A second unprivileged user for lanes that run as `eval`: the only one able to read the eval key. */
       eval_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name').optional(),
+      /** Resolved from the system's user database when left out; required where it can't be. */
       eval_home: z.string().min(1).optional(),
+      /**
+       * PATH for project commands run as the agent users (tests, checks, setup steps). The instance's owner sets it;
+       * a repo's tests.yaml never can. Default: the system directories, plus Homebrew's on macOS.
+       */
+      path: z.string().regex(/^\/[^:\s]*(:\/[^:\s]*)*$/, 'absolute directories separated by colons').optional(),
     })
     .optional(),
 });
@@ -157,10 +163,10 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 
 export interface Instance {
   name: string;
-  runAs: { user: string; home: string; claudeConfigDir?: string } | null;
+  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string } | null;
   /** Set in instance.yaml; otherwise resolved at start (the App's bot identity). */
   commitIdentity?: { name: string; email: string };
-  evalAs: { user: string; home: string } | null;
+  evalAs: { user: string; home: string; path?: string } | null;
   home: string;
   stateDir: string;
   repo: { path: string; repo: string };
@@ -227,8 +233,14 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (Object.values(policy.lanes).some((l) => l.run_as === 'eval') && !inst.run_as?.eval_user) {
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_user', message: 'a lane runs as eval, so set eval_user and eval_home' }]);
   }
-  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
-  const evalAs = inst.run_as?.eval_user ? { user: inst.run_as.eval_user, home: inst.run_as.eval_home ?? `/home/${inst.run_as.eval_user}` } : null;
+  const path = inst.run_as?.path ?? defaultAgentPath();
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
+  let evalAs: { user: string; home: string; path: string } | null = null;
+  if (inst.run_as?.eval_user) {
+    const evalHome = inst.run_as.eval_home ?? resolveHome(inst.run_as.eval_user);
+    if (!evalHome) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `can't find ${inst.run_as.eval_user}'s home on this machine; set eval_home` }]);
+    evalAs = { user: inst.run_as.eval_user, home: evalHome, path };
+  }
   return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs, ...(inst.commit_identity ? { commitIdentity: inst.commit_identity } : {}) };
 }
 
@@ -292,7 +304,13 @@ export function listInstances(dir = instancesDir()): string[] {
 }
 
 /** Create an instance home with skeleton files, readable only by its owner. Credentials stay placeholders to fill in. */
-export function initInstance(instanceName: string, repoPath: string, repo: string, dir = instancesDir(), agentUser = `${instanceName}-agent`): string {
+/** How a user's home is found (the OS user database); tests replace it. */
+export let resolveHome: (user: string) => string | null = (user) => homeOf(user);
+export function setResolveHome(f: (user: string) => string | null): void {
+  resolveHome = f;
+}
+
+export function initInstance(instanceName: string, repoPath: string, repo: string, dir = instancesDir(), agentUser = `${instanceName}-agent`, agentHome = resolveHome(agentUser) ?? `${homesRoot()}/${agentUser}`): string {
   if (!name.safeParse(instanceName).success) throw new Error(`instance name "${instanceName}": lowercase letters, digits and dashes`);
   const home = join(dir, instanceName);
   if (existsSync(home)) throw new Error(`instance "${instanceName}" already exists at ${home}`);
@@ -301,7 +319,7 @@ export function initInstance(instanceName: string, repoPath: string, repo: strin
   const write = (file: string, text: string) => writeFileSync(join(home, file), text, { mode: 0o600 });
   write(
     'instance.yaml',
-    `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${agentUser}\n  agent_home: /home/${agentUser}\n`,
+    `version: 1\nname: ${instanceName}\nrepos:\n  - path: ${JSON.stringify(resolve(repoPath))}\n    repo: ${repo}\n# Agents run as this unprivileged user (create it first; see the docs on separate users).\nrun_as:\n  agent_user: ${agentUser}\n  agent_home: ${JSON.stringify(agentHome)}\n`,
   );
   write('policy.yaml', `version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2 }\nland_mode: pr\n# On: the harness merges its own PRs that review.yaml's merge rules allow; off: every PR waits for you.\nauto_merge: false\n`);
   write(

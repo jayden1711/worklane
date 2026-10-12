@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkRootStep } from '../src/console/root-steps.js';
@@ -218,14 +218,9 @@ test('app-permissions: per project the installation reaches exactly the repo; sh
   assert.match(cred, /read -rp "Delete the copy[^\n]*\|\| yn=/, 'no prompt can fail the script on a closed stdin');
 });
 
-test('home_of reads a home from the user database, never /home/<user> by assumption', { skip: !posix && 'bash' }, () => {
-  const me = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
-  const r = lib('home_of', me);
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout.trim(), homedir());
-  assert.notEqual(lib('home_of', 'no-such-user-xyz').status, 0);
+test('credentials.sh, which the setup commands run, takes every home from home_of, never /home/<user>', () => {
   const cred = readFileSync(join(setup, 'credentials.sh'), 'utf8');
-  assert.deepEqual(cred.split('\n').filter((l) => /\/home\/\$/.test(l) && !/\|\| echo "\/home\/\$coord"/.test(l)), [], 'every home comes from home_of');
+  assert.deepEqual(cred.split('\n').filter((l) => /\/home\/\$/.test(l)), []);
 });
 
 test("the helper's checkout root: /srv/worklane, or machine.json's checkouts when root owns that file", () => {

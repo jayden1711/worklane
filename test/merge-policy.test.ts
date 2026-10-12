@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { PolicyFile } from '../src/instance.js';
-import { instructionEvalReasons, mergeDecision, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
+import { instructionEvalReasons, mergeDecision, waitCategoriesOf, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
-import { computeLevel } from '../src/review.js';
+import { AGENT_INSTRUCTIONS, computeLevel } from '../src/review.js';
+import { BRAND } from '../src/brand.js';
 import { rolePrompt, VERDICT_SCHEMA } from '../src/roles.js';
 import { exampleProject } from './helpers.js';
 
@@ -41,6 +42,25 @@ test('merge policy: the kill switch, the repo switch and a stop each make every 
   assert.deepEqual(mergeDecision(clean({ policyOn: false })).reasons, ['auto-merge is off for this instance (policy.yaml auto_merge)']);
   assert.deepEqual(mergeDecision(clean({ repoOn: false })).reasons, ['auto-merge is off for this repo (review.yaml merge.auto)']);
   assert.match(mergeDecision(clean({ stopped: 'main went red after #4' })).reasons.join(), /auto-merge is stopped: main went red after #4/);
+});
+
+test("regression: a change to the agents' role prompts, skills, AGENTS.md or any CLAUDE.md never auto-merges, whatever review.yaml tries", () => {
+  // A review.yaml that tries to drop it: the category redefined to nothing, no harness-config at L3, no waits.
+  const loose = {
+    ...review,
+    categories: { [AGENT_INSTRUCTIONS]: [] as string[], 'harness-config': [] as string[] },
+    levels: { ...review.levels, L3_human: { ...review.levels.L3_human, when: [] as string[] } },
+    merge: { ...review.merge, wait_categories: [] as string[] },
+  };
+  for (const path of [`${BRAND.configDir}/roles/worker.md`, `${BRAND.configDir}/skills/x/SKILL.md`, 'AGENTS.md', 'CLAUDE.md', 'web/CLAUDE.md']) {
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose);
+    assert.deepEqual(lvl.categories[AGENT_INSTRUCTIONS], [path], path);
+    const d = mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose) }));
+    assert.equal(d.auto, false, path);
+    assert.match(d.reasons.join(), new RegExp(`high-risk: ${AGENT_INSTRUCTIONS}`), path);
+  }
+  // Other files don't land in the category (only the root AGENTS.md counts).
+  for (const path of ['src/a.ts', 'docs/AGENTS.md']) assert.equal(computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose).categories[AGENT_INSTRUCTIONS], undefined, path);
 });
 
 test('merge policy: high-risk paths wait (L3 categories, CI config, and the repo’s own categories)', () => {

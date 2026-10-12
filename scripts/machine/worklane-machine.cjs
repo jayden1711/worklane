@@ -3,7 +3,8 @@
 // /usr/local/libexec/worklane-machine by scripts/setup/machine-helper.sh. sudoers lets each
 // coordinator user run exactly these, and nothing else:
 //
-//   worklane-machine set-slots <1..16>     the machine's agent slot cap (slots.json max_agents)
+//   worklane-machine set-slots <1..max_cap>   the machine's agent slot cap (slots.json max_agents); max_cap is
+//                                            machine.json's (recorded by machine.sh --max-cap), default 16
 //   worklane-machine set-updates on|off    automatic engine updates (updates.json enabled)
 //
 // Each change is written atomically (a temp file in the same directory, then a rename), appended
@@ -36,13 +37,23 @@ const SRV_DEFAULT = '/srv/worklane';
 const PORTS = '/usr/local/libexec/worklane-ports.json';
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | <setup command> <args> (the list is in the helper\'s source)';
+const MACHINE_CONF = path.join(ETC, 'machine.json');
+/** The default ceiling; src/machine.ts (DEFAULT_MAX_CAP) and scripts/setup/lib.sh use the same one. */
+const DEFAULT_MAX_CAP = 16;
+
+/** The highest slot cap allowed: machine.json's max_cap (1..99, root-owned, written by machine.sh), else the default. */
+function maxCap(file = MACHINE_CONF) {
+  const v = readJson(file).max_cap;
+  return Number.isInteger(v) && v >= 1 && v <= 99 ? v : DEFAULT_MAX_CAP;
+}
+
+const usage = (max) => `usage: worklane-machine set-slots <1..${max}> | set-updates on|off | <setup command> <args> (the list is in the helper's source)`;
 
 /** The change an argument list asks for, or null when it is anything but the exact allowed forms. */
-function parse(args) {
+function parse(args, max = maxCap()) {
   if (args.length !== 2) return null;
   const [cmd, arg] = args;
-  if (cmd === 'set-slots' && /^([1-9]|1[0-6])$/.test(arg)) return { what: 'slots.max_agents', file: 'slots.json', key: 'max_agents', value: Number(arg) };
+  if (cmd === 'set-slots' && /^[1-9][0-9]?$/.test(arg) && Number(arg) <= max) return { what: 'slots.max_agents', file: 'slots.json', key: 'max_agents', value: Number(arg) };
   if (cmd === 'set-updates' && (arg === 'on' || arg === 'off')) return { what: 'updates.enabled', file: 'updates.json', key: 'enabled', value: arg === 'on' };
   return null;
 }
@@ -195,7 +206,7 @@ function main(args) {
   if (setup) return runSetup(setup);
   const change = parse(args);
   if (!change) {
-    process.stderr.write(`${USAGE}\n`);
+    process.stderr.write(`${usage(maxCap())}\n`);
     return 2;
   }
   const file = path.join(ETC, change.file);
@@ -212,4 +223,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseSetup, SETUP_COMMANDS: Object.keys(SETUP_COMMANDS), PORTS };
+module.exports = { parse, maxCap, DEFAULT_MAX_CAP, parseSetup, SETUP_COMMANDS: Object.keys(SETUP_COMMANDS), PORTS };

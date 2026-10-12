@@ -17,7 +17,7 @@ import { tryAgentSlot } from '../slots.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
-import { COMMAND_TIMEOUT_MS, MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -221,7 +221,7 @@ export abstract class FixRuns extends Landing {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'ci-fix', model, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'ci-fix', r);
@@ -238,7 +238,7 @@ export abstract class FixRuns extends Landing {
   /**
    * GitHub reports a watched PR as conflicting with its base: merge the base into the branch and let a worker
    * resolve the conflicted hunks, within the cap; otherwise ask the owner. Never on a branch someone else
-   * pushed to. Recorded once per head and base as conflict_fix.detected.
+   * pushed to. Recorded once per head and base as conflict_fix.detected; the owner is asked once per head.
    */
   protected async maybeFixConflict(w: EventPayload<'pr.opened'>, pr: PullRequest) {
     const { issue: n, number } = w;
@@ -252,13 +252,15 @@ export abstract class FixRuns extends Landing {
       this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + MERGEABLE_RECHECK_MS);
       return;
     }
-    const seen = this.d.log.read(0, ['conflict_fix.detected']).filter((e) => {
+    const detected = this.d.log.read(0, ['conflict_fix.detected']).filter((e) => {
       const p = e.payload as EventPayload<'conflict_fix.detected'>;
-      return p.number === number && p.head === pr.headSha && p.base_sha === baseSha;
-    }).at(-1);
-    // The owner was already asked about this head and base: once is enough (a new push or base looks again).
-    if (seen && this.d.log.read(seen.id, ['conflict_fix.finished']).some((e) => (e.payload as { number: number; outcome: string }).number === number && (e.payload as { outcome: string }).outcome === 'gave_up')) return;
-    if (!seen) this.emit('conflict_fix.detected', { issue: n, number, head: pr.headSha, base_sha: baseSha });
+      return p.number === number && p.head === pr.headSha;
+    });
+    // The owner was already asked about this head: once is enough, however often the base moves (a new push to
+    // the PR looks again).
+    const firstAtHead = detected[0];
+    if (firstAtHead && this.d.log.read(firstAtHead.id, ['conflict_fix.finished']).some((e) => (e.payload as { number: number; outcome: string }).number === number && (e.payload as { outcome: string }).outcome === 'gave_up')) return;
+    if (!detected.some((e) => (e.payload as EventPayload<'conflict_fix.detected'>).base_sha === baseSha)) this.emit('conflict_fix.detected', { issue: n, number, head: pr.headSha, base_sha: baseSha });
     const give = (reason: string) => this.giveUpConflict(w, pr.headSha, baseSha, reason, []);
     const ours = this.ourHead(number);
     if (pr.headSha !== ours) return give(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
@@ -459,7 +461,7 @@ export abstract class FixRuns extends Landing {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: workers.model, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'conflict-fix', r);

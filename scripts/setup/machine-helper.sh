@@ -6,12 +6,13 @@
 #   bash scripts/setup/machine-helper.sh --setup-user <login> [<name>...]    also let <login> onboard projects
 #
 #   - Installs the helper as /usr/local/libexec/worklane-machine (root:root 0755). It accepts
-#     exactly `set-slots <1..16>` and `set-updates on|off`, writes atomically, and logs each
-#     change to /var/lib/worklane/machine-changes.jsonl and the journal; and the setup commands
-#     (see the helper's source), each one setup script with checked arguments.
+#     exactly `set-slots <1..max_cap>` and `set-updates on|off`, writes atomically, and logs each
+#     change to /var/lib/worklane/machine-changes.jsonl and the journal. max_cap is the one
+#     machine.sh records in /etc/worklane/machine.json (--max-cap; default 16). And the setup
+#     commands (see the helper's source), each one setup script with checked arguments.
 #   - Copies these setup scripts, root-owned, to /usr/local/libexec/worklane-setup: the only
 #     scripts the helper's setup commands run.
-#   - Lets each coordinator user wl-<name> run exactly those 18 commands as root (sudoers,
+#   - Lets each coordinator user wl-<name> run exactly those commands as root (sudoers,
 #     listed one by one). The dashboard viewer wl-dash gets nothing.
 #   - With --setup-user, lets that one login (yours, the owner's: it runs `worklane add` and the
 #     setup console) run the helper's setup commands, and nothing else, without a password. No
@@ -83,8 +84,9 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
+cap="$(max_cap)"
 if [ "${#users[@]}" -ge 1 ]; then
-  say "sudoers: ${users[*]} may run exactly the helper's 18 commands"
+  say "sudoers: ${users[*]} may run exactly the helper's $((cap + 2)) commands (set-slots 1..$cap, set-updates on|off)"
   install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 fi
 if [ -n "$setup_user" ]; then
@@ -95,7 +97,7 @@ fi
 say "check"
 for u in "${users[@]}"; do
   sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots 1 >/dev/null || { echo "FAIL: $u can't run set-slots 1" >&2; exit 1; }
-  if sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots 17 >/dev/null 2>&1; then echo "FAIL: $u may run set-slots 17" >&2; exit 1; fi
+  if sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots "$((cap + 1))" >/dev/null 2>&1; then echo "FAIL: $u may run set-slots $((cap + 1))" >&2; exit 1; fi
   if sudo -n -l -U "$u" "$MACHINE_HELPER" add-instance x >/dev/null 2>&1; then echo "FAIL: coordinator $u may run a setup command" >&2; exit 1; fi
 done
 if id -u wl-dash >/dev/null 2>&1 && sudo -n -l -U wl-dash "$MACHINE_HELPER" set-slots 1 >/dev/null 2>&1; then echo "FAIL: wl-dash may run the helper" >&2; exit 1; fi

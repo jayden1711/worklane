@@ -219,8 +219,8 @@ test('agents get the instance\'s Claude config dir, and still no tokens', () => 
 
 test('instance init names the agent user the setup scripts create', () => {
   const dir = mkdtempSync(join(tmpdir(), 'instances-'));
-  const home = initInstance('site', '.', 'example-org/example-shop', dir, 'wl-site-agent');
-  assert.match(readFileSync(join(home, 'instance.yaml'), 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: \/home\/wl-site-agent$/m);
+  const home = initInstance('site', '.', 'example-org/example-shop', dir, 'wl-site-agent', '/var/lib/wl-site-agent');
+  assert.match(readFileSync(join(home, 'instance.yaml'), 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: "\/var\/lib\/wl-site-agent"$/m);
 });
 
 test('regression: an instance whose agent user does not exist on this machine is refused before it starts', { skip: process.platform === 'win32' && 'POSIX users' }, () => {

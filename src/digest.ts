@@ -15,6 +15,7 @@ interface Ev {
 export const WAIT_KINDS = [
   'emergency_halt',
   'merge_stopped',
+  'main_checks_timed_out',
   'awaiting_decision',
   'plan_held',
   'needs_owner',
@@ -30,6 +31,7 @@ export type WaitKind = (typeof WAIT_KINDS)[number];
 export const WAIT_LABEL: Record<WaitKind, string> = {
   emergency_halt: 'Emergency stop in force',
   merge_stopped: 'Auto-merge stopped',
+  main_checks_timed_out: 'Auto-merges whose checks on the default branch never reported',
   awaiting_decision: 'Decisions waiting for you',
   plan_held: 'Plans held for you',
   needs_owner: 'PRs waiting for you to review and merge',
@@ -130,6 +132,17 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date }
     const p = stop.payload as { reason: string; number: number | null };
     add('merge_stopped', stop.ts, p.number !== null ? (prIssue.get(p.number) ?? null) : null, p.number, p.reason);
   }
+
+  // An auto-merge whose required checks on the merge commit never reported: whether the default branch is green is
+  // unknown until a later result for that commit (green; a red one is listed as auto-merge stopped).
+  const mainTimedOut = new Map<string, { ts: string; issue: number; number: number; missing: string[] }>();
+  for (const e of evs) {
+    if (e.type !== 'merge.main_result') continue;
+    const q = e.payload as { issue: number; number: number; sha: string; outcome: string; failed: string[] };
+    if (q.outcome === 'timed_out') mainTimedOut.set(q.sha, { ts: e.ts, issue: q.issue, number: q.number, missing: q.failed });
+    else mainTimedOut.delete(q.sha);
+  }
+  for (const [s, w] of mainTimedOut) add('main_checks_timed_out', w.ts, w.issue, w.number, `${w.missing.length ? w.missing.join(', ') : 'the required checks'} never reported on the merge commit ${s.slice(0, 12)}; check them yourself`, { sha: s });
 
   // Decisions not yet answered (a plan's decision is listed as the held plan, once).
   const answered = new Set(evs.filter((e) => e.type === 'decision.answered').map((e) => String((e.payload as { id: string }).id)));

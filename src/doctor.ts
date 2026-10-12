@@ -23,10 +23,6 @@ export interface DoctorCheck {
 
 const CLAUDE_MD_TOKEN_BUDGET = 2500;
 
-function nodeMajor(): number {
-  return Number(process.versions.node.split('.')[0]);
-}
-
 /**
  * An instance's agent API key file (credentials.yaml agent_api_key): present, owned by the agent user, and open to
  * nobody else (no group or other bits). The file is never read. The coordinator user normally can't even see it
@@ -51,8 +47,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
 
   const [maj, min] = process.versions.node.split('.').map(Number) as [number, number];
-  if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; hooks need >= 22.13`);
-  else if (nodeMajor() < 24) add('node', 'warn', `Node ${process.versions.node}: hooks OK; the coordinator (step 2) needs >= 24`);
+  // The engine's requirement (package.json engines): every part, hooks and coordinator alike, runs on it.
+  if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
   else add('node', 'ok', `Node ${process.versions.node}`);
 
   let cfg: Config | null = null;

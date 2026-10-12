@@ -3,6 +3,10 @@
 // guardrails hook reads for frozen paths, such as a reproduction test).
 import { z } from 'zod';
 
+/** `- browser: checkout` runs the app's `checkout` flow in a real browser and judges it (src/browser/check.ts). */
+export const BrowserDoneWhenItem = z.strictObject({ browser: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'a flow name from app.yaml') });
+export type BrowserDoneWhenItem = z.infer<typeof BrowserDoneWhenItem>;
+
 export const DoneWhen = z.array(
   z.union([
     z.strictObject({ command: z.string().min(1), timeout_s: z.number().int().positive().optional() }),
@@ -11,6 +15,7 @@ export const DoneWhen = z.array(
     z.strictObject({ suite: z.enum(['changed', 'full']), timeout_s: z.number().int().positive().optional() }),
     z.strictObject({ manual: z.string().min(1) }),
     z.strictObject({ repro: z.boolean() }),
+    BrowserDoneWhenItem,
   ]),
 );
 
