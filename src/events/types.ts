@@ -288,9 +288,10 @@ export const EventSchemas = {
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
-  'deploy.requested': z.strictObject({ env: z.string(), sha }),
-  'deploy.verified': z.strictObject({ env: z.string(), sha }),
-  'deploy.failed': z.strictObject({ env: z.string(), sha, why: z.string() }),
+  /** `issue`: the issue whose landing triggered it (absent on older events and manual deploys). */
+  'deploy.requested': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
+  'deploy.verified': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
+  'deploy.failed': z.strictObject({ env: z.string(), sha, why: z.string(), issue: issue.optional() }),
   'baseline.recorded': z.strictObject({ sha, failing: z.array(z.string()) }),
   // guardrails and system
   'guardrail.decision': z.strictObject({ decision: z.enum(['deny', 'ask']), rule: z.string(), agent: z.boolean() }),

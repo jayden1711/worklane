@@ -328,29 +328,37 @@ export abstract class Landing extends Decisions {
       this.emit('issue.released', { issue: n, instance: this.d.instance, why: 'landed' });
       return;
     }
-    const ok = await this.deploy(staging.name, staging.trigger!, staging.verify, sha);
+    const ok = await this.deploy(staging.name, staging.trigger!, staging.verify, sha, n);
     await this.d.backlog.comment(n, ok ? `[${BRAND.cli}] Landed \`${sha.slice(0, 8)}\` and verified it on ${staging.name}.` : `[${BRAND.cli}] @${owner} landed \`${sha.slice(0, 8)}\` but ${staging.name} is NOT serving it. Not closing.`);
     if (ok) await this.d.backlog.close(n);
-    else await this.d.backlog.addLabels(n, ['blocked']);
+    else {
+      await this.d.backlog.addLabels(n, ['blocked']);
+      // Released (the claim already was, above), so relabelling it `ready` requeues it.
+      this.emit('issue.released', { issue: n, instance: this.d.instance, why: `deploy to ${staging.name} failed` });
+    }
   }
 
-  /** Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. */
-  async deploy(env: string, trigger: string, verify: string, sha: string, polls = 60, pollMs = 15_000): Promise<boolean> {
-    this.emit('deploy.requested', { env, sha });
+  /**
+   * Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. `issue`:
+   * the issue whose landing triggered it, recorded on each deploy event (so deploy.verified ends that task).
+   */
+  async deploy(env: string, trigger: string, verify: string, sha: string, issue?: number, polls = 60, pollMs = 15_000): Promise<boolean> {
+    const of = issue === undefined ? {} : { issue };
+    this.emit('deploy.requested', { env, sha, ...of });
     const t = await sh(trigger, this.d.repo);
     if (t.code !== 0) {
-      this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}` });
+      this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}`, ...of });
       return false;
     }
     for (let i = 0; i < polls; i++) {
       const v = await sh(verify, this.d.repo, 120_000);
       if (v.code === 0 && v.out.includes(sha)) {
-        this.emit('deploy.verified', { env, sha });
+        this.emit('deploy.verified', { env, sha, ...of });
         return true;
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
-    this.emit('deploy.failed', { env, sha, why: `${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min` });
+    this.emit('deploy.failed', { env, sha, why: `${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min`, ...of });
     return false;
   }
 }

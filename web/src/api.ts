@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type TaskStatus =
   | 'triage' | 'ready' | 'claimed' | 'reproducing' | 'building' | 'verifying' | 'evaluating'
-  | 'awaiting_decision' | 'queued' | 'landed' | 'done' | 'blocked' | 'released';
+  | 'awaiting_decision' | 'queued' | 'in_review' | 'landed' | 'done' | 'blocked' | 'released';
 
 export interface Task {
   issue: number;
