@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
 import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
+import { TestRunConfig } from '../testrun/config.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -463,6 +464,8 @@ export const TestsConfig = z.strictObject({
       }),
     )
     .default([]),
+  /** The coordinator's own test runs of PRs (src/testrun/, docs/test-runs.md); absent: none. */
+  test_run: TestRunConfig.optional(),
 });
 
 // ---------- review.yaml ----------
