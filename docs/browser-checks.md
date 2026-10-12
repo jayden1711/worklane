@@ -75,6 +75,14 @@ judged.
 With no app declared, or no browser on the machine, the check is **unavailable**, never passed. An unknown flow
 fails.
 
+## Which tasks run browser checks (`src/browser/gate.ts`)
+
+- An issue whose `done_when` has `browser:` items runs those flows, and only those, whatever the change
+  touches. With no app declared they are unavailable (and say so), never skipped as passed.
+- Otherwise, a change touching any of the app's `ui_paths` runs every flow the app declares, and lists the UI
+  files it touched (the first 10).
+- Anything else, or a project with no app, runs none.
+
 ## Not yet
 
 - A `browser:` check in an issue's `done_when` is refused until the coordinator runs browser checks, so one can
