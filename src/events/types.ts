@@ -14,6 +14,8 @@ const CheckRunSchema = z.strictObject({
   tail: z.string().max(2000).optional(),
   /** How long the check ran (absent for one that didn't run, and in older events). */
   duration_ms: z.number().int().nonnegative().optional(),
+  /** A browser check (src/browser/check.ts), not a command: what backs a claim about the browser. */
+  kind: z.literal('browser').optional(),
 });
 
 export const EventSchemas = {
@@ -71,6 +73,11 @@ export const EventSchemas = {
     repeats: z.number().int().nonnegative(),
     failures: z.number().int().nonnegative(),
   }),
+  /**
+   * A write made on the dashboard: who (their GitHub login, and the role the instance read from its repo, or the
+   * owner's break-glass), on which instance, and what was done.
+   */
+  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
@@ -135,7 +142,10 @@ export const EventSchemas = {
   'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
-  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
+  /** `provider`: the open-model provider it ran on (local runs cost 0); tokens and seconds, when claude reported them. */
+  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative(), provider: z.string().optional(), tokens_in: z.number().int().nonnegative().optional(), tokens_out: z.number().int().nonnegative().optional(), secs: z.number().nonnegative().optional() }),
+  /** A run meant for an open-model provider ran on its normal model instead, and why (not opted in, no passing eval, down, slow, the GPU lock held, refused for the work). */
+  'provider.fallback': z.strictObject({ issue: issue.nullable(), role: z.string(), provider: z.string(), reason: z.string(), model: z.string() }),
   /**
    * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
    * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.
@@ -157,6 +167,8 @@ export const EventSchemas = {
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
+  /** The browser checks a verify ran (src/coordinator/browser.ts): the PR description's BROWSER CHECKS section. */
+  'browser.evidence': z.strictObject({ issue, head: sha, lines: z.array(z.string().max(1000)).max(300) }),
   /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
   'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
   'eval.verdict': z.strictObject({
@@ -180,7 +192,7 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake', 'delegation']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
   /** An agent's request to a host outside its allowlist was refused: once per issue and host, with the decision it raised. */
   'network.domain_requested': z.strictObject({ issue, host: z.string(), role: z.string(), run: z.string().nullable(), tool: z.string(), what: z.string(), decision: z.string() }),
   /** The owner's answer on a refused host: allow-repo (pr: the config change proposed), allow-once (the task's next run), or deny. */
@@ -191,7 +203,28 @@ export const EventSchemas = {
   'plan.decided': z.strictObject({ issue, decision: z.string(), answer: z.enum(['approve', 'revise', 'reject']), by: z.string(), note: z.string() }),
   /** The owner (or a writer) objected to a plan that was built at once: the task stopped. */
   'plan.objected': z.strictObject({ issue, by: z.string(), why: z.string() }),
-  'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
+  /** A writer corrected the harness (a rejected PR or landing, a revised or rejected plan, a review asking for changes, a chat correction): recorded once per source. */
+  'correction.recorded': z.strictObject({ key: z.string(), kind: z.enum(['pr_rejected', 'land_rejected', 'plan_revised', 'plan_rejected', 'review_changes', 'chat']), issue: issue.nullable(), pr: z.number().int().positive().nullable(), by: z.string(), text: z.string() }),
+  /** The corrections agent's durable fix, filed as an issue the pipeline builds into a reviewed PR. */
+  'correction.proposed': z.strictObject({ key: z.string(), fix_kind: z.enum(['impossible', 'check', 'rule', 'style']), issue, title: z.string(), why: z.string() }),
+  /** A correction that repeats an earlier one: grouped with it, never proposed twice. `how`: same words, or the agent. */
+  'correction.grouped': z.strictObject({ key: z.string(), same_as: z.string(), how: z.enum(['same words', 'the agent']) }),
+  /** No durable fix: the agent found none (why), or the run failed (failed: true; it isn't retried). */
+  'correction.no_fix': z.strictObject({ key: z.string(), why: z.string(), failed: z.boolean() }),
+  /** Gradual delegation: a harness PR merged; its review categories and whether it merged as proposed (no writer correction on it, no one else's push). */
+  'delegation.observed': z.strictObject({ pr: z.number().int().positive(), issue, categories: z.array(z.string()), unchanged: z.boolean() }),
+  /** A category put to the owner: loosen (a clean record) or tighten (loosened, then a revert, red main or later fix). */
+  'delegation.suggested': z.strictObject({ category: z.string(), direction: z.enum(['loosen', 'tighten']), decision: z.string(), receipts: z.array(z.string()) }),
+  /** The owner's answer; loosen or tighten files the review.yaml change as an issue (built into a PR they review). */
+  'delegation.decided': z.strictObject({ category: z.string(), decision: z.string(), answer: z.string(), by: z.string(), issue: issue.nullable() }),
+  /** A gardener finding: a pattern and the places it was seen (from the run or the event log's signals). */
+  'gardener.finding': z.strictObject({ pattern: z.string(), kind: z.enum(['dead_code', 'duplication', 'rule_violation', 'hotspot', 'slow_check', 'flaky_check']), where: z.array(z.string()), detail: z.string() }),
+  /** A gardener fix filed (an issue the pipeline builds into a reviewed PR): once per pattern. */
+  'gardener.filed': z.strictObject({ pattern: z.string(), issue }),
+  /** One gardener run (started_at: by the coordinator's clock): what it found and filed, what it cost, its log issue; outcome: done, or why it stopped. */
+  'gardener.run': z.strictObject({ started_at: z.string(), findings: z.number().int().nonnegative(), filed: z.array(issue), cost_usd: z.number().nonnegative(), log_issue: issue.nullable(), outcome: z.string() }),
+  /** `role`: answered on the dashboard by someone it read as an owner or writer of the instance's repo. */
+  'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string(), role: z.enum(['owner', 'writer']).optional() }),
   // the setup console's asks (src/console/asks.ts): what the harness needs from the owner and can't do itself
   /** An ask, as created. A paste_secret ask names the credential only; its value is never in any event. */
   'ask.created': z.strictObject({
@@ -243,6 +276,20 @@ export const EventSchemas = {
     changes: z.array(z.strictObject({ id: z.string(), title: z.string(), base: z.string(), head: z.string() })),
     cost_usd: z.number().nonnegative(),
     error: z.string().optional(),
+    /** Samples per case. Scores (`base`, `result`, and held-out's) are rubric items met, of all items. */
+    samples: z.number().int().positive().optional(),
+    /** A role's held-out comparison, which decides; null: the role has no held-out cases (it can't pass). Absent: not a role. */
+    held_out: z
+      .strictObject({
+        base: z.strictObject({ passed: z.number().int(), total: z.number().int() }).nullable(),
+        result: z.strictObject({ passed: z.number().int(), total: z.number().int() }),
+        dropped: z.boolean(),
+        incomplete: z.boolean(),
+        changes: z.array(z.strictObject({ id: z.string(), title: z.string(), base: z.string(), head: z.string() })),
+      })
+      .nullable()
+      .optional(),
+    held_out_error: z.string().optional(),
   }),
   /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
   'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),
@@ -250,7 +297,10 @@ export const EventSchemas = {
   'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
-  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red']), failed: z.array(z.string()) }),
+  /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
+  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()) }),
+  /** A wait reached its cap (coordinator/wait-caps.ts): recorded, the owner told, and it waits for them. `number`: the PR, if any. */
+  'wait.capped': z.strictObject({ issue, number: z.number().int().positive().nullable(), kind: z.enum(['deferred_landing', 'mergeable_recheck', 'light_check_pending', 'main_checks']), detail: z.string() }),
   /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
   'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
@@ -280,9 +330,10 @@ export const EventSchemas = {
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
-  'deploy.requested': z.strictObject({ env: z.string(), sha }),
-  'deploy.verified': z.strictObject({ env: z.string(), sha }),
-  'deploy.failed': z.strictObject({ env: z.string(), sha, why: z.string() }),
+  /** `issue`: the issue whose landing triggered it (absent on older events and manual deploys). */
+  'deploy.requested': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
+  'deploy.verified': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
+  'deploy.failed': z.strictObject({ env: z.string(), sha, why: z.string(), issue: issue.optional() }),
   'baseline.recorded': z.strictObject({ sha, failing: z.array(z.string()) }),
   // guardrails and system
   'guardrail.decision': z.strictObject({ decision: z.enum(['deny', 'ask']), rule: z.string(), agent: z.boolean() }),

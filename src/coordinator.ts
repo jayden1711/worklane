@@ -12,7 +12,7 @@ import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, ty
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { protectedPaths } from './guardrails/engine.js';
+import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
@@ -26,7 +26,7 @@ import { pushProblems } from './push-check.js';
 import { needsPlan, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { changedFiles } from './merge-base.js';
-import { importsOf, lightCheckPlan } from './light-check.js';
+import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow } from './settings.js';
@@ -41,9 +41,13 @@ import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
-import { MergeFlow } from './coordinator/merge-flow.js';
+import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
+import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
+import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { Gardener } from './coordinator/gardener.js';
+import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
+import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
@@ -52,12 +56,12 @@ export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
 
 /** What one worker build ends in: stop the task, or go on to inspect its change. */
-type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string };
+type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string; provider?: string };
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends MergeFlow {
+export class Coordinator extends Gardener {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -84,6 +88,9 @@ export class Coordinator extends MergeFlow {
     await step('prs', () => this.watchPrs(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
+    await step('corrections', () => this.checkCorrections(), undefined);
+    await step('delegation', () => this.checkDelegation(), undefined);
+    await step('gardener', () => this.checkGardener(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
@@ -95,6 +102,8 @@ export class Coordinator extends MergeFlow {
     await this.chatQueue;
     await this.intakeQueue;
     await this.poolRefill;
+    await this.correctionsRun;
+    await this.gardenerRun;
   }
 
   /**
@@ -171,6 +180,7 @@ export class Coordinator extends MergeFlow {
         until: now,
         instance: this.d.instance,
         runner: this.d.runner,
+        ...(({ model, route }) => ({ model, route }))(runRoute(this.d.cfg, 'stage_judge')),
         // The judge has no tools: it reads only what the prompt carries, wherever it runs.
         cwd: this.d.repo,
         doneWhenOf: async (n) => {
@@ -263,7 +273,8 @@ export class Coordinator extends MergeFlow {
     for (const q of takeRequests(this.d.stateDir)) {
       const refuse = (why: string) => this.emit('console.request_refused', { request: q.id, kind: q.kind, run: q.run, by: q.by, why });
       const owner = this.d.cfg.project.owners.default;
-      if (q.by.toLowerCase() !== owner.toLowerCase()) {
+      // The default owner, or one the instance's own dashboard read as an owner (admin on the repo).
+      if (q.by.toLowerCase() !== owner.toLowerCase() && q.owner !== true) {
         refuse(`only the owner (@${owner}) may use the console`);
         continue;
       }
@@ -522,9 +533,11 @@ export class Coordinator extends MergeFlow {
       // instead of starting again from 1.
       const used = this.attemptsUsed(n);
       if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
+      // Once a hosted model's change is refused, the task's later attempts run on Anthropic.
+      let noOpenModel = false;
       for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
-        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
+        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan, 0, noOpenModel);
         if (out.stop) return;
         // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
         if (out.stuck) {
@@ -544,6 +557,16 @@ export class Coordinator extends MergeFlow {
         }
         const change = await this.inspect(n, path, base, head, repro);
         refused = 'rejected' in change ? (change.refused ?? null) : null;
+        // A hosted open model never builds L3, money-path or agent-instructions work: such a change is refused, and the
+        // task goes on with the next attempt on the build's Anthropic model.
+        const hostedWhy = !('rejected' in change) && out.provider?.startsWith('hosted:') ? hostedChangeRefusal({ files: change.files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW }) : null;
+        if (hostedWhy) {
+          noOpenModel = true;
+          this.emit('provider.fallback', { issue: n, role: 'worker', provider: out.provider!, reason: hostedWhy, model: buildRoute(this.d.cfg, issue.labels, attempt + 1, true).model });
+          this.emit('change.rejected', { issue: n, why: hostedWhy });
+          feedback = [`Your previous attempt was rejected: ${hostedWhy}. It is being redone on the harness's own model.`];
+          continue;
+        }
         if ('rejected' in change) {
           this.emit('change.rejected', { issue: n, why: change.rejected });
           feedback = [`Your previous attempt was rejected: ${change.rejected}`];
@@ -599,7 +622,8 @@ export class Coordinator extends MergeFlow {
   private async investigate(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, base: string, owner: string) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
-    const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
+    // Routed like a build (src/model-routing.ts): the high-risk model for a high-risk issue; never an open model.
+    const { model } = buildRoute(this.d.cfg, issue.labels, 1, true);
     const r = await this.d.runner.run({
       env: this.projectEnv(),
       role: 'investigator',
@@ -616,7 +640,7 @@ export class Coordinator extends MergeFlow {
       jsonSchema: INVESTIGATION_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'investigator', model, worktree: path, pid: p, pgid: p, attempt: 1 }),
     });
     this.cost(n, 'investigator', r);
@@ -663,7 +687,7 @@ export class Coordinator extends MergeFlow {
         maxBudgetUsd: role.budget_usd ?? 3,
         jsonSchema: REPRO_SCHEMA,
         stallMs: 15 * 60_000,
-        timeoutMs: COMMAND_TIMEOUT_MS,
+        timeoutMs: this.commandTimeoutMs,
       });
       this.cost(n, 'evaluator-repro', r);
       const s = r.structured as { test_path?: string; not_reproducible?: string } | undefined;
@@ -694,10 +718,12 @@ export class Coordinator extends MergeFlow {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0): Promise<BuildOut> {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0, noOpenModel = false): Promise<BuildOut> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
-    const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
+    // Routed (src/model-routing.ts): the high-risk model for an L3 or high-risk issue, or once `escalate_after`
+    // attempts have failed; the build model otherwise (an open model only on the default route, src/providers.ts).
+    const { model, route } = buildRoute(this.d.cfg, issue.labels, attempt, noOpenModel);
     const remaining = Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday());
     const { runner, checks } = this.d.cfg.tests;
     const extra = [
@@ -720,13 +746,14 @@ export class Coordinator extends MergeFlow {
       appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
       cwd: path,
       model,
+      route,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 200,
       maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining),
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => {
         pid = p;
         this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt, ...(researched ? { resumed: 'research' as const } : {}) });
@@ -764,7 +791,7 @@ export class Coordinator extends MergeFlow {
     // attempt resumes with the answer (or why there is none) in its brief. Past the limit, its output stands as is.
     if (s.research_request && researched < MAX_REQUESTS_PER_TASK) {
       const section = await this.answerResearch(issue, s.research_request, path, 'worker');
-      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1);
+      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1, noOpenModel);
     }
     if (s.ask) {
       await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '']);
@@ -776,7 +803,7 @@ export class Coordinator extends MergeFlow {
     }
     // What the worker says it verified: checked against the record at evaluation, listed in the PR's receipts.
     this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? '') });
-    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}) };
+    return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}), ...(r.provider ? { provider: r.provider } : {}) };
   }
 
   /**
@@ -818,7 +845,7 @@ export class Coordinator extends MergeFlow {
     const targets = instructionTargets(files);
     if (!targets.length) return;
     const cfg = this.d.cfg.agents.instruction_evals;
-    const model = cfg.model ?? this.d.cfg.agents.roles.workers?.model ?? 'sonnet';
+    const model = cfg.model ?? routeRun(this.d.cfg, 'eval_answer');
     const judge = cfg.judge ?? this.d.cfg.agents.roles.evaluator?.model ?? 'opus';
     const at = (rev: string, p: string): string | null => {
       try {
@@ -850,8 +877,12 @@ export class Coordinator extends MergeFlow {
         continue;
       }
       try {
-        const c = await compareInstructions({ target: t.target, baseText, headText, cases, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
-        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd });
+        // A role is judged on its held-out cases too (the coordinator's own, never in the repo); they decide.
+        const held = t.role ? await heldOutFor({ role: t.role, baseText, headText, stateDir: this.d.stateDir, model: judge, ask: runnerAsk(this.d.runner, (r) => this.cost(n, CASE_WRITER_COST_ROLE, r as RunResult), this.d.stateDir) }) : null;
+        const c = await compareInstructions({ target: t.target, baseText, headText, cases, heldOut: held && 'cases' in held ? held.cases : null, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
+        // Held-out cases go into the log by number only: their titles stay in the coordinator's store.
+        const heldOut = c.heldOut ? { base: c.heldOut.base, result: c.heldOut.head, dropped: c.heldOut.dropped, incomplete: c.heldOut.incomplete, changes: c.heldOut.changes.map((x) => ({ ...x, title: '' })) } : null;
+        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd, samples: c.samples, ...(t.role ? { held_out: heldOut } : {}), ...(held && 'error' in held ? { held_out_error: held.error } : {}) });
       } catch (e) {
         if (e instanceof Halted) throw e;
         record({ ...none, error: (e as Error).message.slice(0, 500) });
@@ -878,8 +909,7 @@ export class Coordinator extends MergeFlow {
     const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
-    const protectedRes = protectedPaths(this.d.cfg.guardrails).map((g) => globToRegExp(g));
-    const prot = names.filter((f) => protectedRes.some((re) => re.test(f)));
+    const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
     if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
     const scan = await scanRange(path, `${base}..${head}`);
     if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };
@@ -913,9 +943,12 @@ export class Coordinator extends MergeFlow {
     return { files, tampered, patchHash };
   }
 
+  /** Browser baselines per (base, flow), kept across a task's attempts (src/coordinator/browser.ts). */
+  private readonly browserBaselines = new Map<string, BaselineRun>();
+
   /** The coordinator's own run of the contract: it never trusts the agent's word. */
   protected async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
-    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number }[] = [];
+    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number; kind?: 'browser' }[] = [];
     // Each check's wall time, so a project's test times can be followed over time.
     const timed = async (command: string) => {
       const t0 = Date.now();
@@ -940,7 +973,28 @@ export class Coordinator extends MergeFlow {
         if (one) await run(one.replaceAll('{file}', d.test));
         else checks.push({ check: `test ${d.test}`, status: 'unavailable', exitCode: null, tail: 'tests.yaml runner.one not set' });
       }
+      // A person checks it: listed under NOT CHECKED in the PR's receipts, never run here.
+      else if ('manual' in d) continue;
+      // The frozen reproduction test, run below from `repro`.
+      else if ('repro' in d) continue;
+      // Run below with the UI-paths gate, which may add flows of its own (src/coordinator/browser.ts).
+      else if ('browser' in d) continue;
+      else {
+        // A done_when kind without a branch here must not pass by being skipped: typecheck fails on a new kind
+        // (d is never), and anything that reaches this at run time fails the attempt.
+        const unknown: never = d;
+        checks.push({ check: `done_when ${JSON.stringify(unknown).slice(0, 200)}`, status: 'fail', exitCode: null, tail: 'unknown done_when kind: the coordinator has no way to check it' });
+      }
     }
+    // Browser checks (src/coordinator/browser.ts), each flow judged against its run at the change's base.
+    const change = changeAt(this.events(n), head);
+    const out = join(this.d.stateDir, 'browser', `issue-${n}`);
+    const runAs = this.d.commandsAs ? { runAs: this.d.commandsAs } : {};
+    const app = this.d.cfg.app;
+    const baseline = change && app ? (chrome: string) => worktreeBaseline({ wt: this.wt, name: `issue-${n}-browser-base`, base: change.base, app, cache: this.browserBaselines, outDir: join(out, `base-${change.base.slice(0, 12)}`), chrome, ...runAs }) : undefined;
+    const browser = await browserChecks({ app, doneWhen, changed: change?.files ?? [], cwd: path, outDir: join(out, head.slice(0, 12)), ...(baseline ? { baseline } : {}), ...runAs });
+    checks.push(...browser.checks);
+    if (browser.lines.length) this.emit('browser.evidence', { issue: n, head, lines: browser.lines });
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
     // The project's checks can be long (a full suite): once the issue's own checks have failed the attempt
     // is rejected anyway, so they're recorded as skipped instead of run.
@@ -995,7 +1049,7 @@ export class Coordinator extends MergeFlow {
             maxBudgetUsd: role.budget_usd ?? 5,
             jsonSchema: opts.schema ?? VERDICT_SCHEMA,
             stallMs: 15 * 60_000,
-            timeoutMs: COMMAND_TIMEOUT_MS,
+            timeoutMs: this.commandTimeoutMs,
             onControl: (c) => void (runId = c.runId),
           });
           this.cost(n, costRole, r);
@@ -1045,7 +1099,7 @@ export class Coordinator extends MergeFlow {
    * Otherwise the result of the check on that exact head and branch tip (started in the background if there is
    * none yet: 'pending'). The PR is never changed: a pass merges the unchanged head that already passed CI.
    */
-  protected async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | { hold: string }> {
+  protected async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | 'conflict' | { hold: string }> {
     if (!this.d.cfg.project.combined_check) return 'merge';
     const { number } = w;
     const baseRef = pr.base || this.branch;
@@ -1073,8 +1127,14 @@ export class Coordinator extends MergeFlow {
       .at(-1);
     if (done?.outcome === 'merge') return 'merge';
     if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
-    if (done?.outcome === 'conflict') return 'pending'; // GitHub reports the conflict next, and the conflict path takes it
+    if (done?.outcome === 'conflict') return 'conflict'; // GitHub should report it next, and the conflict path take it (capped in mergeOrWait)
     if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
+      // Debounced: a burst of moves of main checks at most twice, then the newest main once the window allows.
+      const wait = lightCheckWait(this.d.log.read(0, ['light_check.started']).filter((e) => (e.payload as { number: number }).number === number).map((e) => Date.parse(e.ts)), Date.now());
+      if (wait > 0) {
+        this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + wait);
+        return 'pending';
+      }
       this.lightRunning.add(number);
       void this.lightCheck(w, pr, baseRef, mainSha, plan.overlap)
         .catch((e: Error) => this.emit('coordinator.error', { instance: this.d.instance, where: `combined check #${number}`, kind: 'error', message: e.message.slice(0, 500) }))

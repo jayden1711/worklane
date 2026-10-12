@@ -13,6 +13,7 @@ import { INTAKE_ROLE, INTAKE_TOOLS } from './intake/run.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
 import { TaskFile } from './contract.js';
+import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
 import { splitCommands } from './guardrails/shell.js';
 
@@ -111,6 +112,10 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const g = withFrozen(cfg.guardrails, taskFile);
     if ('error' in g) return decide('deny', `the task file ${taskFile} can't be read (${g.error}), so the task's frozen files can't be protected; refusing every call until it can`);
     guardrails = g.guardrails;
+    // Held-out eval cases are never read by an agent, by tool or by shell argument: wherever a store is, and the
+    // one this instance names. (They live in the coordinator's state, which agent users can't enter either.)
+    const held = env[HELD_OUT_ENV];
+    guardrails = { ...guardrails, secret_paths: [...guardrails.secret_paths, HELD_OUT_GLOB, ...(held ? [`${held.replace(/[\\/]+$/, '')}/**`] : [])] };
     // Hosts the owner allowed for this one run ("allow once"), set by the runner for this session only.
     const once = (env[`${BRAND.envPrefix}_ALLOW_HOSTS`] ?? '').split(',').map((h) => h.trim()).filter(Boolean);
     if (once.length) guardrails = { ...guardrails, network: { ...guardrails.network, allow: [...guardrails.network.allow, ...once] } };

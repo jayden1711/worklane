@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { REAL_CHROME_TIMEOUT, realChromeTests } from './browser-helpers.js';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
-import { parseContract } from '../src/backlog/types.js';
+import { parseContract, type DoneWhenList } from '../src/backlog/types.js';
 import { BRAND } from '../src/brand.js';
 import { claim, claimRef } from '../src/claims.js';
 import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
@@ -18,6 +19,8 @@ import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { CliRunner, DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
+import { findChrome, freePort, portInUse } from '../src/browser/cdp.js';
+import { AppConfig } from '../src/config/schema.js';
 import { repoRoot, STDIN_LINE } from './helpers.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
@@ -1978,6 +1981,9 @@ test('auto-merge: main green after it is recorded and nothing stops', { skip }, 
 
 // ---- instruction evals
 
+/** The eval reasons alone: an instructions change also always waits as high-risk (agent-instructions). */
+const evalOnly = (reasons: string[]) => reasons.filter((r) => !r.startsWith('high-risk: agent-instructions'));
+
 const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the ledger.\n\n**Correct**\n- Reads the alert row first.\n\n**Wrong**\n- Edits the ledger by hand.\n';
 
 /**
@@ -1985,16 +1991,26 @@ const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the
  * before the task (with its eval cases unless `cases` is false). The scripted model under test plans
  * badly when its instructions say BAD; the judge passes only a good plan.
  */
-async function instructionsPr(o: { base: string | null; head: string; cases?: boolean; enabled?: boolean; cap?: number }) {
+async function instructionsPr(o: { base: string | null; head: string; cases?: boolean; enabled?: boolean; cap?: number; file?: string; casesFile?: string }) {
   const f = fixture();
+  const file = o.file ?? 'AGENTS.md';
+  const casesFile = o.casesFile ?? join(BRAND.configDir, 'evals', 'AGENTS.md');
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   if (o.enabled === false) f.cfg.agents.instruction_evals.enabled = false;
   if (o.cap) f.cfg.agents.instruction_evals.cap_usd = o.cap;
-  if (o.base !== null) writeFileSync(join(f.repo, 'AGENTS.md'), o.base);
+  // A project that lets its role prompts change through tasks (the example protects its whole config folder).
+  if (o.file?.startsWith(BRAND.configDir)) {
+    f.cfg.guardrails.protected_paths = f.cfg.guardrails.protected_paths.filter((g) => !g.startsWith(BRAND.configDir));
+    if (f.cfg.review) f.cfg.review.levels.L3_human.when = f.cfg.review.levels.L3_human.when.filter((c) => c !== 'harness-config');
+  }
+  if (o.base !== null) {
+    mkdirSync(dirname(join(f.repo, file)), { recursive: true });
+    writeFileSync(join(f.repo, file), o.base);
+  }
   if (o.cases !== false) {
-    mkdirSync(join(f.repo, BRAND.configDir, 'evals'), { recursive: true });
-    writeFileSync(join(f.repo, BRAND.configDir, 'evals', 'AGENTS.md'), AGENTS_CASES);
+    mkdirSync(dirname(join(f.repo, casesFile)), { recursive: true });
+    writeFileSync(join(f.repo, casesFile), AGENTS_CASES);
   }
   if (o.base !== null || o.cases !== false) {
     git(f.repo, 'add', '-A');
@@ -2004,14 +2020,18 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const runner = agents({
     worker: workerWith((req) => {
-      writeFileSync(join(req.cwd, 'AGENTS.md'), o.head);
+      mkdirSync(dirname(join(req.cwd, file)), { recursive: true });
+      writeFileSync(join(req.cwd, file), o.head);
       return null;
     }),
     'evaluator-verdict': approve(),
     'instruction-eval': (req) => {
-      if ('plan' in ((req.jsonSchema as { properties: object }).properties ?? {})) return { plan: req.appendSystemPrompt?.includes('BAD') ? 'edit the ledger by hand' : 'read the alert row first' };
+      const props = (req.jsonSchema as { properties: object }).properties ?? {};
+      // The held-out case writer: cases about the same duty, written from the contract it was given.
+      if ('cases' in props) return { cases: [1, 2, 3].map((i) => ({ title: `Held ${i}`, situation: ['An alert fires on the ledger.', 'Nothing else is known.'], correct: ['Reads the alert row first.'], wrong: ['Edits the ledger by hand.'] })) };
+      if ('plan' in props) return { plan: req.appendSystemPrompt?.includes('BAD') ? 'edit the ledger by hand' : 'read the alert row first' };
       const good = /<plan>\nread the alert row/.test(req.prompt);
-      return { notes: '', correct: [good], wrong: [!good] };
+      return { '1': good, '2': !good };
     },
   });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
@@ -2028,35 +2048,69 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
 test('instruction evals: a change that makes AGENTS.md score lower waits for the owner, with the per-case diff and the cost', { skip }, async () => {
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'BAD: act first.\n' });
   const e = lastOf(t.f.log, 'instructions.eval') as { target: string; base: object; result: object; dropped: boolean; changes: object[]; cost_usd: number };
-  assert.deepEqual([e.target, e.base, e.result, e.dropped], ['AGENTS.md', { passed: 1, total: 1 }, { passed: 0, total: 1 }, true]);
+  assert.deepEqual([e.target, e.base, e.result, e.dropped], ['AGENTS.md', { passed: 2, total: 2 }, { passed: 0, total: 2 }, true], 'rubric items met');
   assert.deepEqual(e.changes, [{ id: '1', title: 'Ledger alert', base: 'pass', head: 'fail' }]);
   assert.ok(e.cost_usd > 0);
   assert.equal(t.decided.auto, false);
-  assert.deepEqual(t.decided.reasons, [`eval: AGENTS.md scored lower, 1/1 → 0/1 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
+  assert.deepEqual(evalOnly(t.decided.reasons), [`eval: AGENTS.md scored lower, 2/2 → 0/2 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
   assert.ok(!t.pr.merged);
   assert.ok(t.pr.comments.some((x) => /waits for you[\s\S]*case 1 "Ledger alert": pass → fail/.test(x.body)), 'the waiting comment carries the diff');
-  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: 1\/1 → 0\/1, \*\*lower\*\*; case 1 pass → fail/);
-  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'instruction-eval').length, 4, 'base and head, each a plan and a judgement');
+  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: visible 2\/2 → 0\/2, \*\*lower\*\*; case 1 pass → fail, 3 sample\(s\) per case/);
+  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'instruction-eval').length, 12, 'base and head, 3 samples each, each a plan and a judgement');
   // The agent under test never saw the rubric, and was a different model from the judge.
   const evalRuns = t.runner.calls.filter((r) => r.role === 'instruction-eval');
   const underTest = evalRuns.filter((r) => r.appendSystemPrompt);
-  assert.ok(underTest.length === 2 && underTest.every((r) => !/Reads the alert row first|Edits the ledger by hand/.test(r.prompt) && r.model === 'sonnet'));
+  assert.ok(underTest.length === 6 && underTest.every((r) => !/Reads the alert row first|Edits the ledger by hand/.test(r.prompt) && r.model === 'sonnet'));
   assert.ok(evalRuns.filter((r) => !r.appendSystemPrompt).every((r) => r.model === 'opus'));
 });
 
-test('instruction evals: no drop, no reason: the change auto-merges', { skip }, async () => {
+const ROLE_PROMPT = (rule: string) => `You keep the ledger.\nOwn: the ledger stays right.\nSources: the alert row.\nOutput: a note.\nApproval: the owner's for any edit.\nFailure: If a source is missing, stale or contradictory, report it; never guess or fill from memory.\n- ${rule}\nNever: edit the ledger by hand.\n`;
+
+test('instruction evals: a role prompt is also judged on held-out cases a separate run wrote from its contract into the coordinator state; a held-out drop holds the PR', { skip }, async () => {
+  const t = await instructionsPr({ base: ROLE_PROMPT('Read the alert row first.'), head: ROLE_PROMPT('BAD: act first.'), file: join(BRAND.configDir, 'roles', 'worker.md'), casesFile: join(BRAND.configDir, 'evals', 'roles', 'worker.md') });
+  const e = lastOf(t.f.log, 'instructions.eval') as { target: string; held_out: { base: object; result: object; dropped: boolean } | null; samples: number };
+  assert.equal(e.target, 'role worker');
+  assert.equal(e.samples, 3);
+  assert.deepEqual([e.held_out?.base, e.held_out?.result, e.held_out?.dropped], [{ passed: 6, total: 6 }, { passed: 0, total: 6 }, true]);
+  // Written once, by a run that saw only the contract lines of the base prompt, into the coordinator's state.
+  const writer = t.runner.calls.filter((r) => r.role === 'instruction-eval' && 'cases' in ((r.jsonSchema as { properties: object }).properties ?? {}));
+  assert.equal(writer.length, 1);
+  assert.ok(!writer[0]!.appendSystemPrompt && !writer[0]!.prompt.includes('You keep the ledger.') && !writer[0]!.prompt.includes('Read the alert row first.'), 'no prompt text beyond the contract lines');
+  assert.match(writer[0]!.prompt, /Own: the ledger stays right\./);
+  const store = join(t.f.stateDir, 'evals', 'held-out', 'roles', 'worker.md');
+  assert.ok(existsSync(store), 'kept in the coordinator state, not the repo');
+  if (process.platform !== 'win32') assert.equal(statSync(store).mode & 0o777, 0o600);
+  assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'eval-case-writer').length, 1);
+  assert.equal(t.decided.auto, false);
+  assert.ok(t.decided.reasons.some((r) => /scored lower on its held-out cases, 6\/6 → 0\/6/.test(r)), t.decided.reasons.join(' | '));
+});
+
+test("instruction evals: no drop, no eval reason; the change still waits, because the agents' instructions never auto-merge", { skip }, async () => {
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'Read the alert, then act.\n' });
   assert.equal((lastOf(t.f.log, 'instructions.eval') as { dropped: boolean }).dropped, false);
-  assert.equal(t.decided.auto, true, t.decided.reasons.join('; '));
-  assert.ok(t.pr.merged);
+  assert.equal(t.decided.auto, false);
+  assert.deepEqual(t.decided.reasons, ['high-risk: agent-instructions (AGENTS.md)']);
+  assert.ok(!t.pr.merged);
+});
+
+test('instruction evals: a skill in the config folder is evaluated from its cases beside it, and a drop holds the PR', { skip }, async () => {
+  const file = `${BRAND.configDir}/skills/triage/SKILL.md`;
+  // A skill that passes the skill lint (the push check refuses one that doesn't).
+  const skill = (steps: string) => ['When to use', 'Inputs and access', 'Steps', 'Validate', 'Return', 'Approval'].map((s) => `## ${s}\n${s === 'Steps' ? steps : 'As usual.'}\n`).join('\n');
+  const t = await instructionsPr({ base: skill('Read before you act.'), head: skill('BAD: act first.'), file, casesFile: `${BRAND.configDir}/skills/triage/evals/cases.md` });
+  const e = lastOf(t.f.log, 'instructions.eval') as { target: string; base: object; result: object; dropped: boolean };
+  assert.deepEqual([e.target, e.base, e.result, e.dropped], [`skill triage (${BRAND.configDir})`, { passed: 2, total: 2 }, { passed: 0, total: 2 }, true]);
+  assert.equal(t.decided.auto, false);
+  assert.ok(t.decided.reasons.some((r) => r.startsWith(`eval: skill triage (${BRAND.configDir}) scored lower`)), t.decided.reasons.join(' | '));
+  assert.ok(t.decided.reasons.includes(`high-risk: agent-instructions (${file})`), t.decided.reasons.join(' | '));
 });
 
 test('instruction evals: instructions without eval cases, or evals turned off, wait for the owner (fail closed)', { skip }, async () => {
   const none = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', cases: false });
-  assert.deepEqual(none.decided.reasons, [`eval: AGENTS.md was not evaluated: no eval cases (${BRAND.configDir}/evals/AGENTS.md)`]);
+  assert.deepEqual(evalOnly(none.decided.reasons), [`eval: AGENTS.md was not evaluated: no eval cases (${BRAND.configDir}/evals/AGENTS.md)`]);
   assert.ok(!none.runner.calls.some((r) => r.role === 'instruction-eval'), 'nothing to run');
   const off = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', enabled: false });
-  assert.deepEqual(off.decided.reasons, ['eval: AGENTS.md was not evaluated: instruction evals are off (agents.yaml instruction_evals)']);
+  assert.deepEqual(evalOnly(off.decided.reasons), ['eval: AGENTS.md was not evaluated: instruction evals are off (agents.yaml instruction_evals)']);
 });
 
 test('instruction evals: the spend cap bounds an eval; cut short, the PR waits', { skip }, async () => {
@@ -2352,6 +2406,27 @@ test('push limits on the change: refused before any check runs, the worker is to
   assert.match(comment, /the push was refused:\n- touches paths that are never pushed \(data\/dump\.json\)/);
 });
 
+test('a failing pre-land step that prints secrets: the block comment and the land.result event carry its tail with the secrets redacted (#130)', { skip }, async () => {
+  const f = fixture();
+  // The secrets exist only in the step's output, joined at run time.
+  f.cfg.tests.land.pre = [`node -e "console.log('building'); console.log('DATABASE_URL=postgres://app:' + 'hunter2pass' + '@db.example.invalid/shop'); console.log('auth ghp_' + 'Q7w8E9r0T1y2U3i4O5p6A7s8D9f0G1h2J3k4'); console.log('end of output'); process.exit(1)"`];
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => /the pre-land step/.test(b));
+  assert.ok(comment, (await f.backlog.comments(n)).map((x) => x.body).join('\n---\n'));
+  const event = JSON.stringify(f.log.read(0, ['land.result']).at(-1)!.payload);
+  for (const [where, text] of [['comment', comment], ['land.result', event]] as const) {
+    // (The step's own command, quoted in the comment, holds the pieces apart; the joined secret is what it printed.)
+    assert.ok(!text.includes('app:hunter2pass@'), `${where}: no connection-string password`);
+    assert.ok(!/ghp_Q7w8E9r0T1y2/.test(text), `${where}: no token`);
+    assert.match(text, /end of output/, `${where}: the rest of the tail is kept`);
+    assert.match(text, /postgres:\/\/app:\[REDACTED\]@db\.example\.invalid/, `${where}: redacted in place`);
+  }
+});
+
 test('push limits at the push: a pre-land step that adds a refused file stops the landing; main is untouched and the issue blocked', { skip }, async () => {
   const f = fixture();
   f.cfg.guardrails.push.refuse_paths = ['gen/**'];
@@ -2506,4 +2581,123 @@ test("the project's own variables reach its agents, its worktree setup and its c
   const { duration_ms: _ms, ...probe } = verify.checks.find((x) => x.check.includes('PROJECT_PROBE')) as { check: string; duration_ms?: number };
   assert.deepEqual(probe, { check: 'test "$PROJECT_PROBE" = yes', status: 'pass', exitCode: 0 });
   assert.equal(f.log.read(0, ['coordinator.error']).length, 0, 'worktree setup saw the variable');
+});
+
+test('verify: a done_when item of a kind it has no branch for fails the attempt ("unknown done_when kind"), never passes by being skipped', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const head = git(f.repo, 'rev-parse', 'HEAD');
+  // A kind the DoneWhen type doesn't have (one a future track adds), cast past the type as bad data would be.
+  const doneWhen = [{ manual: 'looks right on a phone' }, { lighthouse: 'checkout page' }] as unknown as DoneWhenList;
+  const verify = (c as unknown as { verify: (n: number, path: string, head: string, d: DoneWhenList, r: null) => Promise<{ check: string; status: string; tail: string }[]> }).verify.bind(c);
+  const checks = await verify(n, f.repo, head, doneWhen, null);
+  const bad = checks.find((x) => /unknown done_when kind/.test(x.tail));
+  assert.ok(bad, `a failed check names the unknown kind: ${JSON.stringify(checks)}`);
+  assert.equal(bad.status, 'fail');
+  assert.match(bad.check, /lighthouse/);
+  assert.ok(!checks.some((x) => /phone/.test(x.check)), 'a manual item is not run (it is NOT CHECKED in the receipts)');
+  const recorded = (lastOf(f.log, 'check.result') as { checks: { status: string }[] }).checks;
+  assert.ok(recorded.some((x) => x.status === 'fail'), 'recorded as a failure');
+});
+
+test('a browser: check the coordinator cannot run (no app declared) fails the attempt; it is never counted as passed', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: 'Totals.\n\n```done_when\n- test: test/price.test.js\n- browser: checkout\n```\n', author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 2 });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string; kind?: string }[] }).filter((p) => p.stage === 'verify');
+  assert.ok(verify.length >= 1);
+  for (const v of verify) {
+    const b = v.checks.find((x) => x.check === 'browser checkout');
+    assert.deepEqual([b?.status, b?.kind], ['unavailable', 'browser'], JSON.stringify(v.checks));
+  }
+  const retry = runner.calls.filter((r) => r.role === 'worker')[1]!;
+  assert.match(retry.prompt, /browser checkout: unavailable\n.*no app is declared/);
+  assert.ok(!f.log.read(0, ['land.result']).some((e) => (e.payload as { outcome: string }).outcome === 'landed'), 'nothing landed');
+});
+
+const chrome = findChrome(process.env.CHROME);
+realChromeTests();
+
+test('a change touching the app\'s UI runs its flows in a real browser: VERIFIED lists them, the PR gets a BROWSER CHECKS section, and a browser claim is backed', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+  const server = `"${process.execPath}" -e "require('http').createServer((q, s) => s.end('<p data-testid=ok>ok</p>')).listen(Number(process.env.PORT), '127.0.0.1')"`;
+  const port = await freePort();
+  const t = await openPr({ worker: workerSaying('Guarded totals against non-positive quantities. Checked the totals page in the browser.') }, {
+    edit: (cfg) => {
+      cfg.app = AppConfig.parse({ version: 1, start: { command: server, port, ready: { timeout_s: 30 } }, ui_paths: ['src/**'], thresholds: { max_long_task_ms: 10_000 }, flows: { home: [{ goto: '/' }, { expect_text: { target: 'testid:ok', text: 'ok' } }] } });
+    },
+  });
+  const body = t.pr().body;
+  const section = (name: string) => body.split(`### ${name}\n`)[1]!.split('\n\n')[0]!;
+  assert.match(section('VERIFIED'), /^- `browser home`: pass/m, body);
+  assert.match(section('BROWSER CHECKS'), /- Why: the change touches 1 file\(s\) under ui_paths, so every flow runs/);
+  assert.match(section('BROWSER CHECKS'), /- UI files touched: `src\/price\.js`/);
+  assert.match(section('BROWSER CHECKS'), /- `browser home`: pass\n {2}- before the change \(base `[0-9a-f]{12}`\): 2\/2 steps held, 0 console error\(s\)[^\n]*\n {2}- after the change: 2\/2 steps held, 0 console error\(s\)/);
+  assert.equal(section('NOT VERIFIED').trim(), "- nothing: every claim in the worker's summary is backed by a recorded command or check", 'the passing browser check backs the browser claim');
+  assert.equal(await portInUse(port), false, 'the app was stopped');
+});
+
+/**
+ * A project whose app already logs an error on main ("legacy warning"); it logs "cart broke" too once
+ * src/new-error.js exists, and (with `needsReady`) only starts at all once src/serve-ok.js exists. The issue asks
+ * for the `home` flow; the worker makes the usual fix plus whatever `extra` files it's given.
+ */
+async function browserBaselineRun(o: { extra: string[]; needsReady?: boolean }) {
+  const f = fixture();
+  writeFileSync(
+    join(f.repo, 'server.mjs'),
+    `import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
+${o.needsReady ? "if (!existsSync('src/serve-ok.js')) process.exit(1);\n" : ''}const extra = existsSync('src/new-error.js') ? "console.error('cart broke');" : '';
+const page = '<!doctype html><title>t</title><p data-testid="ok">ok</p><script>console.error("legacy warning");' + extra + '</script>';
+createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end(page); }).listen(Number(process.env.PORT), '127.0.0.1');
+`,
+  );
+  git(f.repo, 'add', 'server.mjs');
+  git(f.repo, 'commit', '-q', '-m', 'app');
+  git(f.repo, 'push', '-q', 'origin', 'main');
+  const port = await freePort();
+  f.cfg.app = AppConfig.parse({ version: 1, start: { command: `"${process.execPath}" server.mjs`, port, ready: { timeout_s: 5 } }, ui_paths: ['web/**'], thresholds: { max_long_task_ms: 10_000 }, flows: { home: [{ goto: '/' }, { expect_text: { target: 'testid:ok', text: 'ok' } }] } });
+  f.backlog.open({ title: 'Totals count negative quantities', body: 'Totals.\n\n```done_when\n- test: test/price.test.js\n- browser: home\n```\n', author: 'example-owner', labels: ['ready'] });
+  const worker = (req: RunRequest) => {
+    for (const x of o.extra) writeFileSync(join(req.cwd, 'src', x), 'export {};\n');
+    return workerSaying('fixed')(req);
+  };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents({ worker }), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 1 });
+  await c.tick();
+  await c.idle();
+  const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string; tail?: string }[] }).filter((p) => p.stage === 'verify').at(-1)!;
+  const lines = (lastOf(f.log, 'browser.evidence') as { lines: string[] }).lines;
+  const worktrees = git(f.repo, 'worktree', 'list');
+  return { check: verify.checks.find((x) => x.check === 'browser home')!, lines, worktrees, port };
+}
+
+test('the browser baseline: an error the base already logs is not new, so the flow passes; the base worktree is gone afterwards', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+  const r = await browserBaselineRun({ extra: [] });
+  assert.equal(r.check.status, 'pass', `${r.check.tail}\n${r.lines.join('\n')}`);
+  assert.ok(r.lines.some((l) => /^ {2}- before the change \(base `[0-9a-f]{12}`\): 2\/2 steps held, 1 console error\(s\)/.test(l)), r.lines.join('\n'));
+  assert.ok(r.lines.some((l) => /^ {2}- after the change: 2\/2 steps held, 1 console error\(s\)/.test(l)));
+  assert.doesNotMatch(r.worktrees, /browser-base/, 'the base worktree was removed');
+  assert.equal(await portInUse(r.port), false);
+});
+
+test('the browser baseline: an error the change adds fails the flow, naming only the new one', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+  const r = await browserBaselineRun({ extra: ['new-error.js'] });
+  assert.equal(r.check.status, 'fail');
+  assert.match(r.check.tail ?? '', /new console error: cart broke/);
+  assert.doesNotMatch(r.check.tail ?? '', /legacy warning/, 'the error main already has is not counted');
+  assert.doesNotMatch(r.worktrees, /browser-base/);
+});
+
+test("the browser baseline: an app that won't start at base is said, and the flow is judged with none (every error counts)", { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+  const r = await browserBaselineRun({ extra: ['serve-ok.js'], needsReady: true });
+  assert.equal(r.check.status, 'fail', 'no silent pass for want of a baseline');
+  assert.match(r.check.tail ?? '', /new console error: legacy warning/);
+  assert.match(r.check.tail ?? '', /no baseline at base [0-9a-f]{12} \(the app couldn't be run at base: .*\), so every error was counted as new/);
+  assert.ok(r.lines.some((l) => /^ {2}- no baseline \(base `[0-9a-f]{12}`\): `the app couldn't be run at base/.test(l)), r.lines.join('\n'));
+  assert.doesNotMatch(r.worktrees, /browser-base/);
 });

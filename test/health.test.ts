@@ -146,7 +146,7 @@ test('the dashboard serves /api/health behind its token, from the OS adapter\'s 
     assert.equal(v.usage.days[0]!.estimatedUsd, 0.4);
     assert.equal(v.usage.quotaNote, QUOTA_NOTE);
     assert.deepEqual(v.suggestions, NOTHING);
-    const viaHub = await fetch(`${h.url.split('/?')[0]}/api/i/shop/health`, { headers: { authorization: `Bearer ${h.token}` } });
+    const viaHub = await fetch(`${h.breakGlassUrl.split('/?')[0]}/api/i/shop/health`, { headers: { authorization: `Bearer ${h.token}` } });
     assert.equal(viaHub.status, 200);
     assert.equal(((await viaHub.json()) as { instance: string }).instance, 'shop@box');
   } finally {

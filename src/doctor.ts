@@ -10,8 +10,10 @@ import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instancesDir, policiesForRepo, policyViolations, readPolicy } from './instance.js';
-import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
+import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
+import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
+import { projectStateDir } from './guardrails/context.js';
+import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
 export type Level = 'ok' | 'warn' | 'fail';
@@ -23,8 +25,22 @@ export interface DoctorCheck {
 
 const CLAUDE_MD_TOKEN_BUDGET = 2500;
 
-function nodeMajor(): number {
-  return Number(process.versions.node.split('.')[0]);
+/**
+ * An instance's agent API key file (credentials.yaml agent_api_key): present, owned by the agent user, and open to
+ * nobody else (no group or other bits). The file is never read. The coordinator user normally can't even see it
+ * (it lives in the agent user's home), which is right: then this says to run doctor as root to check the mode.
+ */
+export function apiKeyCheck(file: string, agentUser: string | null, access = fileAccess, uidOf = userUid): { level: Level; detail: string } {
+  if (!agentUser) return { level: 'fail', detail: `${file}: an API key needs agents to run as their own user (instance.yaml run_as)` };
+  const a = access(file);
+  if (a.kind === 'unsupported') return { level: 'warn', detail: 'API-key instances run agents as their own POSIX user; not checkable on native Windows' };
+  if (a.kind === 'missing') return { level: 'fail', detail: `${file} not found: install it with \`scripts/setup/credentials.sh <name> api-key\`` };
+  if (a.kind === 'hidden') return { level: 'warn', detail: `${file} can't be seen from this user, as intended (it is ${agentUser}'s); to check its owner and mode, run doctor as root` };
+  const uid = uidOf(agentUser);
+  if (uid === null) return { level: 'fail', detail: `the agent user ${agentUser} does not exist on this machine` };
+  if (a.uid !== uid) return { level: 'fail', detail: `${file} is not owned by ${agentUser}: reinstall it with credentials.sh` };
+  if (a.openToOthers) return { level: 'fail', detail: `${file} is mode ${a.mode}: only ${agentUser} may read it (0400). Run: chmod 0400 ${file}` };
+  return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
 }
 
 export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string } = {}): DoctorCheck[] {
@@ -33,8 +49,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
 
   const [maj, min] = process.versions.node.split('.').map(Number) as [number, number];
-  if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; hooks need >= 22.13`);
-  else if (nodeMajor() < 24) add('node', 'warn', `Node ${process.versions.node}: hooks OK; the coordinator (step 2) needs >= 24`);
+  // The engine's requirement (package.json engines): every part, hooks and coordinator alike, runs on it.
+  if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
   else add('node', 'ok', `Node ${process.versions.node}`);
 
   let cfg: Config | null = null;
@@ -43,6 +59,17 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     add('config', 'ok', `${BRAND.configDir}/ valid`);
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
+  }
+
+  // Migrations: anything newer than this engine, or pending steps the coordinator won't start with.
+  const targets: [string, Targets][] = [['migrations', { configFiles: projectConfigFiles(root), eventsDb: join(projectStateDir(root), 'events.db') }], ...(opts.instance ? [[`migrations ${opts.instance}`, instanceTargets(join(instancesDir(), opts.instance))] as [string, Targets]] : [])];
+  for (const [name, t] of targets) {
+    const plan = planMigrations(t);
+    const manual = plan.pending.filter((p) => !p.auto);
+    const lines = [...plan.newer, ...plan.pending.map((p) => `${p.path}: ${p.kind} version ${p.from} -> ${p.to}${p.auto ? ' (applied at the next start)' : ''}: ${p.steps.join('; ')}`)];
+    if (plan.newer.length) add(name, 'fail', `${lines.join('\n')}\nnewer than this engine: update the engine, or restore the backup made before the migration`);
+    else if (manual.length) add(name, 'fail', `${lines.join('\n')}\nthe coordinator won't start until you run \`${BRAND.cli} migrate${name === 'migrations' ? '' : ` --instance ${opts.instance}`}\` (it backs each file up first)`);
+    else add(name, 'ok', lines.length ? lines.join('\n') : 'config and state at the current versions');
   }
 
   // A repo config may only tighten the policy of the instance that runs it; the coordinator refuses to start otherwise.
@@ -67,6 +94,16 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   // instances installed before agent settings still find them.
   const instances = [...new Set([...(opts.instance ? [opts.instance] : []), ...(cfg ? policiesForRepo(cfg.project.project.repo).map((p) => p.name) : [])])];
   for (const name of instances) {
+    // An API-key instance: its key file is the agent user's alone.
+    try {
+      const inst = loadInstance(name);
+      if (inst.credentials.agent_api_key) {
+        const k = apiKeyCheck(inst.credentials.agent_api_key, inst.runAs?.user ?? null);
+        add(`api key ${name}`, k.level, k.detail);
+      }
+    } catch {
+      // an instance this user can't load is reported by its own checks
+    }
     const file = agentSettingsPath(join(instancesDir(), name));
     if (!existsSync(file)) {
       // Hooks in the checkout's own .claude/settings.json (an install from before agent settings) don't count: the

@@ -12,6 +12,7 @@ import { Header } from './Overview';
 export const KINDS: [WaitKind, string][] = [
   ['emergency_halt', 'Emergency stop in force'],
   ['merge_stopped', 'Auto-merge stopped'],
+  ['main_checks_timed_out', 'Auto-merges whose checks on the default branch never reported'],
   ['awaiting_decision', 'Decisions waiting for you'],
   ['plan_held', 'Plans held for you'],
   ['needs_owner', 'PRs waiting for you to review and merge'],
@@ -21,6 +22,7 @@ export const KINDS: [WaitKind, string][] = [
   ['deploy_failed', 'Deploys that failed'],
   ['check_held', 'PRs held back by a required check'],
   ['hotspot_held', 'Tasks held behind another on the same files'],
+  ['update_held', 'Engine updates rolled back and held'],
 ];
 
 /** How long, in words (the digest's own wording). */
@@ -32,8 +34,8 @@ export function waited(since: string, now = Date.now()): string {
 }
 
 /** For a viewer the state says may not read it, the refusal the server would give; null for the owner and writers. */
-export const waitingRefusal = (state: Pick<State, 'canReadDigest' | 'owners' | 'user'>) =>
-  state.canReadDigest === false ? `what waits on the owner is for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+export const waitingRefusal = (state: Pick<State, 'canReadDigest' | 'owners' | 'user' | 'role'>) =>
+  state.canReadDigest === false ? `what waits on the owner is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 function Subject({ i }: { i: WaitItem }) {
   const issue = i.issue !== null && (

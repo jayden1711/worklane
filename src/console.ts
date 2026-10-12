@@ -3,8 +3,9 @@
 // request is a file in the instance's state (<state>/console/requests/), which
 // the coordinator takes within seconds and acts on; every outcome is an event.
 // The coordinator lists its live runs in <state>/console/live.json. Only the
-// owner (owners.default) may message or stop a run, or read its live feed:
-// checked here, and again by the coordinator.
+// owner may message or stop a run: owners.default, or one the dashboard read
+// as an owner of the instance (admin on its repo; the request says so).
+// Checked here, and again by the coordinator.
 //
 // A message is held until the agent's current turn ends, then delivered (one
 // sent mid-turn would be folded into that turn and change its outcome); the
@@ -41,13 +42,14 @@ export interface LiveRun {
   pending: PendingMessage[];
 }
 
-export type ConsoleRequest = { v: 1; id: string; at: string; by: string; run: string } & ({ kind: 'message'; text: string } | { kind: 'stop' });
+/** `owner`: the instance's own dashboard read `by` as one of its owners (admin on the repo). */
+export type ConsoleRequest = { v: 1; id: string; at: string; by: string; run: string; owner?: true } & ({ kind: 'message'; text: string } | { kind: 'stop' });
 
 const dirs = (stateDir: string) => ({ root: join(stateDir, CONSOLE_DIR), requests: join(stateDir, CONSOLE_DIR, 'requests'), live: join(stateDir, CONSOLE_DIR, 'live.json') });
 
-function ownerOnly(cfg: Config, by: string, what: string) {
+function ownerOnly(cfg: Config, by: string, what: string, isOwner?: boolean) {
   const owner = cfg.project.owners.default;
-  if (!by || by.toLowerCase() !== owner.toLowerCase()) throw new ConsoleError(`only the owner (@${owner}) may ${what}; @${by || 'unknown'} may not`);
+  if (!by || !(isOwner ?? by.toLowerCase() === owner.toLowerCase())) throw new ConsoleError(`only the owner (@${owner}) may ${what}; @${by || 'unknown'} may not`);
 }
 
 /** The runs live right now (empty when the coordinator isn't running any, or hasn't written the list). */
@@ -60,7 +62,7 @@ export function liveRuns(stateDir: string): LiveRun[] {
   }
 }
 
-function request(stateDir: string, r: { kind: 'message'; run: string; text: string; by: string } | { kind: 'stop'; run: string; by: string }, now = new Date()): { id: string } {
+function request(stateDir: string, r: ({ kind: 'message'; run: string; text: string; by: string } | { kind: 'stop'; run: string; by: string }) & { owner?: true }, now = new Date()): { id: string } {
   const d = dirs(stateDir);
   groupOnlyDir(d.requests);
   const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
@@ -78,20 +80,20 @@ function liveRun(stateDir: string, run: string): LiveRun {
 }
 
 /** Message a live run (owner only). Queued at once; delivered when the agent's current turn ends. */
-export function sendMessage(o: { stateDir: string; cfg: Config; run: string; text: string; by: string; now?: Date }): { id: string } {
-  ownerOnly(o.cfg, o.by, 'message a run');
+export function sendMessage(o: { stateDir: string; cfg: Config; run: string; text: string; by: string; owner?: boolean; now?: Date }): { id: string } {
+  ownerOnly(o.cfg, o.by, 'message a run', o.owner);
   const text = o.text.trim();
   if (!text) throw new ConsoleError('the message is empty');
   if (text.length > MAX_MESSAGE) throw new ConsoleError(`the message is over ${MAX_MESSAGE} characters`);
   liveRun(o.stateDir, o.run);
-  return request(o.stateDir, { kind: 'message', run: o.run, text, by: o.by }, o.now);
+  return request(o.stateDir, { kind: 'message', run: o.run, text, by: o.by, ...(o.owner ? { owner: true as const } : {}) }, o.now);
 }
 
 /** Stop a live run (owner only): its process tree ends; the task it was on is blocked, saying who stopped it. */
-export function stopRun(o: { stateDir: string; cfg: Config; run: string; by: string; now?: Date }): { id: string } {
-  ownerOnly(o.cfg, o.by, 'stop a run');
+export function stopRun(o: { stateDir: string; cfg: Config; run: string; by: string; owner?: boolean; now?: Date }): { id: string } {
+  ownerOnly(o.cfg, o.by, 'stop a run', o.owner);
   liveRun(o.stateDir, o.run);
-  return request(o.stateDir, { kind: 'stop', run: o.run, by: o.by }, o.now);
+  return request(o.stateDir, { kind: 'stop', run: o.run, by: o.by, ...(o.owner ? { owner: true as const } : {}) }, o.now);
 }
 
 /** A run's live feed after `after` (owner only); the same items whether the run is live or ended. */

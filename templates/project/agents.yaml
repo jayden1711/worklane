@@ -8,10 +8,20 @@ roles:
   ci_repair: { enabled: false, model: sonnet, max_fixes_per_pr: 2 }
 # A change to the agents' own instructions (.claude/skills/**, AGENTS.md, roles/*.md here) is
 # evaluated before it lands: its eval cases (a skill's evals/cases.md; evals/AGENTS.md and
-# evals/roles/<role>.md in this folder) at the base and at the head. A lower score, a cap hit
-# or no cases: the PR waits for you, with the per-case diff. The judge is never the model
-# under test (defaults: the workers' model under test, the evaluator's as judge).
-instruction_evals: { enabled: true, cap_usd: 5, samples: 1 }
+# evals/roles/<role>.md in this folder) at the base and at the head, 3 samples per case. A role
+# is also judged on its held-out cases (written from its contract by a separate agent, kept in
+# the coordinator's state where no agent reads them), and that score decides. A lower score, a
+# cap hit, no cases or no held-out cases: the PR waits for you, with the per-case diff. The
+# judge answers yes/no per rubric item and is never the model under test (defaults: the
+# workers' model under test, the evaluator's as judge).
+instruction_evals: { enabled: true, cap_usd: 10, samples: 3 }
+# Which model each kind of run uses, decided in code. Defaults: builds (worker, investigator, conflict fix)
+# on workers.model; an issue labelled size:L, money-path, review:L3 or high-risk, or a build that already
+# failed escalate_after times, on hard_issues_model (else opus); planning, research and eval answers on
+# sonnet, as is the stage-label judge; intake replies on haiku; intake triage on the researcher's model (else
+# the workers'). Override any key here; the instance's policy.yaml settings.model_cap caps every model at a tier.
+# model_routing: { build: sonnet, build_high_risk: opus, escalate_after: 2, planner: sonnet, research: sonnet,
+#                  intake_triage: sonnet, intake_replier: haiku, stage_judge: sonnet, eval_answer: sonnet }
 # Tiered evaluation, decided in code: changes at cheap_levels (L0: docs-only, tests-only, comment-only) are
 # judged by cheap_model, the rest by the evaluator's model; a failed or uncertain cheap verdict is judged once
 # more by the evaluator's model. An instance can override it in policy.yaml settings.eval_routing.

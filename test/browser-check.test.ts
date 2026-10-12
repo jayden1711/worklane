@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { REAL_CHROME_TIMEOUT, realChromeTests } from './browser-helpers.js';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,8 +95,9 @@ test('a check that cannot run is unavailable, never passed: no app declared, or 
 });
 
 const chrome = findChrome(process.env.CHROME);
+realChromeTests();
 
-test('a real check: a clean flow passes; the same app with a broken button fails, naming what broke', { skip: !chrome && 'no Chrome or Chromium on this machine (set CHROME)', timeout: 120_000 }, async () => {
+test('a real check: a clean flow passes; the same app with a broken button fails, naming what broke', { skip: !chrome && 'no Chrome or Chromium on this machine (set CHROME)', timeout: REAL_CHROME_TIMEOUT }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-check-real-'));
   writeFileSync(
     join(dir, 'server.mjs'),

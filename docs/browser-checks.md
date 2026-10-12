@@ -1,13 +1,13 @@
 # Browser checks for a project's app
 
-Status: being built as modules (Track B). Nothing runs yet: the coordinator doesn't start apps or run browser
-checks until Track B's wiring lands, and a project without an app never will.
+Status: wired into the coordinator's verify() (`src/coordinator/browser.ts`). A project without an app runs
+none unless an issue asks for one, and then the check is unavailable, which fails the attempt.
 
 A project with a web app can have its changes checked in a real browser: the harness starts the app in the
 task's worktree, drives headless Chromium through named flows, and records console errors, failed and slow
-requests, a performance-trace summary and a screenshot. A UI fix is reproduced first (evidence attached), fixed,
-and the same flow run again (after-evidence attached). Only PRs that touch the app's UI paths, or issues that
-ask for it, run a browser check; everything else pays nothing.
+requests, a performance-trace summary and a screenshot. Each flow is run at the base commit first, so only what
+the change adds counts against it, and the PR shows the two side by side. Only PRs that touch the app's UI paths,
+or issues that ask for it, run a browser check; everything else pays nothing.
 
 ## `.worklane/app.yaml`
 
@@ -57,6 +57,19 @@ name other than lowercase letters, digits and dashes is refused, with the reason
 With no Chrome or Chromium on the machine (set `CHROME` to its path), the run is skipped with that reason and
 nothing is started.
 
+**Timeouts** (`browserTimeouts()` in `src/browser/cdp.ts`):
+
+| Wait | Default |
+|---|---|
+| Chrome's start, until its DevTools port and page are up | 30 s |
+| One DevTools command, such as a navigation or a screenshot | 30 s |
+| A step waiting for its target or text | 10 s |
+| The DevTools socket opening | 10 s |
+
+A slow or loaded machine, such as a shared CI runner, scales them all with `WORKLANE_BROWSER_TIMEOUT_SCALE` (1 to 20). The repo's real-Chrome tests set it to 3.
+
+If Chrome's DevTools port never appears, Chrome is stopped and started once more, and the evidence notes it. A Chrome that can't start or crashes isn't retried.
+
 ## The `browser:` check (`src/browser/check.ts`)
 
 `- browser: checkout` in `done_when` runs the app's `checkout` flow and judges it. It passes only when:
@@ -83,7 +96,42 @@ fails.
   files it touched (the first 10).
 - Anything else, or a project with no app, runs none.
 
-## Not yet
+## Evidence in the PR and its receipts (`src/browser/evidence.ts`)
 
-- A `browser:` check in an issue's `done_when` is refused until the coordinator runs browser checks, so one can
-  never be skipped and counted as passed.
+The PR description gets a `BROWSER CHECKS` section:
+- why checks ran or didn't, and the UI files touched;
+- per flow: its result, a one-line summary (steps held, console errors, failed and slow requests, the longest
+  task, dropped frames), the reasons it failed, and the errors and requests seen (5 of each at most);
+- for a UI fix, the reproduction run before the change beside the run after it.
+
+Text from the app (console messages, URLs) is shown as code, so its markup or mentions never render. The
+screenshot is named, not given by path: the path is on the machine that ran the check.
+
+In the claims receipts, a passing browser check is recorded as one (`kind: browser` on the check, never inferred
+from its name). It backs a worker's claim about the browser, the UI or a screenshot. It doesn't back a claim
+about a phone, another browser, staging or checking by hand.
+
+## In the coordinator (`src/coordinator/browser.ts`)
+
+verify() runs the browser checks after the issue's own checks, from the gate above:
+- **Flows the issue asks for** are checks like any other. Unavailable (no app, no browser on the machine) fails
+  the attempt, as verify() fails anything that isn't a pass.
+- **Flows run because the change touched `ui_paths`** are held to their result. With no browser on the machine,
+  though, they are listed in the PR and skipped, so one machine without Chrome doesn't stop a project's UI changes.
+
+Each check is recorded with `kind: browser`. Its screenshots go under the instance's state folder
+(`browser/issue-<n>/<head>/<flow>/`). The PR description gets the `BROWSER CHECKS` section for the head it opens.
+
+### The baseline at the base commit
+
+Before a flow is judged on the change's head, the same flow runs at the base commit the change is measured
+against:
+- **Where:** a worktree of its own (`issue-<n>-browser-base`), set up like any task's, with the app started there.
+- **What it's for:** its evidence is the judge's baseline. A console error or failed request the base already has
+  isn't new (port, line and query string ignored), so it doesn't fail the change. In the PR, each flow shows the
+  base run before the change beside the head run after it.
+- **When there's none:** the app won't start at base, or the worktree can't be made. That's said in the check and
+  in the PR, and the flow is judged with no baseline: every error counts, never a silent pass. With no browser on
+  the machine, no baseline is attempted (the flows themselves are unavailable).
+- **Cost:** one run per (base, flow), cached across the task's attempts, so a retry doesn't rerun it.
+- **Cleanup:** the base worktree is always removed, however the checks end. A removal that fails is a note.

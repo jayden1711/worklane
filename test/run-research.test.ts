@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 async function serve(user: string) {
   const dir = mkdtempSync(join(tmpdir(), 'dash-research-'));
@@ -21,9 +21,9 @@ async function serve(user: string) {
   log.append('research.capped', { issue: 9, run: null, why: 'spend cap reached before the run' }, 'c');
   log.close();
   const { dir: root } = exampleProject();
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user, slotsDir: join(dir, 'slots') });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots') });
   const url = `${d.url.split('/?')[0]}/api/runs/${run}/research`;
-  return { d, url, h: { authorization: `Bearer ${d.token}` } };
+  return { d, url, h: { authorization: `Bearer ${d.token}`, ...asPerson(user) } };
 }
 
 test('a research run\'s searches, fetches (refusals marked) and caps, for the owner and the writers', async () => {
@@ -56,7 +56,7 @@ test('a research run\'s searches, fetches (refusals marked) and caps, for the ow
   try {
     const r = await fetch(other.url, { headers: other.h });
     assert.equal(r.status, 403);
-    assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the owner \(@example-owner\) and the project's writers/);
+    assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the instance's owners and writers/);
   } finally {
     await other.d.close();
   }

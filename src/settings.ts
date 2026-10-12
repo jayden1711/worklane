@@ -212,14 +212,16 @@ export function researchCaps(s: InstanceSettings): ResearchCaps {
 }
 
 /**
- * Change one instance setting, for the instance's own dashboard. Only the owner (owners.default) may.
+ * Change one instance setting, for the instance's own dashboard. Only the owner may: `owner` says whether the
+ * dashboard read `by` as one of the instance's owners (admin on its repo); without it, owners.default only.
  * The new value is checked against the schema, the machine's limits and the policy's ceilings; refused,
  * nothing changes. Written atomically (a temp file beside policy.yaml, same owner, mode 0600, then a
  * rename), and recorded as settings.changed in the instance's event log.
  */
-export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; actor?: string; limitsPath?: string; now?: () => Date }): { from: unknown; to: unknown } {
+export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; owner?: boolean; actor?: string; limitsPath?: string; now?: () => Date }): { from: unknown; to: unknown } {
   const owner = o.cfg.project.owners.default;
-  if (!o.by || o.by.toLowerCase() !== owner.toLowerCase()) throw new SettingsError(`only the owner (@${owner}) may change settings; @${o.by || 'unknown'} may not`);
+  const isOwner = o.owner ?? (!!o.by && o.by.toLowerCase() === owner.toLowerCase());
+  if (!o.by || !isOwner) throw new SettingsError(`only the owner (@${owner}) may change settings; @${o.by || 'unknown'} may not`);
   if (!(SETTING_KEYS as readonly string[]).includes(o.key)) throw new SettingsError(`unknown setting ${o.key}; settings are ${SETTING_KEYS.join(', ')}`);
   const key = o.key as SettingKey;
   const text = readFileSync(o.policyPath, 'utf8');

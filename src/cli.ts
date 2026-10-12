@@ -25,11 +25,12 @@ import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
-import { HUB_PORT, parseHubArg, startHub } from './dashboard-hub.js';
+import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
 import { parseDeviceList } from './console/terminal-devices.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
@@ -82,10 +83,16 @@ usage: ${BRAND.cli} <command> [options]
                                    (launchd on macOS, systemd --user on Linux); survives sessions
   dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
-                                   --instance, that instance's, as its coordinator user)
-  dashboard --hub name=<state dir>[,...] [--port n] [--service] [--console-user admin --console-devices tag:x,node]
+                                   --instance, that instance's, as its coordinator user); its
+                                   token is the owner's break-glass (--user: the login recorded)
+  dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
+            [--console-user admin --console-devices tag:x,node]
+            [--client-id id --public-url https://<host> --signin-dir dir]
                                    one view over several instances' own dashboards; it forwards
-                                   to each, so writes stay with that instance's server and user;
+                                   to each, so writes stay with that instance's server and user.
+                                   People sign in with GitHub (the sign-in App's client id; its
+                                   secrets in --signin-dir); the token works on the break-glass
+                                   port only, on this machine (docs/dashboard.md);
                                    --console-user: the admin user the owner terminal runs as
                                    from the Tailscale devices --console-devices lists (none: refused)
   demo <dir>                       seed a demo project worked by the real coordinator, then
@@ -94,6 +101,8 @@ usage: ${BRAND.cli} <command> [options]
   tune <instance> [--full] [--dry-run]
                                    profile the test suite at 1/2/4/all cores' workers and open a PR
                                    with the recommended worker settings (run as the coordinator user)
+  migrate [--instance name]        apply pending config and state migrations, each file backed up first
+                                   (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
@@ -179,6 +188,38 @@ async function main(argv: string[]): Promise<number> {
       if (r.gitHook) console.log(`pre-commit secret scan: ${r.gitHook}`);
       for (const n of r.notes) console.log(`note: ${n}`);
       console.log(`next: ${BRAND.cli} doctor`);
+      return 0;
+    }
+
+    case 'migrate': {
+      // Each pending step, after a backup beside its file; the instance's files and repo config with --instance.
+      const targets = instanceOpt ? instanceTargets(join(instancesDir(), instanceOpt)) : { configFiles: projectConfigFiles(root), eventsDb: logPath(root) };
+      // --json: for the engine updater, which migrates each instance as part of installing an engine and restores
+      // these backups if anything after fails.
+      const json = flag(args, '--json');
+      const plan = planMigrations(targets);
+      if (plan.newer.length) {
+        const error = `${plan.newer.join('\n')}\nnewer than this engine: nothing migrated. Update the engine, or restore a backup.`;
+        if (json) console.log(JSON.stringify({ ok: false, error, made: [] }));
+        else console.error(error);
+        return 1;
+      }
+      let r: ReturnType<typeof applyMigrations>;
+      try {
+        r = applyMigrations(targets);
+      } catch (e) {
+        const restored = e instanceof MigrationFailed ? e.restored : [];
+        if (json) console.log(JSON.stringify({ ok: false, error: (e as Error).message, made: [], restored }));
+        else console.error(`migration failed: ${(e as Error).message}`);
+        return 1;
+      }
+      if (json) {
+        console.log(JSON.stringify({ ok: true, applied: r.applied.map((p) => ({ kind: p.kind, path: p.path, from: p.from, to: p.to })), made: r.made }));
+        return 0;
+      }
+      if (!r.applied.length) console.log('nothing to migrate: config and state are at the current versions');
+      for (const [k, p] of r.applied.entries()) console.log(`migrated ${p.path}: ${p.kind} version ${p.from} -> ${p.to} (${p.steps.join('; ')}); backup ${r.backups[k]}`);
+      if (r.applied.some((p) => p.kind === 'config' && !p.path.startsWith(instanceOpt ? join(instancesDir(), instanceOpt) : '\0'))) console.log(`the repo's ${BRAND.configDir}/ changed: commit it in a PR`);
       return 0;
     }
 
@@ -433,9 +474,16 @@ async function main(argv: string[]): Promise<number> {
         const instances = parseHubArg(hubArg, instancePort);
         const hubState = join(stateDir(), 'dashboard-hub');
         const portOpt = option(opts, '--port');
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
-        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  ${service ? `${h.url.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.url}\n(local only)`);
-        if (!service && !flag(opts, '--no-open')) openUrl(h.url);
+        const bgOpt = option(opts, '--break-glass-port');
+        const clientId = option(opts, '--client-id');
+        const publicUrl = option(opts, '--public-url');
+        const signinDir = option(opts, '--signin-dir');
+        if ((clientId || publicUrl || signinDir) && !(clientId && publicUrl && signinDir)) throw new Error('sign-in needs all of --client-id, --public-url and --signin-dir');
+        const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
+        const bg = service ? `${h.breakGlassUrl.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.breakGlassUrl;
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}\n(loopback only)`);
+        if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;
       }
@@ -457,7 +505,7 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       user = user || cfg.project.owners.default;
-      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, ...(instance ? { instance } : {}), port: portOpt ? Number(portOpt) : site.port });
+      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(instance ? { instance } : {}) });
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
@@ -616,10 +664,10 @@ async function main(argv: string[]): Promise<number> {
         const repoPath = option(rest, '--repo');
         const gh = option(rest, '--github');
         if (!repoPath || !gh) {
-          console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>]');
+          console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>]');
           return 2;
         }
-        const home = initInstance(target, repoPath, gh, undefined, option(rest, '--agent-user'));
+        const home = initInstance(target, repoPath, gh, undefined, option(rest, '--agent-user'), option(rest, '--agent-home'));
         console.log(`created ${home}\n  edit policy.yaml, and point credentials.yaml at credentials made for this instance`);
         return 0;
       }
@@ -662,7 +710,7 @@ async function main(argv: string[]): Promise<number> {
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] | instance list | instance show <name>');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name>');
       return 2;
     }
 

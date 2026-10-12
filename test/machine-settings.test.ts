@@ -7,7 +7,7 @@ import { loadConfig } from '../src/config/load.js';
 import { machineView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { MACHINE_HELPER } from '../src/machine.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 function setup(o: { updates?: boolean | null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dash-machine-'));
@@ -28,22 +28,22 @@ function setup(o: { updates?: boolean | null } = {}) {
 
 test('the machine settings: the slot cap and its bounds, engine updates, who may change them, and the history newest first', () => {
   const s = setup();
-  const v = machineView({ cfg: s.cfg, user: 'example-owner', slotsDir: s.slotsDir, machine: s.machine });
+  const v = machineView({ cfg: s.cfg, user: 'example-owner', role: 'owner', slotsDir: s.slotsDir, machine: s.machine });
   assert.equal(v.canChange, true);
   assert.deepEqual(v.slots, { cap: 3, running: 0, min: 1, max: 16 });
   assert.deepEqual(v.updates, { configured: true, enabled: true, branch: 'main', requiredChecks: ['test'] });
   assert.deepEqual(v.changes.map((c) => [c.by, c.what, c.to]), [['wl-code', 'updates', true], ['wl-site', 'slots', 3]], 'newest first; a torn line skipped');
   assert.deepEqual(v.history.map((h) => h.event), ['rolled_back', 'installed'], 'newest first; an unknown event skipped');
   assert.equal(v.helper, MACHINE_HELPER);
-  assert.equal(machineView({ cfg: s.cfg, user: 'example-collaborator', slotsDir: s.slotsDir, machine: s.machine }).canChange, false, 'a writer is not the owner');
+  assert.equal(machineView({ cfg: s.cfg, user: 'example-collaborator', role: 'writer', slotsDir: s.slotsDir, machine: s.machine }).canChange, false, 'a writer is not the owner');
   const bare = setup({ updates: null });
-  assert.deepEqual(machineView({ cfg: bare.cfg, user: 'example-owner', slotsDir: bare.slotsDir, machine: bare.machine }).updates, { configured: false, enabled: null }, 'the updater not set up here');
+  assert.deepEqual(machineView({ cfg: bare.cfg, user: 'example-owner', role: 'owner', slotsDir: bare.slotsDir, machine: bare.machine }).updates, { configured: false, enabled: null }, 'the updater not set up here');
 });
 
 async function serve(s: ReturnType<typeof setup>, user: string, exec: (file: string, args: string[]) => string) {
-  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user, slotsDir: s.slotsDir, machine: { ...s.machine, exec } });
+  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: s.slotsDir, machine: { ...s.machine, exec } });
   const base = d.url.split('/?')[0]!;
-  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' };
+  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(user) };
   const post = (what: string, value: unknown) => fetch(`${base}/api/machine`, { method: 'POST', headers: h, body: JSON.stringify({ what, value }) });
   return { d, base, h, post };
 }
@@ -77,7 +77,7 @@ test('anyone but the owner is refused; a missing sudo rule or helper says what a
   try {
     const r = await other.post('slots', 4);
     assert.equal(r.status, 403);
-    assert.match(((await r.json()) as { error: string }).error, /only the owner \(@example-owner\)/);
+    assert.match(((await r.json()) as { error: string }).error, /only the instance's owners \(admin on [^)]+\) may change machine settings; @example-collaborator is a writer/);
     assert.equal(calls.length, 0);
   } finally {
     await other.d.close();

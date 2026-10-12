@@ -2,6 +2,7 @@
 // owner and why, and the biggest costs with a tuning to try for each. Read from the event log alone (the
 // dashboard's panel and the weekly report); every cost figure is the CLI's own estimate, not billed money.
 // The tunings come from fixed rules here, never from a model.
+import { tierOf } from './model-routing.js';
 
 interface Ev {
   type: string;
@@ -18,6 +19,7 @@ export function stageOf(role: string, attempt = 1): Stage {
   if (role === 'worker') return attempt > 1 ? 'retries' : 'worker';
   if (role === 'evaluator-verdict' || role === 'evaluator-repro' || role === 'investigator') return 'evaluator';
   if (role === 'evaluator-escalated') return 'evaluator';
+  if (role === 'instruction-eval' || role === 'eval-case-writer') return 'evaluator';
   if (role === 'planner') return 'plan';
   if (role === 'researcher') return 'research';
   if (role === 'research-on-demand') return 'research';
@@ -50,6 +52,12 @@ export interface Throughput {
     totalUsd: number;
     perMergedPrUsd: number | null;
     byStage: { stage: Stage; usd: number; perMergedPrUsd: number | null; share: number }[];
+    /**
+     * The same spend by model, most first: haiku, sonnet or opus; an open-model provider by name (`local`,
+     * `hosted:<name>`, whose cost is its own price, $0 for local); or the id of a model of no known tier. With the
+     * tokens and run time behind it, where claude reported them.
+     */
+    byModel: { model: string; usd: number; perMergedPrUsd: number | null; share: number; tokensIn: number; tokensOut: number; secs: number; perMergedPrTokens: number | null }[];
     /** Evaluator spend on PRs whose review level was L0. */
     evaluatorOnL0Usd: number;
   };
@@ -142,6 +150,7 @@ export function throughput(events: Ev[], o: { now?: Date; days?: number } = {}):
   const attempt = new Map<string, number>();
   const level = new Map<number, string>();
   const usd = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
+  const byModel = new Map<string, { usd: number; tokensIn: number; tokensOut: number; secs: number }>();
   let evaluatorOnL0Usd = 0;
   for (const e of events) {
     const p = e.payload as Record<string, unknown>;
@@ -151,6 +160,9 @@ export function throughput(events: Ev[], o: { now?: Date; days?: number } = {}):
       const stage = stageOf(String(p.role), p.issue === null ? 1 : (attempt.get(`${p.issue}:${p.role}`) ?? 1));
       const cost = Number(p.usd) || 0;
       usd[stage] += cost;
+      const model = typeof p.provider === 'string' && p.provider ? p.provider : typeof p.model === 'string' && p.model ? (tierOf(p.model) ?? p.model) : 'unknown';
+      const m = byModel.get(model) ?? { usd: 0, tokensIn: 0, tokensOut: 0, secs: 0 };
+      byModel.set(model, { usd: m.usd + cost, tokensIn: m.tokensIn + (Number(p.tokens_in) || 0), tokensOut: m.tokensOut + (Number(p.tokens_out) || 0), secs: m.secs + (Number(p.secs) || 0) });
       if (stage === 'evaluator' && typeof p.issue === 'number' && level.get(p.issue) === 'L0') evaluatorOnL0Usd += cost;
     }
   }
@@ -160,6 +172,9 @@ export function throughput(events: Ev[], o: { now?: Date; days?: number } = {}):
     totalUsd: round2(totalUsd),
     perMergedPrUsd: per(totalUsd),
     byStage: STAGES.map((stage) => ({ stage, usd: round2(usd[stage]), perMergedPrUsd: per(usd[stage]), share: totalUsd ? usd[stage] / totalUsd : 0 })),
+    byModel: [...byModel.entries()]
+      .sort((a, b) => b[1].usd - a[1].usd || b[1].tokensIn + b[1].tokensOut - (a[1].tokensIn + a[1].tokensOut))
+      .map(([model, u]) => ({ model, usd: round2(u.usd), perMergedPrUsd: per(u.usd), share: totalUsd ? u.usd / totalUsd : 0, tokensIn: u.tokensIn, tokensOut: u.tokensOut, secs: Math.round(u.secs), perMergedPrTokens: mergedCount ? Math.round((u.tokensIn + u.tokensOut) / mergedCount) : null })),
     evaluatorOnL0Usd: round2(evaluatorOnL0Usd),
   };
 
@@ -229,6 +244,9 @@ export function throughputMarkdown(t: Throughput): string[] {
   out.push(`- Cost per merged PR: ${t.cost.perMergedPrUsd !== null ? `~${money(t.cost.perMergedPrUsd)}` : 'no PR merged'} (~${money(t.cost.totalUsd)} in all).`);
   const stages = t.cost.byStage.filter((s) => s.usd > 0);
   if (stages.length) out.push(`- By stage: ${stages.map((s) => `${s.stage} ~${money(s.perMergedPrUsd ?? s.usd)}${s.perMergedPrUsd !== null ? '/PR' : ''}`).join(', ')}.`);
+  const models = t.cost.byModel.filter((m) => m.usd > 0 || m.tokensIn + m.tokensOut > 0);
+  const tokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+  if (models.length) out.push(`- By model: ${models.map((m) => `${m.model} ~${money(m.perMergedPrUsd ?? m.usd)}${m.perMergedPrUsd !== null ? '/PR' : ''}${m.tokensIn + m.tokensOut ? ` (${tokens(m.tokensIn + m.tokensOut)} tokens, ${Math.round(m.secs / 60)} min)` : ''}`).join(', ')}.`);
   const mine = t.waits.filter((w) => w.owner);
   out.push(mine.length ? `- Waited for you: ${mine.map((w) => `${w.label} ${w.count}× (median ${w.medianHours} h${w.open ? `, ${w.open} still waiting` : ''})`).join('; ')}.` : '- Nothing waited for you.');
   for (const [i, x] of t.top.entries()) out.push(`- Cost ${i + 1}: ${x.stage}, ~${money(x.usd)} (${pct(x.share)}). ${x.suggestion}`);

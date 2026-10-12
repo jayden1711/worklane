@@ -3,7 +3,7 @@
 // the instance's own server, and, for the owner, the console: a message for the agent
 // (held until its current turn ends) and Stop. Everything arrives redacted and capped.
 import { useEffect, useRef, useState } from 'react';
-import { api, apiPath, token } from '../api';
+import { api, apiPath, streamUrl } from '../api';
 import { Loading, StatusMark, ToolRow } from './patterns';
 import { ago, Badge, Button, Card, cx, EST_NOTE, estUsd } from './ui';
 
@@ -258,7 +258,7 @@ export function LiveRun({ run, onEnded }: { run: string; onEnded: () => void }) 
       .then(() => apiPath(`/api/runs/${encodeURIComponent(run)}/live`))
       .then((p) => {
         if (closed) return;
-        es = new EventSource(`${p}?t=${encodeURIComponent(token)}`);
+        es = new EventSource(streamUrl(p));
         es.addEventListener('item', (e) => {
           const it = JSON.parse((e as MessageEvent).data as string) as FeedItem;
           setItems((xs) => (xs.some((x) => x.seq === it.seq) ? xs : [...xs, it]));

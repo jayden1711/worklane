@@ -147,6 +147,16 @@ export interface InstanceHealth {
 }
 
 /** The panel from its data (also what the render checks render). `instances`: on a hub, every instance's view. */
+/** A held engine update, in red: rolled back (a failed migration, or services that didn't come up) and not retried. */
+export function UpdateHold({ hold }: { hold: NonNullable<HealthView['updateHold']> }) {
+  return (
+    <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-update-held">
+      <span className="font-medium text-red">{hold.migration ? 'Engine update rolled back: a migration failed' : 'Engine update rolled back'}</span>
+      {' '}({new Date(hold.at).toISOString().slice(0, 16).replace('T', ' ')} UTC{hold.sha ? `, ${hold.sha.slice(0, 12)}` : ''}): {hold.reason}. Every instance runs the previous engine; this commit is held until a newer one, or until you turn updates off and on.
+    </div>
+  );
+}
+
 export function HealthPanelView({ view, instances }: { view: HealthView; instances?: InstanceHealth[] }) {
   const m = view.machine;
   const today = new Date().toISOString().slice(0, 10);
@@ -176,6 +186,12 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
         </div>
         <div className="primitive-card-footer border-t border-line text-[12px] text-ink-3">Suggestions only: nothing is changed for you.</div>
       </div>
+
+      {(() => {
+        // The machine's, so any instance's view (on the hub) shows it.
+        const hold = view.updateHold ?? instances?.map((i) => i.view?.updateHold).find(Boolean) ?? null;
+        return hold ? <UpdateHold hold={hold} /> : null;
+      })()}
 
       <OffsiteBackup status={view.offsiteBackup ?? null} docs={view.docs?.backups ?? null} />
 

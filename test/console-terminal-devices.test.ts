@@ -142,7 +142,7 @@ test('on the hub: refused (and audited) without an allowed device, open from one
       spawnPty: () => ({ write() {}, onData() {}, onExit() {}, kill() {} }) as Pty,
     },
   });
-  const origin = h.url.split('/?')[0]!;
+  const origin = h.url.replace(/\/(\?.*)?$/, '');
   const connect = (xff: string) =>
     new Promise<{ type: string; why?: string }[]>((done) => {
       const ws = new WebSocket(`${origin.replace('http', 'ws')}/api/terminal?instance=demo`, { origin, headers: { 'x-forwarded-for': xff } });

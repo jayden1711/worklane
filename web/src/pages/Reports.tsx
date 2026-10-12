@@ -6,8 +6,8 @@ import { Header } from './Overview';
 const getReport = () => api<{ report: string }>('/api/report');
 
 /** For a viewer the state says may not read the preview, the refusal the server would give; null for the owner and writers. */
-export const reportRefusal = (state: Pick<State, 'canReadReports' | 'owners' | 'user'>) =>
-  state.canReadReports === false ? `the report preview is for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+export const reportRefusal = (state: Pick<State, 'canReadReports' | 'owners' | 'user' | 'role'>) =>
+  state.canReadReports === false ? `the report preview is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 export function Reports({ state, pulse }: { state: State; pulse: number }) {
   const refused = reportRefusal(state);

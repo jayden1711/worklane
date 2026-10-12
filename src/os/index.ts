@@ -253,6 +253,33 @@ export function stateDir(): string {
   return join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), BRAND.cli);
 }
 
+/** An OS user's numeric id (POSIX), or null if there is no such user (or on native Windows). */
+export function userUid(user: string): number | null {
+  if (process.platform === 'win32') return null;
+  try {
+    const out = execFileSync('id', ['-u', '--', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
+    return /^\d+$/.test(out) ? Number(out) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Who owns a file and who besides the owner may touch it (POSIX): 'missing', 'hidden' when this user can't even
+ * stat it (a directory it may not enter), or its owner uid and whether group or others have any permission. Never
+ * reads the file. Native Windows has no POSIX modes: 'unsupported'.
+ */
+export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden' } | { kind: 'unsupported' } | { kind: 'file'; uid: number; openToOthers: boolean; mode: string } {
+  if (process.platform === 'win32') return { kind: 'unsupported' };
+  try {
+    const s = statSync(file);
+    return { kind: 'file', uid: s.uid, openToOthers: (s.mode & 0o077) !== 0, mode: (s.mode & 0o777).toString(8).padStart(4, '0') };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
+  }
+}
+
 /** Full path of an executable on PATH, or null. */
 /** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
 export function userExists(user: string): boolean {
@@ -360,7 +387,38 @@ export function peakMemoryMb(outFile: string): number | null {
   }
 }
 
-export function projectCommand(command: string, runAs?: { user: string; home: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+/**
+ * The PATH project commands get when they run as the agent user (instance.yaml run_as.path overrides it): the
+ * system directories, and on macOS Homebrew's too (/opt/homebrew on Apple silicon; /usr/local is already listed).
+ */
+export function defaultAgentPath(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'darwin' ? '/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin' : '/usr/local/bin:/usr/bin:/bin';
+}
+
+/** Where user homes usually are, for a user not created yet: /Users on macOS, /home elsewhere. */
+export function homesRoot(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'darwin' ? '/Users' : '/home';
+}
+
+/** A user's home directory from the system's user database (null: no such user, or no way to ask here). */
+export function homeOf(user: string, platform: NodeJS.Platform = process.platform): string | null {
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) return null;
+  try {
+    if (platform === 'linux') {
+      const line = execFileSync('getent', ['passwd', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim();
+      return line.split(':')[5] || null;
+    }
+    if (platform === 'darwin') {
+      const out = execFileSync('dscl', ['.', '-read', `/Users/${user}`, 'NFSHomeDirectory'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+      return /NFSHomeDirectory:\s*(\S.*)$/m.exec(out)?.[1]?.trim() || null;
+    }
+  } catch {
+    // no such user
+  }
+  return null;
+}
+
+export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
@@ -369,7 +427,8 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
     HOME: runAs.home,
     USER: runAs.user,
     LOGNAME: runAs.user,
-    PATH: '/usr/local/bin:/usr/bin:/bin',
+    // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
+    PATH: runAs.path ?? defaultAgentPath(),
     LANG: process.env.LANG ?? 'C.UTF-8',
     CI: '1',
     // The checkout belongs to the coordinator user: without trusting it, git refuses it as "dubious ownership" and
@@ -642,4 +701,46 @@ export function replaceFileAtomically(path: string, data: string, mode: number):
 
 export function cpuCount(): number {
   return availableParallelism();
+}
+
+/**
+ * Whether another process holds a flock(2) lock on `path`, without taking it (a lock file another workload, such as
+ * a simulator, holds while it runs; such files usually always exist, so existence says nothing). Linux: the file's
+ * device and inode against the FLOCK entries of /proc/locks (waiters, "->", don't hold). macOS: a non-blocking
+ * shared try-lock on the file opened read-only, released at once (a holder of an exclusive lock refuses it; a
+ * simulator's `flock -w` at worst waits microseconds). Windows: never held. Null when it can't tell: the caller
+ * treats that as held, so it never contends.
+ */
+export function flockHeld(path: string): boolean | null {
+  if (!existsSync(path)) return false;
+  if (process.platform === 'win32') return false;
+  if (process.platform === 'linux') {
+    let locks: string;
+    let dev: bigint;
+    let ino: bigint;
+    try {
+      locks = readFileSync('/proc/locks', 'utf8');
+      const st = statSync(path, { bigint: true });
+      dev = st.dev;
+      ino = st.ino;
+    } catch {
+      return null;
+    }
+    // glibc's major/minor of a dev_t.
+    const major = ((dev >> 8n) & 0xfffn) | ((dev >> 32n) & ~0xfffn);
+    const minor = (dev & 0xffn) | ((dev >> 12n) & ~0xffn);
+    for (const line of locks.split('\n')) {
+      const f = line.trim().split(/\s+/);
+      if (f[1] !== 'FLOCK') continue;
+      const id = /^([0-9a-f]+):([0-9a-f]+):(\d+)$/i.exec(f[5] ?? '');
+      if (id && BigInt(`0x${id[1]}`) === major && BigInt(`0x${id[2]}`) === minor && BigInt(id[3]!) === ino) return true;
+    }
+    return false;
+  }
+  try {
+    execFileSync('perl', ['-e', 'use Fcntl qw(:flock); open(my $f, "<", $ARGV[0]) or exit 2; exit(flock($f, LOCK_SH | LOCK_NB) ? 0 : 1)', path], { stdio: 'ignore', timeout: 5000 });
+    return false;
+  } catch (e) {
+    return (e as { status?: number }).status === 1 ? true : null;
+  }
 }

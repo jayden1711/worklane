@@ -38,4 +38,17 @@ export function agentIsSelf(instanceHome: string): void {
  * For stand-in claudes: a JS expression that reads the first line of stdin, as claude reads its first
  * stream-json message (stdin stays open for the run, so reading to the end would wait for ever).
  */
+/**
+ * Roles on the example project's instance, as its repo would give them: example-owner is an admin (owner),
+ * example-collaborator has write (writer), anyone else read (viewer). For a dashboard started with
+ * `roleOf: exampleRoles`, a request that names a person (`asPerson`) gets that person's role.
+ */
+export const exampleRole = (login: string): 'owner' | 'writer' | 'viewer' => {
+  const l = login.toLowerCase();
+  return l === 'example-owner' ? 'owner' : l === 'example-collaborator' ? 'writer' : 'viewer';
+};
+export const exampleRoles = async (login: string) => exampleRole(login);
+/** The header the hub names a signed-in person with (src/dashboard-auth.ts LOGIN_HEADER). */
+export const asPerson = (login: string): Record<string, string> => ({ 'x-dashboard-login': login });
+
 export const STDIN_LINE = `(() => { const fs = require('node:fs'); const b = Buffer.alloc(1); const out = []; for (;;) { let n = 0; try { n = fs.readSync(0, b, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; throw e; } if (!n || b[0] === 10) break; out.push(b[0]); } return Buffer.from(out).toString('utf8'); })()`;
