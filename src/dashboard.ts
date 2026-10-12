@@ -30,8 +30,10 @@ import { healthView } from './health.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
-import { machineStats, type MachineStats } from './os/stats.js';
-import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
+import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
+import { boardForViewer, boardView } from './board.js';
+import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN } from './machine.js';
+import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
@@ -41,6 +43,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
+import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 
@@ -49,6 +52,12 @@ import { handleAskRoute } from './console/routes.js';
  * Commands, connection fingerprints and deploy details stay out; editing
  * happens in the project's config folder, through review like any change.
  */
+/** The settings as a viewer (read on the repo) sees them: the project part the Settings page shows them, nothing else. */
+export function settingsForViewer(cfg: Config) {
+  const v = settingsView(cfg);
+  return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
+}
+
 export function settingsView(cfg: Config) {
   return {
     configDir: BRAND.configDir,
@@ -101,12 +110,14 @@ export interface DashboardOptions {
   policyFile?: string | null;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
+  /** What running agents' process groups use now, for the board; the OS adapter's processGroupUsage when unset. */
+  processUsage?: (pgids: number[]) => Map<number, ProcessGroupUsage>;
   /** The backlog a confirmed chat draft is filed to (the instance's); made when first needed. */
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
-  /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
-  machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
 }
@@ -170,9 +181,9 @@ const writersOnly = (what: string, who: Who) => `${what} for the instance's owne
 
 /**
  * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
- * everything under /api/runs, and the list of live runs (/api/live).
+ * everything under /api/runs, the list of live runs (/api/live), and the Board's Watch (/api/board/watch/<run>).
  */
-export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live';
+export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live' || pathname.startsWith('/api/board/watch/');
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -231,7 +242,7 @@ export function healthStats(o: { serviceUnit: string | null; root: string; state
  * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
  * the helper's change log and the updater's log, newest first.
  */
-export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'> & { role?: Role | null }) {
+export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'> & { role?: Role | null; requests?: MachineRequest[] }) {
   const owner = o.cfg.project.owners.default;
   const slots = slotStatus(o.slotsDir);
   const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
@@ -244,6 +255,8 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
+    /** Changes asked for here, for the coordinator to run: pending, running, then done, failed, refused or interrupted. Newest first. */
+    requests: (o.requests ?? []).filter((r) => r.via === 'settings').slice(-20).reverse(),
   };
 }
 
@@ -267,9 +280,9 @@ function feedOrWait(o: Pick<DashboardOptions, 'stateDir'>, run: string, after: n
 }
 
 /**
- * What the run page's console needs: whether the run is live, whether this user (the owner) may message or
- * stop it, its messages held until the agent's turn ends, and the console's events for it (queued, delivered,
- * dropped, stopped, refused), oldest first.
+ * What the run page's console needs: whether the run is live, whether this user may message it (the owner and the
+ * writers) or stop it (the owner), its messages held until the agent's turn ends, and the console's events for it
+ * (queued, delivered, dropped, stopped, refused), oldest first. Messages' text stays the owner's to read.
  */
 export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user' | 'eventsDb'> & { role?: Role | null }, run: string) {
   const owner = o.cfg.project.owners.default;
@@ -283,7 +296,7 @@ export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user
     });
   const settled = new Set(events.filter((e) => e.type === 'message_delivered' || e.type === 'message_dropped').map((e) => e.id));
   const held = events.filter((e) => e.type === 'message_queued' && !settled.has(e.id));
-  return { owner, canControl, live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
+  return { owner, canControl, canMessage: isWriter(o.role), live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
 }
 
 /**
@@ -584,7 +597,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
-  const clients = new Set<ServerResponse>();
+  /** Each live-stream client, with its role: a viewer is told only of the event types it may see. */
+  const clients = new Map<ServerResponse, Role>();
   let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
 
   const owners = opts.cfg.project.owners;
@@ -624,7 +638,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const events = readEvents(opts.eventsDb);
     const p = project(events);
     const slots = slotStatus(opts.slotsDir);
-    return {
+    const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
       user: who.login,
@@ -634,6 +648,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       budget: opts.cfg.agents.daily_budget_usd,
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
+      // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
+      activity: isWriter(who.role) ? p.activity : viewerActivity(events),
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
       canReadIntake: mayReadIntake(who.role),
@@ -648,6 +664,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // Whether this viewer may write at all (viewers are read-only), and see the audit log (owners only).
       canWrite: isWriter(who.role),
       canReadAudit: isOwner(who.role),
+      // Whether this viewer may read the service log and the machine settings (the owners' and writers').
+      canReadLogs: isWriter(who.role),
+      canReadMachine: isWriter(who.role),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -655,6 +674,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
       prCounts: prCounts(prsView(events).prs),
     };
+    // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
+    return isWriter(who.role) ? full : stateForViewer(full);
   };
 
   const server = createServer(async (req, res) => {
@@ -676,13 +697,21 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
+        // Everyone with a role reads it; a viewer gets only the allowlisted card fields (no runs, agents or costs).
+        // Each action is refused again by the route it calls (decide, the console).
+        if (url.pathname === '/api/board' && req.method === 'GET') {
+          const slots = slotStatus(opts.slotsDir);
+          const board = boardView({ events: readEvents(opts.eventsDb), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) });
+          return json(res, 200, who.role === 'owner' || who.role === 'writer' ? board : boardForViewer(board));
+        }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
           if (!isOwnerHere) return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
           return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
         }
         // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
-        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machine?.exec ? { exec: opts.machine.exec } : {}) })) return;
+        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}) })) return;
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
@@ -691,19 +720,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const last = [...events].reverse().find((e) => e.type === 'report.posted');
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, settingsView(opts.cfg));
+        // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg) : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
-          const evs = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
+          const all = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
+          // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
+          const evs = isWriter(who.role) ? all : forViewers(all);
           const issue = url.searchParams.get('issue');
           // One issue's whole history, or the recent tail of everything.
           return json(res, 200, issue ? evs.filter((e) => (e.payload as { issue?: number }).issue === Number(issue)) : evs.slice(-500));
         }
         if (url.pathname === '/api/logs' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the service log is', who) });
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
         }
         // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
         if (isRunsPath(url.pathname) && !mayReadRuns(who.role)) return json(res, 403, { error: writersOnly('agent runs are', who) });
+        // The Board's Watch: the run's live feed so far, for those the runs gate lets through (the owner and the writers).
+        const watch = url.pathname.match(/^\/api\/board\/watch\/([A-Za-z0-9_-]+)$/);
+        if (watch && req.method === 'GET') {
+          try {
+            return json(res, 200, feedOrWait(opts, watch[1]!, Number(url.searchParams.get('after') ?? -1)));
+          } catch (e) {
+            if (e instanceof ConsoleError) return json(res, 404, { error: e.message });
+            throw e;
+          }
+        }
         // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
         if (url.pathname === '/api/runs' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
@@ -825,7 +868,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if ((what === 'message' || what === 'stop') && req.method === 'POST') {
             const body = (await readBody(req)) as { text?: string };
             try {
-              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: who.login, owner: isOwnerHere }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: who.login, owner: isOwnerHere });
+              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: who.login, owner: isOwnerHere, writer: isWriter(who.role) }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: who.login, owner: isOwnerHere });
               audit(who, what === 'message' ? 'console.message' : 'console.stop', { run, request: r.id });
               return json(res, 200, { ok: true, ...r });
             } catch (e) {
@@ -869,7 +912,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          return json(res, 200, { ...healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }), docs: { backups: docsUrl('backups') } });
+          const view = healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } });
+          // Costs are the owners' and writers': a viewer's usage per day has no estimated cost.
+          const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
+          return json(res, 200, { ...view, usage, docs: { backups: docsUrl('backups') } });
         }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
@@ -885,23 +931,31 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
-        // Machine-wide settings (the slot cap, engine updates) and their history. A change goes through the
-        // machine helper (sudo, src/machine.ts) as this server's user, the instance's coordinator; only the owner may ask.
-        const machine = () => machineView({ ...opts, user: who.login, role: who.role });
-        if (url.pathname === '/api/machine' && req.method === 'GET') return json(res, 200, machine());
+        // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
+        // owner may ask for a change; it's recorded for the coordinator, which runs the machine helper
+        // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
+        const machine = () => machineView({ ...opts, user: who.login, role: who.role, requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        if (url.pathname === '/api/machine' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
+          return json(res, 200, machine());
+        }
         if (url.pathname === '/api/machine' && req.method === 'POST') {
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may change machine settings; @${who.login} is a ${who.role}` });
           const body = (await readBody(req)) as { what?: string; value?: unknown };
-          const exec = opts.machine?.exec;
-          let r;
-          if (body.what === 'slots') r = setSlotCap(Number(body.value), ...(exec ? [exec] : []));
-          else if (body.what === 'updates') {
-            if (typeof body.value !== 'boolean') return json(res, 400, { error: 'updates is on (true) or off (false)' });
-            r = setUpdates(body.value, ...(exec ? [exec] : []));
-          } else return json(res, 400, { error: 'what is slots or updates' });
-          if (!r.ok) return json(res, 400, { error: r.error });
-          audit(who, 'machine.changed', { what: body.what, value: body.value });
-          return json(res, 200, { ok: true, output: r.output, machine: machine() });
+          const args = settingArgs(body.what, body.value);
+          if ('error' in args) return json(res, 400, { error: args.error });
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestMachineChange(log, { args, by: who.login, via: 'settings' });
+          } catch (e) {
+            if (e instanceof MachineRequestError) return json(res, e.status, { error: e.message });
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.changed', { what: body.what, value: body.value, request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
@@ -912,7 +966,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           const since = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? lastId);
           res.write(`retry: 3000\nid: ${Math.max(since, lastId)}\nevent: hello\ndata: {}\n\n`);
-          clients.add(res);
+          clients.set(res, who.role);
           req.on('close', () => clients.delete(res));
           return;
         }
@@ -959,11 +1013,17 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     if (!fresh.length) return;
     lastId = fresh.at(-1)!.id;
     const visible = fresh.filter((e) => e.type !== 'coordinator.tick');
-    const msg = `id: ${lastId}\nevent: change\ndata: ${JSON.stringify({ lastId, types: [...new Set(visible.map((e) => e.type))] })}\n\n`;
-    for (const c of clients) c.write(msg);
+    const change = (types: string[]) => `id: ${lastId}\nevent: change\ndata: ${JSON.stringify({ lastId, types: [...new Set(types)] })}\n\n`;
+    const all = change(visible.map((e) => e.type));
+    const forViewer = visible.filter((e) => viewerMaySee(e.type));
+    const viewer = forViewer.length ? change(forViewer.map((e) => e.type)) : null;
+    for (const [c, role] of clients) {
+      if (isWriter(role)) c.write(all);
+      else if (viewer) c.write(viewer);
+    }
   }, opts.pollMs ?? 1000);
   const ping = setInterval(() => {
-    for (const c of clients) c.write(': ping\n\n');
+    for (const c of clients.keys()) c.write(': ping\n\n');
   }, 25_000);
 
   return new Promise((resolveStart) => {
@@ -978,7 +1038,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           new Promise<void>((r) => {
             clearInterval(poll);
             clearInterval(ping);
-            for (const c of clients) c.end();
+            for (const c of clients.keys()) c.end();
             server.close(() => r());
           }),
       });

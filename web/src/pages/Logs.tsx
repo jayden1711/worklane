@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type ServiceLog } from '../api';
+import { api, type ServiceLog, type State } from '../api';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from './Overview';
 
@@ -11,11 +11,16 @@ const PRIORITY: Record<number, { label: string; tone: 'danger' | 'warn' | 'neutr
   4: { label: 'warn', tone: 'warn' },
 };
 
-/** The coordinator's service log, read-only: newest at the bottom, refreshed every 10 s while open. */
-export function LogsPage() {
+/** For someone the state says may not read the service log (a viewer), the refusal the server would give; null otherwise. */
+export const logsRefusal = (state: Pick<State, 'canReadLogs' | 'user' | 'role'>) =>
+  state.canReadLogs === false ? `the service log is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
+
+/** The coordinator's service log, read-only: newest at the bottom, refreshed every 10 s while open. Not asked for when refused. */
+export function LogsPage({ refused = null }: { refused?: string | null }) {
   const [log, setLog] = useState<ServiceLog | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
+    if (refused) return;
     let live = true;
     const load = () =>
       api<ServiceLog>('/api/logs?lines=300')
@@ -27,7 +32,18 @@ export function LogsPage() {
       live = false;
       clearInterval(t);
     };
-  }, []);
+  }, [refused]);
+  if (refused)
+    return (
+      <div data-testid="page-logs">
+        <Header title="Logs" sub="read-only" />
+        <div className="p-6">
+          <Card className="p-3 text-[13px] text-ink-3" data-testid="logs-refused">
+            {refused[0]!.toUpperCase() + refused.slice(1)}.
+          </Card>
+        </div>
+      </div>
+    );
   const sub = !log ? 'loading…' : log.source === 'journal' ? `journal of ${log.unit}` : log.source === 'file' ? 'coordinator log file' : 'no log';
   return (
     <div data-testid="page-logs">

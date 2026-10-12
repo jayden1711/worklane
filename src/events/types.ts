@@ -29,6 +29,8 @@ export const EventSchemas = {
   'issue.claimed': z.strictObject({ issue, instance: z.string(), lease: sha, base: sha, owner: z.string() }),
   'issue.claim_lost': z.strictObject({ issue, instance: z.string(), holder: z.string().nullable() }),
   'issue.released': z.strictObject({ issue, instance: z.string(), why: z.string() }),
+  /** The issue was closed on GitHub by someone, outside the loop (seen by reconcile): nothing it held waits on anyone now. */
+  'issue.closed': z.strictObject({ issue }),
   /** `retry_after`: a rate-limit or budget block retries on its own after then (up to a cap); absent: it waits for a relabel. */
   'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string(), retry_after: z.string().optional(), retry_kind: z.enum(['rate_limit', 'budget']).optional() }),
   /** A held block retried on its own (relabelled ready), or, at the cap, left blocked (`gave_up`). */
@@ -162,7 +164,8 @@ export const EventSchemas = {
   // verification
   'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),
-  'change.proposed': z.strictObject({ issue, branch: z.string(), base: sha, head: sha, files: z.array(z.string()), lines: z.number().int().nonnegative(), patch_hash: z.string() }),
+  /** `added`/`removed`: the lines added and removed (the board's diff +/−); absent in older events, which have only `lines`. */
+  'change.proposed': z.strictObject({ issue, branch: z.string(), base: sha, head: sha, files: z.array(z.string()), lines: z.number().int().nonnegative(), added: z.number().int().nonnegative().optional(), removed: z.number().int().nonnegative().optional(), patch_hash: z.string() }),
   'change.rejected': z.strictObject({ issue, why: z.string() }),
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
@@ -244,6 +247,13 @@ export const EventSchemas = {
   'ask.answered': z.strictObject({ id: z.string(), by: z.string(), role: z.enum(['owner', 'writer']), answer: z.string(), detail: z.string() }),
   /** An ask withdrawn before it was answered (by whatever created it, or the owner). */
   'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
+  // machine changes (src/machine-requests.ts): the dashboard asks, the coordinator runs the machine helper
+  /** A machine helper command the owner asked for from the dashboard (Settings, or a root-step ask), for the coordinator to run. */
+  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask']), ask: z.string().nullable() }),
+  /** The coordinator took a request (once: claimed in a write transaction). */
+  'machine.started': z.strictObject({ id: z.string(), instance: z.string() }),
+  /** How it ended: done (detail: the helper's output), failed, refused (off the allowlist), interrupted (not re-run). */
+  'machine.finished': z.strictObject({ id: z.string(), outcome: z.enum(['done', 'failed', 'refused', 'interrupted']), detail: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),
@@ -257,6 +267,8 @@ export const EventSchemas = {
     reasons: z.array(z.string()),
     checks: z.array(z.strictObject({ name: z.string(), outcome: z.enum(['pass', 'fail', 'pending', 'cancelled', 'skipped', 'missing']) })),
   }),
+  /** The PR's size and conversation as GitHub reports them at `head` (lines added and removed, files, comments and review comments), recorded when they change. */
+  'pr.stats': z.strictObject({ issue, number: z.number().int().positive(), head: sha, additions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), files: z.number().int().nonnegative(), comments: z.number().int().nonnegative() }),
   'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),

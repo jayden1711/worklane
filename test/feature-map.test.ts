@@ -95,7 +95,7 @@ test('every data-testid the UI sets is in the feature map, and every mapped test
 });
 
 test('the route reader catches a page added without a map entry', () => {
-  const added = app.replace("else if (path === '/logs') page = <LogsPage />;", "else if (path === '/logs') page = <LogsPage />;\n  else if (path === '/new-page') page = <LogsPage />;");
+  const added = app.replace("else if (path === '/settings') page = <SettingsPage />;", "else if (path === '/settings') page = <SettingsPage />;\n  else if (path === '/new-page') page = <SettingsPage />;");
   assert.notEqual(added, app, 'the fixture edit applied');
   assert.ok(codeRoutes(added).includes('/new-page'));
   assert.ok(!map.pages.some((p) => p.route === '/new-page'));

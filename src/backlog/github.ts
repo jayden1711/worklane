@@ -88,6 +88,16 @@ export class GitHubBacklog implements Backlog {
     return out;
   }
 
+  async closedSince(since: string): Promise<number[]> {
+    const out: number[] = [];
+    for (let page = 1; page < 20; page++) {
+      const batch = await this.req<GhIssue[]>('GET', `/repos/${this.repo}/issues?state=closed&since=${encodeURIComponent(since)}&sort=updated&direction=asc&per_page=100&page=${page}`);
+      out.push(...batch.filter((i) => !i.pull_request).map((i) => i.number));
+      if (batch.length < 100) break;
+    }
+    return out;
+  }
+
   async get(n: number): Promise<Issue> {
     return this.toIssue(await this.req<GhIssue>('GET', `/repos/${this.repo}/issues/${n}`));
   }
@@ -158,6 +168,9 @@ export class GitHubBacklog implements Backlog {
       title: p.title ?? '',
       mergeable: p.mergeable ?? null,
       mergeableState: p.mergeable_state ?? 'unknown',
+      ...(typeof p.additions === 'number' && typeof p.deletions === 'number'
+        ? { stats: { additions: p.additions, deletions: p.deletions, files: p.changed_files ?? 0, comments: (p.comments ?? 0) + (p.review_comments ?? 0) } }
+        : {}),
     };
   }
 
@@ -259,4 +272,10 @@ interface GhPull {
   title?: string;
   mergeable?: boolean | null;
   mergeable_state?: string;
+  // The single-PR endpoint's counts (absent from list endpoints).
+  additions?: number;
+  deletions?: number;
+  changed_files?: number;
+  comments?: number;
+  review_comments?: number;
 }

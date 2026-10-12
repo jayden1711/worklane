@@ -114,15 +114,22 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
   const title = new Map<number, string>();
   const prIssue = new Map<number, number>();
   const closed = new Set<number>();
+  // Issues closed by hand on GitHub (issue.closed), and when: a hold on one that began before then ended with it.
+  const issueClosedAt = new Map<number, string>();
   for (const e of evs) {
     const p = e.payload as Record<string, unknown>;
     if (e.type === 'issue.seen') title.set(Number(p.issue), String(p.title));
+    if (e.type === 'issue.closed') issueClosedAt.set(Number(p.issue), e.ts);
     if (e.type === 'pr.opened') prIssue.set(Number(p.number), Number(p.issue));
     if ((e.type === 'pr.closed' || e.type === 'merge.done') && typeof p.number === 'number') closed.add(p.number);
   }
   const items: WaitItem[] = [];
-  const add = (kind: WaitKind, since: string, issue: number | null, pr: number | null, detail: string, extra: Partial<WaitItem> = {}) =>
+  const add = (kind: WaitKind, since: string, issue: number | null, pr: number | null, detail: string, extra: Partial<WaitItem> = {}) => {
+    // An issue's own hold (no PR of its own) ends when the issue is closed; one that began after it (reopened) stands.
+    const closedAt = issue !== null && pr === null ? issueClosedAt.get(issue) : undefined;
+    if (closedAt !== undefined && Date.parse(since) <= Date.parse(closedAt)) return;
     items.push({ kind, since, issue, pr, title: issue !== null ? (title.get(issue) ?? null) : null, detail, ...extra });
+  };
 
   // Emergency stop and auto-merge stop: the last of stop/resume says which.
   const halt = evs.filter((e) => e.type === 'emergency.stop' || e.type === 'emergency.resume').at(-1);

@@ -17,6 +17,11 @@ export interface Issue {
 export interface Backlog {
   list(label: string): Promise<Issue[]>;
   get(n: number): Promise<Issue>;
+  /**
+   * Issues (not PRs) now closed and last updated at or after `since` (ISO): every one closed since then, and maybe
+   * some closed earlier. One listing, however many issues it covers.
+   */
+  closedSince(since: string): Promise<number[]>;
   /** Logins that added `label` to the issue, oldest first. */
   labelAdders(n: number, label: string): Promise<string[]>;
   addLabels(n: number, labels: string[]): Promise<void>;
@@ -68,6 +73,8 @@ export interface PullRequest {
   mergeable: boolean | null;
   /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */
   mergeableState: string;
+  /** Its size and conversation as the tracker reports them (lines added and removed, files, comments and review comments); absent when it doesn't. */
+  stats?: { additions: number; deletions: number; files: number; comments: number };
 }
 
 /** A submitted review on a pull request. `state`: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED. */

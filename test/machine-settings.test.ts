@@ -7,6 +7,7 @@ import { loadConfig } from '../src/config/load.js';
 import { machineView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { MACHINE_HELPER } from '../src/machine.js';
+import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 function setup(o: { updates?: boolean | null } = {}) {
@@ -40,64 +41,79 @@ test('the machine settings: the slot cap and its bounds, engine updates, who may
   assert.deepEqual(machineView({ cfg: bare.cfg, user: 'example-owner', role: 'owner', slotsDir: bare.slotsDir, machine: bare.machine }).updates, { configured: false, enabled: null }, 'the updater not set up here');
 });
 
-async function serve(s: ReturnType<typeof setup>, user: string, exec: (file: string, args: string[]) => string) {
-  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: s.slotsDir, machine: { ...s.machine, exec } });
+async function serve(s: ReturnType<typeof setup>, user: string) {
+  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: s.slotsDir, machine: s.machine });
   const base = d.url.split('/?')[0]!;
   const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(user) };
   const post = (what: string, value: unknown) => fetch(`${base}/api/machine`, { method: 'POST', headers: h, body: JSON.stringify({ what, value }) });
-  return { d, base, h, post };
+  const view = async () => (await (await fetch(`${base}/api/machine`, { headers: h })).json()) as { requests: { args: string[]; status: string; detail: string }[] };
+  return { d, base, h, post, view };
 }
 
-test('the owner changes the slot cap and engine updates through the machine helper, as this server\'s user, with sudo -n', async () => {
+/** The coordinator's side: run what's waiting, as the coordinator would on its next tick. */
+function coordinatorTick(s: ReturnType<typeof setup>, exec: (file: string, args: string[]) => string) {
+  const log = new EventLog(s.eventsDb);
+  try {
+    return runMachineRequests({ log, instance: 'site', exec });
+  } finally {
+    log.close();
+  }
+}
+
+test('the owner asks for a slot cap or update change; the dashboard records it, the coordinator runs the helper with sudo -n, and the page shows pending then done', async () => {
   const s = setup();
   const calls: string[][] = [];
-  const x = await serve(s, 'example-owner', (file, args) => (calls.push([file, ...args]), 'ok'));
+  const x = await serve(s, 'example-owner');
   try {
     assert.equal((await fetch(`${x.base}/api/machine`)).status, 401);
     const r = await x.post('slots', 4);
     assert.equal(r.status, 200, await r.clone().text());
-    assert.equal(((await r.json()) as { machine: { slots: { cap: number } } }).machine.slots.cap, 3, 'the view is re-read after the change (the helper writes the real cap)');
+    const body = (await r.json()) as { pending: boolean; machine: { slots: { cap: number }; requests: { status: string }[] } };
+    assert.equal(body.pending, true);
+    assert.equal(body.machine.slots.cap, 3, 'unchanged until the helper has run');
+    assert.deepEqual(body.machine.requests.map((q) => q.status), ['pending']);
     assert.equal((await x.post('updates', false)).status, 200);
+    assert.equal(calls.length, 0, 'the dashboard ran nothing');
+    assert.equal(coordinatorTick(s, (file, args) => (calls.push([file, ...args]), 'ok')), 2);
     assert.deepEqual(calls, [['sudo', '-n', MACHINE_HELPER, 'set-slots', '4'], ['sudo', '-n', MACHINE_HELPER, 'set-updates', 'off']]);
-    for (const [what, value, why] of [['slots', 17, /1 to 16/], ['slots', 0, /1 to 16/], ['slots', 2.5, /whole number/], ['updates', 'yes', /on \(true\) or off \(false\)/], ['cap', 3, /slots or updates/]] as [string, unknown, RegExp][]) {
+    assert.deepEqual((await x.view()).requests.map((q) => [q.args.join(' '), q.status, q.detail]), [['set-updates off', 'done', 'ok'], ['set-slots 4', 'done', 'ok']], 'newest first, done with the output');
+    for (const [what, value, why] of [['slots', 17, /set-slots <1\.\.16>/], ['slots', 0, /set-slots <1\.\.16>/], ['slots', 2.5, /set-slots <1\.\.16>/], ['updates', 'yes', /on \(true\) or off \(false\)/], ['cap', 3, /slots or updates/]] as [string, unknown, RegExp][]) {
       const bad = await x.post(what, value);
       assert.equal(bad.status, 400, `${what}=${value}`);
       assert.match(((await bad.json()) as { error: string }).error, why);
     }
-    assert.equal(calls.length, 2, 'a bad value never reaches the helper');
+    assert.equal(coordinatorTick(s, (file, args) => (calls.push([file, ...args]), 'ok')), 0, 'a bad value is never recorded, so never run');
+    assert.equal(calls.length, 2);
   } finally {
     await x.d.close();
   }
 });
 
-test('anyone but the owner is refused; a missing sudo rule or helper says what an admin does', async () => {
+test('anyone but the owner is refused; a missing sudo rule or helper shows in the request as failed, saying what an admin does', async () => {
   const s = setup();
-  const calls: string[][] = [];
-  const other = await serve(s, 'example-collaborator', (file, args) => (calls.push([file, ...args]), 'ok'));
+  const other = await serve(s, 'example-collaborator');
   try {
     const r = await other.post('slots', 4);
     assert.equal(r.status, 403);
     assert.match(((await r.json()) as { error: string }).error, /only the instance's owners \(admin on [^)]+\) may change machine settings; @example-collaborator is a writer/);
-    assert.equal(calls.length, 0);
   } finally {
     await other.d.close();
   }
   const fail = (stderr: string) => () => {
     throw Object.assign(new Error('Command failed'), { stderr });
   };
-  const noRule = await serve(s, 'example-owner', fail('sudo: a password is required\n'));
+  const x = await serve(s, 'example-owner');
   try {
-    const r = await noRule.post('slots', 4);
-    assert.equal(r.status, 400);
-    assert.match(((await r.json()) as { error: string }).error, /may not run .* \(sudo: a password is required\); an admin runs scripts\/setup\/machine-helper\.sh/);
+    assert.equal((await x.post('slots', 4)).status, 200);
+    coordinatorTick(s, fail('sudo: a password is required\n'));
+    assert.equal((await x.post('updates', true)).status, 200);
+    coordinatorTick(s, fail('sudo: /usr/local/libexec/x: command not found'));
+    const [updates, slots] = (await x.view()).requests;
+    assert.equal(slots!.status, 'failed');
+    assert.match(slots!.detail, /may not run .* \(sudo: a password is required\); an admin runs scripts\/setup\/machine-helper\.sh/);
+    assert.equal(updates!.status, 'failed');
+    assert.match(updates!.detail, /isn't installed; an admin runs scripts\/setup\/machine-helper\.sh once/);
   } finally {
-    await noRule.d.close();
-  }
-  const noHelper = await serve(s, 'example-owner', fail('sudo: /usr/local/libexec/x: command not found'));
-  try {
-    const r = await noHelper.post('updates', true);
-    assert.match(((await r.json()) as { error: string }).error, /isn't installed; an admin runs scripts\/setup\/machine-helper\.sh once/);
-  } finally {
-    await noHelper.d.close();
+    await x.d.close();
   }
 });

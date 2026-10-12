@@ -265,7 +265,7 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
                     <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{svc?.memoryCurrent != null ? `${gb(svc.memoryCurrent)}${svc.memoryMax ? ` of ${gb(svc.memoryMax)}` : ''}` : '–'}</td>
                     <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{t?.runs ?? 0}</td>
                     <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2" title={EST_NOTE}>
-                      {estUsd(t?.estimatedUsd ?? 0)}
+                      {t?.estimatedUsd === undefined && t ? '–' : estUsd(t?.estimatedUsd ?? 0)}
                     </td>
                     <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{t?.rateLimited ?? 0}</td>
                     <td className="primitive-table-cell text-[12.5px]" data-testid="health-instance-offsite">
@@ -371,7 +371,7 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
                   <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink">{d.day}</td>
                   <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{d.runs}</td>
                   <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2" title={EST_NOTE}>
-                    {estUsd(d.estimatedUsd)}
+                    {d.estimatedUsd === undefined ? '–' : estUsd(d.estimatedUsd)}
                   </td>
                   <td className={cx('primitive-table-cell text-[12.5px] tabular-nums', d.rateLimited ? 'text-orange' : 'text-ink-2')}>{d.rateLimited}</td>
                   <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{d.authProblems}</td>

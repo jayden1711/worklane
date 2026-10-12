@@ -16,7 +16,10 @@ test('regression: the prompt never goes on the claude command line (sudo logs co
   assert.equal(args[0], '-p');
 });
 
-test('a run hands claude its prompt on stdin and its system prompt in a readable file, removed afterwards', { skip: process.platform === 'win32' && 'POSIX shell stand-in' }, async () => {
+type Seen = { args: string[]; stdin: string; file: string; system: string; mode: string; identity: string[] };
+
+/** One run through a stand-in claude that records what it was given. */
+async function runOnce(): Promise<Seen> {
   const dir = mkdtempSync(join(tmpdir(), 'fake-claude-'));
   const log = join(dir, 'log.json');
   const bin = join(dir, 'claude');
@@ -36,11 +39,28 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done',
   chmodSync(bin, 0o755);
   const r = await new CliRunner('cli', process.env, bin, undefined, undefined, { name: 'site-app[bot]', email: '42+site-app[bot]@users.noreply.github.com' }).run(req);
   assert.equal(r.reason, 'succeeded', r.detail);
-  const seen = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; stdin: string; file: string; system: string; mode: string; identity: string[] };
+  return JSON.parse(readFileSync(log, 'utf8')) as Seen;
+}
+
+test('a run hands claude its prompt on stdin and its system prompt in a readable file, removed afterwards', { skip: process.platform === 'win32' && 'POSIX shell stand-in' }, async () => {
+  const seen = await runOnce();
   assert.deepEqual(seen.identity, ['site-app[bot]', '42+site-app[bot]@users.noreply.github.com', 'site-app[bot]', '42+site-app[bot]@users.noreply.github.com'], 'the agent commits as the harness identity');
   assert.equal(seen.stdin, req.prompt);
   assert.ok(!seen.args.join(' ').includes('secret plan'));
   assert.equal(seen.system, req.appendSystemPrompt);
   assert.equal(seen.mode, '644', 'readable by the agent user');
   assert.equal(existsSync(seen.file), false, 'removed when the run ends');
+});
+
+test('regression: the system prompt file stays readable by the agent user under the service umask (0007)', { skip: process.platform === 'win32' && 'POSIX modes' }, async () => {
+  // The instance services run with UMask=0007, which turned the file's 0644 into 0640: the agent user is in
+  // neither the owner nor the group, so every worker run failed at start with EACCES.
+  const prev = process.umask(0o007);
+  try {
+    const seen = await runOnce();
+    assert.equal(seen.system, req.appendSystemPrompt);
+    assert.equal(seen.mode, '644', 'readable by the agent user');
+  } finally {
+    process.umask(prev);
+  }
 });

@@ -21,7 +21,10 @@ export type FeedItem = { seq: number; at: string } & (
 
 export interface ConsoleData {
   owner: string;
+  /** Stop: the owner's. */
   canControl: boolean;
+  /** Message (steer): the owner's and the writers'; absent from an older server, the same as canControl. */
+  canMessage?: boolean;
   live: boolean;
   pending: { id: string; text: string; by: string; at: string }[];
   held: { at: string; id: string | null; text: string | null }[];
@@ -174,10 +177,11 @@ export function ConsolePanel({ data, run, onChange = () => {} }: { data: Console
       setBusy(false);
     }
   };
-  if (!data.canControl) {
+  const canMessage = data.canMessage ?? data.canControl;
+  if (!canMessage) {
     return (
       <div className="rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink-2 shadow-hairline" data-testid="console-read-only">
-        Only the owner, @{data.owner}, can message or stop this run.
+        The owner, @{data.owner}, and the writers can message this run; only the owner can stop it.
       </div>
     );
   }
@@ -212,7 +216,7 @@ export function ConsolePanel({ data, run, onChange = () => {} }: { data: Console
         <Button size="sm" disabled={busy || !text.trim()} onClick={() => void post('message', { text })} data-testid="console-send">
           Send
         </Button>
-        {confirmStop ? (
+        {!data.canControl ? null : confirmStop ? (
           <span className="flex items-center gap-1.5" data-testid="console-stop-review">
             <span className="text-[12px] text-ink-2">Stop this run? Its task is blocked, saying you stopped it.</span>
             <Button size="sm" variant="danger" disabled={busy} onClick={() => void post('stop', {})} data-testid="console-stop-confirm">

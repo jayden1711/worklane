@@ -1,6 +1,5 @@
 import type { State } from '../api';
 import { navigate } from '../App';
-import { HealthPanel } from '../components/HealthPanel';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
@@ -18,6 +17,29 @@ export function Header({ title, children, sub }: { title: string; sub?: string; 
 /** A headline figure, as an insight card (Beautiful UI). */
 const Stat = InsightCard;
 
+/** The machine in a line: slots in use, the governor's last reading, and the way to its page (health moved there). */
+export function MachineSummary({ state }: { state: State }) {
+  const g = state.governor;
+  return (
+    <Card className="primitive-card-pad flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px]" data-testid="overview-machine">
+      <span className="text-[13px] font-medium text-ink">Machine</span>
+      <span className="tabular-nums text-ink-2">
+        {state.slots.running} of {state.slots.cap} agent slots in use
+      </span>
+      {g && (
+        <span className={cx('tabular-nums', g.held ? 'text-orange' : 'text-ink-2')}>
+          {g.held ? `dispatch held: ${g.reason}` : 'dispatch running'}
+          {g.load !== null ? ` · load ${g.load.toFixed(1)}` : ''}
+          {g.freeDiskPct !== null ? ` · ${Math.round(g.freeDiskPct)}% disk free` : ''}
+        </span>
+      )}
+      <button className="ml-auto text-blue-ink hover:underline" onClick={() => navigate('/machine')} data-testid="overview-machine-link">
+        Memory, load, disk, backups and settings on the Machine page
+      </button>
+    </Card>
+  );
+}
+
 const ACTIVE = new Set(['claimed', 'reproducing', 'building', 'verifying', 'evaluating']);
 
 export function Overview({ state, pulse }: { state: State; pulse: number }) {
@@ -25,7 +47,11 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
   const open = state.decisions.filter((d) => !d.answer);
   const blocked = state.tasks.filter((t) => t.status === 'blocked');
   const queued = state.tasks.filter((t) => t.status === 'queued');
-  const budgetPct = Math.min(100, (state.spendToday / Math.max(state.budget, 0.01)) * 100);
+  // Absent for a viewer: spend and the budget are the owners' and writers'.
+  const spend = state.spendToday !== undefined && state.budget !== undefined ? { today: state.spendToday, budget: state.budget, byRole: state.spendByRole ?? {} } : null;
+  // The budget is a configured cap, not a cost: shown as is.
+  const budget = spend?.budget ?? 0;
+  const budgetPct = spend ? Math.min(100, (spend.today / Math.max(spend.budget, 0.01)) * 100) : 0;
   const stale = state.coordinator?.lastTick ? Date.now() - Date.parse(state.coordinator.lastTick) > 5 * 60_000 : true;
 
   return (
@@ -41,18 +67,19 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
         </div>
 
         <div className="grid gap-3 lg:grid-cols-3">
+          {spend ? (
           <Card className="p-3">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span title={EST_NOTE}>Estimated spend today</span>
               <span className="tabular-nums" title={EST_NOTE}>
-                {estUsd(state.spendToday)} of {usd(state.budget)}
+                {estUsd(spend.today)} of {usd(budget)}
               </span>
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-valuenow={Math.round(budgetPct)} aria-valuemin={0} aria-valuemax={100}>
               <div className={cx('h-full rounded-full', budgetPct > 90 ? 'bg-red' : budgetPct > 70 ? 'bg-orange' : 'bg-blue')} style={{ width: `${budgetPct}%` }} />
             </div>
             <div className="mt-3 space-y-1">
-              {Object.entries(state.spendByRole)
+              {Object.entries(spend.byRole)
                 .sort((a, b) => b[1] - a[1])
                 .map(([role, v]) => (
                   <div key={role} className="flex justify-between text-xs">
@@ -62,6 +89,11 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
                 ))}
             </div>
           </Card>
+          ) : (
+            <Card className="p-3 text-[12.5px] text-ink-3" data-testid="spend-viewer-only">
+              Costs, spend and the budget are for the instance's owners and writers (write on its repo).
+            </Card>
+          )}
           <Card className="p-3">
             <div className="text-xs text-muted-foreground">Main's baseline</div>
             {state.baseline ? (
@@ -98,7 +130,12 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
             ) : (
               <div className="mt-2 text-xs text-muted-foreground">Not started on this machine.</div>
             )}
-            {!!state.errors.length && (
+            {!state.errors && !!state.errorCount && (
+              <div className="mt-3 text-xs text-danger" data-testid="coordinator-errors-count">
+                The coordinator reported errors ({state.errorCount}).
+              </div>
+            )}
+            {!!state.errors?.length && (
               <div className="mt-3 space-y-1">
                 {state.errors.slice(0, 3).map((e, i) => (
                   <div key={i} className="truncate text-xs text-danger" title={e.message}>
@@ -110,7 +147,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
           </Card>
         </div>
 
-        <HealthPanel />
+        <MachineSummary state={state} />
         <IntakeHealthPanel state={state} />
 
         <Card className="overflow-hidden">

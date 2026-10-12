@@ -58,9 +58,9 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 
 | Permission on the repo | Role | May |
 | --- | --- | --- |
-| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message, stop), filing chat drafts, the audit log |
-| maintain, write | writer | read runs, throughput, reports, intake and the digest; ask the chat; answer ordinary decisions and intake approvals; save views |
-| triage, read | viewer | read the rest; no writes at all |
+| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message and stop a run; asks, root steps, the terminal), filing chat drafts, the audit log |
+| maintain, write | writer | read runs, throughput, reports, intake and the digest; message (steer) a running agent, not stop it; ask the chat; answer ordinary decisions and intake approvals; save views |
+| triage, read | viewer | the tasks (without costs), decisions, PRs and deploys; not the service log, the machine settings, spend, the budget, agent runs, which agents hold the slots (only the counts), the coordinator's error text (only a count) or decisions' receipts; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part. No writes at all; no Watch on the Board, and Board cards without runs, usage, diffs or checks |
 | none, or any error looking it up | none | nothing: the instance isn't listed, and any call to it gets 403 |
 
 - The permission is read with the instance's own installation token (`GET /repos/{owner}/{repo}/collaborators/{login}/permission`), never with the person's token, and cached at most 5 minutes per instance and login. So someone removed from the repo loses access within 5 minutes.
@@ -124,6 +124,64 @@ The hub's token still works, as the owner, but only on the hub's separate break-
   ```
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.
+
+## The owner terminal
+
+The Setup console page on the hub can open a terminal: a login shell as the machine's admin user. sudo in it asks for that user's password every time. It's off until the owner turns it on, and it's refused, with a plain message and an entry in the hub's audit log (`terminal-audit.jsonl` in the hub's state), unless all of these hold:
+
+- the person is the instance's owner, signed in with GitHub in the last 5 minutes;
+- the request comes from a Tailscale device the owner listed;
+- `sudo -n true` as the admin user fails, so sudo still needs a password.
+
+Every command line is recorded in the audit log, except input typed while the terminal doesn't echo, such as a password. It closes after 10 minutes idle.
+
+To turn it on, as root on the machine, after reviewing both scripts:
+
+1. Install the console shell and its one sudoers line:
+
+   ```bash
+   sudo bash scripts/setup/console-shell.sh <admin user>
+   ```
+
+   The hub's viewer, `wl-dash`, may then run exactly `worklane-console-shell check` and `worklane-console-shell shell` as that user, and nothing else, never as root. The script refuses an admin user with a NOPASSWD sudo rule.
+2. Re-run the hub setup with the admin user and your devices:
+
+   ```bash
+   sudo bash scripts/setup/dashboards.sh --console-user <admin user> --console-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+   ```
+
+   `--console-devices` takes Tailscale tags (`tag:...`) and/or MagicDNS node names, comma-separated. Prefer tags that only you can assign in your tailnet policy, because a node can be renamed. The list lives in the hub's systemd unit on the machine, never in a repository. With no list, every device is refused.
+
+   **This weakens the hub's sandbox.** With `--console-user`, the hub's unit drops `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` and `PrivateTmp`. sudo can't switch users under NoNewPrivileges, and the admin's shell, a child of the hub, would otherwise see a read-only filesystem and a private `/tmp`. Without `--console-user`, the unit keeps all four.
+
+How the device is identified: the hub sits behind `tailscale serve --https=443 http://127.0.0.1:4399` (Tailscale HTTPS, above).
+- A terminal request counts only if the kernel says tailscaled (root) opened the connection, from `/proc/net/tcp`. A program on the machine connecting to the port itself is refused, whatever headers it sends.
+- On such a connection, serve's `X-Forwarded-For` holds the peer's Tailscale address. serve replaces any `X-Forwarded-For` the browser sent.
+- That address is looked up with `tailscale whois --json` for the node's name and tags.
+- The `Tailscale-User-*` headers are never used: they name a person, not a device, and serve sets them only for user-owned nodes.
+
+A request through an ssh tunnel, or on the break-glass port 4398, can't be tied to a device, so the terminal is refused there.
+
+## The Board
+
+The home page (`/`, `g b`) shows every task in flight, one column per stage: **Planning** (ready, claimed, a plan or research run), **Building**, **Verifying** (the coordinator's checks and the evaluator; in PR mode, a PR whose checks are running or being fixed), **Waiting on you** (the holds only the owner ends, as on the Waiting page: a decision, a held plan, a PR left to you, a CI fix that gave up, a block, a failed landing) and **Landing** (queued to land, or a PR the merge rules are merging). On a hub it shows every instance you have a role on, with a filter to pick one; an instance's own dashboard shows its own. It follows each instance's live stream.
+
+Each card is built by the instance's own server (`GET /api/board`, `src/board.ts`) from what the coordinator already recorded: the instance and issue (and PR) numbers, the title, diff +/− (the PR's as the watch last read it, `pr.stats`, else the last proposed change), the PR's comment count, how long since the task started, its checks (failing, pending or passing; click for each), and, while an agent runs, its memory, CPU time and processes (its process group, read from `/proc` on Linux; not measured elsewhere). Nothing is fetched from GitHub per card.
+
+The actions on a card follow your role there, and each is refused again by the route it uses:
+
+| | viewer | writer | owner |
+| --- | --- | --- | --- |
+| Watch a running agent (the live feed) | – (403) | yes | yes |
+| Steer (a console message, held until the turn ends) | – (403) | yes | yes |
+| Answer the open decision | – | where the decision rules allow (not plans) | yes |
+| Approve a high-risk landing, or Merge a high-risk PR left to you on GitHub | – | – (403) | yes |
+
+A viewer's board leaves out everything about runs and agents (the run, its resource use, the diff, comments and checks): the card is an allowlist of fields (`VIEWER_CARD_FIELDS` in `src/board.ts`), so a field added later stays hidden from viewers until someone puts it there. A steer message is the one console action writers have: the dashboard (`console.ts`) and the coordinator apply the same rule (`mayRequest`), and stopping a run, asks, root steps and the terminal stay the owner's. Every answer and message is recorded in the audit under its sender's login and role.
+
+## The Machine page
+
+Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
 ## Pull requests
 

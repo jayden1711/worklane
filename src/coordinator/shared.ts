@@ -57,6 +57,8 @@ export interface CoordinatorDeps {
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
+  /** How the machine helper is run for the dashboard's machine requests (sudo -n; tests inject it). */
+  machineExec?: (file: string, args: string[]) => string;
   /**
    * Work intake (docs/intake.md): the instance's intake config, read on every pass (null: intake is off), and its
    * sources. `pullMs`: how often the sources are pulled (default 30 s).

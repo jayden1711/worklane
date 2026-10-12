@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Settings as SettingsIcon, Sun, Vote, Wrench } from 'lucide-react';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
 import { hub, hubInstance, needsSignIn, selectInstance, signOut, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
+import { BoardPage } from './pages/Board';
+import { MachinePage } from './pages/Machine';
 import { InboxPage } from './pages/Inbox';
 import { SetupPage } from './pages/Setup';
 import { WaitingPage } from './pages/Waiting';
@@ -20,7 +22,7 @@ import { IntakePage } from './pages/Intake';
 import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
-import { LogsPage } from './pages/Logs';
+import { LogsPage, logsRefusal } from './pages/Logs';
 import { RunDetail, runsRefusal } from './pages/RunDetail';
 import { PullRequests } from './pages/PullRequests';
 
@@ -77,7 +79,8 @@ export function pageKey(e: KeyboardEvent) {
 }
 
 const NAV = [
-  { to: '/', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
+  { to: '/', label: 'Board', icon: SquareKanban, chord: 'b', testId: 'nav-board' },
+  { to: '/overview', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i', testId: 'nav-inbox' },
   { to: '/waiting', label: 'Waiting on you', icon: Hourglass, chord: 'w', testId: 'nav-waiting' },
   { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd', testId: 'nav-decisions' },
@@ -91,6 +94,7 @@ const NAV = [
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
   { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
   { to: '/logs', label: 'Logs', icon: ScrollText, chord: 'j', testId: 'nav-logs' },
+  { to: '/machine', label: 'Machine', icon: Server, chord: 'm', testId: 'nav-machine' },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',', testId: 'nav-settings' },
 ];
 
@@ -268,7 +272,7 @@ function Dashboard() {
       '/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
       '/land': state?.landQueue.length ?? 0,
       '/prs': state?.prCounts?.needYou ?? 0,
-      '/agents': state?.runs.active.length ?? 0,
+      '/agents': state?.runs?.active.length ?? 0,
     }),
     [state],
   );
@@ -292,8 +296,10 @@ function Dashboard() {
   else if (path === '/deploys') page = <Deploys state={state} />;
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
   else if (path === '/settings') page = <SettingsPage />;
-  else if (path === '/logs') page = <LogsPage />;
-  else page = <Overview state={state} pulse={pulse} />;
+  else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
+  else if (path === '/machine') page = <MachinePage state={state} />;
+  else if (path === '/overview') page = <Overview state={state} pulse={pulse} />;
+  else page = <BoardPage state={state} pulse={pulse} />;
 
   return (
     <div className="flex h-full">

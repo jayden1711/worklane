@@ -89,8 +89,9 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
       )}
       {a.kind === 'root_step' && (
         <p className="mt-1.5 text-[12px] text-ink-3">
-          Runs <code>{[a.command, ...a.args].join(' ')}</code> through the machine helper, as root.
+          Runs <code>{[a.command, ...a.args].join(' ')}</code> through the machine helper, as root: this instance's coordinator runs it on its next tick.
           {!a.allowed && <span className="mt-1 block text-red" data-testid="ask-refusal">Not on the helper's allowlist: {a.refusal}</span>}
+          {a.request && a.status === 'open' && <span className="mt-1 block" data-testid="ask-request">Machine request: {a.request.status === 'pending' ? 'waiting for the coordinator' : a.request.status}{a.request.detail ? ` (${a.request.detail})` : ''}</span>}
         </p>
       )}
       {can && a.kind === 'paste_secret' && <SecretForm a={a} onDone={(e) => (e ? setErr(e) : onChanged?.())} />}
@@ -115,7 +116,7 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
       )}
       {can && a.kind === 'root_step' && (
         <div className="mt-3 flex gap-2">
-          <Button size="sm" disabled={!!busy || !a.allowed} data-testid="ask-run" onClick={() => void act('run', () => runRootStep(a.id))}>
+          <Button size="sm" disabled={!!busy || !a.allowed || a.request?.status === 'pending' || a.request?.status === 'running'} data-testid="ask-run" onClick={() => void act('run', () => runRootStep(a.id))}>
             {busy === 'run' ? 'Running…' : 'Run it'}
           </Button>
           <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void act('declined', () => answerAsk(a.id, 'declined'))}>
@@ -203,7 +204,7 @@ function Terminal({ instance }: { instance: string }) {
       <div className="flex items-center gap-2">
         <div className="flex-1">
           <div className="text-[14px] font-medium text-ink">Owner terminal</div>
-          <p className="text-[12px] text-ink-3">A login shell as this machine's admin user. Needs a GitHub sign-in in the last 5 minutes; sudo asks for your password; every command is recorded; it closes after 10 minutes idle.</p>
+          <p className="text-[12px] text-ink-3">A login shell as this machine's admin user. Needs a GitHub sign-in in the last 5 minutes and one of your allowed Tailscale devices; sudo asks for your password; every command is recorded; it closes after 10 minutes idle.</p>
         </div>
         {state === 'closed' ? (
           <Button size="sm" variant="outline" onClick={open} data-testid="terminal-open">

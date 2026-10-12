@@ -2,10 +2,12 @@
 // dashboard. The dashboard and the coordinator are separate processes, so a
 // request is a file in the instance's state (<state>/console/requests/), which
 // the coordinator takes within seconds and acts on; every outcome is an event.
-// The coordinator lists its live runs in <state>/console/live.json. Only the
-// owner may message or stop a run: owners.default, or one the dashboard read
-// as an owner of the instance (admin on its repo; the request says so).
-// Checked here, and again by the coordinator.
+// The coordinator lists its live runs in <state>/console/live.json. The owner
+// and the writers may message (steer) a run; only the owner may stop one. The
+// owner is owners.default, or one the dashboard read as an owner of the
+// instance (admin on its repo); a writer, one it read as a writer (write or
+// maintain). The request says which. Checked here, and again by the
+// coordinator (mayRequest), with the same rule.
 //
 // A message is held until the agent's current turn ends, then delivered (one
 // sent mid-turn would be folded into that turn and change its outcome); the
@@ -42,8 +44,24 @@ export interface LiveRun {
   pending: PendingMessage[];
 }
 
-/** `owner`: the instance's own dashboard read `by` as one of its owners (admin on the repo). */
-export type ConsoleRequest = { v: 1; id: string; at: string; by: string; run: string; owner?: true } & ({ kind: 'message'; text: string } | { kind: 'stop' });
+/**
+ * `owner`: the instance's own dashboard read `by` as one of its owners (admin on the repo); `writer`: as one of its
+ * writers (write or maintain), which allows a message only.
+ */
+export type ConsoleRequest = { v: 1; id: string; at: string; by: string; run: string; owner?: true; writer?: true } & ({ kind: 'message'; text: string } | { kind: 'stop' });
+
+/**
+ * Who may make a console request, the one rule both sides apply (the dashboard before writing it, the coordinator
+ * when it takes it): a message from the owner or a writer, a stop from the owner only. The owner is the default
+ * owner or one the dashboard read as an owner; a writer, one it read as a writer. Null when allowed, else why not.
+ */
+export function mayRequest(cfg: Config, r: { kind: 'message' | 'stop'; by: string; owner?: boolean; writer?: boolean }): string | null {
+  const owner = cfg.project.owners.default;
+  const isOwner = r.owner ?? (!!r.by && r.by.toLowerCase() === owner.toLowerCase());
+  if (r.by && isOwner) return null;
+  if (r.kind === 'message' && r.by && r.writer) return null;
+  return r.kind === 'message' ? `only the owner (@${owner}) or a writer may message a run; @${r.by || 'unknown'} may not` : `only the owner (@${owner}) may stop a run; @${r.by || 'unknown'} may not`;
+}
 
 const dirs = (stateDir: string) => ({ root: join(stateDir, CONSOLE_DIR), requests: join(stateDir, CONSOLE_DIR, 'requests'), live: join(stateDir, CONSOLE_DIR, 'live.json') });
 
@@ -62,7 +80,7 @@ export function liveRuns(stateDir: string): LiveRun[] {
   }
 }
 
-function request(stateDir: string, r: ({ kind: 'message'; run: string; text: string; by: string } | { kind: 'stop'; run: string; by: string }) & { owner?: true }, now = new Date()): { id: string } {
+function request(stateDir: string, r: ({ kind: 'message'; run: string; text: string; by: string } | { kind: 'stop'; run: string; by: string }) & { owner?: true; writer?: true }, now = new Date()): { id: string } {
   const d = dirs(stateDir);
   groupOnlyDir(d.requests);
   const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
@@ -79,14 +97,15 @@ function liveRun(stateDir: string, run: string): LiveRun {
   return r;
 }
 
-/** Message a live run (owner only). Queued at once; delivered when the agent's current turn ends. */
-export function sendMessage(o: { stateDir: string; cfg: Config; run: string; text: string; by: string; owner?: boolean; now?: Date }): { id: string } {
-  ownerOnly(o.cfg, o.by, 'message a run', o.owner);
+/** Message (steer) a live run: the owner or a writer. Queued at once; delivered when the agent's current turn ends. */
+export function sendMessage(o: { stateDir: string; cfg: Config; run: string; text: string; by: string; owner?: boolean; writer?: boolean; now?: Date }): { id: string } {
+  const refused = mayRequest(o.cfg, { kind: 'message', by: o.by, ...(o.owner !== undefined ? { owner: o.owner } : {}), ...(o.writer ? { writer: true } : {}) });
+  if (refused) throw new ConsoleError(refused);
   const text = o.text.trim();
   if (!text) throw new ConsoleError('the message is empty');
   if (text.length > MAX_MESSAGE) throw new ConsoleError(`the message is over ${MAX_MESSAGE} characters`);
   liveRun(o.stateDir, o.run);
-  return request(o.stateDir, { kind: 'message', run: o.run, text, by: o.by, ...(o.owner ? { owner: true as const } : {}) }, o.now);
+  return request(o.stateDir, { kind: 'message', run: o.run, text, by: o.by, ...(o.owner ? { owner: true as const } : o.writer ? { writer: true as const } : {}) }, o.now);
 }
 
 /** Stop a live run (owner only): its process tree ends; the task it was on is blocked, saying who stopped it. */
