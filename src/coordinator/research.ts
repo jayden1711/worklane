@@ -7,7 +7,7 @@ import { type RunControl } from '../runner.js';
 import { researchCaps, researchRepoAccess } from '../settings.js';
 import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchUsageToday, writeResearchBundle, type ResearchResult, type ResearchStep } from '../research.js';
 import { CoordinatorBase } from './base.js';
-import { COMMAND_TIMEOUT_MS } from './shared.js';
+
 
 export abstract class ResearchRuns extends CoordinatorBase {
   /**
@@ -58,7 +58,7 @@ export abstract class ResearchRuns extends CoordinatorBase {
       maxTurns: 60,
       maxBudgetUsd: Math.max(0.1, Math.min(role.budget_usd ?? caps.max_usd_per_day, caps.max_usd_per_day - usage.usd)),
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'researcher', model: role.model, worktree: spec.cwd, pid: p, pgid: p, attempt: 1 }),
       onControl: (ctl) => {
         control = ctl;

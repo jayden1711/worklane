@@ -17,7 +17,7 @@ import { tryAgentSlot } from '../slots.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
-import { COMMAND_TIMEOUT_MS, MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -221,7 +221,7 @@ export abstract class FixRuns extends Landing {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'ci-fix', model, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'ci-fix', r);
@@ -461,7 +461,7 @@ export abstract class FixRuns extends Landing {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: workers.model, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'conflict-fix', r);

@@ -142,7 +142,7 @@ test('the dashboards setup gives the viewer read of each token and traverse on t
   assert.match(sh, /User=wl-\$1\n/, 'each instance\'s dashboard runs as that instance\'s coordinator');
   assert.match(sh, /User=\$viewer\n/, 'the hub runs as the viewer');
   assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --hub \$hub_arg --service/);
-  assert.match(sh, /ProtectHome=read-only\nReadWritePaths=\/home\/\$viewer/, 'the hub can write only its own home');
+  assert.match(sh, /ProtectHome=read-only\nReadWritePaths=\$\(home_of "\$viewer"\)/, 'the hub can write only its own home');
   assert.ok(sh.indexOf('"$@" > "$tmp"') < sh.indexOf('systemd-analyze verify') && sh.indexOf('systemd-analyze verify') < sh.indexOf('mv -f "$tmp"'), 'units: temp name, validate, move');
   assert.match(sh, /FAIL: \$viewer can write/, 'it checks the viewer can\'t write');
   // Per-person sign-in: no single --user for people; the hub gets the sign-in App's client id and its public URL.

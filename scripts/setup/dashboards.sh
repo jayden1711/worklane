@@ -57,7 +57,7 @@ for f in client-secret session-secret; do
   [ -s "$signin_dir/$f" ] || { echo "no $signin_dir/$f: run credentials.sh dashboard-signin first" >&2; exit 1; }
 done
 
-state_of() { local coord="wl-$1"; echo "/home/$coord/.local/state/worklane/instances/$1/state"; }
+state_of() { local coord="wl-$1"; echo "$(home_of "$coord")/.local/state/worklane/instances/$1/state"; }
 for name in "$@"; do
   [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
@@ -125,7 +125,7 @@ hub_sandbox() {
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/$viewer
+ReadWritePaths=$(home_of "$viewer")
 PrivateTmp=yes
 EOF
 }
@@ -163,7 +163,7 @@ for name in "$@"; do
   d="$state"
   while :; do
     setfacl -m "g:$viewer:--x" "$d"
-    [ "$d" = "/home/$coord" ] && break
+    [ "$d" = "$(home_of "$coord")" ] && break
     d="$(dirname "$d")"
   done
   setfacl -m "g:$viewer:r--" "$state/dashboard-token"
@@ -175,7 +175,7 @@ put worklane-dashboard-hub.service hub_unit "$@"
 systemctl daemon-reload
 systemctl enable --now worklane-dashboard-hub.service
 systemctl restart worklane-dashboard-hub.service
-hub_token_file="/home/$viewer/.local/state/worklane/dashboard-hub/dashboard-token"
+hub_token_file="$(home_of "$viewer")/.local/state/worklane/dashboard-hub/dashboard-token"
 wait_for "$hub_token_file" worklane-dashboard-hub.service
 
 say "check: $viewer reads each token and nothing else"

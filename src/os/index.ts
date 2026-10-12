@@ -318,7 +318,38 @@ export function peakMemoryMb(outFile: string): number | null {
   }
 }
 
-export function projectCommand(command: string, runAs?: { user: string; home: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+/**
+ * The PATH project commands get when they run as the agent user (instance.yaml run_as.path overrides it): the
+ * system directories, and on macOS Homebrew's too (/opt/homebrew on Apple silicon; /usr/local is already listed).
+ */
+export function defaultAgentPath(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'darwin' ? '/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin' : '/usr/local/bin:/usr/bin:/bin';
+}
+
+/** Where user homes usually are, for a user not created yet: /Users on macOS, /home elsewhere. */
+export function homesRoot(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'darwin' ? '/Users' : '/home';
+}
+
+/** A user's home directory from the system's user database (null: no such user, or no way to ask here). */
+export function homeOf(user: string, platform: NodeJS.Platform = process.platform): string | null {
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) return null;
+  try {
+    if (platform === 'linux') {
+      const line = execFileSync('getent', ['passwd', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim();
+      return line.split(':')[5] || null;
+    }
+    if (platform === 'darwin') {
+      const out = execFileSync('dscl', ['.', '-read', `/Users/${user}`, 'NFSHomeDirectory'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+      return /NFSHomeDirectory:\s*(\S.*)$/m.exec(out)?.[1]?.trim() || null;
+    }
+  } catch {
+    // no such user
+  }
+  return null;
+}
+
+export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
@@ -327,7 +358,8 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
     HOME: runAs.home,
     USER: runAs.user,
     LOGNAME: runAs.user,
-    PATH: '/usr/local/bin:/usr/bin:/bin',
+    // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
+    PATH: runAs.path ?? defaultAgentPath(),
     LANG: process.env.LANG ?? 'C.UTF-8',
     CI: '1',
     // The checkout belongs to the coordinator user: without trusting it, git refuses it as "dubious ownership" and

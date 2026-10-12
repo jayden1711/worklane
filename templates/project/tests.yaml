@@ -27,6 +27,7 @@ land:
 # Variables for the project's agent sessions (and the hooks they run) and its commands. Never secrets;
 # harness and system variables (PATH, HOME, GIT_*, proxies, ...) are refused.
 # post_edit: "npx eslint {file}"  # a fast check of one file after each agent edit; its findings go back to the agent (never blocks; 20 s)
-env: {}                     # e.g. { PYTEST_XDIST_AUTO_NUM_WORKERS: "6" }
+env: {}                     # e.g. { PYTEST_XDIST_AUTO_NUM_WORKERS: "{cores}" }  ({cores}: this task's share of the cores)
+# command_timeout_s: 7200    # how long a check, suite, setup step or agent run may take (default 2 hours)
 checks: []                  # project lints for the PR gate, e.g. node .worklane/checks/my-lint.mjs
 tiers: []

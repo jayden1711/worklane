@@ -6,6 +6,9 @@ as_root() {
   if [ "$(id -u)" -ne 0 ]; then exec sudo -- bash "$0" "$@"; fi
 }
 
+# A user's home directory, from the passwd database: never assumed to be /home/<user>.
+home_of() { getent passwd "$1" | cut -d: -f6; }
+
 # Run a bash script as another user, its arguments passed through intact.
 # Never `sudo -i ... -c`: -i re-quotes the command for a login shell, which
 # mangles multi-line scripts. From / so the user needn't reach our cwd.
@@ -19,7 +22,7 @@ say() { printf '\n== %s\n' "$*"; }
 # Create a user with a private home, if it doesn't exist yet.
 ensure_user() {
   if id -u "$1" >/dev/null 2>&1; then echo "user $1 exists"; else useradd --create-home --shell /bin/bash "$1"; echo "created user $1"; fi
-  chmod 0700 "/home/$1"
+  chmod 0700 "$(home_of "$1")"
 }
 
 ensure_group() { groupadd -f "$1"; }
