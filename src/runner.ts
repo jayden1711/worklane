@@ -111,10 +111,11 @@ const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'S
  * The agent's whole environment. Anything not listed is dropped, which
  * removes GitHub tokens, cloud keys, database URLs and the SSH agent.
  */
-export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
-  if (runtime === 'sdk' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
+  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
   Object.assign(env, {
     [`${BRAND.envPrefix}_AGENT`]: '1',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
@@ -129,6 +130,15 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra:
     ...extra,
   });
   return env;
+}
+
+/**
+ * claude's apiKeyHelper for an API-key file: a command claude runs (as the user it runs as) to read the key. The
+ * path is refused unless it is absolute and plain (no quote, space or shell character), so it can't become a command.
+ */
+export function apiKeyHelperCommand(file: string): string {
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(file)) throw new Error(`API key file path ${JSON.stringify(file)} must be absolute, with letters, digits and . _ - / only`);
+  return `cat -- ${file}`;
 }
 
 /** The one identity every commit an agent or the coordinator makes carries. */
@@ -290,7 +300,7 @@ interface ResultLine {
 
 export class CliRunner implements AgentRunner {
   constructor(
-    private runtime: 'cli' | 'sdk' = 'cli',
+    private runtime: 'cli' | 'api_key' = 'cli',
     private base: NodeJS.ProcessEnv = process.env,
     private bin = 'claude',
     private runAs?: RunAs,
@@ -307,6 +317,11 @@ export class CliRunner implements AgentRunner {
      * Throws when there are none: the run doesn't start.
      */
     private guardrails?: () => Settings,
+    /**
+     * runtime api_key, for an instance: the agent user's API key file (0400, the agent user's own). It reaches claude
+     * through apiKeyHelper in --settings, which claude runs as the agent user; the key is never in an environment.
+     */
+    private apiKeyFile?: string,
   ) {}
 
   /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
@@ -348,7 +363,9 @@ export class CliRunner implements AgentRunner {
   }
 
   private async runOnce(req: RunRequest): Promise<RunResult> {
-    const env = agentEnv(this.base, this.runtime, {
+    // With a key file, apiKeyHelper is the key's only way in: none from this process's environment.
+    const base = this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base;
+    const env = agentEnv(base, this.runtime, {
       ...safeProjectEnv(req.env),
       ...identityEnv(this.identity),
       [`${BRAND.envPrefix}_ROLE`]: req.role,
@@ -397,7 +414,11 @@ export class CliRunner implements AgentRunner {
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
     const laneSettings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
     // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
-    const settings = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
+    const pinned = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
+    // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),
+    // for runs as the instance's agent user only; a lane running as another user (the eval user) never gets it.
+    const asAgent = !runAs || !this.runAs || runAs.user === this.runAs.user;
+    const settings = this.runtime === 'api_key' && this.apiKeyFile && asAgent ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(this.apiKeyFile) } : pinned;
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.

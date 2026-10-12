@@ -2,17 +2,33 @@
 
 Reviewed 2026-10-07 against Anthropic's published docs and terms. Quotes are verbatim; re-check the linked pages before relying on them, since policies change.
 
-## The two runtimes
+## How agents are billed
 
-| | `cli` (default) | `sdk` (option) |
+There is one runtime: the locally installed, unmodified `claude` binary, headless (`claude -p --output-format stream-json`, `--setting-sources project`). There is no Agent SDK runtime. What differs is how that `claude` is billed:
+
+| | Claude login (default) | API key (option) |
 |---|---|---|
-| What runs | the locally installed `claude` binary, headless (`claude -p --output-format stream-json`) | the Claude Agent SDK in-process |
-| Auth | whatever the user already configured for Claude Code (subscription login, `claude setup-token`, or a key) | `ANTHROPIC_API_KEY` |
-| Isolation | `--setting-sources project` (bare mode is unavailable without an API key) | `settingSources: ['project']`, or bare mode |
+| Set by | the agent user signs in to Claude: `scripts/setup/credentials.sh <name> claude` | `scripts/setup/credentials.sh <name> api-key`, then `agent_api_key: <file>` in the instance's `credentials.yaml` |
+| `agent_runtime` | `cli` | `api_key` for an instance with `agent_api_key` (an instance's billing is set by its own credentials, not by the repo's config); a local run without an instance uses `agent_runtime.kind: api_key` (`sdk` is accepted as the old name) and `ANTHROPIC_API_KEY` |
+| Where the credential lives | the agent user's Claude config dir | a file owned by the agent user, mode 0400, in a 0700 directory of its own |
+| How `claude` gets it | its own login | `apiKeyHelper` (`cat -- <file>`), passed in each run's `--settings` and in the agent user's own Claude settings, so `claude` reads the key as the agent user when it starts |
+| Preflight (every run) | `claude auth status` must report `claude.ai` or `oauth_token` | must report `api_key` or `api_key_helper` |
 | Cost figures | `total_cost_usd` is a list-price **estimate**, not plan usage | estimate, close to the API bill |
-| Governing terms | Consumer Terms (subscriptions) or Commercial Terms (keys) | Commercial Terms |
+| Governing terms | Consumer Terms (subscriptions) | Commercial Terms |
 
-Worklane has **no sign-in flow and never reads, stores, copies or relays credentials.** Each runtime uses its own credential store. The daily budget is a usage guard on estimated cost under either runtime.
+**Why `apiKeyHelper` and not an environment variable.** A key in `ANTHROPIC_API_KEY` would be in the environment of `claude` and of every command an agent runs, and the coordinator would have to hold it to pass it on. With `apiKeyHelper`:
+- the coordinator passes only the file's path;
+- `claude`, running as the agent user, reads the file itself;
+- the coordinator user can't read it (it isn't theirs), and agent commands are denied it by the sandbox, like the Claude login's `.credentials.json`;
+- `instanceEnv` still strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` for every instance.
+
+The helper is given only to runs as the instance's agent user. A lane that runs as another user (the eval lane) never gets it.
+
+**Spend caps are the same either way.** Every run's command line carries `--max-budget-usd` whatever the billing: the role's `budget_usd`, and for most roles (workers, fix runs, the planner, chat, research, intake) no more than what's left of the day's `daily_budget_usd`, which the instance policy caps. Once the daily budget is spent, no new task starts.
+
+**`doctor`** checks the key file exists, is owned by the agent user and is open to nobody else (0400). It never reads the file. As the coordinator user it usually can't see the file at all (by design), and says so; run it as root to check the mode.
+
+Worklane has **no sign-in flow and never reads, stores, copies or relays credentials.** `credentials.sh` (run by the owner, as root) installs them; the engine only passes paths.
 
 ## What the docs say
 
@@ -27,7 +43,7 @@ Worklane has **no sign-in flow and never reads, stores, copies or relays credent
 **Products should use API keys.**
 - [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview.md): "Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK."
 - [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance.md): "Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication."
-- This is why the `sdk` runtime uses an API key only, and why Worklane never offers a login.
+- This is why Worklane never offers a login: the API-key option is a key you bring, for your own agents.
 
 **Subscription limits assume ordinary individual use.**
 - [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance.md): "Advertised usage limits for Pro and Max plans assume ordinary, individual usage of Claude Code and the Agent SDK."
@@ -37,9 +53,9 @@ Worklane has **no sign-in flow and never reads, stores, copies or relays credent
 
 | Risk | Mitigation |
 |---|---|
-| **Silent API billing.** In `-p` mode an `ANTHROPIC_API_KEY` in the environment takes precedence over a subscription login. | Before each run the `cli` runtime checks `claude auth status` and refuses to start if the auth method doesn't match the configured runtime. In `cli` mode it removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and cloud-provider credentials from the agent's environment. |
+| **Silent API billing.** In `-p` mode an `ANTHROPIC_API_KEY` in the environment takes precedence over a subscription login. | Before each run the runner checks `claude auth status` and refuses to start if the auth method doesn't match the billing configured (login or API key). The agent's environment never carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or cloud-provider credentials for an instance; an API key reaches `claude` only through `apiKeyHelper`. |
 | Heavy unattended use of a subscription | Conservative default concurrency (`agent_runtime.max_concurrency: 2`), optional `run_windows`, a daily budget, and stopping on rate-limit events rather than waiting for the reset. |
-| Credential handling | None. Worklane never reads `~/.claude` credentials, keychains, or tokens, and the guardrails deny agents reading credential files (`secret_paths`). |
+| Credential handling | None in the engine. It never reads `~/.claude` credentials, keychains, tokens or the API key file; it passes only the key file's path. The guardrails deny agents reading credential files (`secret_paths`), and the sandbox denies them the login and the key file. |
 | Untrusted repos | Non-bare `-p` runs a project's hooks and MCP servers without a trust prompt. Only run Worklane on repositories you trust. |
 | Product naming | "Claude Code" may not be part of a product name. The product is "Worklane". |
 

@@ -92,6 +92,15 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   return env;
 }
 
+/**
+ * How an instance's agents are billed: an API key only when its credentials.yaml names one (agent_api_key, which
+ * only the owner sets, with credentials.sh); otherwise the agent user's Claude subscription login. The repo's own
+ * agent_runtime doesn't decide this for an instance. The key never enters an environment (instanceEnv strips it).
+ */
+export function instanceRuntime(i: Pick<Instance, 'credentials'>): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
+  return i.credentials.agent_api_key ? { runtime: 'api_key', apiKeyFile: i.credentials.agent_api_key } : { runtime: 'cli' };
+}
+
 /** Run an instance's coordinator. Refuses to start without the instance's own credentials. */
 export async function runInstanceCoordinator(name: string, opts: { once?: boolean; intervalMs?: number } = {}): Promise<number> {
   const i = loadInstance(name);
@@ -141,7 +150,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path)), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */

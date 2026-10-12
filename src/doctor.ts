@@ -10,8 +10,8 @@ import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instancesDir, policiesForRepo, policyViolations, readPolicy } from './instance.js';
-import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
+import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
+import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
 export type Level = 'ok' | 'warn' | 'fail';
@@ -25,6 +25,24 @@ const CLAUDE_MD_TOKEN_BUDGET = 2500;
 
 function nodeMajor(): number {
   return Number(process.versions.node.split('.')[0]);
+}
+
+/**
+ * An instance's agent API key file (credentials.yaml agent_api_key): present, owned by the agent user, and open to
+ * nobody else (no group or other bits). The file is never read. The coordinator user normally can't even see it
+ * (it lives in the agent user's home), which is right: then this says to run doctor as root to check the mode.
+ */
+export function apiKeyCheck(file: string, agentUser: string | null, access = fileAccess, uidOf = userUid): { level: Level; detail: string } {
+  if (!agentUser) return { level: 'fail', detail: `${file}: an API key needs agents to run as their own user (instance.yaml run_as)` };
+  const a = access(file);
+  if (a.kind === 'unsupported') return { level: 'warn', detail: 'API-key instances run agents as their own POSIX user; not checkable on native Windows' };
+  if (a.kind === 'missing') return { level: 'fail', detail: `${file} not found: install it with \`scripts/setup/credentials.sh <name> api-key\`` };
+  if (a.kind === 'hidden') return { level: 'warn', detail: `${file} can't be seen from this user, as intended (it is ${agentUser}'s); to check its owner and mode, run doctor as root` };
+  const uid = uidOf(agentUser);
+  if (uid === null) return { level: 'fail', detail: `the agent user ${agentUser} does not exist on this machine` };
+  if (a.uid !== uid) return { level: 'fail', detail: `${file} is not owned by ${agentUser}: reinstall it with credentials.sh` };
+  if (a.openToOthers) return { level: 'fail', detail: `${file} is mode ${a.mode}: only ${agentUser} may read it (0400). Run: chmod 0400 ${file}` };
+  return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
 }
 
 export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string } = {}): DoctorCheck[] {
@@ -67,6 +85,16 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   // instances installed before agent settings still find them.
   const instances = [...new Set([...(opts.instance ? [opts.instance] : []), ...(cfg ? policiesForRepo(cfg.project.project.repo).map((p) => p.name) : [])])];
   for (const name of instances) {
+    // An API-key instance: its key file is the agent user's alone.
+    try {
+      const inst = loadInstance(name);
+      if (inst.credentials.agent_api_key) {
+        const k = apiKeyCheck(inst.credentials.agent_api_key, inst.runAs?.user ?? null);
+        add(`api key ${name}`, k.level, k.detail);
+      }
+    } catch {
+      // an instance this user can't load is reported by its own checks
+    }
     const file = agentSettingsPath(join(instancesDir(), name));
     if (!existsSync(file)) {
       // Hooks in the checkout's own .claude/settings.json (an install from before agent settings) don't count: the
