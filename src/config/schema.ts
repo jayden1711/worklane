@@ -187,11 +187,11 @@ export const AgentsConfig = z
       .strictObject({
         enabled: z.boolean().default(true),
         /** Spend cap for one eval (base and head together), on the CLI's cost estimate. */
-        cap_usd: z.number().positive().default(5),
+        cap_usd: z.number().positive().default(10),
         /** The model under test (default: the workers' model) and the judge (default: the evaluator's); never the same. */
         model: model.optional(),
         judge: model.optional(),
-        samples: z.number().int().min(1).max(5).default(1),
+        samples: z.number().int().min(1).max(5).default(3),
       })
       .prefault({}),
   })

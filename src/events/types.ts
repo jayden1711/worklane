@@ -248,6 +248,20 @@ export const EventSchemas = {
     changes: z.array(z.strictObject({ id: z.string(), title: z.string(), base: z.string(), head: z.string() })),
     cost_usd: z.number().nonnegative(),
     error: z.string().optional(),
+    /** Samples per case. Scores (`base`, `result`, and held-out's) are rubric items met, of all items. */
+    samples: z.number().int().positive().optional(),
+    /** A role's held-out comparison, which decides; null: the role has no held-out cases (it can't pass). Absent: not a role. */
+    held_out: z
+      .strictObject({
+        base: z.strictObject({ passed: z.number().int(), total: z.number().int() }).nullable(),
+        result: z.strictObject({ passed: z.number().int(), total: z.number().int() }),
+        dropped: z.boolean(),
+        incomplete: z.boolean(),
+        changes: z.array(z.strictObject({ id: z.string(), title: z.string(), base: z.string(), head: z.string() })),
+      })
+      .nullable()
+      .optional(),
+    held_out_error: z.string().optional(),
   }),
   /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
   'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),

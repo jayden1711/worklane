@@ -52,6 +52,9 @@ export interface InstructionEvalResult {
   changes: { id: string; title: string; base: string; head: string }[];
   cost_usd: number;
   error?: string | undefined;
+  /** A role's held-out comparison (decides); null: no held-out cases; absent: the target isn't a role. */
+  held_out?: { base: { passed: number; total: number } | null; result: { passed: number; total: number }; dropped: boolean; incomplete: boolean; changes: { id: string; title: string; base: string; head: string }[] } | null | undefined;
+  held_out_error?: string | undefined;
 }
 
 /**
@@ -69,6 +72,16 @@ export function instructionEvalReasons(targets: string[], results: InstructionEv
     else if (r.dropped) {
       const diff = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - case ${c.id} "${c.title}": ${c.base} → ${c.head}`);
       out.push([`eval: ${t} scored lower, ${score(r.base)} → ${score(r.result)} (~$${r.cost_usd.toFixed(2)}):`, ...diff].join('\n'));
+    }
+    if (!r || r.error || !t.startsWith('role ')) continue;
+    // A role's held-out score decides: without it, or with it incomplete or lower, the change waits.
+    const h = r.held_out;
+    if (!h) out.push(`eval: ${t} has no held-out score${r.held_out_error ? `: ${r.held_out_error}` : ' (the visible score alone never passes a role change)'}`);
+    else if (h.incomplete) out.push(`eval: ${t} held-out is incomplete: the cost cap was reached, ${score(h.base)} → ${score(h.result)} on the cases that ran`);
+    else if (h.dropped) {
+      // By number only: a held-out case's text never reaches a PR, where a prompt writer could read it.
+      const diff = h.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - held-out case ${c.id}: ${c.base} → ${c.head}`);
+      out.push([`eval: ${t} scored lower on its held-out cases, ${score(h.base)} → ${score(h.result)}:`, ...diff].join('\n'));
     }
   }
   return out;

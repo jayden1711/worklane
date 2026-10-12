@@ -43,6 +43,7 @@ import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { Gardener } from './coordinator/gardener.js';
+import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
@@ -855,8 +856,12 @@ export class Coordinator extends Gardener {
         continue;
       }
       try {
-        const c = await compareInstructions({ target: t.target, baseText, headText, cases, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
-        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd });
+        // A role is judged on its held-out cases too (the coordinator's own, never in the repo); they decide.
+        const held = t.role ? await heldOutFor({ role: t.role, baseText, headText, stateDir: this.d.stateDir, model: judge, ask: runnerAsk(this.d.runner, (r) => this.cost(n, CASE_WRITER_COST_ROLE, r as RunResult), this.d.stateDir) }) : null;
+        const c = await compareInstructions({ target: t.target, baseText, headText, cases, heldOut: held && 'cases' in held ? held.cases : null, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
+        // Held-out cases go into the log by number only: their titles stay in the coordinator's store.
+        const heldOut = c.heldOut ? { base: c.heldOut.base, result: c.heldOut.head, dropped: c.heldOut.dropped, incomplete: c.heldOut.incomplete, changes: c.heldOut.changes.map((x) => ({ ...x, title: '' })) } : null;
+        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd, samples: c.samples, ...(t.role ? { held_out: heldOut } : {}), ...(held && 'error' in held ? { held_out_error: held.error } : {}) });
       } catch (e) {
         if (e instanceof Halted) throw e;
         record({ ...none, error: (e as Error).message.slice(0, 500) });
