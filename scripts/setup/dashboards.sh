@@ -23,7 +23,7 @@ login="${1:?usage: dashboards.sh <your GitHub login> <name> [<name>...]}"
 shift
 [ "$#" -ge 1 ] || { echo "usage: dashboards.sh <your GitHub login> <name> [<name>...]" >&2; exit 2; }
 [[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || { echo "GitHub login: letters, digits and dashes" >&2; exit 2; }
-command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package, then run this again" >&2; exit 1; }
+command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
 

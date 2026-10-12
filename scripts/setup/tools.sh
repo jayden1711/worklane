@@ -16,7 +16,7 @@ gitleaks_sha256_x64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f24
 gitleaks_sha256_arm64=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
 
 say "gh, from the distribution"
-pkg_install gh
+apt-get install -y gh
 gh --version | head -1
 
 say "Claude Code $version, installed globally next to node and linked from /usr/local/bin"

@@ -58,6 +58,6 @@ if [ -n "$name" ]; then
       exit 0
     fi
     worklane instance init "$1" --repo "$2" --github "$3" --agent-user "$agent" --agent-home "$agent_home"
-  ' "$name" "$(checkouts_root)/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
+  ' "$name" "/srv/worklane/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
   echo "next: credentials.sh $name github-app ..., then checkout.sh $name $repo"
 fi

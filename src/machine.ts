@@ -9,21 +9,7 @@ import { BRAND } from './brand.js';
 export const MACHINE_HELPER = `/usr/local/libexec/${BRAND.cli}-machine`;
 export const MACHINE_CHANGES = `/var/lib/${BRAND.cli}/machine-changes.jsonl`;
 export const SLOTS_MIN = 1;
-/** Machine settings machine.sh records (root-owned): the slot ceiling (max_cap) and the checkout root. */
-export const MACHINE_CONF = `/etc/${BRAND.cli}/machine.json`;
-/** The ceiling when machine.json doesn't set one; scripts/setup/lib.sh and the helper use the same default. */
-export const DEFAULT_MAX_CAP = 16;
-
-/** The highest slot cap an instance may set: machine.json's max_cap (1..99), else DEFAULT_MAX_CAP. The one source. */
-export function SLOTS_MAX(file = MACHINE_CONF): number {
-  try {
-    const v = (JSON.parse(readFileSync(file, 'utf8')) as { max_cap?: unknown }).max_cap;
-    if (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 99) return v;
-  } catch {
-    // no machine.json (machine.sh not re-run since it existed): the default
-  }
-  return DEFAULT_MAX_CAP;
-}
+export const SLOTS_MAX = 16;
 
 export interface MachineChange {
   at: string;
@@ -53,9 +39,9 @@ function runHelper(args: string[], exec: Exec): MachineResult {
   }
 }
 
-/** Set the machine's agent slot cap (1..the machine's max_cap) through the helper. */
+/** Set the machine's agent slot cap (1..16) through the helper. */
 export function setSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
-  if (!Number.isInteger(n) || n < SLOTS_MIN || n > SLOTS_MAX()) return { ok: false, error: `the slot cap must be a whole number from ${SLOTS_MIN} to ${SLOTS_MAX()}, not ${n}` };
+  if (!Number.isInteger(n) || n < SLOTS_MIN || n > SLOTS_MAX) return { ok: false, error: `the slot cap must be a whole number from ${SLOTS_MIN} to ${SLOTS_MAX}, not ${n}` };
   return runHelper(['set-slots', String(n)], exec);
 }
 

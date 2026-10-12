@@ -80,7 +80,7 @@ test('task files live in a directory the agents\' group can read but not write; 
 });
 
 test('instance.sh makes the instance root sticky for new instances', () => {
-  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance.sh'), 'utf8'), /install -d -o "\$coord" -g "\$work" -m 3770 "\$\(checkouts_root\)\/\$name"/);
+  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance.sh'), 'utf8'), /install -d -o "\$coord" -g "\$work" -m 3770 "\/srv\/worklane\/\$name"/);
 });
 
 // Separate users for real (CI runners with passwordless sudo): the agent's hook runs as another user.
