@@ -3,6 +3,7 @@
 // their label history.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { redactString } from '../events/redact.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PullRequest } from './types.js';
 
 interface FilePr {
@@ -110,8 +111,9 @@ export class FileBacklog implements Backlog {
   async setAssignees(n: number, logins: string[]) {
     this.edit(n, (i) => (i.assignees = [...new Set([...i.assignees, ...logins])]));
   }
+  // What the harness writes is redacted first (events/redact.ts), as the GitHub backlog does for everything it sends.
   async comment(n: number, body: string) {
-    this.edit(n, (i) => i.comments.push({ author: this.actor, body }));
+    this.edit(n, (i) => i.comments.push({ author: this.actor, body: redactString(body) }));
   }
   async comments(n: number) {
     return this.load().issues.find((x) => x.number === n)?.comments ?? [];
@@ -120,9 +122,11 @@ export class FileBacklog implements Backlog {
     this.edit(n, (i) => (i.state = 'closed'));
   }
   async createIssue(title: string, body: string, labels: string[]) {
-    return this.open({ title, body, author: this.actor, labels });
+    return this.open({ title: redactString(title), body: redactString(body), author: this.actor, labels });
   }
   async openPr(head: string, base: string, title: string, body: string, opts: { draft?: boolean; headSha?: string } = {}) {
+    title = redactString(title);
+    body = redactString(body);
     const s = this.load();
     const existing = s.issues.find((i) => i.pr?.head === head && i.state === 'open');
     if (existing) return { url: existing.pr!.url, number: existing.number, draft: existing.pr!.draft };
