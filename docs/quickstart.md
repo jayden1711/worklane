@@ -20,7 +20,7 @@ You need:
 3. Add `~/.local/bin` to your PATH if the script says it isn't there.
 
 The bootstrap does the following:
-1. Checks for Node.js 22.13 or newer, and installs `node@22` from Homebrew if it's missing or older.
+1. Checks for Node.js 24 or newer, and installs `node@24` from Homebrew if it's missing or older.
 2. Installs gitleaks, pinned and checked against its sha256.
 3. Installs Claude Code at a pinned version through npm.
 4. Installs the engine at the release tag pinned in the script, by its commit, into `~/.local`.

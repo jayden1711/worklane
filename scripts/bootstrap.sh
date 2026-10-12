@@ -19,10 +19,11 @@
 set -euo pipefail
 
 CLI=worklane
-NODE_VERSION=v22.23.3
-NODE_MIN=22.13
-NODE_SHA256_LINUX_X64=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
-NODE_SHA256_LINUX_ARM64=a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f
+NODE_VERSION=v24.21.0
+# The coordinator needs Node 24 (worklane doctor warns below it; hooks alone run on 22.13).
+NODE_MIN=24.0
+NODE_SHA256_LINUX_X64=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
+NODE_SHA256_LINUX_ARM64=6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2
 GITLEAKS_VERSION=8.30.1
 GITLEAKS_SHA256_LINUX_X64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 GITLEAKS_SHA256_LINUX_ARM64=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
@@ -149,9 +150,9 @@ have_node="$(node --version 2>/dev/null || true)"
 if [ -n "$have_node" ] && at_least "$have_node" "$NODE_MIN"; then
   ok "node $have_node ($(command -v node))"
 elif [ "$OS" = Darwin ]; then
-  command -v brew >/dev/null 2>&1 || die "no Node.js $NODE_MIN+ and no Homebrew: install Homebrew (https://brew.sh) or Node.js 22 yourself, then run this again"
-  run brew install node@22
-  nb="$(brew --prefix node@22 2>/dev/null || echo /opt/homebrew/opt/node@22)/bin"
+  command -v brew >/dev/null 2>&1 || die "no Node.js $NODE_MIN+ and no Homebrew: install Homebrew (https://brew.sh) or Node.js 24 yourself, then run this again"
+  run brew install node@24
+  nb="$(brew --prefix node@24 2>/dev/null || echo /opt/homebrew/opt/node@24)/bin"
   for b in node npm npx; do run ln -sfn "$nb/$b" "$PREFIX/bin/$b"; done
 else
   name="node-$NODE_VERSION-linux-$ARCH"

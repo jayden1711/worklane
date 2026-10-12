@@ -23,7 +23,7 @@ See [docs/design.md](docs/design.md) for the architecture and [docs/prior-art.md
 On a Mac (with Homebrew) or Linux, from a checkout of this repo:
 
 ```sh
-bash scripts/bootstrap.sh ~/code/your-repo   # Node.js 22, gitleaks, Claude Code and the engine (pinned, checked),
+bash scripts/bootstrap.sh ~/code/your-repo   # Node.js 24, gitleaks, Claude Code and the engine (pinned, checked),
                                              # then `worklane install` in your repo and `worklane doctor`
 worklane up --root ~/code/your-repo          # the coordinator, as a service for your user
 worklane dashboard --root ~/code/your-repo   # the dashboard

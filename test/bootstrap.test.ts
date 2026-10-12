@@ -55,7 +55,7 @@ function released(m: ReturnType<typeof machine>) {
 
 /** Everything already installed at the right versions; the engine stub records its subcommands. */
 const installed = (over: Record<string, string> = {}) => ({
-  node: 'echo v22.23.3',
+  node: 'echo v24.21.0',
   gitleaks: 'echo 8.30.1',
   claude: 'echo "2.1.296 (Claude Code)"',
   worklane: 'case "$1" in --version) echo 0.4.1 ;; add) exit 2 ;; *) exit 0 ;; esac',
@@ -82,7 +82,7 @@ test('bootstrap: a dry run on a bare Linux machine plans every step, pinned and 
   const m = machine();
   const r = m.run('--dry-run', m.repo);
   assert.equal(r.code, 0, r.out);
-  assert.match(r.out, /would download node-v22\.23\.3-linux-x64\.tar\.xz \(sha256 df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de\)/);
+  assert.match(r.out, /would download node-v24\.21\.0-linux-x64\.tar\.xz \(sha256 fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6\)/);
   assert.match(r.out, /would download gitleaks_8\.30\.1_linux_x64\.tar\.gz \(sha256 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb\)/);
   assert.match(r.out, /would run: npm install -g --prefix \S+ --no-audit --no-fund @anthropic-ai\/claude-code@2\.1\.296/);
   assert.match(r.out, new RegExp(`would fetch https://github\\.com/${esc(ENGINE_REPO)}\\.git at 9c24a10eb91ffac894e24f0b0a54d8407f23d423 \\(v0\\.4\\.1\\), check the commit, and pack it`), 'the engine at its release commit, not main');
@@ -91,30 +91,30 @@ test('bootstrap: a dry run on a bare Linux machine plans every step, pinned and 
   assert.match(r.out, /would run: worklane doctor --root/);
   assert.ok(!existsSync(m.prefix), 'nothing was created');
   assert.deepEqual(m.calls(), [], 'no tool was run');
-  assert.match(machine({ arch: 'aarch64' }).run('--dry-run', '--no-repo').out, /node-v22\.23\.3-linux-arm64\.tar\.xz \(sha256 a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f\)/);
+  assert.match(machine({ arch: 'aarch64' }).run('--dry-run', '--no-repo').out, /node-v24\.21\.0-linux-arm64\.tar\.xz \(sha256 6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2\)/);
 });
 
 test('bootstrap: on a Mac, Node comes from Homebrew (never a piped installer); without Homebrew it stops and says so', { skip }, () => {
   const bare = machine({ os: 'Darwin', arch: 'arm64' });
   const r = bare.run('--dry-run', bare.repo);
   assert.equal(r.code, 1);
-  assert.match(r.out, /no Node\.js 22\.13\+ and no Homebrew: install Homebrew/);
-  const brew = machine({ os: 'Darwin', arch: 'arm64', have: { brew: 'echo /opt/homebrew/opt/node@22' } });
+  assert.match(r.out, /no Node\.js 24\.0\+ and no Homebrew: install Homebrew/);
+  const brew = machine({ os: 'Darwin', arch: 'arm64', have: { brew: 'echo /opt/homebrew/opt/node@24' } });
   const b = brew.run('--dry-run', brew.repo);
   assert.equal(b.code, 0, b.out);
-  assert.match(b.out, /would run: brew install node@22/);
+  assert.match(b.out, /would run: brew install node@24/);
   assert.match(b.out, /gitleaks_8\.30\.1_darwin_arm64\.tar\.gz \(sha256 b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5\)/);
   assert.match(machine({ os: 'Darwin', arch: 'x86_64', have: { brew: 'true' } }).run('--dry-run', '--no-repo').out, /darwin_x64\.tar\.gz \(sha256 dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709\)/);
-  const old = machine({ os: 'Darwin', arch: 'arm64', have: { node: 'echo v20.11.0', brew: 'true' } });
-  assert.match(old.run('--dry-run', old.repo).out, /would run: brew install node@22/, 'Node 20 is too old');
+  const old = machine({ os: 'Darwin', arch: 'arm64', have: { node: 'echo v22.23.3', brew: 'true' } });
+  assert.match(old.run('--dry-run', old.repo).out, /would run: brew install node@24/, 'Node 22 is too old for the coordinator');
 });
 
 test('bootstrap: a download that does not match its pinned checksum is refused and removed', { skip }, () => {
   const m = machine({ have: { curl: 'while [ $# -gt 0 ]; do [ "$1" = -o ] && { echo tampered > "$2"; }; shift; done' } });
   const r = m.run('--no-repo');
   assert.equal(r.code, 1);
-  assert.match(r.out, /checksum mismatch for https:\/\/nodejs\.org\/dist\/v22\.23\.3\/node-v22\.23\.3-linux-x64\.tar\.xz/);
-  assert.ok(!existsSync(join(m.prefix, 'lib', 'node-v22.23.3-linux-x64')), 'nothing installed');
+  assert.match(r.out, /checksum mismatch for https:\/\/nodejs\.org\/dist\/v24\.21\.0\/node-v24\.21\.0-linux-x64\.tar\.xz/);
+  assert.ok(!existsSync(join(m.prefix, 'lib', 'node-v24.21.0-linux-x64')), 'nothing installed');
 });
 
 test('bootstrap: idempotent: with everything in place it installs nothing, sets the repo up and ends with doctor', { skip }, () => {
@@ -124,7 +124,7 @@ test('bootstrap: idempotent: with everything in place it installs nothing, sets 
   for (let i = 0; i < 2; i++) {
     const r = m.run(m.repo);
     assert.equal(r.code, 0, r.out);
-    for (const what of ['node v22.23.3', 'gitleaks 8.30.1', 'claude 2.1.296', 'worklane 0.4.1']) assert.match(r.out, new RegExp(`ok: ${what}`));
+    for (const what of ['node v24.21.0', 'gitleaks 8.30.1', 'claude 2.1.296', 'worklane 0.4.1']) assert.match(r.out, new RegExp(`ok: ${what}`));
   }
   const calls = m.calls().filter((c) => !/--version|^node |^gitleaks |^claude /.test(c));
   assert.deepEqual(calls, [`worklane install --root ${m.repo}`, 'worklane add --help', `worklane doctor --root ${m.repo}`, `worklane install --root ${m.repo}`, 'worklane add --help', `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
@@ -165,7 +165,7 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   const r = m.run('--hardened', '--dry-run', 'shop', 'acme/shop');
   assert.equal(r.code, 0, r.out);
   const steps = [...r.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim());
-  assert.deepEqual(steps, ['node.sh v22.23.3', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
+  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
   assert.match(r.out, /credentials\.sh shop github-app/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
   assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop']);
