@@ -167,6 +167,20 @@ export class IntakeMeter {
     this.save(c);
   }
 
+  /** Count a drop that happened before a report was taken (e.g. a sender not allowed): the reason only, nothing else. */
+  countDrop(reason: string) {
+    const c = this.load();
+    c.dropped[reason] = (c.dropped[reason] ?? 0) + 1;
+    this.save(c);
+  }
+
+  /** Spend that isn't a draft (a casual reply): counted against the day's spend cap. */
+  recordSpend(usd: number) {
+    const c = this.load();
+    c.usd += usd;
+    this.save(c);
+  }
+
   /** What was dropped today, by reason (for the health panel). */
   dropped(): Record<string, number> {
     return { ...this.load().dropped };

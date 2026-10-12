@@ -102,6 +102,11 @@ export const EventSchemas = {
   'intake.grouped': z.strictObject({ id: z.string(), with: z.string() }),
   /** The triage run for a report is about to start: until its outcome, a restart ends it as interrupted. */
   'intake.started': z.strictObject({ id: z.string() }),
+  /**
+   * Which text a reply used: the casual replier's (`casual`, it passed the checks) or the engine's fixed one, with
+   * `why` (the check it failed, the cap, or the run's end). Only when casual replies are on.
+   */
+  'intake.reply_checked': z.strictObject({ id: z.string(), stage: z.string(), used: z.enum(['casual', 'fixed']), why: z.string().nullable() }),
   /** A reply is about to be sent (recorded first, so a crash can't send it twice). */
   'intake.replying': z.strictObject({ id: z.string(), stage: z.string() }),
   /**

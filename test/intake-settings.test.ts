@@ -54,14 +54,17 @@ test('intake.yaml: absent means off; only its owner may change it; invalid is re
   const d = mkdtempSync(join(tmpdir(), 'intake-cfg-'));
   const p = join(d, 'intake.yaml');
   assert.equal(loadIntakeConfig(p), null);
-  writeFileSync(p, 'version: 1\ntrusted: { discord: ["222222"] }\ndiscord: { enabled: true, guild: "555555", channels: ["111111"] }\n', { mode: 0o600 });
+  writeFileSync(p, 'version: 1\ntrusted: { discord: ["222222"] }\ndiscord: { enabled: true, guild: "555555", channels: ["111111"], allowed_senders: ["222222"] }\n', { mode: 0o600 });
   const ok = loadIntakeConfig(p) as { config: { trusted: { discord: string[] }; discord: { enabled: boolean; guild: string } } };
   assert.deepEqual([ok.config.trusted.discord, ok.config.discord.enabled, ok.config.discord.guild], [['222222'], true, '555555']);
   chmodSync(p, 0o620);
   assert.match((loadIntakeConfig(p) as { error: string }).error, /writable by its group or others/);
   chmodSync(p, 0o600);
   writeFileSync(p, 'version: 1\ntrusted: { discord: ["sam"] }\n');
-  assert.match((loadIntakeConfig(p) as { error: string }).error, /Discord user id/);
+  assert.match((loadIntakeConfig(p) as { error: string }).error, /Discord user id/);  writeFileSync(p, 'version: 1\ntrusted: { discord: ["222222"] }\n');
+  assert.match((loadIntakeConfig(p) as { error: string }).error, /222222 is trusted but not in discord.allowed_senders/, 'a trusted sender who is not allowed is refused at start-up (#150)');
+  writeFileSync(p, 'version: 1\ndiscord: { enabled: true, guild: "555555" }\n');
+  assert.deepEqual((loadIntakeConfig(p) as { warnings: string[] }).warnings, ['discord is on but discord.allowed_senders is empty: no Discord message will be accepted']);
 });
 
 test('intake.yaml: Discord needs its one server id when enabled; every source is off by default', () => {
