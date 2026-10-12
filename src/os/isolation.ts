@@ -23,6 +23,15 @@ export interface IsolationFacts {
 
 export type Level = 'ok' | 'warn' | 'fail';
 
+/**
+ * Credential stores in a home that only this OS has, relative to the home: on macOS the user's keychain files.
+ * Denying the files doesn't block the `security` tool, which asks the keychain service over IPC instead of
+ * reading them; agents get no secret in their keychain to find.
+ */
+export function osCredentialStores(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === 'darwin' ? ['Library/Keychains'] : [];
+}
+
 /** The mechanism Claude Code's sandbox uses on this OS, if it's there (it refuses to run agents without it). */
 export function sandboxMechanism(os: OsKind, exists: (p: string) => boolean = existsSync): string | null {
   if (os === 'macos') return exists('/usr/bin/sandbox-exec') ? 'Seatbelt' : null;

@@ -5,6 +5,8 @@
 // stronger boundary is the OS one: agents run as their own user, and the
 // coordinator's credentials are unreadable to that user anyway.
 
+import { osCredentialStores } from './os/isolation.js';
+
 export interface Lane {
   /** Hosts sandboxed commands may reach (the sandbox's proxy checks each connection). */
   allowedDomains: string[];
@@ -43,15 +45,9 @@ export function sandboxSettings(s: SandboxInput) {
   };
 }
 
-/**
- * Credential stores in an agent user's home that its commands never need. On macOS that includes the user's
- * keychain files (Library/Keychains). Denying the files doesn't block the `security` tool, which asks the
- * keychain service over IPC instead of reading them; agents get no secret in their keychain to find.
- */
-export function homeCredentialStores(home: string, platform: NodeJS.Platform = process.platform): string[] {
-  const stores = ['.ssh', '.aws', '.config/gh', '.gnupg', '.netrc', '.npmrc', '.pypirc', '.docker/config.json'];
-  if (platform === 'darwin') stores.push('Library/Keychains');
-  return stores.map((p) => `${home.replace(/\/$/, '')}/${p}`);
+/** Credential stores in an agent user's home that its commands never need, plus this OS's own (osCredentialStores). */
+export function homeCredentialStores(home: string, osStores: string[] = osCredentialStores()): string[] {
+  return ['.ssh', '.aws', '.config/gh', '.gnupg', '.netrc', '.npmrc', '.pypirc', '.docker/config.json', ...osStores].map((p) => `${home.replace(/\/$/, '')}/${p}`);
 }
 
 /** The hosts a run's settings let its commands reach (none when there are no settings). */

@@ -5,7 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from '
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolationCheck, sandboxMechanism, serviceDefinitionPath, type IsolationFacts } from '../src/os/isolation.js';
+import { isolationCheck, osCredentialStores, sandboxMechanism, serviceDefinitionPath, type IsolationFacts } from '../src/os/isolation.js';
 import { homeCredentialStores } from '../src/sandbox.js';
 import { repoRoot } from './helpers.js';
 
@@ -66,9 +66,9 @@ test('the sandbox and service each OS uses, by path', () => {
 });
 
 test('on macOS an agent\'s keychain files are a denied credential store too', () => {
-  assert.ok(homeCredentialStores('/Users/u', 'darwin').includes('/Users/u/Library/Keychains'));
-  assert.ok(!homeCredentialStores('/home/u', 'linux').some((p) => p.includes('Keychains')));
-  assert.ok(homeCredentialStores('/Users/u/', 'darwin').includes('/Users/u/.ssh'), 'the common stores stay');
+  assert.ok(homeCredentialStores('/Users/u', osCredentialStores('darwin')).includes('/Users/u/Library/Keychains'));
+  assert.ok(!homeCredentialStores('/home/u', osCredentialStores('linux')).some((p) => p.includes('Keychains')));
+  assert.ok(homeCredentialStores('/Users/u/', osCredentialStores('darwin')).includes('/Users/u/.ssh'), 'the common stores stay');
 });
 
 test('the macOS scripts use nothing Linux-only', () => {
