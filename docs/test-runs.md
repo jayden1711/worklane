@@ -26,7 +26,7 @@ test_run:
 ```
 
 - **Tiers.** `fast` tiers run on every PR, and again on each new head. `full` tiers run once per batch of approved PRs (PR mode). Each tier is one command, run under bash with pipefail in the run's workspace. It posts one check.
-- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. The workspace has no `.git` (see below), so a plan that runs `git diff` itself won't work there. `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
+- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
 - **Database.** A tier with `database: true` gets the run's own Postgres in `DATABASE_URL`: a container named after the run, on a port the daemon picks, on `127.0.0.1` only, with a random password. Its data is on a tmpfs, and it is removed with the run.
 - **Checks.** Several tiers of one kind may map to one check (say three full tiers to `suite`): it passes only when all of them passed. A check can't have both fast and full tiers.
 - **Shared directories.** Concurrent runs that must coordinate (a registry of test ports, say) get a directory of the instance's that every run can write and no wipe removes, in the variable named. It lives outside each run's `TMPDIR`, which is wiped.
@@ -44,7 +44,11 @@ test_run:
 | `worklane-test-<name>-docker.service` | Rootless Docker as the test user, for the runs' databases. There is no root daemon and no `docker` group. Published ports bind `127.0.0.1`. |
 | `/var/lib/worklane-test/<name>` | Per instance: `runs/<id>` (one per run), `cache/`, Docker's data. |
 
-**One run.** The coordinator makes a run's workspace from `git archive` of the commit, piped to the helper, which unpacks it as the test user into `runs/<id>/work`. The test user never reads the coordinator's checkout or its `.git`. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
+**One run.** A run's workspace is a git clone of its own, owned by the test user, so suites that call git (`git log main`, a diff against `origin/main`, LFS paths) work as on CI.
+- The coordinator writes a `git bundle` of the commit and the default branch, under temporary refs it removes at once. The bundle is a copy of the objects, never shared alternates or the coordinator's `.git`, and it is piped to the helper.
+- As the test user, the helper clones it into `runs/<id>/work`: the commit checked out, and the default branch as `main` and `origin/main` (and `origin/HEAD`).
+- The clone has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config.
+- The test user never reads the coordinator's checkout, and has no path back to it to write. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
 
 - a read-only system (`ProtectSystem=strict`), no `/home`, `/root` or `/run/user` (`ProtectHome=tmpfs`);
 - every protected path above inaccessible, and the Docker socket too, so only the helper starts containers;
