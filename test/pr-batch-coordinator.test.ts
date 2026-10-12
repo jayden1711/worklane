@@ -21,6 +21,7 @@ function service(ok = true) {
     async postChecks(sha) {
       backlog!.setChecks(sha, [...(await backlog!.checks(sha)), full]);
     },
+    checkNames: () => ({ unit: 'full' }),
   };
   return { t, runs, bind: (b: Fixture['backlog']) => (backlog = b) };
 }

@@ -26,6 +26,7 @@ export interface TestRunRequest {
   kind: 'fast' | 'full';
   prs: number[];
   changedFiles?: string[];
+  /** 1-based: index 1..total. */
   shard?: { index: number; total: number };
 }
 export interface TierResult {
@@ -45,8 +46,10 @@ export interface TestRunResult {
 export interface TestRuns {
   /** Queues, waits for a slot and the lock, runs, wipes, records events. */
   startTestRun(req: TestRunRequest): Promise<TestRunResult>;
-  /** GitHub check runs via the App, one per tier, on `sha`. */
-  postChecks(sha: string, result: TestRunResult, checkNames: string[]): Promise<void>;
+  /** GitHub check runs via the App, one per tier, on `sha`; `checkNames`: tier -> check name. */
+  postChecks(sha: string, result: TestRunResult, checkNames: Record<string, string>): Promise<void>;
+  /** Every tier's check name (src/testrun/ checkNamesFor over tests.yaml test_run). */
+  checkNames(): Record<string, string>;
 }
 
 export interface PrBatchConfig {
@@ -507,7 +510,7 @@ export class PrBatcher {
   private async test(sha: string, prs: BatchEntry[]): Promise<TestRunResult> {
     const shards = Math.max(1, this.d.config().shards);
     const base = { repo: this.d.repo, sha, kind: 'full' as const, prs: prs.map((p) => p.number) };
-    const reqs: TestRunRequest[] = shards === 1 ? [base] : Array.from({ length: shards }, (_, index) => ({ ...base, shard: { index, total: shards } }));
+    const reqs: TestRunRequest[] = shards === 1 ? [base] : Array.from({ length: shards }, (_, i) => ({ ...base, shard: { index: i + 1, total: shards } }));
     const results = await Promise.all(reqs.map((r) => this.d.testRuns!.startTestRun(r)));
     const tiers = new Map<string, TierResult>();
     for (const r of results) {
@@ -571,7 +574,7 @@ export class PrBatcher {
 
   /** Post the passing full check on each head (once), then hand each PR to the merge policy. */
   private async pass(id: string, entries: BatchEntry[], r: TestRunResult) {
-    const names = this.d.config().full_checks;
+    const names = this.d.testRuns!.checkNames();
     for (const e of entries) {
       if (this.state().posted.has(key(e.number, e.head))) continue;
       await this.d.testRuns!.postChecks(e.head, r, names);
