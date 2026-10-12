@@ -42,6 +42,7 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './wor
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
+import { routeBuild, routeRun } from './coordinator/model-routing.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
@@ -171,6 +172,7 @@ export class Coordinator extends MergeFlow {
         until: now,
         instance: this.d.instance,
         runner: this.d.runner,
+        model: routeRun(this.d.cfg, 'stage_judge'),
         // The judge has no tools: it reads only what the prompt carries, wherever it runs.
         cwd: this.d.repo,
         doneWhenOf: async (n) => {
@@ -599,7 +601,8 @@ export class Coordinator extends MergeFlow {
   private async investigate(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, base: string, owner: string) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
-    const model = role.hard_issues_model && (issue.labels.includes('size:L') || issue.labels.includes('money-path')) ? role.hard_issues_model : role.model;
+    // Routed like a build (src/model-routing.ts): the high-risk model for a high-risk issue.
+    const { model } = routeBuild(this.d.cfg, issue.labels);
     const r = await this.d.runner.run({
       env: this.projectEnv(),
       role: 'investigator',
@@ -697,7 +700,9 @@ export class Coordinator extends MergeFlow {
   private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0): Promise<BuildOut> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
-    const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
+    // Routed (src/model-routing.ts): the high-risk model for an L3 or high-risk issue, or once `escalate_after`
+    // attempts have failed; the build model otherwise.
+    const { model } = routeBuild(this.d.cfg, issue.labels, attempt);
     const remaining = Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday());
     const { runner, checks } = this.d.cfg.tests;
     const extra = [
@@ -818,7 +823,7 @@ export class Coordinator extends MergeFlow {
     const targets = instructionTargets(files);
     if (!targets.length) return;
     const cfg = this.d.cfg.agents.instruction_evals;
-    const model = cfg.model ?? this.d.cfg.agents.roles.workers?.model ?? 'sonnet';
+    const model = cfg.model ?? routeRun(this.d.cfg, 'eval_answer');
     const judge = cfg.judge ?? this.d.cfg.agents.roles.evaluator?.model ?? 'opus';
     const at = (rev: string, p: string): string | null => {
       try {

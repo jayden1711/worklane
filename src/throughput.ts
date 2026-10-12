@@ -2,6 +2,7 @@
 // owner and why, and the biggest costs with a tuning to try for each. Read from the event log alone (the
 // dashboard's panel and the weekly report); every cost figure is the CLI's own estimate, not billed money.
 // The tunings come from fixed rules here, never from a model.
+import { tierOf } from './model-routing.js';
 
 interface Ev {
   type: string;
@@ -50,6 +51,8 @@ export interface Throughput {
     totalUsd: number;
     perMergedPrUsd: number | null;
     byStage: { stage: Stage; usd: number; perMergedPrUsd: number | null; share: number }[];
+    /** The same spend by model (run.cost's model: haiku, sonnet, opus, or the id of a model of no known tier), most first. */
+    byModel: { model: string; usd: number; perMergedPrUsd: number | null; share: number }[];
     /** Evaluator spend on PRs whose review level was L0. */
     evaluatorOnL0Usd: number;
   };
@@ -142,6 +145,7 @@ export function throughput(events: Ev[], o: { now?: Date; days?: number } = {}):
   const attempt = new Map<string, number>();
   const level = new Map<number, string>();
   const usd = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
+  const byModel = new Map<string, number>();
   let evaluatorOnL0Usd = 0;
   for (const e of events) {
     const p = e.payload as Record<string, unknown>;
@@ -151,6 +155,8 @@ export function throughput(events: Ev[], o: { now?: Date; days?: number } = {}):
       const stage = stageOf(String(p.role), p.issue === null ? 1 : (attempt.get(`${p.issue}:${p.role}`) ?? 1));
       const cost = Number(p.usd) || 0;
       usd[stage] += cost;
+      const model = typeof p.model === 'string' && p.model ? (tierOf(p.model) ?? p.model) : 'unknown';
+      byModel.set(model, (byModel.get(model) ?? 0) + cost);
       if (stage === 'evaluator' && typeof p.issue === 'number' && level.get(p.issue) === 'L0') evaluatorOnL0Usd += cost;
     }
   }
@@ -160,6 +166,7 @@ export function throughput(events: Ev[], o: { now?: Date; days?: number } = {}):
     totalUsd: round2(totalUsd),
     perMergedPrUsd: per(totalUsd),
     byStage: STAGES.map((stage) => ({ stage, usd: round2(usd[stage]), perMergedPrUsd: per(usd[stage]), share: totalUsd ? usd[stage] / totalUsd : 0 })),
+    byModel: [...byModel.entries()].sort((a, b) => b[1] - a[1]).map(([model, u]) => ({ model, usd: round2(u), perMergedPrUsd: per(u), share: totalUsd ? u / totalUsd : 0 })),
     evaluatorOnL0Usd: round2(evaluatorOnL0Usd),
   };
 

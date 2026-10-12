@@ -23,6 +23,7 @@ import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
+import { cappedModel } from './model-routing.js';
 import { type CoordinatorDeps, COMMAND_TIMEOUT_MS, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted } from './shared.js';
 
 export abstract class CoordinatorBase {
@@ -91,8 +92,10 @@ export abstract class CoordinatorBase {
     this.d = {
       ...d,
       runner: {
-        run: async (req) => {
+        run: async (asked) => {
           if (this.halt.signal.aborted) throw new Halted();
+          // The instance's model cap holds for every run, whatever chose its model.
+          const req = { ...asked, model: cappedModel(asked.model, this.d.settings?.().settings) };
           // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
           const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
           // The console holds every live run's input: listed for the dashboard while it runs.

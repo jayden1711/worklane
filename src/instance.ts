@@ -63,6 +63,8 @@ export const InstanceSettings = z.strictObject({
       repo_access: z.boolean().optional(),
     })
     .optional(),
+  /** Caps every model this instance runs at a tier (src/model-routing.ts): a model above it runs as the cap instead. */
+  model_cap: z.enum(['haiku', 'sonnet', 'opus']).optional(),
   /** Tiered evaluation for this instance (agents.yaml eval_routing): the cheap model, its levels, escalation. */
   eval_routing: z
     .strictObject({
