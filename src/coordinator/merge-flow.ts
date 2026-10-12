@@ -20,10 +20,13 @@ import { instructionEvalReasons, mergeDecision, outsidePlanReasons, waitCategori
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { FixRuns } from './fix-runs.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
+import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
   protected abstract combinedGate(...args: Parameters<Coordinator['combinedGate']>): ReturnType<Coordinator['combinedGate']>;
+  /** Polls of the merge flow's capped waits (wait-caps.ts). */
+  protected readonly waitPolls = new PollCounter();
 
   // ---------------------------------------------------------------- PR watch
 
@@ -177,9 +180,15 @@ export abstract class MergeFlow extends FixRuns {
     if (prior && !prior.auto) return; // already waiting for the owner
     const d = this.mergeDecisionFor(n, number, pr);
     if (d.auto) {
-      // GitHub still computing: try again next poll. A conflict, or anything else blocking a clean merge: a human.
-      if (pr.mergeable === null || pr.mergeableState === 'unknown' || pr.mergeableState === 'draft') return;
-      if (!pr.mergeable || !['clean', 'unstable', 'has_hooks'].includes(pr.mergeableState)) d.reasons.push(`GitHub can't merge it cleanly (${pr.mergeableState})`);
+      // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
+      if (pr.mergeableState === 'draft') return;
+      if (pr.mergeable === null || pr.mergeableState === 'unknown') {
+        const polls = this.waitPolls.bump(`mergeable:${number}:${pr.headSha}`);
+        if (polls < MERGEABLE_CAP) return;
+        const why = `GitHub was still computing whether it can merge after ${polls} polls`;
+        this.emit('wait.capped', { issue: n, number, kind: 'mergeable_recheck', detail: why });
+        d.reasons.push(why);
+      } else if (!pr.mergeable || !['clean', 'unstable', 'has_hooks'].includes(pr.mergeableState)) d.reasons.push(`GitHub can't merge it cleanly (${pr.mergeableState})`);
       const failures = this.d.log.read(0, ['merge.failed']).map((e) => e.payload as EventPayload<'merge.failed'>).filter((p) => p.number === number && p.head === pr.headSha);
       if (failures.length >= 3) d.reasons.push(`merging failed ${failures.length} times: ${failures.at(-1)!.why}`);
       d.auto = d.reasons.length === 0;
@@ -188,7 +197,15 @@ export abstract class MergeFlow extends FixRuns {
       if (d.auto) {
         const gate = await this.combinedGate(w, pr);
         if (gate === 'pending') return;
-        if (gate !== 'merge') {
+        // The combined check found a conflict GitHub doesn't report: wait for GitHub to catch up, up to a cap.
+        if (gate === 'conflict') {
+          const polls = this.waitPolls.bump(`light:${number}:${pr.headSha}`);
+          if (polls < LIGHT_PENDING_CAP) return;
+          const why = `merging the default branch into it conflicts, but GitHub still reports it mergeable after ${polls} polls`;
+          this.emit('wait.capped', { issue: n, number, kind: 'light_check_pending', detail: why });
+          d.reasons.push(why);
+          d.auto = false;
+        } else if (gate !== 'merge') {
           d.reasons.push(gate.hold);
           d.auto = false;
         }
@@ -237,7 +254,16 @@ export abstract class MergeFlow extends FixRuns {
       const required = this.d.cfg.project.required_checks;
       const outcomes = requiredOutcomes(required, await this.d.backlog.checks(m.sha));
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
-      if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) continue; // still running
+      if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) {
+        // Still running, up to a timeout (in polls, so it holds whatever the poll interval).
+        const polls = this.waitPolls.bump(`main:${m.sha}`);
+        if (polls < pollsFor(MAIN_CHECKS_TIMEOUT_MS, this.d.prPollMs ?? 60_000, MAIN_CHECKS_MIN_POLLS)) continue;
+        const missing = outcomes.filter((c) => c.outcome !== 'pass').map((c) => c.name);
+        this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: 'timed_out', failed: missing });
+        this.emit('wait.capped', { issue: m.issue, number: m.number, kind: 'main_checks', detail: `${missing.join(', ')} never reported on ${m.sha.slice(0, 8)} after ${polls} polls` });
+        await this.d.backlog.comment(m.number, `[${BRAND.cli}] @${this.ownerOf(m.issue)} the required check(s) ${missing.join(', ')} never reported on the merge commit \`${m.sha.slice(0, 8)}\` (${polls} polls), so whether ${this.branch} is green after this merge is unknown. Auto-merge goes on; check them yourself.`);
+        continue;
+      }
       this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed });
       if (failed.length) await this.mainWentRed(m, failed);
     }

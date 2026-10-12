@@ -255,7 +255,10 @@ export const EventSchemas = {
   'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
-  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red']), failed: z.array(z.string()) }),
+  /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
+  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()) }),
+  /** A wait reached its cap (coordinator/wait-caps.ts): recorded, the owner told, and it waits for them. `number`: the PR, if any. */
+  'wait.capped': z.strictObject({ issue, number: z.number().int().positive().nullable(), kind: z.enum(['deferred_landing', 'mergeable_recheck', 'light_check_pending', 'main_checks']), detail: z.string() }),
   /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
   'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),

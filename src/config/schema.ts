@@ -329,6 +329,11 @@ export const TestsConfig = z.strictObject({
       pre: z.array(z.string()).default([]),
       /** Changes tested and landed together; 1 = strictly serial. A red batch is split in half. */
       batch_max: z.number().int().min(1).max(32).default(4),
+      /**
+       * How long a queued land may wait on the machine-wide full-run slot (held, pass after pass, by another
+       * run), measured from its first such deferral in a row, before it goes to the owner.
+       */
+      defer_timeout_minutes: z.number().int().min(1).max(7 * 24 * 60).default(180),
     })
     .prefault({}),
   /** Which tiers gate what. Names are tiers[] entries, or "changed" / "full" (runner commands). */
