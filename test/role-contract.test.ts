@@ -10,7 +10,7 @@ import { INTAKE_PROMPT } from '../src/intake/run.js';
  * Roles not rewritten yet; each later rewrite removes its entry. Never add one: a new role (the gardener, the
  * corrections agent) must follow the contract from the start.
  */
-const NOT_YET = new Set(['chief_of_staff', 'investigator', 'evaluator-repro', 'researcher', 'intake']);
+const NOT_YET = new Set(['chief_of_staff', 'investigator', 'evaluator-repro', 'intake']);
 
 const prompts = (): [string, string][] => [...defaultRoles().map((r) => [r, defaultRolePrompt(r)] as [string, string]), ['researcher', RESEARCH_PROMPT], ['intake', INTAKE_PROMPT]];
 
