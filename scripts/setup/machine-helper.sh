@@ -54,6 +54,8 @@ install -o root -g root -m 0755 "$src" "$tmp"
 node --check "$tmp"
 mv -f "$tmp" "$MACHINE_HELPER"
 echo "installed $MACHINE_HELPER"
+# The engine's ports (the hub's, which tailscale-serve exposes): the one copy, root-owned beside the helper.
+install -o root -g root -m 0644 "$(dirname "$0")/../../templates/machine/ports.json" "$(dirname "$MACHINE_HELPER")/worklane-ports.json"
 
 say "the setup scripts its setup commands run, root-owned"
 setup_dir="$(dirname "$MACHINE_HELPER")/worklane-setup"

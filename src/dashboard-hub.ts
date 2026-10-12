@@ -27,7 +27,8 @@ export interface HubOptions {
 }
 
 /** The hub's port: next to the instances' range (4400-4899). */
-export const HUB_PORT = 4399;
+/** The hub's loopback port, from the engine's one ports file (the machine helper's tailscale-serve reads it too). */
+export const HUB_PORT = (JSON.parse(readFileSync(new URL('../../templates/machine/ports.json', import.meta.url), 'utf8')) as { hub: number }).hub;
 const NAME = /^[a-z][a-z0-9-]{0,40}$/;
 
 /** `a=/state/a,b=/state/b`: each instance's name and state dir (its token file is there). */

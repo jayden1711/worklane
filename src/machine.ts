@@ -19,25 +19,34 @@ export interface MachineChange {
   to: unknown;
 }
 
-/** Run a command and return its stdout; `input`, when given, is its stdin (a secret for a setup command). */
-export type Exec = (file: string, args: string[], input?: string) => string;
-const defaultExec: Exec = (file, args, input) =>
-  execFileSync(file, args, { encoding: 'utf8', stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: input === undefined ? 30_000 : 1_800_000, ...(input === undefined ? {} : { input }) });
+/** How long a machine setting (set-slots, set-updates) may take. */
+export const SETTING_TIMEOUT_MS = 30_000;
+/**
+ * Run a command and return its stdout; `input`, when given, is its stdin (a secret for a setup command);
+ * `timeoutMs`: how long it may run (a setting's 30 s when unset; each setup command says its own).
+ */
+export type Exec = (file: string, args: string[], input?: string, timeoutMs?: number) => string;
+const defaultExec: Exec = (file, args, input, timeoutMs = SETTING_TIMEOUT_MS) =>
+  execFileSync(file, args, { encoding: 'utf8', stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: timeoutMs, ...(input === undefined ? {} : { input }) });
 
-export type MachineResult = { ok: true; output: string } | { ok: false; error: string };
+/** `stdout`, on a failure: what the command printed before it failed (a setup command's report), when it printed any. */
+export type MachineResult = { ok: true; output: string } | { ok: false; error: string; stdout?: string };
 
-function runHelper(args: string[], exec: Exec, input?: string): MachineResult {
+function runHelper(args: string[], exec: Exec, input?: string, timeoutMs?: number): MachineResult {
   try {
-    return { ok: true, output: (input === undefined ? exec('sudo', ['-n', MACHINE_HELPER, ...args]) : exec('sudo', ['-n', MACHINE_HELPER, ...args], input)).trim() };
+    const argv = ['-n', MACHINE_HELPER, ...args];
+    return { ok: true, output: (timeoutMs !== undefined ? exec('sudo', argv, input, timeoutMs) : input === undefined ? exec('sudo', argv) : exec('sudo', argv, input)).trim() };
   } catch (e) {
-    const err = e as { stderr?: string | Buffer; message: string };
+    const err = e as { stderr?: string | Buffer; stdout?: string | Buffer; message: string };
     const text = `${err.stderr ?? ''}`.trim() || err.message;
+    const out = `${err.stdout ?? ''}`.trim();
+    const stdout = out ? { stdout: out } : {};
     // sudo -n refuses rather than prompting: the rule isn't installed for this user (or not for these arguments).
     if (/password is required|not allowed to execute|may not run sudo|is not in the sudoers/i.test(text)) {
       return { ok: false, error: `this user may not run ${MACHINE_HELPER} ${args.join(' ')} (sudo: ${text.split('\n')[0]!.replace(/^sudo:\s*/, '')}); an admin runs scripts/setup/machine-helper.sh with every instance once` };
     }
     if (/command not found|no such file/i.test(text)) return { ok: false, error: `${MACHINE_HELPER} isn't installed; an admin runs scripts/setup/machine-helper.sh once` };
-    return { ok: false, error: `${MACHINE_HELPER} ${args.join(' ')} failed: ${text.slice(0, 500)}` };
+    return { ok: false, error: `${MACHINE_HELPER} ${args.join(' ')} failed: ${text.slice(0, 500)}`, ...stdout };
   }
 }
 
@@ -56,8 +65,8 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
  * One of the helper's setup commands (onboarding a project), as the setup user. The arguments are checked by
  * the caller (console/root-steps.ts) and again by the helper; a secret goes on stdin, never in the arguments.
  */
-export function runSetupCommand(command: string, args: string[], input?: string, exec: Exec = defaultExec): MachineResult {
-  return runHelper([command, ...args], exec, input);
+export function runSetupCommand(command: string, args: string[], input: string | undefined, timeoutMs: number, exec: Exec = defaultExec): MachineResult {
+  return runHelper([command, ...args], exec, input, timeoutMs);
 }
 
 /** The helper's change log, newest last; unreadable or malformed lines are skipped. */

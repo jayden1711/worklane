@@ -14,8 +14,6 @@
 #       Read-only: the same check with the key already installed (after changing the App's permissions).
 #   bash scripts/setup/credentials.sh <name> claude
 #       The agent user's Claude login (interactive).
-#   bash scripts/setup/credentials.sh <name> claude-key
-#       Instead of a login: an Anthropic API key for the agent user (stdin or pasted), read through apiKeyHelper.
 #   bash scripts/setup/credentials.sh <name> github
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
@@ -46,7 +44,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # Mint a token as the coordinator user (who alone can read the key) and check what it reaches and may do.
 verify_app() { (cd / && sudo -u "$coord" node --input-type=module - "$@" < "$here/app-permissions.mjs"); }
 # Intake secrets: one file each, for the coordinator user only (0400), in a 0700 directory of its own.
-intake_dir="/home/$coord/.config/$name-intake"
+intake_dir="$(home_of "$coord" 2>/dev/null || echo "/home/$coord")/.config/$name-intake"
 install_secret() {
   local file="$1" secret="$2"
   printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
@@ -71,7 +69,7 @@ case "$what" in
       head -c 16384 > "$src"
     fi
     grep -q -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' "$src" || { echo "$src is not a PEM private key" >&2; exit 1; }
-    dir="/home/$coord/.config/$name-app"
+    dir="$(home_of "$coord")/.config/$name-app"
     key="$dir/private-key.pem"
     say "install the App's private key for $coord only ($key, 0400)"
     install -d -o "$coord" -g "$coord" -m 0700 "$dir"
@@ -79,7 +77,7 @@ case "$what" in
     say "verify as $coord: mint an installation token and list what the installation reaches"
     verify_app "$key" "$app_id" "$inst_id" "$repo" $shared
     echo
-    creds="/home/$coord/.local/state/worklane/instances/$name/credentials.yaml"
+    creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
     if [ -f "$creds" ]; then
       sudo -u "$coord" sh -c 'umask 077; printf "%s\n" "version: 1" "github: { kind: app, app_id: $1, installation_id: $2, key_path: $3 }" > "$4"' _ "$app_id" "$inst_id" "$key" "$creds"
       echo "wrote $creds (the App; agents sign in to Claude as their own user)"
@@ -96,7 +94,7 @@ case "$what" in
     ;;
   verify-app)
     # Nothing is installed or written: the key, ids and repo come from the instance's own files.
-    home="/home/$coord/.local/state/worklane/instances/$name"
+    home="$(home_of "$coord")/.local/state/worklane/instances/$name"
     say "verify as $coord: the installed App key, its installation, and the token's permissions"
     read -r key app_id inst_id repo < <(cd / && sudo -u "$coord" node --input-type=module - "$home" <<'JS'
 import { createRequire } from 'node:module';
@@ -114,7 +112,7 @@ JS
     ;;
   github)
     echo "fallback: a personal access token instead of a GitHub App (prefer github-app)"
-    dir="/home/$coord/.config/$name-gh"
+    dir="$(home_of "$coord")/.config/$name-gh"
     say "GitHub: a fine-grained token limited to this instance's repo, with an expiry, stored in $dir"
     sudo -u "$coord" install -d -m 0700 "$dir"
     read -rsp "Paste the token, then Enter (it is not shown): " token; echo
@@ -132,28 +130,11 @@ JS
     sudo -iu "$agent" claude
     sudo -iu "$agent" claude auth status --json
     ;;
-  claude-key)
-    # Instead of a subscription login: an Anthropic API key for the agent user's Claude Code (billed per use; the
-    # instance's daily budget still caps the estimated spend). Read from stdin or the terminal, never shown; stored
-    # 0400 for $agent, and Claude Code reads it through apiKeyHelper in $agent's own settings.
-    read -rsp "Paste the API key, then Enter (it is not shown): " key || true; echo
-    [[ "$key" =~ ^sk-ant-[A-Za-z0-9_-]{20,200}$ ]] || { unset key; echo "that doesn't look like an Anthropic API key (sk-ant-...); nothing installed" >&2; exit 1; }
-    file="/home/$agent/.config/claude-key/api-key"
-    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
-    unset key
-    (cd / && sudo -H -u "$agent" node -e '
-      const fs = require("node:fs"), p = `${process.env.HOME}/.claude/settings.json`;
-      let s = {}; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
-      s.apiKeyHelper = `cat ${process.argv[1]}`;
-      fs.mkdirSync(`${process.env.HOME}/.claude`, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n", { mode: 0o600 });' "$file")
-    echo "installed $file (0400, $agent only); $agent's Claude Code reads it through apiKeyHelper"
-    ;;
   eval-key)
     # Evals are off unless you turn them on: no key, no eval lane, and the eval user needs no Claude login.
     [ "$flag" = --evals-on ] || { echo "evals are off for $name: no eval key is needed. Pass --evals-on only once you have an API key and want an eval lane." >&2; exit 2; }
     id -u "$eval_user" >/dev/null 2>&1 || { echo "no $eval_user; run instance.sh $name --eval first" >&2; exit 1; }
-    file="/home/$eval_user/.config/eval/anthropic_key"
+    file="$(home_of "$eval_user")/.config/eval/anthropic_key"
     read -rsp "Paste the API key, then Enter (it is not shown): " key; echo
     printf '%s' "$key" | sudo -u "$eval_user" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; cat > "$1"; chmod 0400 "$1"' _ "$file"
     unset key
@@ -161,7 +142,7 @@ JS
     ;;
   api-key)
     id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
-    dir="/home/$agent/.config/$name-claude-key"
+    dir="$(home_of "$agent")/.config/$name-claude-key"
     file="$dir/api_key"
     if [ -n "$flag" ]; then
       [ -f "$flag" ] || { echo "$flag: no such file" >&2; exit 1; }
@@ -176,7 +157,7 @@ JS
     # claude auth status (the runner's preflight, run as the agent user) reads the agent's own settings; runs get the
     # same helper in --settings from the coordinator, which passes only this path.
     say "point $agent's Claude settings at it (apiKeyHelper), keeping its other settings"
-    (cd / && sudo -u "$agent" node --input-type=module - "/home/$agent/.claude/settings.json" "cat -- $file") <<'JS'
+    (cd / && sudo -u "$agent" node --input-type=module - "$(home_of "$agent")/.claude/settings.json" "cat -- $file") <<'JS'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 const [file, helper] = process.argv.slice(2);
@@ -190,7 +171,7 @@ JS
     echo "In credentials.yaml set:"
     echo "  agent_api_key: $file"
     echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
-    echo "and the apiKeyHelper entry from /home/$agent/.claude/settings.json."
+    echo "and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;
   intake-discord)
     read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token || true; echo

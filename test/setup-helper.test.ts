@@ -5,18 +5,18 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkRootStep } from '../src/console/root-steps.js';
 import { SETUP_STEPS } from '../src/console/setup-steps.js';
 import { HUB_PORT } from '../src/dashboard-hub.js';
-import { MACHINE_HELPER, runSetupCommand } from '../src/machine.js';
+import { MACHINE_HELPER, SETTING_TIMEOUT_MS, setSlotCap, setUpdates } from '../src/machine.js';
 import { repoRoot } from './helpers.js';
 
 const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
 type Parsed = { cmd: string; args: string[]; stdin: boolean; run: [string, string[]] | null } | null;
-const helper = createRequire(import.meta.url)(helperSrc) as { parseSetup: (a: string[]) => Parsed; parse: (a: string[]) => unknown; SETUP_COMMANDS: string[]; HUB_PORT: number };
+const helper = createRequire(import.meta.url)(helperSrc) as { parseSetup: (a: string[]) => Parsed; parse: (a: string[]) => unknown; SETUP_COMMANDS: string[]; PORTS: string };
 const posix = process.platform !== 'win32';
 const setup = join(repoRoot, 'scripts', 'setup');
 const sha = 'a'.repeat(40);
@@ -30,12 +30,12 @@ const good: string[][] = [
   ['checkout', 'shop', 'acme/shop'],
   ['install-service', 'shop'],
   ['install-dashboards', 'ada', 'shop', 'blog'],
-  ['install-claude-key', 'shop'],
+  ['install-api-key', 'shop'],
   ['install-discord-token', 'shop'],
   ['set-budget', 'shop', '20'],
   ['claude-status', 'shop'],
   ['instance-doctor', 'shop', 'acme/shop'],
-  ['tailscale-serve'],
+  ['tailscale-serve', '443'],
 ];
 const bad: string[][] = [
   ['setup-machine', '--cap', '9'],
@@ -56,12 +56,16 @@ const bad: string[][] = [
   ['install-dashboards', 'ada'],
   ['install-dashboards', 'ada', 'shop', 'shop'],
   ['install-dashboards', '-ada', 'shop'],
-  ['install-claude-key', 'shop', 'sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxx'],
+  ['install-api-key', 'shop', 'sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxx'],
   ['install-discord-token', 'shop', 'x'.repeat(60)],
   ['set-budget', 'shop', '0'],
   ['set-budget', 'shop', '1001'],
   ['set-budget', 'shop', '20.5'],
   ['tailscale-serve', '--https=80'],
+  ['tailscale-serve'],
+  ['tailscale-serve', '0'],
+  ['tailscale-serve', '65536'],
+  ['tailscale-serve', '443', '80'],
   ['bash', '-c', 'id'],
   ['setup-machine;id'],
   ['__proto__'],
@@ -86,7 +90,11 @@ test('the setup commands are one list: the helper, lib.sh and the engine name th
   assert.deepEqual(fromLib, helper.SETUP_COMMANDS);
   assert.deepEqual(SETUP_STEPS.map((s) => s.command), helper.SETUP_COMMANDS);
   assert.deepEqual(good.map((a) => a[0]).filter((c, i, all) => all.indexOf(c) === i), helper.SETUP_COMMANDS, 'every command is exercised above');
-  assert.equal(helper.HUB_PORT, HUB_PORT, 'tailscale serve exposes the hub');
+  // One copy of the hub's port: the engine reads it, machine-helper.sh installs it where the helper reads it.
+  assert.equal(HUB_PORT, (JSON.parse(readFileSync(join(repoRoot, 'templates', 'machine', 'ports.json'), 'utf8')) as { hub: number }).hub);
+  assert.equal(helper.PORTS, '/usr/local/libexec/worklane-ports.json');
+  assert.match(readFileSync(join(setup, 'machine-helper.sh'), 'utf8'), /templates\/machine\/ports\.json" "\$\(dirname "\$MACHINE_HELPER"\)\/worklane-ports\.json"/);
+  assert.doesNotMatch(readFileSync(helperSrc, 'utf8'), /4399/, 'the helper keeps no copy of the port');
 });
 
 test('a secret goes on stdin only: the commands that take one, and none takes it as an argument', () => {
@@ -96,9 +104,29 @@ test('a secret goes on stdin only: the commands that take one, and none takes it
   );
   const calls: { file: string; args: string[]; input: string | undefined }[] = [];
   const exec = (file: string, args: string[], input?: string) => (calls.push({ file, args, input }), 'ok');
-  const r = runSetupCommand('install-claude-key', ['shop'], 'sk-ant-secret-value-000000000000', exec);
-  assert.deepEqual(r, { ok: true, output: 'ok' });
-  assert.deepEqual(calls, [{ file: 'sudo', args: ['-n', MACHINE_HELPER, 'install-claude-key', 'shop'], input: 'sk-ant-secret-value-000000000000' }]);
+  const r = checkRootStep('install-api-key', ['shop']);
+  assert.ok(r.allowed);
+  assert.deepEqual(r.rule.run(['shop'], exec, 'sk-ant-secret-value-000000000000'), { ok: true, output: 'ok' });
+  assert.deepEqual(calls, [{ file: 'sudo', args: ['-n', MACHINE_HELPER, 'install-api-key', 'shop'], input: 'sk-ant-secret-value-000000000000\n' }], 'on stdin, its line ended for read');
+});
+
+test('each setup command gets the time it needs; machine settings keep their 30 s', () => {
+  const seen: Record<string, number | undefined> = {};
+  const exec = (_f: string, args: string[], _i?: string, timeoutMs?: number) => ((seen[args[2]!] = timeoutMs), 'ok');
+  for (const a of good) {
+    const c = checkRootStep(a[0]!, a.slice(1));
+    assert.ok(c.allowed);
+    c.rule.run(a.slice(1), exec, c.rule.secret ? 'x' : undefined);
+  }
+  for (const c of ['setup-machine', 'install-engine', 'checkout']) assert.ok(seen[c]! >= 30 * 60_000, `${c} gets ${seen[c]} ms`);
+  for (const c of ['install-service', 'install-dashboards', 'add-instance', 'instance-doctor']) assert.ok(seen[c]! >= 5 * 60_000, `${c} gets ${seen[c]} ms`);
+  assert.ok(Object.values(seen).every((t) => typeof t === 'number' && t > SETTING_TIMEOUT_MS), "no setup command gets a setting's 30 s");
+  const settings: (number | undefined)[] = [];
+  const exec2 = (_f: string, _a: string[], _i?: string, timeoutMs?: number) => (settings.push(timeoutMs), 'ok');
+  setSlotCap(3, exec2);
+  setUpdates(true, exec2);
+  assert.deepEqual(settings, [undefined, undefined], 'set-slots and set-updates run with the default 30 s');
+  assert.equal(SETTING_TIMEOUT_MS, 30_000);
 });
 
 test('each setup command runs its one script from the root-owned copy, never a path from the caller', () => {
@@ -137,15 +165,15 @@ test('the helper runs a setup script with its checked arguments, passes a secret
   const h = helperIn(mkdtempSync(join(tmpdir(), 'setup-helper-')));
   assert.equal(h.run(['add-instance', 'shop']).status, 0);
   assert.equal(readFileSync(h.record, 'utf8'), 'instance.sh\nshop\n');
-  const secret = 'sk-ant-api03-' + 'z'.repeat(30);
-  const r = h.run(['install-claude-key', 'shop'], `${secret}\n`);
+  const secret = 'MTIz.' + 'z'.repeat(60);
+  const r = h.run(['install-discord-token', 'shop'], `${secret}\n`);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(readFileSync(h.record, 'utf8'), `credentials.sh\nshop\nclaude-key\n${secret}\n`);
+  assert.equal(readFileSync(h.record, 'utf8'), `credentials.sh\nshop\nintake-discord\n${secret}\n`);
   const log = readFileSync(h.log, 'utf8');
   assert.match(log, /"by":"ada","what":"setup.add-instance","from":null,"to":"shop"/);
-  assert.match(log, /"what":"setup.install-claude-key"/);
+  assert.match(log, /"what":"setup.install-discord-token"/);
   assert.ok(!log.includes(secret), 'the secret is never logged');
-  assert.equal(h.run(['install-claude-key', 'shop'], '').status, 2, 'a secret command refuses an empty stdin');
+  assert.equal(h.run(['install-discord-token', 'shop'], '').status, 2, 'a secret command refuses an empty stdin');
   assert.equal(h.run(['add-instance', 'shop;id']).status, 2);
 });
 
@@ -156,7 +184,7 @@ test('sudoers: the setup user alone gets the setup commands; coordinators keep e
   assert.equal(r.status, 0, r.stderr);
   const cmds = [...r.stdout.matchAll(new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} ([a-z-]+) ([^,\\\\\n]+)`, 'g'))].map((m) => [m[1], m[2]!.trim()]);
   assert.deepEqual(cmds.map((c) => c[0]), helper.SETUP_COMMANDS);
-  for (const [c, args] of cmds) assert.equal(args, ['setup-machine', 'tailscale-serve'].includes(c!) ? '""' : '*', `${c}: no arguments at all, or arguments the helper checks`);
+  for (const [c, args] of cmds) assert.equal(args, c === 'setup-machine' ? '""' : '*', `${c}: no arguments at all, or arguments the helper checks`);
   assert.match(r.stdout, /^ada ALL=\(root\) NOPASSWD: WORKLANE_SETUP$/m);
   assert.doesNotMatch(r.stdout, /\bbash\b|\bsh\b|ALL\s*$/m);
   for (const u of ['root', 'wl-shop', 'wl-dash', 'ada ALL', '']) assert.notEqual(lib('setup_sudoers', u).status, 0, JSON.stringify(u));
@@ -188,4 +216,47 @@ test('app-permissions: per project the installation reaches exactly the repo; sh
   const cred = readFileSync(join(setup, 'credentials.sh'), 'utf8');
   assert.match(cred, /verify_app "\$key" "\$app_id" "\$inst_id" "\$repo" \$shared/);
   assert.match(cred, /read -rp "Delete the copy[^\n]*\|\| yn=/, 'no prompt can fail the script on a closed stdin');
+});
+
+test('home_of reads a home from the user database, never /home/<user> by assumption', { skip: !posix && 'bash' }, () => {
+  const me = spawnSync('id', ['-un'], { encoding: 'utf8' }).stdout.trim();
+  const r = lib('home_of', me);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), homedir());
+  assert.notEqual(lib('home_of', 'no-such-user-xyz').status, 0);
+  const cred = readFileSync(join(setup, 'credentials.sh'), 'utf8');
+  assert.deepEqual(cred.split('\n').filter((l) => /\/home\/\$/.test(l) && !/\|\| echo "\/home\/\$coord"/.test(l)), [], 'every home comes from home_of');
+});
+
+test("the helper's checkout root: /srv/worklane, or machine.json's checkouts when root owns that file", () => {
+  const root = mkdtempSync(join(tmpdir(), 'checkouts-'));
+  const etc = join(root, 'etc');
+  mkdirSync(etc);
+  const src = readFileSync(helperSrc, 'utf8').replace("const ETC = '/etc/worklane';", `const ETC = ${JSON.stringify(etc)};`);
+  let n = 0;
+  const load = (owned: boolean) => {
+    const f = join(root, `h-${n++}.cjs`);
+    writeFileSync(f, owned ? src.replace('st.uid === 0', 'st.uid === process.getuid()') : src);
+    return createRequire(import.meta.url)(f) as { parseSetup: (a: string[]) => Parsed };
+  };
+  const doctorRoot = (h: { parseSetup: (a: string[]) => Parsed }) => h.parseSetup(['instance-doctor', 'shop', 'acme/shop'])!.run![1].at(-1);
+  assert.equal(doctorRoot(load(false)), '/srv/worklane/shop/shop');
+  writeFileSync(join(etc, 'machine.json'), JSON.stringify({ checkouts: '/data/checkouts/' }));
+  chmodSync(join(etc, 'machine.json'), 0o644);
+  assert.equal(doctorRoot(load(false)), '/srv/worklane/shop/shop', 'a machine.json root does not own is ignored');
+  if (posix) {
+    assert.equal(doctorRoot(load(true)), '/data/checkouts/shop/shop');
+    writeFileSync(join(etc, 'machine.json'), JSON.stringify({ checkouts: '/data/../etc' }));
+    assert.equal(doctorRoot(load(true)), '/srv/worklane/shop/shop', 'a path with .. is refused');
+    writeFileSync(join(etc, 'machine.json'), JSON.stringify({ checkouts: '/data/checkouts' }));
+    chmodSync(join(etc, 'machine.json'), 0o666);
+    assert.equal(doctorRoot(load(true)), '/srv/worklane/shop/shop', 'a machine.json others can write is ignored');
+  }
+});
+
+test('tailscale: only a root-owned binary from the fixed list, the HTTPS port as checked, the hub port from the ports file', () => {
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.match(src, /const TAILSCALE_PATHS = \['\/usr\/bin\/tailscale', '\/usr\/sbin\/tailscale', '\/usr\/local\/bin\/tailscale'\];/);
+  assert.match(src, /TAILSCALE_PATHS\.map\(rootOwned\)\.find\(Boolean\)/);
+  assert.match(src, /`--https=\$\{httpsPort\}`, `http:\/\/127\.0\.0\.1:\$\{hub\}`/);
 });

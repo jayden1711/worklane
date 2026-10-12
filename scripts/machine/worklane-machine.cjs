@@ -26,11 +26,14 @@ const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const SETUP = '/usr/local/libexec/worklane-setup';
 const CLI = '/usr/local/bin/worklane';
 const CLAUDE = '/usr/local/bin/claude';
-const TAILSCALE = '/usr/bin/tailscale';
+// Where tailscale may be: root-owned and not writable by anyone else, or it isn't used.
+const TAILSCALE_PATHS = ['/usr/bin/tailscale', '/usr/sbin/tailscale', '/usr/local/bin/tailscale'];
 const TLS = '/var/lib/worklane/tls';
-const SRV = '/srv/worklane';
-// The dashboard hub's loopback port (src/dashboard-hub.ts HUB_PORT): what tailscale serve exposes.
-const HUB_PORT = 4399;
+// The checkouts' root: /srv/worklane, unless the root-owned /etc/worklane/machine.json says otherwise (`checkouts`).
+const SRV_DEFAULT = '/srv/worklane';
+// The engine's ports (templates/machine/ports.json, the one copy; src/dashboard-hub.ts reads it too), installed
+// root-owned beside the helper by machine-helper.sh.
+const PORTS = '/usr/local/libexec/worklane-ports.json';
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
 const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | <setup command> <args> (the list is in the helper\'s source)';
@@ -52,6 +55,32 @@ const REF = (s) => /^[0-9a-f]{40}$/.test(s);
 const LOGIN = (s) => /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(s);
 const USD = (s) => /^[1-9][0-9]{0,3}$/.test(s) && Number(s) <= 1000;
 const MODE = (s) => s === 'per-repo' || s === 'shared';
+const PORT = (s) => /^[1-9][0-9]{0,4}$/.test(s) && Number(s) <= 65535;
+
+/** A file root owns that no one else may change, or null. */
+function rootOwned(file) {
+  try {
+    const st = fs.statSync(file);
+    return st.uid === 0 && (st.mode & 0o022) === 0 ? file : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The checkouts' root, from the root-owned machine.json when it names an absolute path. */
+function checkoutsRoot() {
+  const file = path.join(ETC, 'machine.json');
+  if (!rootOwned(file)) return SRV_DEFAULT;
+  const c = readJson(file).checkouts;
+  return typeof c === 'string' && /^\/[A-Za-z0-9_./-]+$/.test(c) && !c.split('/').includes('..') ? c.replace(/\/+$/, '') : SRV_DEFAULT;
+}
+
+function hubPort() {
+  if (!rootOwned(PORTS)) throw new Error(`${PORTS} is missing or not root-owned; re-run machine-helper.sh`);
+  const p = readJson(PORTS).hub;
+  if (!Number.isInteger(p) || p < 1 || p > 65535) throw new Error(`${PORTS} has no hub port`);
+  return p;
+}
 
 const script = (file, ...args) => ['bash', [path.join(SETUP, file), ...args]];
 const asUser = (user, ...cmd) => ['runuser', ['-u', user, '--', ...cmd]];
@@ -68,12 +97,12 @@ const SETUP_COMMANDS = {
   checkout: { args: [NAME, REPO], run: ([n, r]) => script('checkout.sh', n, r) },
   'install-service': { args: [NAME], run: ([n]) => script('service.sh', n) },
   'install-dashboards': { args: [LOGIN, NAME], rest: NAME, run: ([login, ...names]) => script('dashboards.sh', login, ...names) },
-  'install-claude-key': { args: [NAME], stdin: true, run: ([n]) => script('credentials.sh', n, 'claude-key') },
+  'install-api-key': { args: [NAME], stdin: true, run: ([n]) => script('credentials.sh', n, 'api-key'), then: ([n]) => asUser(`wl-${n}`, CLI, 'instance', 'set-agent-api-key', n) },
   'install-discord-token': { args: [NAME], stdin: true, run: ([n]) => script('credentials.sh', n, 'intake-discord') },
   'set-budget': { args: [NAME, USD], run: ([n, usd]) => asUser(`wl-${n}`, CLI, 'instance', 'set-budget', n, usd) },
   'claude-status': { args: [NAME], run: ([n]) => asUser(`wl-${n}-agent`, CLAUDE, 'auth', 'status', '--json') },
-  'instance-doctor': { args: [NAME, REPO], run: ([n, r]) => asUser(`wl-${n}`, CLI, 'doctor', '--json', '--instance', n, '--root', `${SRV}/${n}/${r.split('/')[1]}`) },
-  'tailscale-serve': { args: [], run: () => null },
+  'instance-doctor': { args: [NAME, REPO], run: ([n, r]) => asUser(`wl-${n}`, CLI, 'doctor', '--json', '--instance', n, '--root', `${checkoutsRoot()}/${n}/${r.split('/')[1]}`) },
+  'tailscale-serve': { args: [PORT], run: () => null },
 };
 
 /** A setup command and what it runs, or null when the argument list is anything but its exact form. */
@@ -88,7 +117,7 @@ function parseSetup(args) {
     if (typeof rest[i] !== 'string' || !check(rest[i])) return null;
   }
   if (c.rest && new Set(rest.slice(1)).size !== rest.length - 1) return null;
-  return { cmd, args: rest, stdin: Boolean(c.stdin), run: c.run(rest) };
+  return { cmd, args: rest, stdin: Boolean(c.stdin), run: c.run(rest), then: c.then ? c.then(rest) : null };
 }
 
 function readJson(file) {
@@ -114,24 +143,28 @@ function logLine(what, from, to) {
 }
 
 /** tailscale cert for this node's own name (into a root-only directory), then serve the hub over HTTPS on the tailnet. */
-function tailscaleServe() {
+function tailscaleServe(httpsPort) {
   const env = { PATH: PATH_ENV };
+  const TAILSCALE = TAILSCALE_PATHS.map(rootOwned).find(Boolean);
+  if (!TAILSCALE) throw new Error(`no root-owned tailscale at ${TAILSCALE_PATHS.join(', ')}`);
+  const hub = hubPort();
   const status = JSON.parse(execFileSync(TAILSCALE, ['status', '--json'], { encoding: 'utf8', env }));
   const host = String((status.Self && status.Self.DNSName) || '').replace(/\.$/, '');
   if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host)) throw new Error(`tailscale gave no usable name for this node (${JSON.stringify(host)}); is it logged in?`);
   fs.mkdirSync(TLS, { recursive: true, mode: 0o700 });
   fs.chmodSync(TLS, 0o700);
   execFileSync(TAILSCALE, ['cert', '--cert-file', path.join(TLS, `${host}.crt`), '--key-file', path.join(TLS, `${host}.key`), host], { stdio: 'inherit', env });
-  execFileSync(TAILSCALE, ['serve', '--bg', '--https=443', `http://127.0.0.1:${HUB_PORT}`], { stdio: 'inherit', env });
-  return host;
+  execFileSync(TAILSCALE, ['serve', '--bg', `--https=${httpsPort}`, `http://127.0.0.1:${hub}`], { stdio: 'inherit', env });
+  return { host, hub };
 }
 
 /** Run one setup command. Its arguments (never a secret) are logged; a secret on stdin goes only to the script. */
 function runSetup(s) {
   if (s.cmd === 'tailscale-serve') {
-    const host = tailscaleServe();
-    logLine('setup.tailscale-serve', null, host);
-    process.stdout.write(`https://${host}/ serves the dashboard hub (127.0.0.1:${HUB_PORT}) on the tailnet\n`);
+    const port = s.args[0];
+    const { host, hub } = tailscaleServe(port);
+    logLine('setup.tailscale-serve', null, `${host}:${port}`);
+    process.stdout.write(`https://${host}${port === '443' ? '' : `:${port}`}/ serves the dashboard hub (127.0.0.1:${hub}) on the tailnet\n`);
     return 0;
   }
   let input;
@@ -142,14 +175,19 @@ function runSetup(s) {
       return 2;
     }
   }
+  const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
   const [file, args] = s.run;
-  const r = spawnSync(file, args, { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: [s.stdin ? 'pipe' : 'ignore', 'inherit', 'inherit'], ...(input ? { input } : {}) });
+  const r = spawnSync(file, args, { cwd: '/', env, stdio: [s.stdin ? 'pipe' : 'ignore', 'inherit', 'inherit'], ...(input ? { input } : {}) });
   logLine(`setup.${s.cmd}`, null, s.args.join(' '));
   if (r.error) {
     process.stderr.write(`${s.cmd}: ${r.error.message}\n`);
     return 1;
   }
-  return r.status === null ? 1 : r.status;
+  if (r.status !== 0 || !s.then) return r.status === null ? 1 : r.status;
+  // A second, fixed command once the script succeeded (the credentials.yaml line, as the coordinator).
+  const [f2, a2] = s.then;
+  const t = spawnSync(f2, a2, { cwd: '/', env, stdio: ['ignore', 'inherit', 'inherit'] });
+  return t.error || t.status === null ? 1 : t.status;
 }
 
 function main(args) {
@@ -174,4 +212,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseSetup, SETUP_COMMANDS: Object.keys(SETUP_COMMANDS), HUB_PORT };
+module.exports = { parse, parseSetup, SETUP_COMMANDS: Object.keys(SETUP_COMMANDS), PORTS };

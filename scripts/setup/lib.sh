@@ -16,6 +16,16 @@ run_as() {
 
 say() { printf '\n== %s\n' "$*"; }
 
+# A user's home directory, from the user database (never assumed to be /home/<user>).
+home_of() {
+  local h=""
+  if command -v getent >/dev/null 2>&1; then h="$(getent passwd "$1" | cut -d: -f6)"
+  elif command -v dscl >/dev/null 2>&1; then h="$(dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+  fi
+  [ -n "$h" ] || { echo "no home directory for $1" >&2; return 1; }
+  printf '%s\n' "$h"
+}
+
 # Create a user with a private home, if it doesn't exist yet.
 ensure_user() {
   if id -u "$1" >/dev/null 2>&1; then echo "user $1 exists"; else useradd --create-home --shell /bin/bash "$1"; echo "created user $1"; fi
@@ -73,8 +83,8 @@ machine_sudoers() {
 # The helper's setup commands (onboarding a project), as scripts/machine/worklane-machine.cjs names them; a test
 # keeps the two lists equal. Those taking no argument are listed with "" (sudo: no arguments at all); the rest
 # take arguments the helper checks one by one against their exact shapes, so sudoers passes them through (*).
-SETUP_COMMANDS=(setup-machine add-instance install-engine install-app-key checkout install-service install-dashboards install-claude-key install-discord-token set-budget claude-status instance-doctor tailscale-serve)
-SETUP_NO_ARGS=" setup-machine tailscale-serve "
+SETUP_COMMANDS=(setup-machine add-instance install-engine install-app-key checkout install-service install-dashboards install-api-key install-discord-token set-budget claude-status instance-doctor tailscale-serve)
+SETUP_NO_ARGS=" setup-machine "
 # The sudoers rule for the one setup user (the owner's own account, which runs `worklane add` and the setup
 # console): exactly the helper's setup commands. Never a coordinator, the dashboard viewer or root.
 setup_sudoers() {
