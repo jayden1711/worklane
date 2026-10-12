@@ -134,15 +134,12 @@ export const CredentialsFile = z.strictObject({
   /** An API key file for eval lanes: owned by the eval user, unreadable to every other. */
   eval_key: path.optional(),
   /**
-   * Work intake's credentials, each a file only the coordinator user can read (0400), installed with
-   * credentials.sh: the chat bot's token, the SMS provider's auth token (with its account and number), and the
-   * secret shared with the SMS relay. No agent can read any of them.
+   * Work intake's credential: the chat bot's token, a file only the coordinator user can read (0400), installed
+   * with credentials.sh. No agent can read it.
    */
   intake: z
     .strictObject({
       discord_token: path.optional(),
-      twilio: z.strictObject({ account_sid: z.string().regex(/^AC[0-9a-f]{32}$/), auth_token: path, number: z.string().regex(/^\+[1-9]\d{6,14}$/) }).optional(),
-      relay_secret: path.optional(),
     })
     .optional(),
 });
@@ -238,8 +235,6 @@ export function credentialProblems(c: CredentialsFile): string[] {
   else need(c.github.key_path, 'GitHub: App private key');
   if (c.claude) need(c.claude.config_dir, 'Claude: config dir');
   if (c.intake?.discord_token) need(c.intake.discord_token, 'Intake: chat bot token');
-  if (c.intake?.twilio) need(c.intake.twilio.auth_token, 'Intake: SMS auth token');
-  if (c.intake?.relay_secret) need(c.intake.relay_secret, 'Intake: relay secret');
   return out;
 }
 
