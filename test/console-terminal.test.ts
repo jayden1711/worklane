@@ -179,8 +179,8 @@ test('the hub serves the terminal over a WebSocket: same origin only, refused wi
     stateDir: dir,
     terminal: { consoleUser: ADMIN, hubUser: 'wl-dash', session: () => session, audit: { record: (e) => void audit.push(e) }, spawnPty: p.spawn, exec: passwordRequired, now: () => NOW },
   });
-  const base = h.url.split('/?')[0]!.replace('http', 'ws');
-  const origin = h.url.split('/?')[0]!;
+  const origin = h.url.replace(/\/(\?.*)?$/, '');
+  const base = origin.replace('http', 'ws');
   const connect = (o: string, instance = 'demo') =>
     new Promise<{ msgs: { type: string; why?: string; data?: string }[]; ws: WebSocket; error?: string }>((done) => {
       const ws = new WebSocket(`${base}/api/terminal?instance=${instance}`, { origin: o });

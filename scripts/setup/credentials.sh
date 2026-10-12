@@ -47,11 +47,11 @@ source "$(dirname "$0")/lib.sh"
 as_root "$@"
 if [ "${1:-}" = dashboard-signin ]; then
   viewer=wl-dash
-  dir="/home/$viewer/.config/dashboard-signin"
   # Write one secret for the viewer only: 0400, in a 0700 directory of its own, never echoed.
   put_secret() { sudo -u "$viewer" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$1"; }
   say "the dashboard sign-in App's secrets, for $viewer only ($dir, 0400)"
   ensure_user "$viewer"
+  dir="$(home_of "$viewer")/.config/dashboard-signin"
   read -rsp "Paste the sign-in App's client secret, then Enter (it is not shown): " secret; echo
   [[ "$secret" =~ ^[A-Za-z0-9_]{20,100}$ ]] || { unset secret; echo "that doesn't look like a GitHub App client secret; nothing installed" >&2; exit 1; }
   printf '%s' "$secret" | put_secret "$dir/client-secret"; unset secret
@@ -157,7 +157,7 @@ JS
     id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
     cred="${3:?usage: credentials.sh <name> provider-key <credential> [<key-file>]}"
     [[ "$cred" =~ ^[a-z][a-z0-9_-]{0,40}$ ]] || { echo "a credential name is lowercase letters, digits, _ or -; nothing installed" >&2; exit 1; }
-    dir="/home/$agent/.config/$name-provider-keys"
+    dir="$(home_of "$agent")/.config/$name-provider-keys"
     file="$dir/$cred"
     if [ -n "${4:-}" ]; then
       [ -f "$4" ] || { echo "$4: no such file" >&2; exit 1; }
@@ -175,7 +175,7 @@ JS
     ;;
   api-key)
     id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
-    dir="/home/$agent/.config/$name-claude-key"
+    dir="$(home_of "$agent")/.config/$name-claude-key"
     file="$dir/api_key"
     if [ -n "$flag" ]; then
       [ -f "$flag" ] || { echo "$flag: no such file" >&2; exit 1; }
@@ -190,7 +190,7 @@ JS
     # claude auth status (the runner's preflight, run as the agent user) reads the agent's own settings; runs get the
     # same helper in --settings from the coordinator, which passes only this path.
     say "point $agent's Claude settings at it (apiKeyHelper), keeping its other settings"
-    (cd / && sudo -u "$agent" node --input-type=module - "/home/$agent/.claude/settings.json" "cat -- $file") <<'JS'
+    (cd / && sudo -u "$agent" node --input-type=module - "$(home_of "$agent")/.claude/settings.json" "cat -- $file") <<'JS'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 const [file, helper] = process.argv.slice(2);
@@ -204,7 +204,7 @@ JS
     echo "In credentials.yaml set:"
     echo "  agent_api_key: $file"
     echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
-    echo "and the apiKeyHelper entry from /home/$agent/.claude/settings.json."
+    echo "and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;
   intake-discord)
     read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token; echo

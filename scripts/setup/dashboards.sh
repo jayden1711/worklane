@@ -52,7 +52,7 @@ fi
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
-signin_dir="/home/$viewer/.config/dashboard-signin"
+signin_dir="$(home_of "$viewer")/.config/dashboard-signin"
 for f in client-secret session-secret; do
   [ -s "$signin_dir/$f" ] || { echo "no $signin_dir/$f: run credentials.sh dashboard-signin first" >&2; exit 1; }
 done
