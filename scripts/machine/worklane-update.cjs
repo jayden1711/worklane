@@ -259,7 +259,7 @@ function asInstance(inst, argv) {
 /** The new engine's `migrate` for one instance, run as its coordinator user. */
 function migrateCommand(inst, sha, opt = OPT) {
   // node through env: found on the unit's own PATH, as the instance's service finds it.
-  return asInstance(inst, ['/usr/bin/env', 'node', path.join(opt, sha, 'dist', 'src', 'cli.js'), 'migrate', '--instance', inst.name, '--json']);
+  return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'migrate', '--instance', inst.name, '--json']);
 }
 
 /** Put one backup back, as the instance's user (the files are its own): a log loses the migrated one's WAL files. */
