@@ -9,12 +9,20 @@ import { approve, changeOnMain, lastOf, openPr, passing, skip, type Fixture, typ
 const full = { name: 'full', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 2 };
 
 /** A test-run service whose full runs pass (or not) and whose checks land on the PR's head as GitHub would show them. */
-function service(ok = true) {
+function service(ok = true, o: { holdFirst?: boolean } = {}) {
   const runs: TestRunRequest[] = [];
+  const signals: (AbortSignal | undefined)[] = [];
   let backlog: Fixture['backlog'] | null = null;
   const t: TestRuns = {
-    async startTestRun(req) {
+    async startTestRun(req, opts) {
       runs.push(req);
+      signals.push(opts?.signal);
+      // The first run waits (a slot, the lock, its tiers) until it is cancelled, as src/testrun/ reports a cancel.
+      if (o.holdFirst && runs.length === 1) {
+        return new Promise((resolve) =>
+          opts?.signal?.addEventListener('abort', () => resolve({ id: 'run-1', sha: req.sha, kind: 'full', ok: false, tiers: [{ tier: 'unit', ok: false, durationMs: 0, summary: 'cancelled', logRef: '' }] })),
+        );
+      }
       const pass = ok || req.prs.length === 0; // the base alone is green
       return { id: `run-${runs.length}`, sha: req.sha, kind: 'full', ok: pass, tiers: [{ tier: 'unit', ok: pass, durationMs: 1, summary: pass ? 'ok' : '3 failing', logRef: 'log://1' }] };
     },
@@ -23,7 +31,7 @@ function service(ok = true) {
     },
     checkNames: () => ({ unit: 'full' }),
   };
-  return { t, runs, bind: (b: Fixture['backlog']) => (backlog = b) };
+  return { t, runs, signals, bind: (b: Fixture['backlog']) => (backlog = b) };
 }
 
 function batching(cfg: Fixture['cfg'], edit?: (cfg: Fixture['cfg']) => void) {
@@ -32,8 +40,8 @@ function batching(cfg: Fixture['cfg'], edit?: (cfg: Fixture['cfg']) => void) {
   edit?.(cfg);
 }
 
-async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void } = {}) {
-  const s = service(o.ok ?? true);
+async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean } = {}) {
+  const s = service(o.ok ?? true, { holdFirst: o.holdFirst ?? false });
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => batching(cfg, o.edit), deps: o.wired === false ? {} : { testRuns: s.t } });
   s.bind(t.f.backlog);
   return { t, s };
@@ -160,4 +168,23 @@ test('batching: a commit that lands on main between a green batch and its merge 
   await settle(t);
   assert.equal(s.runs.length, 2, 'tested again on the new main');
   assert.ok(t.pr().merged);
+});
+
+test("batching: a push to a PR while its batch runs cancels that run; the batch is abandoned, nobody blamed, and the new head is tested", { skip }, async () => {
+  const { t, s } = await batched({ holdFirst: true });
+  t.f.backlog.setChecks(t.pr().headSha, passing);
+  await t.c.tick(); // queued; its batch's run starts and waits
+  for (let i = 0; i < 100 && !s.runs.length; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(s.runs.length, 1);
+  assert.ok(s.signals[0] && !s.signals[0].aborted);
+  // A new head on the PR (a fix pushed): the PR watch sees it and the run in flight is cancelled.
+  const moved = 'c'.repeat(40);
+  t.f.backlog.setPr(t.opened.number, { headSha: moved });
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(s.signals[0]!.aborted, 'cancelled');
+  const steps = t.f.log.read(0, ['pr_batch.step']).map((e) => (e.payload as EventPayload<'pr_batch.step'>).step);
+  assert.ok(steps.includes('abandoned') && steps.includes('dropped'), steps.join());
+  assert.ok(!steps.includes('red') && !steps.includes('culprit'), 'nobody blamed');
+  assert.ok(!t.pr().merged);
 });

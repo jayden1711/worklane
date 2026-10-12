@@ -18,7 +18,7 @@ import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, outsidePlanReasons, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
-import { mayMerge, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
+import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
@@ -54,6 +54,7 @@ export abstract class MergeFlow extends FixRuns {
       ownerOf: (issue) => this.ownerOf(issue),
       // The merge policy decides it on the PR watch's next pass, as for any ready PR.
       tested: (e) => this.prPolled.delete(e.number),
+      mergesSettled: () => !mergesPending(this.d.log.read(0, [...PR_BATCH_EVENTS, 'merge.done', 'merge.decided']), Date.now()),
       // High-risk, money-path, or anything else the policy leaves to the owner: batched alone.
       waitsForOwner: (e, pr) => {
         try {
@@ -73,6 +74,11 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** Wait for a running PR batch. */
+  /** The coordinator is stopping: cancel a batch run in flight. */
+  protected prBatchStop() {
+    this.batcher?.stop();
+  }
+
   protected async prBatchIdle() {
     await this.batcher?.idle();
   }
@@ -105,6 +111,8 @@ export abstract class MergeFlow extends FixRuns {
       const tip = r.status === 0 ? (r.stdout.split(/\s/)[0] ?? '') : '';
       if (tip && tip !== this.defaultTip) {
         if (this.defaultTip) this.prPolled.clear();
+        // Main moved off a running batch's base: its result would be stale, so its run is cancelled.
+        if (this.prBatching()) this.batcher?.mainMoved(tip);
         this.defaultTip = tip;
       }
     }
@@ -121,6 +129,8 @@ export abstract class MergeFlow extends FixRuns {
   private async watchPr(w: EventPayload<'pr.opened'>) {
     const { issue: n, number } = w;
     const pr = await this.d.backlog.pullRequest(number);
+    // A head that moved, or a PR that closed, drops it from a running batch: that batch's run is cancelled.
+    if (this.prBatching()) this.batcher?.observe(number, pr.headSha, pr.state);
     if (pr.state !== 'open') {
       this.emit('pr.closed', { issue: n, number, merged: pr.state === 'merged' });
       return;
