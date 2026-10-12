@@ -17,6 +17,7 @@
   "files": [
     "dist/src",
     "dist/web",
+    "examples/basic",
     "templates",
     "examples/basic",
     "LICENSE",

@@ -79,13 +79,16 @@ function agents() {
   });
 }
 
+/** The example project the demo seeds from: shipped in the package (`files` in package.json), beside dist/. */
+export const EXAMPLE_DIR = fileURLToPath(new URL('../../examples/basic', import.meta.url));
+
 export async function seedDemo(dir: string): Promise<{ root: string; eventsDb: string; issues: number }> {
   if (existsSync(dir)) throw new Error(`${dir} already exists; pick a new directory`);
   mkdirSync(dir, { recursive: true });
   const remote = join(dir, 'remote.git');
   const seed = join(dir, 'seed');
   const root = join(dir, 'shop');
-  cpSync(fileURLToPath(new URL('../../examples/basic', import.meta.url)), seed, { recursive: true });
+  cpSync(EXAMPLE_DIR, seed, { recursive: true });
   writeFileSync(join(seed, '.gitignore'), '.claude/worktrees/\n');
   // A main that's a little red, like real ones: one known failure for the baseline.
   writeFileSync(join(seed, 'test', 'legacy.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('legacy currency rounding', () => { assert.equal(0.1 + 0.2, 0.3); });\n");
