@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { EventPayload } from '../src/events/types.js';
 import type { TestRuns, TestRunRequest } from '../src/coordinator/pr-batch.js';
-import { approve, lastOf, openPr, passing, skip, type Fixture, type OpenPr } from './repro-state-graph/harness.js';
+import { approve, changeOnMain, lastOf, openPr, passing, skip, type Fixture, type OpenPr } from './repro-state-graph/harness.js';
 
 const full = { name: 'full', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 2 };
 
@@ -103,4 +103,61 @@ test('batching: a high-risk PR is batched and gets its full check, but never aut
   const d = lastOf(t.f.log, 'merge.decided') as EventPayload<'merge.decided'>;
   assert.equal(d.auto, false);
   assert.ok(d.reasons.includes('high-risk: pricing (src/price.js)'));
+});
+
+const highRisk = (cfg: Fixture['cfg']) => {
+  cfg.review!.categories = { ...cfg.review!.categories, pricing: ['src/price.js'] };
+  cfg.review!.merge.wait_categories = ['pricing'];
+};
+const approveAsOwner = (t: OpenPr) => t.f.backlog.addReview(t.opened.number, { author: 'example-owner', state: 'APPROVED', body: 'ok' });
+async function settle(t: OpenPr, passes = 3) {
+  for (let i = 0; i < passes; i++) {
+    await t.c.tick();
+    await t.c.idle();
+  }
+}
+
+test("batching: an approved high-risk PR merges on the main its batch tested; on a moved main it's tested again first", { skip }, async () => {
+  // Main unchanged: the owner's approval merges it, with no second run.
+  const same = await batched({ edit: highRisk });
+  await fastGreen(same.t);
+  assert.ok(!same.t.pr().merged && same.t.pr().labels.includes('needs-owner'));
+  approveAsOwner(same.t);
+  await settle(same.t, 2);
+  assert.ok(same.t.pr().merged, 'merged on approval');
+  assert.equal(same.s.runs.length, 1);
+
+  // Main moved after its batch passed: approved, but tested again on the new main before it merges.
+  const { t, s } = await batched({ edit: highRisk });
+  await fastGreen(t);
+  assert.equal(s.runs.length, 1);
+  const moved = changeOnMain(t, 'NOTES.md', () => 'someone landed this by hand\n');
+  approveAsOwner(t);
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(!t.pr().merged, 'not merged onto a main its batch never tested');
+  assert.ok(t.f.log.read(0, ['pr_batch.step']).some((e) => (e.payload as EventPayload<'pr_batch.step'>).step === 'stale'));
+  assert.ok(t.pr().comments.some((c) => /Approved, but not merged yet: main is at/.test(c.body)));
+  await settle(t);
+  assert.equal(s.runs.length, 2, 'tested again');
+  const built = t.f.log.read(0, ['pr_batch.step']).map((e) => e.payload as EventPayload<'pr_batch.step'>).filter((p) => p.step === 'built').at(-1)!;
+  assert.equal(built.base, moved, 'on the moved main');
+  assert.ok(t.pr().merged, 'then merged');
+  assert.equal(t.f.log.read(0, ['merge.done']).length, 1);
+});
+
+test('batching: a commit that lands on main between a green batch and its merge sends the PR back to be tested again', { skip }, async () => {
+  const { t, s } = await batched();
+  t.f.backlog.setChecks(t.pr().headSha, passing);
+  await t.c.tick(); // queued, and its batch runs
+  await t.c.idle();
+  assert.equal(s.runs.length, 1);
+  assert.ok(!t.pr().merged);
+  changeOnMain(t, 'NOTES.md', () => 'landed by hand\n');
+  await t.c.tick();
+  await t.c.idle();
+  assert.ok(!t.pr().merged, 'not merged onto the moved main');
+  await settle(t);
+  assert.equal(s.runs.length, 2, 'tested again on the new main');
+  assert.ok(t.pr().merged);
 });

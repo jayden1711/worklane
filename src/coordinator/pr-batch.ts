@@ -79,6 +79,8 @@ export interface BatchView {
   steps: StepName[];
   /** The batch's own full run, when it ended. */
   run: Step['run'];
+  /** The tree after each PR's merge, in order (what main must hold after merging up to it). */
+  trees: string[];
   /** Built and not yet finished or abandoned. */
   open: boolean;
   at: string;
@@ -119,16 +121,18 @@ export function batchState(events: StoredEvent[]): BatchState {
       const s = e.payload as Step;
       let b = batches.get(s.id);
       if (!b) {
-        b = { id: s.id, parent: s.parent, prs: [], sha: null, base: null, steps: [], run: null, open: false, at: e.ts, last: e.ts };
+        b = { id: s.id, parent: s.parent, prs: [], sha: null, base: null, steps: [], run: null, trees: [], open: false, at: e.ts, last: e.ts };
         batches.set(s.id, b);
       }
       b.steps.push(s.step);
       b.last = e.ts;
-      if (s.step === 'built') Object.assign(b, { prs: s.prs, sha: s.sha, base: s.base, open: true });
+      if (s.step === 'built') Object.assign(b, { prs: s.prs, sha: s.sha, base: s.base, trees: s.trees ?? [], open: true });
       if (s.step === 'green' || s.step === 'red') b.run = s.run;
       if (s.step === 'finished' || s.step === 'abandoned') b.open = false;
       for (const p of s.prs) {
         if (s.step === 'checks_posted') posted.set(key(p.number, p.head), s.id);
+        // Main is no longer what the batch tested for it: untested again, back in the queue.
+        if (s.step === 'stale' && posted.get(key(p.number, p.head)) === s.id) posted.delete(key(p.number, p.head));
         if (s.step === 'culprit' || s.step === 'conflict') returned.set(key(p.number, p.head), s);
         if (s.step === 'dropped') gone.add(key(p.number, p.head));
       }
@@ -203,6 +207,58 @@ export function mayMerge(o: { events: StoredEvent[]; number: number; head: strin
   return { ok: true, batch: b.id };
 }
 
+/** Whose turn it is to merge in a green batch, and whether main is still what the batch tested. */
+export type MergeTurn = { act: 'merge'; batch: string } | { act: 'wait'; why: string } | { act: 'stale'; batch: string; prs: BatchEntry[]; why: string };
+
+/**
+ * A green batch merges strictly in batch order, each PR onto exactly the commit the batch tested it on: the batch's
+ * base for the first, and for each next one the merge of the PR before it, whose tree must be the batch's tree after
+ * that PR. (GitHub's merge commit, `merge_method: merge`, of the head onto that tip gives the same tree the batch
+ * tested.) Anything else and this PR and those after it are stale: main is no longer what was tested, so they are
+ * tested again. A PR ahead of it still to merge (open at its head, its own turn pending): wait.
+ */
+export function mergeTurn(o: { events: StoredEvent[]; number: number; head: string; tip: string; treeOf: (sha: string) => string | null }): MergeTurn {
+  const st = batchState(o.events);
+  const id = st.posted.get(key(o.number, o.head));
+  const b = id ? st.batches.get(id) : undefined;
+  if (!b?.base) return { act: 'wait', why: `no green batch holds ${o.head.slice(0, 8)}` };
+  const i = b.prs.findIndex((p) => p.number === o.number && p.head === o.head);
+  const merged = new Map<string, string>();
+  const closed = new Set<number>();
+  const head = new Map<number, string>();
+  const ownerWait = new Set<string>();
+  for (const e of o.events) {
+    const p = e.payload as Record<string, unknown>;
+    if (e.type === 'merge.done') merged.set(key(Number(p.number), String(p.head)), String(p.sha));
+    else if (e.type === 'pr.closed' && !p.merged) closed.add(Number(p.number));
+    else if (e.type === 'pr.status' || e.type === 'pr.opened') head.set(Number(p.number), String(p.head));
+    else if (e.type === 'merge.decided') {
+      const k = key(Number(p.number), String(p.head));
+      if (p.auto) ownerWait.delete(k);
+      else ownerWait.add(k);
+    }
+  }
+  const rest = b.prs.slice(i).filter((p) => !merged.has(key(p.number, p.head)));
+  const stale = (why: string): MergeTurn => ({ act: 'stale', batch: b.id, prs: rest, why });
+  let expected = b.base;
+  for (let j = 0; j < i; j++) {
+    const p = b.prs[j]!;
+    const k = key(p.number, p.head);
+    const m = merged.get(k);
+    if (m) {
+      const tree = o.treeOf(m);
+      if (b.trees[j] && tree !== b.trees[j]) return stale(`#${p.number} merged as ${m.slice(0, 8)}, whose tree is not the one the batch tested`);
+      expected = m;
+      continue;
+    }
+    if (closed.has(p.number) || (head.get(p.number) ?? p.head) !== p.head || st.posted.get(k) !== b.id) return stale(`#${p.number}, ahead of it in ${b.id}, left the batch without merging`);
+    if (ownerWait.has(k)) return stale(`#${p.number}, ahead of it in ${b.id}, waits for the owner`);
+    return { act: 'wait', why: `#${p.number} merges first (batch order in ${b.id})` };
+  }
+  if (o.tip !== expected) return stale(`main is at ${o.tip.slice(0, 8)}, not ${expected.slice(0, 8)} as ${b.id} tested: something else landed`);
+  return { act: 'merge', batch: b.id };
+}
+
 // ---------------------------------------------------------------- the batcher
 
 export interface PrBatchDeps {
@@ -223,11 +279,17 @@ export interface PrBatchDeps {
   ownerOf(issue: number): string;
   /** A PR whose batch passed and whose full check is posted on its head: the merge policy decides it next. */
   tested(e: BatchEntry): void;
+  /**
+   * Why the merge policy would leave this PR to the owner (high-risk, money-path, or any other reason it won't
+   * auto-merge), or null. Such a PR is batched alone: merging the rest around it would leave main untested.
+   */
+  waitsForOwner?(e: BatchEntry, pr: PullRequest): string | null;
   now?: () => number;
 }
 
 interface Live extends BatchEntry {
   branch: string;
+  pr: PullRequest;
 }
 
 /** After an error (a failed fetch, a test-run service that threw), wait this long before the next batch. */
@@ -260,6 +322,7 @@ export class PrBatcher {
       tier: o.tier ?? null,
       run: o.run ?? null,
       detail: (o.detail ?? '').slice(0, 2000),
+      ...(o.trees ? { trees: o.trees } : {}),
     });
   }
 
@@ -387,7 +450,7 @@ export class PrBatcher {
       const pr = await this.d.pullRequest(e.number);
       if (pr.state !== 'open') this.step(id, 'dropped', [e], { detail: `the PR is ${pr.state}` });
       else if (pr.headSha !== e.head) this.step(id, 'dropped', [e], { detail: `its head moved from ${e.head.slice(0, 8)} to ${pr.headSha.slice(0, 8)}` });
-      else out.push({ ...e, branch: pr.head });
+      else out.push({ ...e, branch: pr.head, pr });
     }
     return out;
   }
@@ -401,8 +464,9 @@ export class PrBatcher {
   }
 
   /** Merge each entry, in order, onto `base` (merge commits, no worktree), under the batch's branch. */
-  private build(id: string, entries: Live[], base: string): { sha: string; included: Live[]; conflicts: Live[]; skipped: Live[] } {
+  private build(id: string, entries: Live[], base: string): { sha: string; trees: string[]; included: Live[]; conflicts: Live[]; skipped: Live[] } {
     let commit = base;
+    const trees: string[] = [];
     const included: Live[] = [];
     const conflicts: Live[] = [];
     const skipped: Live[] = [];
@@ -413,6 +477,7 @@ export class PrBatcher {
         const tree = m.stdout.split('\n')[0]!.trim();
         commit = this.gitOk(...ident, 'commit-tree', '--no-gpg-sign', tree, '-p', commit, '-p', e.head, '-m', `${BRAND.name} ${id}: #${e.number} (${e.head.slice(0, 8)})`);
         included.push(e);
+        trees.push(tree);
       } else if (m.status === 1) {
         // A conflict with the base itself goes back to its author; one only with a PR ahead of it waits for a later batch.
         const alone = commit === base ? m : this.git('merge-tree', '--write-tree', '--no-messages', base, e.head);
@@ -420,7 +485,7 @@ export class PrBatcher {
       } else throw new Error(`git merge-tree failed: ${(m.stderr || m.stdout).trim().slice(-300)}`);
     }
     if (included.length) this.gitOk('update-ref', this.refOf(id), commit);
-    return { sha: commit, included, conflicts, skipped };
+    return { sha: commit, trees, included, conflicts, skipped };
   }
 
   /** One full run of `sha`, in `shards` parallel runs, as one result. Fails closed on a run of another commit or kind. */
@@ -462,7 +527,7 @@ export class PrBatcher {
       return;
     }
     const id = this.nextId();
-    const entries = await this.live(id, st.queue.slice(0, size));
+    const { entries, alone } = await this.select(id, st.queue, size);
     if (!entries.length) return this.finish(id, [], 'every PR in it left the queue');
     const base = this.fetch(entries);
     const b = this.build(id, entries, base);
@@ -472,7 +537,7 @@ export class PrBatcher {
     }
     if (!b.included.length) return this.finish(id, [], 'no PR merged onto the base');
     const skipped = b.skipped.length ? ` (${b.skipped.map((e) => `#${e.number}`).join(', ')} conflict with a PR ahead of them: next batch)` : '';
-    this.step(id, 'built', b.included, { sha: b.sha, base, detail: `batch of ${b.included.length} (size ${size}, max ${cfg.max})${skipped}` });
+    this.step(id, 'built', b.included, { sha: b.sha, base, trees: b.trees, detail: alone ? `alone: ${alone}` : `batch of ${b.included.length} (size ${size}, max ${cfg.max})${skipped}` });
     const r = await this.test(b.sha, b.included);
     this.step(id, r.ok ? 'green' : 'red', b.included, { sha: b.sha, base, run: this.runOf(r), tier: failingTier(r)?.tier ?? null });
     const live = await this.live(id, b.included);
@@ -487,6 +552,31 @@ export class PrBatcher {
     if (live.length === 1) await this.bisectOne(id, live[0]!, base, r);
     else await this.bisect(id, live, base, r);
     this.finish(id, b.included);
+  }
+
+  /**
+   * The next batch from the queue, in order: up to `size` PRs the policy would auto-merge. A PR it would leave to the
+   * owner never shares a batch: at the head of the queue it is a batch of one; further back it keeps its place.
+   */
+  private async select(id: string, queue: BatchEntry[], size: number): Promise<{ entries: Live[]; alone: string | null }> {
+    const out: Live[] = [];
+    for (const q of queue) {
+      if (out.length >= size) break;
+      const [l] = await this.live(id, [q]);
+      if (!l) continue;
+      const why = this.d.waitsForOwner?.(l, l.pr) ?? null;
+      if (why) {
+        if (!out.length) return { entries: [l], alone: why };
+        continue;
+      }
+      out.push(l);
+    }
+    return { entries: out, alone: null };
+  }
+
+  /** These PRs' green batch no longer matches main: tested again in a later batch. */
+  stale(id: string, prs: BatchEntry[], why: string) {
+    if (prs.length) this.step(id, 'stale', prs, { detail: why });
   }
 
   /** Post the passing full check on each head (once), then hand each PR to the merge policy. */
@@ -538,7 +628,7 @@ export class PrBatcher {
         this.step(root, 'requeued', entries, { detail: 'bisection stopped' });
         return;
       }
-      this.step(id, 'built', prefix, { sha: b.sha, base, parent: root, detail: `bisecting ${root}: the first ${mid} of ${entries.length}` });
+      this.step(id, 'built', prefix, { sha: b.sha, base, parent: root, trees: b.trees, detail: `bisecting ${root}: the first ${mid} of ${entries.length}` });
       const r = await this.test(b.sha, prefix);
       this.step(id, r.ok ? 'green' : 'red', prefix, { sha: b.sha, base, parent: root, run: this.runOf(r), tier: failingTier(r)?.tier ?? null });
       this.finish(id, prefix);
