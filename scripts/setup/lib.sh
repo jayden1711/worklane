@@ -14,7 +14,8 @@ home_of() { getent passwd "$1" | cut -d: -f6; }
 # mangles multi-line scripts. From / so the user needn't reach our cwd.
 run_as() {
   local user="$1" script="$2"; shift 2
-  (cd / && sudo -H -u "$user" bash -euo pipefail -c "$script" _ "$@")
+  # GIT_TERMINAL_PROMPT=0: a setup step's git never asks for a username or password; it fails instead.
+  (cd / && sudo -H -u "$user" env GIT_TERMINAL_PROMPT=0 bash -euo pipefail -c "$script" _ "$@")
 }
 
 say() { printf '\n== %s\n' "$*"; }
