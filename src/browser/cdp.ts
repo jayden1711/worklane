@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chromeCandidates, which } from '../os/index.js';
+import { chromeCandidates, killTree, spawnDetached, which } from '../os/index.js';
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -94,15 +94,29 @@ export class Cdp {
     if (!WebSocketCtor) throw new Error(`this Node (${process.version}) has no WebSocket; Node 22.4 or later does`);
     const ws = new WebSocketCtor(url);
     await new Promise<void>((ok, fail) => {
-      ws.addEventListener('open', ok, { once: true });
-      ws.addEventListener('error', () => fail(new Error(`DevTools WebSocket ${url} refused`)), { once: true });
+      const t = setTimeout(() => fail(new Error(`DevTools WebSocket ${url} didn't open in 10 s`)), 10_000);
+      ws.addEventListener('open', () => (clearTimeout(t), ok()), { once: true });
+      ws.addEventListener('error', () => (clearTimeout(t), fail(new Error(`DevTools WebSocket ${url} refused`))), { once: true });
     });
     return new Cdp(ws);
   }
-  send<T = Params>(method: string, params: Params = {}): Promise<T> {
+  /** A command, failing after `ms` if Chrome never answers (a hung browser must not hang its caller). */
+  send<T = Params>(method: string, params: Params = {}, ms = 30_000): Promise<T> {
     const id = this.next++;
-    this.ws.send(JSON.stringify({ id, method, params }));
-    return new Promise((ok, fail) => this.pending.set(id, { ok: ok as (r: Params) => void, fail, method }));
+    return new Promise((ok, fail) => {
+      const t = setTimeout(() => {
+        this.pending.delete(id);
+        fail(new Error(`${method}: no answer from Chrome in ${ms / 1000} s`));
+      }, ms);
+      const done = <A>(f: (a: A) => void) => (a: A) => (clearTimeout(t), f(a));
+      this.pending.set(id, { ok: done(ok as (r: Params) => void), fail: done(fail), method });
+      try {
+        this.ws.send(JSON.stringify({ id, method, params }));
+      } catch (e) {
+        this.pending.delete(id);
+        done(fail)(new Error(`${method}: ${(e as Error).message}`));
+      }
+    });
   }
   on(method: string, fn: (p: Params) => void) {
     this.handlers.set(method, [...(this.handlers.get(method) ?? []), fn]);
@@ -115,13 +129,36 @@ export class Cdp {
 export interface Browser {
   cdp: Cdp;
   proc: ChildProcess;
-  /** Stop Chrome and remove its profile. Safe to call more than once. */
-  close(): Promise<void>;
+  /**
+   * Stop Chrome (all its processes) and remove its profile. Never throws: a profile that can't be removed is
+   * returned as a note, as cleanup is never a reason a check fails. Safe to call more than once.
+   */
+  close(): Promise<string | null>;
+}
+
+/** Stop a process and everything in its group (Chrome's renderers, an app's children), and wait until it's gone. */
+export async function stopTree(p: ChildProcess, kill: () => void = () => killTree(p.pid, () => p.kill('SIGKILL'))): Promise<boolean> {
+  // No pid: it never started (spawn failed), so there's nothing to stop.
+  const exited = () => p.pid === undefined || p.exitCode !== null || p.signalCode !== null;
+  if (!exited()) {
+    const gone = new Promise((r) => p.once('exit', r));
+    kill();
+    await Promise.race([gone, sleep(5000)]);
+    if (!exited()) {
+      p.kill('SIGKILL');
+      await Promise.race([gone, sleep(2000)]);
+    }
+  }
+  // Whatever happened, its pipes must not keep this process (a test run, the coordinator) waiting.
+  p.stdout?.destroy();
+  p.stderr?.destroy();
+  p.unref();
+  return exited();
 }
 
 /** Start headless Chrome on a temporary profile and connect to its page. Chrome is stopped if connecting fails. */
-export async function launchChrome(chrome: string, o: { width?: number; height?: number; noSandbox?: boolean; extraArgs?: string[] } = {}): Promise<Browser> {
-  const profile = mkdtempSync(join(tmpdir(), 'cdp-chrome-'));
+export async function launchChrome(chrome: string, o: { width?: number; height?: number; noSandbox?: boolean; extraArgs?: string[]; profileRoot?: string } = {}): Promise<Browser> {
+  const profile = mkdtempSync(join(o.profileRoot ?? tmpdir(), 'cdp-chrome-'));
   const proc = spawn(
     chrome,
     [
@@ -137,28 +174,44 @@ export async function launchChrome(chrome: string, o: { width?: number; height?:
       ...(o.extraArgs ?? []),
       'about:blank',
     ],
-    { stdio: ['ignore', 'ignore', 'pipe'] },
+    // Its own process group, so stopping it stops its renderers and helpers too, before the profile is removed.
+    { stdio: ['ignore', 'ignore', 'pipe'], detached: spawnDetached },
   );
   let stderr = '';
   proc.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-2000)));
-  let closed = false;
-  const close = async () => {
-    if (closed) return;
-    closed = true;
-    if (proc.exitCode === null && proc.signalCode === null) {
-      const gone = new Promise((r) => proc.once('exit', r));
-      proc.kill();
-      await Promise.race([gone, sleep(3000)]);
-      if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGKILL');
-    }
-    rmSync(profile, { recursive: true, force: true, maxRetries: 3 });
-  };
+  proc.on('error', (e) => (stderr += `\n${e.message}`));
+  let closed: Promise<string | null> | null = null;
+  const close = () =>
+    (closed ??= (async () => {
+      const notes: string[] = [];
+      try {
+        if (!(await stopTree(proc))) notes.push(`Chrome (pid ${proc.pid}) didn't exit`);
+      } catch (e) {
+        notes.push(`stopping Chrome failed: ${(e as Error).message}`);
+      }
+      try {
+        // Retried: a process that was just stopped can still be letting go of its files (ENOTEMPTY, EBUSY).
+        rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch (e) {
+        notes.push(`Chrome's temporary profile ${profile} wasn't removed: ${(e as Error).message.split('\n')[0]}`);
+      }
+      return notes.length ? notes.join('; ') : null;
+    })());
   try {
     const portFile = join(profile, 'DevToolsActivePort');
-    const devtools = await until('Chrome to open its DevTools port', () => existsSync(portFile) && readFileSync(portFile, 'utf8').split(/\r?\n/)[0], 20_000).catch((e: Error) => {
-      throw new Error(`${e.message}\nChrome said: ${stderr.trim() || '(nothing)'}`);
+    // A Chrome that can't start, or exits early, fails now rather than at the timeout.
+    const died = new Promise<never>((_, fail) => {
+      proc.once('error', (e) => fail(new Error(`Chrome couldn't be started (${chrome}): ${e.message}`)));
+      proc.once('exit', (code, signal) => fail(new Error(`Chrome exited (${code ?? signal}) before it opened DevTools\nChrome said: ${stderr.trim() || '(nothing)'}`)));
     });
-    const target = await until('a page target', async () => ((await (await fetch(`http://127.0.0.1:${devtools}/json/list`)).json()) as { type: string; webSocketDebuggerUrl: string }[]).find((t) => t.type === 'page'));
+    died.catch(() => {});
+    const devtools = await Promise.race([
+      died,
+      until('Chrome to open its DevTools port', () => existsSync(portFile) && readFileSync(portFile, 'utf8').split(/\r?\n/)[0], 20_000).catch((e: Error) => {
+        throw new Error(`${e.message}\nChrome said: ${stderr.trim() || '(nothing)'}`);
+      }),
+    ]);
+    const target = await until('a page target', async () => ((await (await fetch(`http://127.0.0.1:${devtools}/json/list`, { signal: AbortSignal.timeout(2000) })).json()) as { type: string; webSocketDebuggerUrl: string }[]).find((t) => t.type === 'page'));
     return { cdp: await Cdp.connect(target.webSocketDebuggerUrl), proc, close };
   } catch (e) {
     await close();
