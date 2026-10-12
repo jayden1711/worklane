@@ -21,22 +21,26 @@
 #     4398 (the token, on this machine only), which it never forwards.
 #
 #   bash scripts/setup/credentials.sh dashboard-signin      (first, once)
-#   bash scripts/setup/dashboards.sh [--console-user <admin user>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--console-user <admin user> --console-devices <tags,names>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
 #
 #   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh
 #     with the same user first. Without it the terminal never opens. With it, the hub's unit drops
 #     NoNewPrivileges and its read-only filesystem: sudo (to start the terminal, and in it) needs both.
+#   --console-devices (console_devices): the Tailscale devices the terminal may be opened from, as Tailscale
+#     tags (tag:owner-laptop) and/or MagicDNS node names, comma-separated. Prefer tags you alone own in the
+#     tailnet policy. Empty or missing: every device is refused. Kept in the hub's unit on this machine only.
 #
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh [--console-user <admin user>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
-client_id="" public_url="" console_user=""
+usage="usage: dashboards.sh [--console-user <admin user> --console-devices <tags,names>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
+client_id="" public_url="" console_user="" console_devices=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
     --console-user) console_user="${2:-}"; shift 2 ;;
+    --console-devices) console_devices="${2:-}"; shift 2 ;;
     --) shift; break ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *) break ;;
@@ -49,6 +53,11 @@ if [ -n "$console_user" ]; then
   [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
   [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
 fi
+if [ -n "$console_devices" ]; then
+  [ -n "$console_user" ] || { echo "--console-devices goes with --console-user" >&2; exit 2; }
+  [[ "$console_devices" =~ ^[a-z0-9:.,-]+$ ]] || { echo "--console-devices: Tailscale tags (tag:x) and/or node names, comma-separated, lowercase" >&2; exit 2; }
+fi
+[ -z "$console_user" ] || [ -n "$console_devices" ] || echo "note: no --console-devices, so the owner terminal refuses every device until you list yours" >&2
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
@@ -103,7 +112,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${console_user:+ --console-user $console_user}
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}
 Restart=on-failure
 UMask=0007
 RestartSec=10

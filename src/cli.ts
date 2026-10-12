@@ -26,6 +26,7 @@ import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
+import { parseDeviceList } from './console/terminal-devices.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
@@ -84,7 +85,8 @@ usage: ${BRAND.cli} <command> [options]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user); its
                                    token is the owner's break-glass (--user: the login recorded)
-  dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service] [--console-user admin]
+  dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
+            [--console-user admin --console-devices tag:x,node]
             [--client-id id --public-url https://<host> --signin-dir dir]
                                    one view over several instances' own dashboards; it forwards
                                    to each, so writes stay with that instance's server and user.
@@ -92,6 +94,7 @@ usage: ${BRAND.cli} <command> [options]
                                    secrets in --signin-dir); the token works on the break-glass
                                    port only, on this machine (docs/dashboard.md);
                                    --console-user: the admin user the owner terminal runs as
+                                   from the Tailscale devices --console-devices lists (none: refused)
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -477,7 +480,7 @@ async function main(argv: string[]): Promise<number> {
         const signinDir = option(opts, '--signin-dir');
         if ((clientId || publicUrl || signinDir) && !(clientId && publicUrl && signinDir)) throw new Error('sign-in needs all of --client-id, --public-url and --signin-dir');
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null } });
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
         const bg = service ? `${h.breakGlassUrl.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.breakGlassUrl;
         console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);

@@ -56,7 +56,11 @@ export interface HubOptions {
    * own (`session` on what startHub returns) unless one is given here; it runs as consoleUser (console_user; none: it
    * never opens). The rest is for tests.
    */
-  terminal?: { consoleUser?: string | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
+  /**
+   * devices: the Tailscale tags and node names the terminal may be opened from (console_devices; none: it never
+   * opens); whois and peerUid identify the device (src/console/terminal-devices.ts) and are injected in tests.
+   */
+  terminal?: { consoleUser?: string | null; devices?: string[]; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
   now?: () => number;
 }
 
@@ -327,6 +331,8 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     instances: opts.instances.map((i) => i.name),
     session,
     audit: t?.audit ?? fileAudit(join(opts.stateDir, 'terminal-audit.jsonl')),
+    // Never served on the break-glass server (only this one), and refused there anyway if it ever were.
+    devices: { allow: t?.devices ?? [], breakGlassPort: opts.breakGlassPort ?? HUB_BREAK_GLASS_PORT, ...(t?.whois ? { whois: t.whois } : {}), ...(t?.peerUid ? { peerUid: t.peerUid } : {}) },
     ...(t?.spawnPty ? { spawnPty: t.spawnPty } : {}),
     ...(t?.exec ? { exec: t.exec } : {}),
     ...(t?.now ? { now: t.now } : {}),
