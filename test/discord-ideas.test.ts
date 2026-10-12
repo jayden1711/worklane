@@ -221,3 +221,16 @@ test('ideas: the confirm reading and the filing rule', () => {
   assert.equal(mayFileReady('viewer', true), false, 'a viewer, even their own');
   assert.equal(mayFileReady(null, true), false);
 });
+
+test('ideas: off by default: without discord.conversation an idea opens no conversation and no thread', async () => {
+  const t = setup([{ kind: 'needs_info' }]);
+  CONFIG.discord.conversation = false;
+  try {
+    await t.pass(msg(OWNER_ID, 'bug: the totals ignore my discount code'));
+  } finally {
+    CONFIG.discord.conversation = true;
+  }
+  assert.equal(t.chat.threads.length, 0);
+  assert.deepEqual(t.log.read(0, ['discord.idea']), []);
+  assert.equal(IntakeConfig.parse({ version: 1 }).discord.conversation, false, 'the default');
+});
