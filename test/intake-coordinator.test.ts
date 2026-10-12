@@ -22,7 +22,7 @@ const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encod
 
 const OWNER_ID = '123456789012';
 const STRANGER_ID = '987654321098';
-const DRAFT = { title: 'Totals ignore discounts', body: 'Totals are wrong when a discount applies.\n\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n' };
+const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 
 const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true }, sms: { enabled: true } });
 
@@ -179,7 +179,7 @@ test('intake: needs_info gets the engine\'s own reply and no issue', async () =>
 });
 
 test('intake: a trusted bug whose draft fails checkDraft is recorded as needs_info, gets the request for details and files nothing (#107)', async () => {
-  const t = setup({ triage: () => ({ kind: 'bug', draft: { title: 'Totals ignore discounts', body: '```done_when\n- command: npm test\n```\n' } }) });
+  const t = setup({ triage: () => ({ kind: 'bug', draft: { title: 'Totals ignore discounts', body: DRAFT.body.replace('command: |\n    npm test -- --grep "discount: applied"', 'command: npm test') } }) });
   await t.c.checkIntake();
   assert.deepEqual(t.discord.replies.map((r) => r.text), [NEEDS_INFO_REPLY]);
   assert.deepEqual(await t.backlog.list('ready'), []);

@@ -149,6 +149,24 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('backup.offsite', { ok: true, destination: 'rclone remote, backups bucket', key: 'events-112.db.age', last_id: 1 });
   } catch (e) {
     console.error(`no off-machine backups in this engine (${e.message.split('\n')[0]}); the health panel says not set up`);
+  }
+  // Reports through intake, redacted as the coordinator records them: one filed and answered, one waiting on
+  // the owner, one grouped with it, one dropped (engines with intake).
+  try {
+    add('intake.received', { id: 'r1', source: 'discord', sender: 'a1b2c3', excerpt: 'Checkout total is off by a cent when the cart has [AMOUNT] in it' });
+    add('intake.triaged', { id: 'r1', kind: 'bug', reproduction: 'reproduced', ignored: [] });
+    add('intake.filed', { id: 'r1', issue: 3, ready: true });
+    add('intake.replied', { id: 'r1', stage: 'received', ok: true });
+    add('intake.replied', { id: 'r1', stage: 'filed', ok: true });
+    add('intake.received', { id: 'r2', source: 'sms', sender: 'd4e5f6', excerpt: 'Could the receipt show the discount code?' });
+    add('intake.triaged', { id: 'r2', kind: 'feature', reproduction: null, ignored: [] });
+    add('intake.awaiting', { id: 'r2', decision: 'intake-r2' });
+    add('intake.received', { id: 'r3', source: 'product', sender: '9f8e7d', excerpt: 'Receipts should list the discount' });
+    add('intake.grouped', { id: 'r3', with: 'r2' });
+    add('intake.received', { id: 'r4', source: 'sms', sender: '0c1d2e', excerpt: 'win a prize [URL]' });
+    add('intake.dropped', { id: 'r4', reason: 'spam' });
+  } catch (e) {
+    console.error(`no intake in this engine (${e.message.split('\n')[0]}); the Intake page is empty`);
   } finally {
     log.close();
   }
@@ -285,6 +303,7 @@ const pages = [
   ['pull-requests', '/prs'],
   ['agents', '/agents'],
   ['activity', '/activity'],
+  ['intake', '/intake'],
   ['deploys', '/deploys'],
   ['reports', '/reports'],
   ['logs', '/logs'],

@@ -124,6 +124,58 @@ export function parseContract(body: string): { ok: true; done_when: DoneWhenList
   return { ok: true, done_when: r.data };
 }
 
+/** The five parts of every issue the harness drafts itself (intake, chat, gardener, corrections). */
+export const ISSUE_PARTS = ['Outcome', 'Sources', 'Constraints', 'Deliverable', 'Review point'] as const;
+export type IssuePart = (typeof ISSUE_PARTS)[number];
+
+/** How a drafting agent is told to write the body (src/roles.ts says the same in the chat role; a test keeps them in step). */
+export const DRAFT_FORMAT =
+  'five parts, each starting a line with its bold label: **Outcome:** one sentence. **Sources:** where to look, nowhere else. **Constraints:** what to leave alone. **Deliverable:** a closed ```done_when block, commands as YAML block scalars ("- command: |"). **Review point:** the expected review level (L0 to L3) and what would make it wait for the owner.';
+
+/**
+ * The text of each part in an issue body, labelled `**Outcome:**` (or `**Outcome**:`) at the start of a line, or as
+ * a heading (`## Outcome`). A part runs to the next part's label; labels inside code fences don't count. null: absent.
+ */
+export function issueParts(body: string): Record<IssuePart, string | null> {
+  const out = Object.fromEntries(ISSUE_PARTS.map((p) => [p, null])) as Record<IssuePart, string | null>;
+  const names = new Map(ISSUE_PARTS.map((p) => [p.toLowerCase(), p]));
+  let current: IssuePart | null = null;
+  let fence = false;
+  const parts: Partial<Record<IssuePart, string[]>> = {};
+  for (const line of body.replace(/\r\n/g, '\n').split('\n')) {
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    const m = fence ? null : /^\s*(?:\*\*([^*]+?):?\*\*:?|#{1,6}\s+([^#]+?):?\s*#*\s*$)\s*(.*)$/.exec(line);
+    const name = m ? names.get((m[1] ?? m[2] ?? '').trim().toLowerCase()) : undefined;
+    if (name) {
+      current = name;
+      parts[name] = [m![3] ?? ''];
+    } else if (current) parts[current]!.push(line);
+  }
+  for (const p of ISSUE_PARTS) if (parts[p]) out[p] = parts[p]!.join('\n').trim();
+  return out;
+}
+
+/**
+ * Can an issue the harness drafted itself be filed? A title; all five parts, none empty; the Outcome one sentence on
+ * one line; the Deliverable a ```done_when block parseContract accepts, its commands YAML block scalars
+ * (`- command: |`, which keeps quoting and colons inside commands from breaking the block); the Review point naming
+ * a review level (L0 to L3).
+ */
+export function checkDraftedIssue(title: string, body: string): { ok: true; done_when: DoneWhenList } | { ok: false; why: string } {
+  if (!title.trim()) return { ok: false, why: 'the draft has no title' };
+  const parts = issueParts(body);
+  const missing = ISSUE_PARTS.filter((p) => !parts[p]);
+  if (missing.length) return { ok: false, why: `the draft needs all five parts (${ISSUE_PARTS.join(', ')}); missing or empty: ${missing.join(', ')}` };
+  if (parts.Outcome!.includes('\n')) return { ok: false, why: 'the Outcome must be one sentence on one line' };
+  const c = parseContract(parts.Deliverable!);
+  if (!c.ok) return { ok: false, why: `Deliverable: ${c.why}` };
+  const block = parts.Deliverable!.match(/```done_when\s*\n([\s\S]*?)\n```/)![1]!;
+  const inline = block.split('\n').filter((l) => /^\s*-?\s*command:\s*\S/.test(l) && !/^\s*-?\s*command:\s*[|>][-+]?\s*$/.test(l));
+  if (inline.length) return { ok: false, why: `commands must be YAML block scalars ("- command: |"), not inline: ${inline[0]!.trim()}` };
+  if (!/\bL[0-3]\b/.test(parts['Review point']!)) return { ok: false, why: 'the Review point must name the expected review level (L0 to L3) and what would make it wait for the owner' };
+  return c;
+}
+
 export interface Actionability {
   actionable: boolean;
   why: string;

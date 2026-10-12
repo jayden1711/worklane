@@ -7,7 +7,8 @@ import { askChat, bundleFiles, chatAnswer, chatHistory, chatTurn, CHAT_HISTORY, 
 import { RunRecorder } from '../src/run-record.js';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
-import { CHAT_SCHEMA } from '../src/roles.js';
+import { CHAT_SCHEMA, rolePrompt } from '../src/roles.js';
+import { acceptSummary, CHAT_SUMMARY_FILE, readSummary, renderSummary, SECTION_CHARS, SUMMARY_CHARS } from '../src/chat-summary.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { sandboxSettings } from '../src/sandbox.js';
 import { exampleProject } from './helpers.js';
@@ -92,13 +93,15 @@ test('answers cite events, runs, PRs and issues as links; citations to nothing a
   assert.deepEqual(a.unknownCitations, ['event:999']);
 });
 
-test('issue drafts: validated with parseContract, commands as block scalars; a preview, never filed', async () => {
-  const good = 'Totals skip zero quantities.\n\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n';
+test('issue drafts: the five parts, checked by the contract parser, commands as block scalars; a preview, never filed', async () => {
+  const good = '**Outcome:** Totals skip zero quantities.\n**Sources:** the totals code.\n**Constraints:** leave rounding alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n';
   assert.deepEqual(validateDraft('Skip zero quantities', good), { ok: true, title: 'Skip zero quantities', body: good, labels: ['ready'] });
-  const inline = validateDraft('t', '```done_when\n- command: npm test\n```\n');
+  const inline = validateDraft('t', good.replace('command: |\n    npm test -- --grep zero', 'command: npm test'));
   assert.ok(!inline.ok && /block scalars/.test(inline.why));
   const bad = validateDraft('t', 'no contract at all');
-  assert.ok(!bad.ok && /done_when/.test(bad.why));
+  assert.ok(!bad.ok && /five parts/.test(bad.why));
+  const noParts = validateDraft('t', 'Totals skip zero quantities.\n\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n');
+  assert.ok(!noParts.ok && /missing or empty: Outcome, Sources, Constraints, Deliverable, Review point/.test(noParts.why), 'a bare done_when is no longer enough for a draft');
   assert.ok(!validateDraft('  ', good).ok);
   const s = setup(() => ({ answer: 'drafted', citations: [], issue_draft: { title: 'Skip zero quantities', body: good } }));
   const a = await chatTurn({ ...s.opts, question: 'draft an issue', by: owner });
@@ -138,15 +141,63 @@ test("someone who isn't the owner gets a read-only answer: no drafts, no proposa
   assert.deepEqual(chatHistory(s.opts.stateDir), [], "not the owner's conversation");
 });
 
-test('history: the owner’s turns, redacted, 0600, fed into the next turn', async () => {
-  const s = setup((req) => ({ answer: req.prompt.includes('Earlier in this conversation') ? 'again' : `first, with ${TOKEN}`, citations: [] }));
-  await chatTurn({ ...s.opts, question: 'one', by: owner });
+test('history: the owner’s turns are logged, redacted, 0600, but never fed into the next turn', async () => {
+  const s = setup(() => ({ answer: `first, with ${TOKEN}`, citations: [] }));
+  await chatTurn({ ...s.opts, question: 'the very first question', by: owner });
   await chatTurn({ ...s.opts, question: 'two', by: owner });
   const h = chatHistory(s.opts.stateDir);
-  assert.deepEqual(h.map((x) => x.question), ['one', 'two']);
+  assert.deepEqual(h.map((x) => x.question), ['the very first question', 'two']);
   assert.ok(!readFileSync(join(s.opts.stateDir, CHAT_HISTORY), 'utf8').includes(TOKEN), 'redacted');
   if (process.platform !== 'win32') assert.equal(statSync(join(s.opts.stateDir, CHAT_HISTORY)).mode & 0o777, 0o600);
-  assert.match(s.runner.calls[1]!.prompt, /Q \(@[^)]+\): one\nA: first/);
+  assert.ok(!s.runner.calls[1]!.prompt.includes('the very first question'), 'no transcript in the prompt');
+  assert.ok(!s.runner.calls[1]!.prompt.includes('first, with'), 'no earlier answer either');
+});
+
+const SUMMARY = { goal: 'fix the totals bug (#7)', files_touched: 'src/price.js', done: 'found the cause', pending: 'landing #7', errors_fixes: 'none', current_state: 'PR #9 open, waiting for approval', next_step: 'approve the landing' };
+
+test('summary: the next turn gets the fixed-heading summary the last one returned, with a fresh bundle', async () => {
+  const s = setup((req) => ({ answer: 'ok', citations: [], summary: req.prompt.includes('fix the totals bug') ? { ...SUMMARY, done: 'found the cause; drafted the fix', next_step: undefined } : SUMMARY }));
+  await chatTurn({ ...s.opts, question: 'what is going on with #7?', by: owner });
+  await chatTurn({ ...s.opts, question: 'and now?', by: owner });
+  const first = s.runner.calls[0]!.prompt;
+  const second = s.runner.calls[1]!.prompt;
+  assert.match(first, /### Goal\n\(none yet\)[\s\S]*### Next step\n\(none yet\)/, 'every heading, empty at first');
+  for (const h of ['Goal', 'Files touched', 'Done', 'Pending', 'Errors & fixes', 'Current state', 'Next step']) assert.match(second, new RegExp(`### ${h.replace('&', '&')}\n`), h);
+  assert.match(second, /### Goal\nfix the totals bug \(#7\)/);
+  assert.match(second, /### Current state\nPR #9 open, waiting for approval/);
+  const bundles = [first, second].map((p) => p.match(/Context files for instance shop: (\S+)/)![1]);
+  assert.notEqual(bundles[0], bundles[1], 'a fresh bundle each turn');
+  // The second turn left Next step out: the previous text stays; what it changed is kept.
+  const kept = JSON.parse(readFileSync(join(s.opts.stateDir, CHAT_SUMMARY_FILE), 'utf8'));
+  assert.equal(kept.next_step, 'approve the landing');
+  assert.equal(kept.done, 'found the cause; drafted the fix');
+  if (process.platform !== 'win32') assert.equal(statSync(join(s.opts.stateDir, CHAT_SUMMARY_FILE)).mode & 0o777, 0o600);
+});
+
+test("summary: someone who isn't the owner neither sees the owner's summary nor changes it", async () => {
+  const s = setup(() => ({ answer: 'ok', citations: [], summary: { ...SUMMARY, goal: 'something else' } }));
+  await chatTurn({ ...s.opts, question: 'one', by: owner });
+  await chatTurn({ ...s.opts, question: 'peek', by: 'collaborator' });
+  assert.ok(!s.runner.calls[1]!.prompt.includes('fix the totals bug'), "the owner's conversation stays the owner's");
+  assert.equal(readSummary(s.opts.stateDir).goal, 'something else', 'still the owner turn’s summary');
+  assert.ok(!s.runner.calls[1]!.prompt.includes(SUMMARY.current_state));
+});
+
+test('summary: every heading kept, each section capped and redacted, the whole bounded', () => {
+  const big = acceptSummary({ goal: `${'g'.repeat(2000)} ${TOKEN}`, files_touched: 'f'.repeat(900), done: 'd'.repeat(900), pending: 'p'.repeat(900), errors_fixes: 'e'.repeat(900), current_state: 'c'.repeat(900), next_step: 'n'.repeat(900) });
+  for (const v of Object.values(big)) assert.ok(v.length <= SECTION_CHARS, `${v.length} over ${SECTION_CHARS}`);
+  assert.ok(Object.values(big).reduce((n, v) => n + v.length, 0) <= SUMMARY_CHARS);
+  assert.ok(!JSON.stringify(big).includes(TOKEN));
+  assert.deepEqual(Object.keys(acceptSummary({ goal: 'g', extra: 'x' })), ['goal', 'files_touched', 'done', 'pending', 'errors_fixes', 'current_state', 'next_step']);
+  assert.match(renderSummary(acceptSummary({})), /^### Goal\n\(none yet\)\n\n### Files touched/);
+});
+
+test('the chat must return the summary, and its prompt sends state questions to the context files, not the summary', () => {
+  assert.ok(CHAT_SCHEMA.required.includes('summary'));
+  assert.deepEqual(CHAT_SCHEMA.properties.summary.required, ['goal', 'files_touched', 'done', 'pending', 'errors_fixes', 'current_state', 'next_step']);
+  const p = rolePrompt(cfg.dir, 'chief_of_staff');
+  assert.match(p, /The summary is your memory of the conversation, not a source/);
+  assert.match(p, /answer from this turn's context files and cite them/);
 });
 
 test('spend: each turn reports its cost (run.cost role chat) and is capped by what is left of the day', async () => {
