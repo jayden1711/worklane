@@ -28,7 +28,7 @@ if [ "${1:-}" = --console-user ]; then
   console_user="${2:?--console-user takes the admin user}"
   shift 2
   [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
-  [ -x "$CONSOLE_SHELL" ] && [ -f /etc/sudoers.d/worklane-console ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
+  [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
 fi
 login="${1:?usage: dashboards.sh [--console-user <admin user>] <your GitHub login> <name> [<name>...]}"
 shift

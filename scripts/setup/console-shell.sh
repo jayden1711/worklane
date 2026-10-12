@@ -12,7 +12,7 @@
 #     nothing else (one sudoers line, validated with visudo -cf before it's moved into place). Never as root.
 #   - Refuses an admin user whose sudo needs no password (NOPASSWD): the terminal would be root without one.
 # Then set console_user when you run dashboards.sh (--console-user <admin user>).
-# To remove it: rm /etc/sudoers.d/worklane-console /usr/local/libexec/worklane-console-shell
+# To remove it: rm "$CONSOLE_SUDOERS" "$CONSOLE_SHELL" (both named in lib.sh)
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 admin="${1:?usage: console-shell.sh <admin user>}"
@@ -40,7 +40,7 @@ echo "installed $CONSOLE_SHELL"
 
 say "sudoers: $viewer may run exactly the console shell's check and shell, as $admin"
 install_sudoers worklane-console "$(console_sudoers "$viewer" "$admin")"
-cat /etc/sudoers.d/worklane-console
+cat "$CONSOLE_SUDOERS"
 
 say "check"
 sudo -n -l -U "$viewer" -u "$admin" "$CONSOLE_SHELL" shell >/dev/null || { echo "FAIL: $viewer can't start the console shell as $admin" >&2; exit 1; }
