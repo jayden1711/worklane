@@ -5,7 +5,7 @@
 // and each goes to that instance's existing routes (decide, the console), which check the role again.
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
-import { hub, instanceStream, onInstance, type BoardCard, type BoardColumn, type BoardData, type OutlineItem, type State } from '../api';
+import { hub, instanceStream, onInstance, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
@@ -44,7 +44,7 @@ const CHECK_TONE = { failing: 'red', pending: 'orange', passing: 'green', none: 
 const OUTCOME_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange' };
 
 /** The card's checks: one pill for the whole, expandable to each check. */
-function Checks({ checks }: { checks: BoardCard['checks'] }) {
+function Checks({ checks }: { checks: NonNullable<BoardCard['checks']> }) {
   if (checks.state === 'none' && !checks.items.length) return <span className="text-[11.5px] text-ink-3" data-testid="board-card-checks" data-state="none">no checks yet</span>;
   return (
     <details className="group" data-testid="board-card-checks" data-state={checks.state}>
@@ -69,7 +69,7 @@ function Checks({ checks }: { checks: BoardCard['checks'] }) {
   );
 }
 
-/** A run's live feed (owner and writers), over the instance's own stream until it ends. */
+/** A run's live feed (the owner and writers: the server's runs gate), over the instance's own stream until it ends. */
 function WatchFeed({ instance, run }: { instance: string | null; run: string }) {
   const [items, setItems] = useState<FeedItem[]>([]);
   const [ended, setEnded] = useState(false);
@@ -77,7 +77,7 @@ function WatchFeed({ instance, run }: { instance: string | null; run: string }) 
   useEffect(() => {
     let es: EventSource | null = null;
     let closed = false;
-    void onInstance<{ items: FeedItem[] }>(instance, `/api/runs/${encodeURIComponent(run)}/feed?after=-1`)
+    void onInstance<{ items: FeedItem[] }>(instance, `/api/board/watch/${encodeURIComponent(run)}`)
       .then(() => instanceStream(instance, `/api/runs/${encodeURIComponent(run)}/live`))
       .then((u) => {
         if (closed) return;
@@ -99,43 +99,6 @@ function WatchFeed({ instance, run }: { instance: string | null; run: string }) 
   }, [instance, run]);
   if (error) return <div className="text-[12px] text-ink-2">{error}</div>;
   return items.length ? <LiveFeedView items={items.slice(-40)} ended={ended} /> : <Loading label="Waiting for the run's first step…" />;
-}
-
-/** A run's outline (viewers): each step's kind and tool, never its content. Polled while the run lasts. */
-export function OutlineView({ items, ended }: { items: OutlineItem[]; ended: boolean }) {
-  return (
-    <ol className="space-y-0.5" data-testid="board-outline">
-      {items.map((it) => (
-        <li key={it.seq} className="flex items-center gap-2 text-[11.5px]" data-testid="board-outline-item">
-          <span className="w-12 shrink-0 text-ink-3">{ago(it.at)}</span>
-          <span className="text-ink-2">{it.kind === 'tool' ? `tool: ${it.tool}` : it.kind === 'diff' ? `file change (${it.tool})` : it.kind === 'tool_result' ? `result: ${it.status}` : it.kind === 'end' ? `ended: ${it.reason}` : it.kind}</span>
-        </li>
-      ))}
-      {!ended && <li className="shimmer-text text-[11.5px] font-medium">Working…</li>}
-      <li className="pt-1 text-[11px] text-ink-3">An outline: what the agent says and the tools' input and output are for the owner and writers.</li>
-    </ol>
-  );
-}
-
-function WatchOutline({ instance, run }: { instance: string | null; run: string }) {
-  const [data, setData] = useState<{ items: OutlineItem[]; ended: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    const load = () =>
-      onInstance<{ items: OutlineItem[]; ended: boolean }>(instance, `/api/board/watch/${encodeURIComponent(run)}`).then(
-        (d) => live && (setData({ items: d.items.slice(-40), ended: d.ended }), setError(null)),
-        (e: Error) => live && setError(e.message),
-      );
-    void load();
-    const t = setInterval(() => void load(), 2_000);
-    return () => {
-      live = false;
-      clearInterval(t);
-    };
-  }, [instance, run]);
-  if (error) return <div className="text-[12px] text-ink-2">{error}</div>;
-  return data ? <OutlineView items={data.items} ended={data.ended} /> : <Loading />;
 }
 
 type Panel = 'watch' | 'steer' | 'answer' | 'approve' | null;
@@ -189,6 +152,7 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
         {card.title}
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] tabular-nums text-ink-2">
+        {card.diff !== undefined && (
         <span data-testid="board-card-diff" title={card.diff ? `${card.diff.files} file(s), from ${card.diff.source === 'pr' ? 'the PR' : 'the last proposed change'}` : 'no change yet'}>
           {card.diff ? (
             card.diff.added !== null && card.diff.removed !== null ? (
@@ -202,13 +166,16 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
             <span className="text-ink-3">no diff</span>
           )}
         </span>
+        )}
+        {card.comments !== undefined && (
         <span data-testid="board-card-comments" className="inline-flex items-center gap-1" title={card.comments === null ? 'no PR comments recorded' : 'comments and review comments on the PR'}>
           <MessageSquare className="size-3" /> {card.comments ?? '–'}
         </span>
+        )}
         <span data-testid="board-card-elapsed" title={`started ${new Date(card.startedAt).toLocaleString()}; in this state since ${new Date(card.since).toLocaleString()}`}>
           {elapsed(card.startedAt, now)}
         </span>
-        <Checks checks={card.checks} />
+        {card.checks && <Checks checks={card.checks} />}
       </div>
       {card.run && (
         <div className="mt-2 rounded-control bg-inset px-2 py-1.5 text-[11.5px] text-ink-2 shadow-hairline" data-testid="board-card-run">
@@ -261,7 +228,7 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
       )}
       {panel === 'watch' && card.run?.live && (
         <div className="mt-2 max-h-80 overflow-y-auto rounded-control bg-page p-2 shadow-hairline" data-testid="board-watch-panel">
-          {a.watch === 'feed' ? <WatchFeed instance={instance} run={card.run.live} /> : <WatchOutline instance={instance} run={card.run.live} />}
+          <WatchFeed instance={instance} run={card.run.live} />
         </div>
       )}
       {panel === 'steer' && card.run?.live && (

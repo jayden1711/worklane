@@ -7,9 +7,8 @@
 import type { StoredEvent } from './events/types.js';
 import { checkResults, prsView, project, type PrView, type Task, type TaskStatus } from './projection.js';
 import { waitingOnYou, WAIT_LABEL, type WaitKind } from './digest.js';
-import { isOwner, mayAnswerKind, type Role } from './dashboard-auth.js';
+import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
 import type { LiveRun } from './console.js';
-import type { FeedItem } from './run-feed.js';
 import type { ProcessGroupUsage } from './os/stats.js';
 
 export const BOARD_COLUMNS = ['planning', 'building', 'verifying', 'waiting', 'landing'] as const;
@@ -69,13 +68,13 @@ export interface BoardCard {
   /** A high-risk change that waits for the owner: an L3 review level, or a landing decision (direct mode). */
   highRisk: boolean;
   /**
-   * What this asker may do from the card. watch: the run's live feed (owner and writers, the runs gate), or its
-   * outline (viewers: the steps without their content). steer: a console message (the owner, the console's rule).
-   * answer: the open decision, where the decision rules let this role answer it (plans and landings are the owner's).
-   * approve: a high-risk change waiting for the owner, the owner's alone: its landing decision, or the PR to merge on GitHub.
+   * What this asker may do from the card. watch: the run's live feed (the owner and writers, the runs gate).
+   * steer: a console message to the run (the owner and writers, the console's rule). answer: the open decision,
+   * where the decision rules let this role answer it (plans and landings are the owner's). approve: a high-risk
+   * change waiting for the owner, the owner's alone: its landing decision, or the PR to merge on GitHub.
    */
   actions: {
-    watch: 'feed' | 'outline' | null;
+    watch: 'feed' | null;
     steer: boolean;
     answer: boolean;
     approve: { decision: string; options: string[] } | { merge: string } | null;
@@ -221,8 +220,8 @@ export function boardView(i: BoardInput): BoardView {
       level: t.level,
       highRisk,
       actions: {
-        watch: live ? (i.role === 'viewer' ? 'outline' : 'feed') : null,
-        steer: !!live && owner,
+        watch: live && isWriter(i.role) ? 'feed' : null,
+        steer: !!live && isWriter(i.role),
         // A landing decision is the Approve action, not an answer.
         answer: !!d && d.kind !== 'land' && mayAnswerKind(d.kind, i.role),
         approve,
@@ -235,23 +234,29 @@ export function boardView(i: BoardInput): BoardView {
 }
 
 /**
- * A run's feed as an outline, for those who may watch a run but not read it (viewers): each step's kind, its
- * tool and outcome, and when; never the agent's text, a tool's input or output, a diff or a message.
+ * A card as a viewer (read on the repo) may have it: an allowlist of its fields, as src/viewer-events.ts allows a
+ * viewer only some events and fields. A viewer sees the task's progress, its PR, its decision and why it waits
+ * (not the digest's reason): never the agent running on it (its live run, what it uses), the change's size or the
+ * checks' outcomes, which come from events viewers don't get; and they may do nothing from it. A field added to
+ * cards later stays hidden from viewers until it is put here.
  */
-export type OutlineItem = { seq: number; at: string; kind: FeedItem['kind']; tool?: string; status?: 'ok' | 'error'; reason?: string };
-export function feedOutline(items: FeedItem[]): OutlineItem[] {
-  return items.map((it) => {
-    const base = { seq: it.seq, at: it.at, kind: it.kind };
-    switch (it.kind) {
-      case 'tool':
-      case 'diff':
-        return { ...base, tool: it.tool };
-      case 'tool_result':
-        return { ...base, status: it.status };
-      case 'end':
-        return { ...base, reason: it.reason };
-      default:
-        return base;
-    }
+export const VIEWER_CARD_FIELDS: readonly string[] = Object.freeze(['instance', 'issue', 'title', 'column', 'status', 'pr', 'startedAt', 'since', 'waiting', 'decision', 'level', 'highRisk']);
+const VIEWER_PR_FIELDS: readonly string[] = Object.freeze(['number', 'url']);
+const VIEWER_WAIT_FIELDS: readonly string[] = Object.freeze(['kind', 'label', 'since']);
+const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'question', 'options', 'recommendation']);
+export const VIEWER_BOARD_KEYS: readonly string[] = Object.freeze(['instance', 'role', 'at', 'columns', 'cards', 'slots']);
+
+const pick = (o: unknown, keys: readonly string[]) => (o && typeof o === 'object' ? Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, (o as Record<string, unknown>)[k]])) : null);
+
+/** The board as a viewer may have it: only the allowlisted keys, each card only its allowlisted fields, and no actions. */
+export function boardForViewer(b: BoardView): Record<string, unknown> {
+  const out = pick(b, VIEWER_BOARD_KEYS)!;
+  out.cards = b.cards.map((c) => {
+    const v = pick(c, VIEWER_CARD_FIELDS)!;
+    if (v.pr) v.pr = pick(v.pr, VIEWER_PR_FIELDS);
+    if (v.waiting) v.waiting = { ...pick(v.waiting, VIEWER_WAIT_FIELDS), detail: null };
+    if (v.decision) v.decision = pick(v.decision, VIEWER_DECISION_FIELDS);
+    return { ...v, actions: { watch: null, steer: false, answer: false, approve: null } };
   });
+  return out;
 }

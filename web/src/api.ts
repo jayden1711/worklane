@@ -603,18 +603,20 @@ export interface BoardCard {
   title: string;
   column: BoardColumn;
   status: TaskStatus;
-  pr: { number: number; url: string; phase: PrView['phase'] } | null;
-  diff: { added: number | null; removed: number | null; lines: number; files: number; source: 'pr' | 'change' } | null;
-  comments: number | null;
+  /** A viewer's card has the PR's number and link only. */
+  pr: { number: number; url: string; phase?: PrView['phase'] } | null;
+  // The owner's and writers' only: a viewer's card leaves these out (src/board.ts VIEWER_CARD_FIELDS).
+  diff?: { added: number | null; removed: number | null; lines: number; files: number; source: 'pr' | 'change' } | null;
+  comments?: number | null;
   startedAt: string;
   since: string;
-  checks: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
-  run: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
+  checks?: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
+  run?: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
   waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
   highRisk: boolean;
-  actions: { watch: 'feed' | 'outline' | null; steer: boolean; answer: boolean; approve: { decision: string; options: string[] } | { merge: string } | null };
+  actions: { watch: 'feed' | null; steer: boolean; answer: boolean; approve: { decision: string; options: string[] } | { merge: string } | null };
 }
 export interface BoardData {
   instance: string;
@@ -623,15 +625,6 @@ export interface BoardData {
   columns: { id: BoardColumn; label: string }[];
   cards: BoardCard[];
   slots: { cap: number; running: number };
-}
-/** A run's feed as an outline (GET /api/board/watch/:run): for viewers, the steps without their content. */
-export interface OutlineItem {
-  seq: number;
-  at: string;
-  kind: string;
-  tool?: string;
-  status?: 'ok' | 'error';
-  reason?: string;
 }
 
 /** A call to one instance: through the hub to the named one (`/api/i/<name>/...`), or this page's own server (null). */

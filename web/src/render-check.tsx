@@ -27,9 +27,8 @@ import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
 import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
-import { BoardPage, BoardView, OutlineView, type InstanceBoard } from './pages/Board';
+import { BoardPage, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
-import type { OutlineItem } from './api';
 import { SetupConsoleView } from './pages/Setup';
 
 export const pages = {
@@ -88,7 +87,6 @@ export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => ren
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';
 export const renderBoard = (boards: InstanceBoard[], filter: string | null = null, now?: number) => renderToStaticMarkup(<BoardView boards={boards} filter={filter} {...(now !== undefined ? { now } : {})} />);
-export const renderOutline = (items: OutlineItem[], ended: boolean) => renderToStaticMarkup(<OutlineView items={items} ended={ended} />);
 export const renderMachineSlots = (slots: State['slots']) => renderToStaticMarkup(<MachineSlots slots={slots} />);
 export { elapsed } from './pages/Board';
 export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);

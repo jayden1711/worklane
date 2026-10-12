@@ -52,7 +52,6 @@ interface Render {
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   probeMe(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], filter?: string | null, now?: number): string;
-  renderOutline(items: unknown[], ended: boolean): string;
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
   renderSignIn(): string;
@@ -569,7 +568,11 @@ test('the live run: text, thinking, tool calls with their results, diffs, messag
   for (const id of ['console-panel', 'console-input', 'console-send', 'console-stop', 'console-pending', 'console-pending-item']) assert.match(panel, new RegExp(`data-testid="${id}"`), id);
   assert.match(panel, /data-testid="console-pending-item"[\s\S]*held[\s\S]*also update the README/);
   assert.doesNotMatch(panel, /data-testid="console-stop-confirm"/, 'stop needs a second click');
-  assert.match(r.renderConsole({ ...con, canControl: false }), /data-testid="console-read-only"[^>]*>Only the owner, @example-owner, can message or stop this run\./);
+  assert.match(r.renderConsole({ ...con, canControl: false, canMessage: false }), /data-testid="console-read-only"[^>]*>The owner, @example-owner, and the writers can message this run; only the owner can stop it\./);
+  // A writer messages the run but doesn't stop it.
+  const writer = r.renderConsole({ ...con, canControl: false, canMessage: true });
+  assert.match(writer, /data-testid="console-send"/);
+  assert.doesNotMatch(writer, /data-testid="console-stop"|console-read-only/);
   assert.equal(r.renderConsole({ ...con, live: false }), '', 'nothing to control once the run has ended');
 
   const run = { issue: asOwner.tasks[0]!.issue, role: 'worker', model: 'sonnet', pid: 1, attempt: 1, startedAt: at, lastHeartbeat: null, note: null, finishedAt: null, reason: null, costUsd: 0 };
@@ -875,8 +878,15 @@ test('the Board renders for the owner, a writer and a viewer without errors: fiv
     assert.equal((html.match(/data-testid="board-column"/g) ?? []).length, 5);
     for (const [col, label] of [['planning', 'Planning'], ['building', 'Building'], ['verifying', 'Verifying'], ['waiting', 'Waiting on you'], ['landing', 'Landing']]) assert.match(html, new RegExp(`data-column="${col}"[^>]*>[\\s\\S]*?${label}`));
     assert.equal((html.match(/data-testid="board-card"/g) ?? []).length, b.cards.length, `${role}: every card`);
-    for (const id of ['board', 'board-filter', 'board-card-ref', 'board-card-title', 'board-card-diff', 'board-card-comments', 'board-card-elapsed', 'board-card-checks']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
-    assert.match(html, /data-testid="board-card-run"[\s\S]*?data-testid="board-card-usage"/, 'the running agent and its resource use');
+    for (const id of ['board', 'board-filter', 'board-card-ref', 'board-card-title', 'board-card-elapsed']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
+    if (role === 'viewer') {
+      // A viewer's cards carry no run or agent details, no change size and no checks: the server left them out.
+      for (const c of b.cards) for (const k of ['run', 'diff', 'comments', 'checks']) assert.ok(!(k in c), `a viewer's card has no ${k}`);
+      for (const id of ['board-card-run', 'board-card-usage', 'board-card-diff', 'board-card-comments', 'board-card-checks', 'board-watch']) assert.doesNotMatch(html, new RegExp(`data-testid="${id}"`), `viewer: no ${id}`);
+    } else {
+      for (const id of ['board-card-diff', 'board-card-comments', 'board-card-checks']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
+      assert.match(html, /data-testid="board-card-run"[\s\S]*?data-testid="board-card-usage"/, 'the running agent and its resource use');
+    }
     assert.doesNotMatch(html, /<select/, "an instance's own dashboard: no instance picker");
     // The page itself, and the Machine page, render for each role too.
     assert.match(clean(() => r.renderPage('board', { owner: asOwner, writer: asWriter, viewer: asOther }[role])), /data-testid="page-board"[\s\S]*<h1[^>]*>Board</);
@@ -892,7 +902,7 @@ test('the Board renders for the owner, a writer and a viewer without errors: fiv
   assert.doesNotMatch(onlyB, /data-instance="demo"/, 'filtered to b');
 });
 
-test('each role sees only its actions on the Board: viewers Watch (an outline); writers Watch and Answer what they may; the owner also Steers and Approves', () => {
+test('each role sees only its actions on the Board: viewers none; writers Watch, Steer and Answer what they may; the owner also Approves', () => {
   const html = (role: 'owner' | 'writer' | 'viewer') => clean(() => r.renderBoard([{ name: null, data: boards[role], error: null }]));
   const count = (h: string, id: string) => (h.match(new RegExp(`data-testid="${id}"`, 'g')) ?? []).length;
   const owner = html('owner');
@@ -905,12 +915,11 @@ test('each role sees only its actions on the Board: viewers Watch (an outline); 
   assert.ok(count(owner, 'board-answer') >= 1);
 
   assert.match(writer, /data-testid="board-watch" data-mode="feed"/);
-  assert.equal(count(writer, 'board-steer'), 0, 'the console is the owner\'s');
+  assert.equal(count(writer, 'board-steer'), 1, 'a writer steers the live run');
   assert.equal(count(writer, 'board-approve') + count(writer, 'board-merge'), 0, 'high-risk merges are the owner\'s');
   assert.ok(count(writer, 'board-answer') >= 1, 'a writer answers the demo\'s question');
 
-  assert.match(viewer, /data-testid="board-watch" data-mode="outline"/);
-  for (const id of ['board-steer', 'board-answer', 'board-approve', 'board-merge']) assert.equal(count(viewer, id), 0, `a viewer has no ${id}`);
+  for (const id of ['board-watch', 'board-steer', 'board-answer', 'board-approve', 'board-merge', 'board-card-actions']) assert.equal(count(viewer, id), 0, `a viewer has no ${id}`);
   // What the server said each may do is exactly what shows.
   for (const role of ['owner', 'writer', 'viewer'] as const) {
     const a = boards[role].cards.map((c) => c.actions);
@@ -919,8 +928,6 @@ test('each role sees only its actions on the Board: viewers Watch (an outline); 
     assert.equal(count(h, 'board-answer'), a.filter((x) => x.answer).length);
     assert.equal(count(h, 'board-approve') + count(h, 'board-merge'), a.filter((x) => x.approve).length);
   }
-  const outline = clean(() => r.renderOutline([{ seq: 0, at: new Date().toISOString(), kind: 'start' }, { seq: 1, at: new Date().toISOString(), kind: 'tool', tool: 'Bash' }], false));
-  assert.match(outline, /data-testid="board-outline-item"[^>]*>[\s\S]*tool: Bash/);
   assert.equal(r.elapsed(new Date(Date.now() - 135 * 60_000).toISOString()), '2h 15m');
 });
 

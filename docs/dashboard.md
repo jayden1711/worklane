@@ -58,8 +58,8 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 
 | Permission on the repo | Role | May |
 | --- | --- | --- |
-| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message, stop), filing chat drafts, the audit log |
-| maintain, write | writer | read runs, throughput, reports, intake and the digest; ask the chat; answer ordinary decisions and intake approvals; save views |
+| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message and stop a run; asks, root steps, the terminal), filing chat drafts, the audit log |
+| maintain, write | writer | read runs, throughput, reports, intake and the digest; message (steer) a running agent, not stop it; ask the chat; answer ordinary decisions and intake approvals; save views |
 | triage, read | viewer | read the rest; no writes at all |
 | none, or any error looking it up | none | nothing: the instance isn't listed, and any call to it gets 403 |
 
@@ -135,12 +135,12 @@ The actions on a card follow your role there, and each is refused again by the r
 
 | | viewer | writer | owner |
 | --- | --- | --- | --- |
-| Watch a running agent | an outline (each step's kind and tool, no content) | the live feed | the live feed |
-| Steer (a console message, held until the turn ends) | – | – | yes |
+| Watch a running agent (the live feed) | – (403) | yes | yes |
+| Steer (a console message, held until the turn ends) | – (403) | yes | yes |
 | Answer the open decision | – | where the decision rules allow (not plans) | yes |
-| Approve a high-risk landing, or Merge a high-risk PR left to you on GitHub | – | – | yes |
+| Approve a high-risk landing, or Merge a high-risk PR left to you on GitHub | – | – (403) | yes |
 
-Steer and Approve are the console's and the decision rules' own: messaging a run and high-risk merges are the owner's. Every answer and message is recorded in the audit, as from the pages they come from.
+A viewer's board leaves out everything about runs and agents (the run, its resource use, the diff, comments and checks): the card is an allowlist of fields (`VIEWER_CARD_FIELDS` in `src/board.ts`), so a field added later stays hidden from viewers until someone puts it there. A steer message is the one console action writers have: the dashboard (`console.ts`) and the coordinator apply the same rule (`mayRequest`), and stopping a run, asks, root steps and the terminal stay the owner's. Every answer and message is recorded in the audit under its sender's login and role.
 
 ## The Machine page
 

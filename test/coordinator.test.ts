@@ -2295,7 +2295,7 @@ test('console: the owner stops a live run; the task is blocked saying who stoppe
   assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
 });
 
-test("console: a request that isn't the owner's, or for a run that isn't live, is refused and recorded", { skip }, async () => {
+test("console: a stop that isn't the owner's, a message from someone neither owner nor writer, or one for a run that isn't live, is refused and recorded; a writer's message is taken", { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const w = liveWorker();
@@ -2306,11 +2306,18 @@ test("console: a request that isn't the owner's, or for a run that isn't live, i
   mkdirSync(join(f.stateDir, 'console', 'requests'), { recursive: true });
   writeFileSync(join(f.stateDir, 'console', 'requests', '1.json'), JSON.stringify({ v: 1, id: 'x1', at: '', by: 'mallory', run: 'run-w1', kind: 'stop' }));
   writeFileSync(join(f.stateDir, 'console', 'requests', '2.json'), JSON.stringify({ v: 1, id: 'x2', at: '', by: 'example-owner', run: 'run-gone', kind: 'message', text: 'hi' }));
+  writeFileSync(join(f.stateDir, 'console', 'requests', '3.json'), JSON.stringify({ v: 1, id: 'x3', at: '', by: 'mallory', run: 'run-w1', kind: 'message', text: 'hi' }));
+  // One the dashboard read as a writer: a message is theirs to send, a stop isn't.
+  writeFileSync(join(f.stateDir, 'console', 'requests', '4.json'), JSON.stringify({ v: 1, id: 'x4', at: '', by: 'wendy', writer: true, run: 'run-w1', kind: 'stop' }));
+  writeFileSync(join(f.stateDir, 'console', 'requests', '5.json'), JSON.stringify({ v: 1, id: 'x5', at: '', by: 'wendy', writer: true, run: 'run-w1', kind: 'message', text: 'try the other file' }));
   c.checkConsole();
   assert.deepEqual(f.log.read(0, ['console.request_refused']).map((e) => [(e.payload as { request: string }).request, (e.payload as { why: string }).why]), [
-    ['x1', 'only the owner (@example-owner) may use the console'],
+    ['x1', 'only the owner (@example-owner) may stop a run; @mallory may not'],
     ['x2', "run run-gone isn't live"],
+    ['x3', 'only the owner (@example-owner) or a writer may message a run; @mallory may not'],
+    ['x4', 'only the owner (@example-owner) may stop a run; @wendy may not'],
   ]);
+  assert.deepEqual(f.log.read(0, ['console.message_queued']).map((e) => [(e.payload as { id: string }).id, (e.payload as { by: string }).by]), [['x5', 'wendy']]);
   assert.equal(f.log.read(0, ['console.run_stopped']).length, 0);
   w.finish('succeeded');
   await c.idle();

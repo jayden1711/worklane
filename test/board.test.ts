@@ -5,9 +5,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { boardView, checkState, columnOf, feedOutline, type BoardView } from '../src/board.js';
+import { boardView, checkState, columnOf, VIEWER_CARD_FIELDS, type BoardView } from '../src/board.js';
+import { asks } from '../src/console/asks.js';
+import { terminalRefusal } from '../src/console/terminal.js';
 import { loadConfig } from '../src/config/load.js';
-import { writeLive } from '../src/console.js';
+import { mayRequest, takeRequests, writeLive } from '../src/console.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { parseProcStat, processGroupUsage } from '../src/os/stats.js';
@@ -102,15 +104,15 @@ test("a card's fields: diff +/− (the PR's, else the proposed change), comments
   assert.deepEqual(card(view(s, 'owner'), 1).diff, { added: null, removed: null, lines: 9, files: 1, source: 'change' });
 });
 
-test('the actions each role sees: viewers watch an outline; writers watch and answer what the decision rules allow; only the owner steers and approves', () => {
+test('the actions each role sees: viewers none; writers watch, steer and answer what the decision rules allow; only the owner approves', () => {
   const s = seed();
   const acts = (role: 'owner' | 'writer' | 'viewer') => Object.fromEntries(view(s, role).cards.map((c) => [c.issue, c.actions]));
   const owner = acts('owner');
   const writer = acts('writer');
   const viewer = acts('viewer');
   assert.deepEqual(owner[2], { watch: 'feed', steer: true, answer: false, approve: null });
-  assert.deepEqual(writer[2], { watch: 'feed', steer: false, answer: false, approve: null });
-  assert.deepEqual(viewer[2], { watch: 'outline', steer: false, answer: false, approve: null });
+  assert.deepEqual(writer[2], { watch: 'feed', steer: true, answer: false, approve: null });
+  assert.deepEqual(viewer[2], { watch: null, steer: false, answer: false, approve: null });
   assert.equal(owner[4]!.answer, true);
   assert.equal(writer[4]!.answer, true, 'a question is a writer\'s to answer too');
   assert.equal(viewer[4]!.answer, false);
@@ -119,7 +121,7 @@ test('the actions each role sees: viewers watch an outline; writers watch and an
   assert.equal(writer[5]!.approve, null);
   assert.equal(writer[5]!.answer, false);
   assert.equal(viewer[5]!.approve, null);
-  for (const a of Object.values(viewer)) assert.ok(!a.steer && !a.answer && !a.approve, 'a viewer writes nothing');
+  for (const a of Object.values(viewer)) assert.ok(!a.watch && !a.steer && !a.answer && !a.approve, 'a viewer does nothing');
   // The digest's reason is the owner's and writers' to read.
   assert.match(card(view(s, 'writer'), 4).waiting!.detail ?? '', /Which threshold/);
   assert.equal(card(view(s, 'viewer'), 4).waiting!.detail, null);
@@ -148,24 +150,6 @@ test('check state: any failure fails, then anything unfinished is pending', () =
   assert.equal(checkState(['pass', 'skipped']), 'passing');
 });
 
-test("a run's outline keeps each step's kind, tool and outcome, never what the agent said or a tool's input or output", () => {
-  const out = feedOutline([
-    { seq: 0, at: 't', kind: 'text', text: 'private words' },
-    { seq: 1, at: 't', kind: 'tool', id: 'x', tool: 'Bash', input: '{"command":"cat .env"}' },
-    { seq: 2, at: 't', kind: 'tool_result', id: 'x', status: 'error', output: 'secret output' },
-    { seq: 3, at: 't', kind: 'diff', id: 'y', tool: 'Edit', file: 'a.js', diff: '+secret' },
-    { seq: 4, at: 't', kind: 'end', reason: 'succeeded', costUsd: 1, turns: 2 },
-  ]);
-  assert.deepEqual(out, [
-    { seq: 0, at: 't', kind: 'text' },
-    { seq: 1, at: 't', kind: 'tool', tool: 'Bash' },
-    { seq: 2, at: 't', kind: 'tool_result', status: 'error' },
-    { seq: 3, at: 't', kind: 'diff', tool: 'Edit' },
-    { seq: 4, at: 't', kind: 'end', reason: 'succeeded' },
-  ]);
-  assert.doesNotMatch(JSON.stringify(out), /private|secret|\.env|a\.js/);
-});
-
 test("resource use: one pass over /proc sums each process group's memory and CPU (Linux); elsewhere nothing is measured", () => {
   // The command name may hold spaces and parentheses: fields are counted from the last ')'.
   const stat = (pid: number, pgrp: number, ut: number, st: number, rss: number) => `${pid} (node (worker) x) S 1 ${pgrp} ${pgrp} 0 -1 0 0 0 0 0 ${ut} ${st} 0 0 20 0 1 0 100 1000 ${rss} 0`;
@@ -183,9 +167,9 @@ test("resource use: one pass over /proc sums each process group's memory and CPU
   assert.equal(processGroupUsage([10], { platform: 'win32', list: () => ['10'], readFile: read }).size, 0);
 });
 
-test('the server: every role reads the board; a viewer\'s Steer and a writer\'s Steer or Approve are refused; answers are audited', async () => {
+test("the server: a viewer gets 403 on Watch and no run fields on the board; a writer's Steer is accepted and audited, a viewer's refused; a writer still can't Approve, use the terminal or answer root steps", async () => {
   const s = seed();
-  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(s.dir, 'slots'), instance: 'shop', processUsage: () => new Map() });
+  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(s.dir, 'slots'), instance: 'shop', processUsage: () => new Map([[4242, { rssBytes: 1, cpuSeconds: 1, processes: 1 }]]) });
   const base = d.url.split('/?')[0]!;
   const as = (login: string) => ({ authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(login) });
   const get = (login: string, path: string) => fetch(`${base}${path}`, { headers: as(login) });
@@ -197,20 +181,32 @@ test('the server: every role reads the board; a viewer\'s Steer and a writer\'s 
       const b = (await r.json()) as BoardView;
       assert.equal(b.role, role);
       assert.equal(b.instance, 'shop');
-      assert.equal(b.cards.find((c) => c.issue === 2)!.actions.steer, role === 'owner');
+      const running = b.cards.find((c) => c.issue === 2)!;
+      assert.equal(running.actions.steer, role !== 'viewer');
+      assert.equal(running.actions.watch, role === 'viewer' ? null : 'feed');
+      if (role !== 'viewer') assert.equal(running.run!.live, RUN);
     }
-    // Watch: a viewer gets the outline, never the feed itself.
-    const outline = (await (await get('someone-else', `/api/board/watch/${RUN}`)).json()) as { items: { kind: string }[]; ended: boolean };
-    assert.deepEqual(outline.items.map((i) => i.kind), ['start', 'text', 'tool', 'tool_result']);
-    assert.doesNotMatch(JSON.stringify(outline), /SECRET-ISH|npm test/);
-    assert.equal((await get('someone-else', `/api/runs/${RUN}/feed`)).status, 403, 'the feed stays behind the runs gate');
-    assert.equal((await get('example-collaborator', `/api/runs/${RUN}/feed`)).status, 200, 'a writer watches the feed');
-    assert.equal((await get('someone-else', '/api/board/watch/no-such-run')).status, 404);
+    // A viewer's board: only the allowlisted fields, so no run id, resource use, feed link or anything of the agent's.
+    const raw = await (await get('someone-else', '/api/board')).text();
+    assert.doesNotMatch(raw, new RegExp(`${RUN}|rssBytes|cpuSeconds|"run"|"usage"|costUsd|"diff"|"checks"|"comments"|editing totals`));
+    const viewerCards = (JSON.parse(raw) as { cards: Record<string, unknown>[] }).cards;
+    for (const c of viewerCards) assert.deepEqual(Object.keys(c).filter((k) => !VIEWER_CARD_FIELDS.includes(k) && k !== 'actions'), [], 'nothing off the allowlist');
+    assert.deepEqual(viewerCards.find((c) => c.issue === 2)!.actions, { watch: null, steer: false, answer: false, approve: null });
 
-    // Steer: the console's message, the owner's alone.
+    // Watch: the run's feed, behind the runs gate.
+    assert.equal((await get('someone-else', `/api/board/watch/${RUN}`)).status, 403, 'a viewer may not watch');
+    const watched = (await (await get('example-collaborator', `/api/board/watch/${RUN}`)).json()) as { items: { kind: string }[] };
+    assert.deepEqual(watched.items.map((i) => i.kind), ['start', 'text', 'tool', 'tool_result'], 'a writer watches the feed');
+    assert.equal((await get('someone-else', `/api/runs/${RUN}/feed`)).status, 403);
+
+    // Steer: the owner's and the writers', each audited as its sender; a viewer's refused.
     assert.equal((await post('someone-else', `/api/runs/${RUN}/message`, { text: 'go left' })).status, 403, "a viewer's Steer is refused");
-    assert.equal((await post('example-collaborator', `/api/runs/${RUN}/message`, { text: 'go left' })).status, 403, "a writer's Steer is refused");
-    assert.equal((await post('example-owner', `/api/runs/${RUN}/message`, { text: 'go left' })).status, 200);
+    assert.equal((await post('example-collaborator', `/api/runs/${RUN}/message`, { text: 'go left' })).status, 200, "a writer's Steer is accepted");
+    assert.equal((await post('example-owner', `/api/runs/${RUN}/message`, { text: 'go right' })).status, 200);
+    const asked = takeRequests(s.dir);
+    assert.deepEqual(asked.map((q) => [q.by, q.kind, q.owner ?? null, q.writer ?? null]), [['example-collaborator', 'message', null, true], ['example-owner', 'message', true, null]]);
+    // Stop stays the owner's.
+    assert.equal((await post('example-collaborator', `/api/runs/${RUN}/stop`, {})).status, 403, "a writer can't stop the run");
 
     // Approve: a high-risk landing, the owner's alone.
     const refused = await post('example-collaborator', '/api/decide', { id: 'd-land', answer: 'approve' });
@@ -220,8 +216,16 @@ test('the server: every role reads the board; a viewer\'s Steer and a writer\'s 
     assert.equal((await post('example-collaborator', '/api/decide', { id: 'd-q', answer: '$50' })).status, 200, 'a writer answers a question');
     assert.equal((await post('example-owner', '/api/decide', { id: 'd-land', answer: 'approve' })).status, 200);
 
+    // The rest of the console stays the owner's: root steps (run or answered) and the terminal.
+    const step = asks(s.log).create({ instance: 'shop', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
+    assert.equal((await post('example-collaborator', `/api/asks/${step.id}/run`, {})).status, 403, "a writer can't run a root step");
+    assert.equal((await post('example-collaborator', `/api/asks/${step.id}/answer`, { answer: 'declined' })).status, 403, "a writer can't answer a root step");
+    const now = Date.now();
+    assert.match(terminalRefusal({ login: 'example-collaborator', role: 'writer', authenticatedAt: now, csrfOk: true }, { consoleUser: 'console-admin', hubUser: 'hub-viewer' }, now) ?? '', /owner's alone/, "a writer can't open the terminal");
+
     const audit = s.log.read(0, ['dashboard.audit']).map((e) => e.payload as { login: string; role: string; action: string; instance: string | null });
     assert.deepEqual(audit.map((a) => [a.login, a.role, a.action, a.instance]), [
+      ['example-collaborator', 'writer', 'console.message', 'shop'],
       ['example-owner', 'owner', 'console.message', 'shop'],
       ['example-collaborator', 'writer', 'decision.answered', 'shop'],
       ['example-owner', 'owner', 'decision.answered', 'shop'],
@@ -231,4 +235,14 @@ test('the server: every role reads the board; a viewer\'s Steer and a writer\'s 
   } finally {
     await d.close();
   }
+});
+
+test("the console's one rule, which the dashboard and the coordinator both apply: a message from the owner or a writer, a stop from the owner", () => {
+  const { cfg } = seed();
+  assert.equal(mayRequest(cfg, { kind: 'message', by: 'example-owner' }), null, 'the default owner');
+  assert.equal(mayRequest(cfg, { kind: 'message', by: 'alice', owner: true }), null, 'one the dashboard read as an owner');
+  assert.equal(mayRequest(cfg, { kind: 'message', by: 'wendy', writer: true }), null, 'a writer may steer');
+  assert.match(mayRequest(cfg, { kind: 'stop', by: 'wendy', writer: true }) ?? '', /only the owner \(@example-owner\) may stop a run/);
+  assert.match(mayRequest(cfg, { kind: 'message', by: 'vic' }) ?? '', /only the owner \(@example-owner\) or a writer may message a run; @vic may not/);
+  assert.match(mayRequest(cfg, { kind: 'message', by: '', writer: true }) ?? '', /may not/, 'nobody named: refused');
 });

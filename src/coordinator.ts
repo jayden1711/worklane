@@ -19,7 +19,7 @@ import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { type RunResult } from './runner.js';
-import { MAX_MESSAGE, takeRequests } from './console.js';
+import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
@@ -272,10 +272,10 @@ export class Coordinator extends Gardener {
   private consoleRequests(): void {
     for (const q of takeRequests(this.d.stateDir)) {
       const refuse = (why: string) => this.emit('console.request_refused', { request: q.id, kind: q.kind, run: q.run, by: q.by, why });
-      const owner = this.d.cfg.project.owners.default;
-      // The default owner, or one the instance's own dashboard read as an owner (admin on the repo).
-      if (q.by.toLowerCase() !== owner.toLowerCase() && q.owner !== true) {
-        refuse(`only the owner (@${owner}) may use the console`);
+      // The console's own rule (console.ts): a message from the owner or a writer the dashboard read as one, a stop from the owner.
+      const refused = mayRequest(this.d.cfg, { kind: q.kind, by: q.by, ...(q.owner === true ? { owner: true } : {}), ...(q.writer === true ? { writer: true } : {}) });
+      if (refused) {
+        refuse(refused);
         continue;
       }
       const l = [...this.live.values()].find((x) => x.run === q.run);
