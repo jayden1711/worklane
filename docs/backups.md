@@ -23,6 +23,33 @@ A copy counts as made only once Worklane has fetched the remote copy, decrypted 
 - **Outcomes are recorded.** Each attempt is a `backup.offsite` event. Every report shows when the last verified copy was made. If that copy is over a day old, or none was ever verified, the report and the health panel say it's stale, with the latest error.
 - **Old copies are kept.** Worklane doesn't prune the destination.
 
+## Set up with Backblaze B2 (the simplest)
+
+`scripts/setup/offsite-backup.sh` sets up one instance end to end, with age for encryption and a Backblaze B2 bucket as the destination. Create these in B2 first:
+
+1. **One private bucket**, with versioning kept (B2's default, "keep all versions") and, if you want copies nobody can delete early, Object Lock with a retention period.
+2. **One application key per instance**, under *Application Keys*:
+   - limited to that bucket;
+   - with the instance's name as the file name prefix (for example `site`);
+   - with the capabilities `listBuckets`, `listFiles`, `readFiles` and `writeFiles`, and **not** `deleteFiles`, so a stolen key can't erase what's there.
+
+   B2 shows the keyID and the applicationKey once. Keep them for the script.
+
+Then, on the machine, with age and rclone installed (`apt-get install age rclone`):
+
+```bash
+sudo bash scripts/setup/offsite-backup.sh <instance> b2 <bucket>
+```
+
+For the instance's coordinator user, and nobody else, it:
+- makes an age key pair, or keeps the existing one;
+- offers to show the private key once, so you can keep a copy off the machine. Without that copy, a dead machine means unreadable backups.
+- installs the B2 key in an rclone config of its own; the key is pasted and never shown;
+- writes `offsite-backup.yaml`;
+- checks one copy end to end: encrypt, upload, download, decrypt, compare.
+
+`--print-config` shows the file it would write, changing nothing. The check copy stays in the bucket as `setup-check-*`, because the key can't delete.
+
 Example with [age](https://github.com/FiloSottile/age) and [rclone](https://rclone.org). Both are installed by you, and the remote is already configured for the coordinator user:
 
 ```yaml
