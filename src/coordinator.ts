@@ -14,6 +14,7 @@ import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
+import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { type RunResult } from './runner.js';
@@ -44,6 +45,9 @@ import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, 
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
+
+/** What one worker build ends in: stop the task, or go on to inspect its change. */
+type BuildOut = { stop: true } | { stop: false; raise?: Level; noChange?: string };
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
@@ -115,7 +119,8 @@ export class Coordinator extends MergeFlow {
     let used = 0;
     for (const e of this.events(n)) {
       if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
-      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker') used++;
+      // A run resumed after research it asked for continues its attempt; it isn't another one.
+      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker' && !(e.payload as { resumed?: string }).resumed) used++;
     }
     return used;
   }
@@ -651,7 +656,7 @@ export class Coordinator extends MergeFlow {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null) {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0): Promise<BuildOut> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
     const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
@@ -686,13 +691,13 @@ export class Coordinator extends MergeFlow {
       timeoutMs: COMMAND_TIMEOUT_MS,
       onStart: (p) => {
         pid = p;
-        this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt });
+        this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt, ...(researched ? { resumed: 'research' as const } : {}) });
       },
     });
     void pid;
     this.cost(n, 'worker', r);
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level; research_request?: unknown };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
@@ -715,6 +720,12 @@ export class Coordinator extends MergeFlow {
       const said = r.detail.slice(0, 1500).replace(/`{3,}/g, "'''");
       await this.block(n, owner, `the worker's claude run failed to start (ended after ${secs}s, ${r.turns} turn(s), nothing committed), so no further attempts were made. claude reported:\n\n\`\`\`\n${said}\n\`\`\``);
       return { stop: true as const };
+    }
+    // Research it asked for instead of guessing: answered within the caps and the per-task limit, then the same
+    // attempt resumes with the answer (or why there is none) in its brief. Past the limit, its output stands as is.
+    if (s.research_request && researched < MAX_REQUESTS_PER_TASK) {
+      const section = await this.answerResearch(issue, s.research_request, path, 'worker');
+      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1);
     }
     if (s.ask) {
       await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '']);
@@ -927,26 +938,32 @@ export class Coordinator extends MergeFlow {
       stateDir: this.d.stateDir,
       verdictOf: (r) => (r.reason === 'succeeded' && r.structured ? { patch_correct: (r.structured as Out)?.patch_correct === true, confidence: (r.structured as Out)?.confidence ?? 'low' } : null),
       run: async (model, costRole) => {
-        let runId: string | null = null;
-        const r = await this.d.runner.run({
-          env: this.projectEnv(),
-          role: 'evaluator-verdict',
-          stateDir: this.d.stateDir,
-          prompt: issueBrief(issue, doneWhen, extra),
-          appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
-          cwd: path,
-          model,
-          allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
-          disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
-          maxTurns: 60,
-          maxBudgetUsd: role.budget_usd ?? 5,
-          jsonSchema: opts.schema ?? VERDICT_SCHEMA,
-          stallMs: 15 * 60_000,
-          timeoutMs: COMMAND_TIMEOUT_MS,
-          onControl: (c) => void (runId = c.runId),
-        });
-        this.cost(n, costRole, r);
-        return { r, runId };
+        // Research the evaluator asked for instead of guessing: answered, then it judges again with the answer.
+        let brief = extra;
+        for (let researched = 0; ; researched++) {
+          let runId: string | null = null;
+          const r = await this.d.runner.run({
+            env: this.projectEnv(),
+            role: 'evaluator-verdict',
+            stateDir: this.d.stateDir,
+            prompt: issueBrief(issue, doneWhen, brief),
+            appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
+            cwd: path,
+            model,
+            allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
+            disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+            maxTurns: 60,
+            maxBudgetUsd: role.budget_usd ?? 5,
+            jsonSchema: opts.schema ?? VERDICT_SCHEMA,
+            stallMs: 15 * 60_000,
+            timeoutMs: COMMAND_TIMEOUT_MS,
+            onControl: (c) => void (runId = c.runId),
+          });
+          this.cost(n, costRole, r);
+          const asked = r.reason === 'succeeded' ? (r.structured as { research_request?: unknown } | undefined)?.research_request : undefined;
+          if (!asked || researched >= MAX_REQUESTS_PER_TASK) return { r, runId };
+          brief = [...brief, '', await this.answerResearch(issue, asked, path, 'evaluator')];
+        }
       },
     });
     const r = judged.r;

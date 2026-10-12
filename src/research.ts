@@ -203,6 +203,9 @@ export interface ResearchUsage {
   usd: number;
 }
 
+/** run.cost roles that are researcher runs: for research issues, and on demand for a worker or evaluator. */
+export const RESEARCH_COST_ROLES = new Set(['researcher', 'research-on-demand']);
+
 /** Today's research use for an instance, from its events (by type name; older logs simply have none). */
 export function researchUsageToday(events: { type: string; ts: string; payload: unknown }[], day: string): ResearchUsage {
   const u: ResearchUsage = { searches: 0, fetches: 0, usd: 0 };
@@ -211,7 +214,7 @@ export function researchUsageToday(events: { type: string; ts: string; payload: 
     const p = e.payload as { role?: string; usd?: number; refused?: string | null };
     if (e.type === 'research.searched') u.searches++;
     else if (e.type === 'research.fetched' && !p.refused) u.fetches++;
-    else if (e.type === 'run.cost' && p.role === 'researcher') u.usd += Number(p.usd) || 0;
+    else if (e.type === 'run.cost' && RESEARCH_COST_ROLES.has(String(p.role))) u.usd += Number(p.usd) || 0;
   }
   return u;
 }

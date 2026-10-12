@@ -14,7 +14,7 @@ import { candidates as intakeCandidates } from '../intake/dedupe.js';
 import { acceptTriage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, statusReply, type IntakeAction } from '../intake/decide.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
-import { ResearchRuns } from './research.js';
+import { ResearchOnDemand } from './research-on-demand.js';
 import { type CoordinatorDeps } from './shared.js';
 
 /** How often intake sources are pulled, by default. */
@@ -28,7 +28,7 @@ const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Coul
 /** The marker in an intake issue's body that ties it to its report, so it is never filed twice. */
 const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 
-export abstract class Intake extends ResearchRuns {
+export abstract class Intake extends ResearchOnDemand {
   // ---------------------------------------------------------------- intake
 
   /**

@@ -5,7 +5,7 @@ import { type Issue } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
 import { type RunControl } from '../runner.js';
 import { researchCaps, researchRepoAccess } from '../settings.js';
-import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchUsageToday, writeResearchBundle } from '../research.js';
+import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchUsageToday, writeResearchBundle, type ResearchResult, type ResearchStep } from '../research.js';
 import { CoordinatorBase } from './base.js';
 import { COMMAND_TIMEOUT_MS } from './shared.js';
 
@@ -18,6 +18,18 @@ export abstract class ResearchRuns extends CoordinatorBase {
    * sources is taken, and posted on the issue. Returns null once the report is posted, else why there is none.
    */
   protected async research(issue: Issue, questions: string[], path: string): Promise<string | null> {
+    const got = await this.runResearcher(issue, questions, path, 'researcher');
+    if (!got.ok) return got.why;
+    this.emit('research.reported', { issue: issue.number, run: got.run, sources: got.result.sources.length, ignored: got.ignored, report: got.result.report.slice(0, 4000) });
+    await this.d.backlog.comment(issue.number, researchComment(got.result, got.steps));
+    return null;
+  }
+
+  /**
+   * One researcher run on `questions`, as `research` describes, booked to `costRole`: its accepted report with the
+   * steps it took, or why there is none (a cap, a failed run, a report that isn't accepted). Posts nothing.
+   */
+  protected async runResearcher(issue: Issue, questions: string[], path: string, costRole: string): Promise<{ ok: true; result: ResearchResult; ignored: string[]; steps: ResearchStep[]; run: string | null } | { ok: false; why: string }> {
     const n = issue.number;
     const settings = this.d.settings?.().settings ?? {};
     const caps = researchCaps(settings);
@@ -25,7 +37,7 @@ export abstract class ResearchRuns extends CoordinatorBase {
     const hold = researchCapHold(usage, caps);
     if (hold) {
       this.emit('research.capped', { issue: n, run: null, why: hold });
-      return `${hold}; raise it in the instance settings, or it runs once the day's count resets`;
+      return { ok: false, why: `${hold}; raise it in the instance settings, or it runs once the day's count resets` };
     }
     const blocklist = this.d.cfg.project.research.domain_blocklist;
     const repoAccess = researchRepoAccess(settings);
@@ -65,15 +77,13 @@ export abstract class ResearchRuns extends CoordinatorBase {
         }
       },
     });
-    this.cost(n, 'researcher', r);
+    this.cost(n, costRole, r);
     this.emit('run.finished', { issue: n, role: 'researcher', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    if (capped) return `the research run was stopped at the daily cap: ${capped}`;
-    if (r.reason !== 'succeeded') return `research run ended: ${r.reason} (${r.detail.slice(0, 300)})`;
+    if (capped) return { ok: false, why: `the research run was stopped at the daily cap: ${capped}` };
+    if (r.reason !== 'succeeded') return { ok: false, why: `research run ended: ${r.reason} (${r.detail.slice(0, 300)})` };
     const got = acceptResearch(r.structured);
-    if (!got.ok) return `research report not accepted: ${got.why}`;
-    this.emit('research.reported', { issue: n, run: runRef, sources: got.result.sources.length, ignored: got.ignored, report: got.result.report.slice(0, 4000) });
-    await this.d.backlog.comment(n, researchComment(got.result, meter.steps));
-    return null;
+    if (!got.ok) return { ok: false, why: `research report not accepted: ${got.why}` };
+    return { ok: true, result: got.result, ignored: got.ignored, steps: meter.steps, run: runRef };
   }
 
   /** The latest research report on an issue, for a later run's brief: web-sourced, so marked as data to check. */

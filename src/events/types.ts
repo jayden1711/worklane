@@ -34,7 +34,8 @@ export const EventSchemas = {
   /** The worker found nothing to change, and the coordinator's own checks pass on the unchanged base. */
   'issue.no_change': z.strictObject({ issue, owner: z.string(), base: sha, why: z.string(), checks: z.array(CheckRunSchema) }),
   // runs
-  'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int() }),
+  /** `resumed`: the run continues the same attempt after research it asked for (it doesn't count as an attempt). */
+  'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int(), resumed: z.literal('research').optional() }),
   'run.heartbeat': z.strictObject({ issue, role: z.string(), note: z.string() }),
   'run.finished': z.strictObject({
     issue,
@@ -80,6 +81,8 @@ export const EventSchemas = {
   'research.fetched': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), url: z.string(), host: z.string(), refused: z.string().nullable() }),
   /** A research run was held or stopped by a daily cap (searches, fetches or spend). */
   'research.capped': z.strictObject({ issue: issue.nullable(), run: z.string().nullable(), why: z.string() }),
+  /** A worker or evaluator asked for research instead of guessing; `held`: why it wasn't answered (a cap, the per-task limit, a refused request). */
+  'research.requested': z.strictObject({ issue, role: z.enum(['worker', 'evaluator']), question: z.string(), why: z.string(), held: z.string().nullable() }),
   /** A research report was accepted and posted: its sources, the fields it returned that were dropped, and the report. */
   'research.reported': z.strictObject({ issue, run: z.string().nullable(), sources: z.number().int(), ignored: z.array(z.string()), report: z.string() }),
   // work intake (docs/intake.md): ids are report ids; senders only as a short hash; text only redacted
