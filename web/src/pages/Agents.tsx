@@ -4,7 +4,7 @@ import { liveRunFor, type LiveList } from '../components/LiveRun';
 import { StatusMark, TaskRow } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { Header } from './Overview';
-import { runsRefusal } from './RunDetail';
+import { runsRefusal, RunsRefused } from './RunDetail';
 
 const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
 
@@ -14,6 +14,8 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
   // for by someone the state says may not read runs (no live links for them).
   const { data: fetched } = useFetch(() => (given === undefined && !runsRefusal(state) ? api<LiveList>('/api/live') : Promise.resolve(given ?? null)), state.lastId);
   const live = given === undefined ? fetched : given;
+  // Agent runs are the owners' and writers': a viewer's state has none (the runs cards say so).
+  const runs = state.runs ?? { active: [], recent: [] };
   return (
     <div data-testid="page-agents">
       <Header title="Agents" sub={`${state.slots.running} of ${state.slots.cap} machine-wide slots in use`} />
@@ -35,7 +37,8 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
           <Card className="p-3">
             <div className="text-[12px] font-medium text-ink-3">Slots on this machine</div>
             <ul className="mt-2 space-y-1 text-[12px] text-ink">
-              {state.slots.agents.map((a) => (
+              {!state.slots.agents && <li className="text-ink-3">{state.slots.running} of {state.slots.cap} in use. Which agents hold them is for the owners and writers.</li>}
+              {(state.slots.agents ?? []).map((a) => (
                 <li key={a.slot} className="flex justify-between gap-2">
                   <span className="truncate">{a.owner}</span>
                   <span className="text-ink-3">
@@ -43,7 +46,7 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
                   </span>
                 </li>
               ))}
-              {!state.slots.agents.length && <li className="text-ink-3">All free.</li>}
+              {state.slots.agents && !state.slots.agents.length && <li className="text-ink-3">All free.</li>}
               {state.slots.fullRun && <li className="pt-1">Full test run: {state.slots.fullRun.owner}</li>}
             </ul>
           </Card>
@@ -52,7 +55,7 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
               Estimated spend today by role
             </div>
             <div className="mt-2 space-y-1">
-              {Object.entries(state.spendByRole).map(([r, v]) => (
+              {Object.entries(state.spendByRole ?? {}).map(([r, v]) => (
                 <div key={r} className="flex justify-between text-[12px]">
                   <span className="text-ink-2">{r}</span>
                   <span className="tabular-nums text-ink" title={EST_NOTE}>
@@ -60,16 +63,16 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
                   </span>
                 </div>
               ))}
-              {!Object.keys(state.spendByRole).length && <div className="text-[12px] text-ink-3">Nothing spent today.</div>}
+              {!state.spendByRole ? <div className="text-[12px] text-ink-3">Costs, spend and the budget are for the instance's owners and writers (write on its repo).</div> : !Object.keys(state.spendByRole).length && <div className="text-[12px] text-ink-3">Nothing spent today.</div>}
             </div>
           </Card>
         </div>
 
         <Card className="overflow-hidden">
-          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Running now ({state.runs.active.length})</div>
-          {state.runs.active.length ? (
+          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Running now ({runs.active.length})</div>
+          {runs.active.length ? (
             <div>
-              {state.runs.active.map((r, i) => (
+              {runs.active.map((r, i) => (
                 <TaskRow
                   key={`${r.issue}-${r.role}`}
                   index={i}
@@ -96,16 +99,16 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
             </div>
           ) : (
             <div className="p-3">
-              <Empty title="No agents running" hint="Workers start when there is ready work, budget, and room on the machine." />
+              {state.runs ? <Empty title="No agents running" hint="Workers start when there is ready work, budget, and room on the machine." /> : <RunsRefused message={runsRefusal(state) ?? 'agent runs are for the owners and writers'} />}
             </div>
           )}
         </Card>
 
         <Card className="overflow-hidden">
           <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Recent runs</div>
-          {state.runs.recent.length ? (
+          {runs.recent.length ? (
             <div>
-              {state.runs.recent.map((r, i) => (
+              {runs.recent.map((r, i) => (
                 <TaskRow
                   key={i}
                   index={i}
@@ -126,7 +129,7 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
               ))}
             </div>
           ) : (
-            <div className="p-4 text-[12.5px] text-ink-3">No finished runs yet.</div>
+            state.runs ? <div className="p-4 text-[12.5px] text-ink-3">No finished runs yet.</div> : <div className="p-4"><RunsRefused message={runsRefusal(state) ?? 'agent runs are for the owners and writers'} /></div>
           )}
         </Card>
       </div>

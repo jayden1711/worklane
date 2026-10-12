@@ -165,6 +165,13 @@ test('decisions are answerable only where the server allows it (canAnswer)', () 
   const theirs = r.renderPage('decisions', asOther);
   assert.equal((theirs.match(/data-option=/g) ?? []).length, 0, 'no option buttons for someone who can\'t answer');
   assert.match(theirs, /Waiting on @example-owner/);
+  // A viewer's decision cards show no receipts (the server sends none); the owner's do.
+  const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+  const receipts = (asOwner.decisions as { receipts?: string[] }[]).flatMap((d) => d.receipts ?? []).filter((x) => x.length > 8);
+  assert.ok(receipts.length, 'the demo has decisions with receipts');
+  const ownerCards = r.renderPage('decisions', asOwner);
+  assert.ok(receipts.some((x) => ownerCards.includes(esc(x))), "the owner's cards show them");
+  for (const x of receipts) assert.ok(!theirs.includes(esc(x)), `a viewer's card doesn't show "${x}"`);
 });
 
 test('the PR page: what waits for you and exactly why, what is moving, what auto-merged (with links and reasons), refused pushes, the auto-merge state', () => {

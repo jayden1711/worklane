@@ -28,6 +28,8 @@ const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span c
 
 export function SettingsPage() {
   const { data: s, error } = useFetch(getSettings);
+  // A viewer gets the project part only; the rest is the owners' and writers'.
+  const full = s && !('forViewer' in s) ? s : null;
   if (error || !s)
     return (
       <div>
@@ -42,7 +44,8 @@ export function SettingsPage() {
         <InstanceSettings />
       </div>
       <div className="px-6 pt-6">
-        <MachineSettings />
+        {/* The machine settings are the owners' and writers' (a viewer isn't sent them). */}
+        {full && <MachineSettings />}
       </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <Section title="Project">
@@ -65,53 +68,63 @@ export function SettingsPage() {
           </Row>
         </Section>
 
-        <Section title="Agents">
-          <Row k="Daily budget">${s.agents.budget}</Row>
-          <Row k="Roles">
-            <ul className="space-y-1">
-              {s.agents.roles.map((r) => (
-                <li key={r.name} className="flex items-center gap-2">
-                  <Badge tone={r.enabled ? 'ok' : 'neutral'}>{r.enabled ? 'on' : 'off'}</Badge>
-                  <span>{r.name}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {r.model}
-                    {r.count !== null ? ` · ${r.count}` : ''}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </Row>
-        </Section>
-
-        <Section title="Machine and tests">
-          <Row k="Max load">{s.governor.max_load ?? '2 × cores'}</Row>
-          <Row k="Min free disk">{s.governor.min_free_disk_pct}%</Row>
-          {Object.entries(s.tests.gates).map(([k, v]) => (
-            <Row key={k} k={`Gate: ${k}`}>
-              {list(v)}
-            </Row>
-          ))}
-          <Row k="Batch size">up to {s.tests.batchMax}</Row>
-          <Row k="Nightly">{s.tests.nightlyAt ?? <span className="text-muted-foreground">off</span>}</Row>
-          <Row k="Baseline parser">{s.tests.baselineParser ? 'configured' : <span className="text-danger">missing: a red main can't land anything</span>}</Row>
-        </Section>
-
-        <Section title="Review and guardrails">
-          {s.review &&
-            Object.entries(s.review.levels).map(([k, v]) => (
-              <Row key={k} k={k.replace('_', ' ')}>
-                {list(v)}
+        {full ? (
+          <>
+            <Section title="Agents">
+              <Row k="Daily budget">${full.agents.budget}</Row>
+              <Row k="Roles">
+                <ul className="space-y-1">
+                  {full.agents.roles.map((r) => (
+                    <li key={r.name} className="flex items-center gap-2">
+                      <Badge tone={r.enabled ? 'ok' : 'neutral'}>{r.enabled ? 'on' : 'off'}</Badge>
+                      <span>{r.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {r.model}
+                        {r.count !== null ? ` · ${r.count}` : ''}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               </Row>
-            ))}
-          <Row k="Guardrail rules">{s.guardrails.rules}</Row>
-          <Row k="Protected paths">{list(s.guardrails.protectedPaths)}</Row>
-          <Row k="Network">{s.guardrails.network}</Row>
-          <Row k="Pre-approved tools">{list(s.guardrails.preApproved)}</Row>
-          <Row k="Environments">
-            {s.deploy ? list(s.deploy.environments.map((e) => `${e.name}${e.production ? ' (production)' : ''}`)) : <span className="text-muted-foreground">none</span>}
-          </Row>
-          <Row k="Production reads">{s.deploy?.prodRead ? 'one sanctioned read-only path' : 'none'}</Row>
-        </Section>
+            </Section>
+
+            <Section title="Machine and tests">
+              <Row k="Max load">{full.governor.max_load ?? '2 × cores'}</Row>
+              <Row k="Min free disk">{full.governor.min_free_disk_pct}%</Row>
+              {Object.entries(full.tests.gates).map(([k, v]) => (
+                <Row key={k} k={`Gate: ${k}`}>
+                  {list(v)}
+                </Row>
+              ))}
+              <Row k="Batch size">up to {full.tests.batchMax}</Row>
+              <Row k="Nightly">{full.tests.nightlyAt ?? <span className="text-muted-foreground">off</span>}</Row>
+              <Row k="Baseline parser">{full.tests.baselineParser ? 'configured' : <span className="text-danger">missing: a red main can't land anything</span>}</Row>
+            </Section>
+
+            <Section title="Review and guardrails">
+              {full.review &&
+                Object.entries(full.review.levels).map(([k, v]) => (
+                  <Row key={k} k={k.replace('_', ' ')}>
+                    {list(v)}
+                  </Row>
+                ))}
+              <Row k="Guardrail rules">{full.guardrails.rules}</Row>
+              <Row k="Protected paths">{list(full.guardrails.protectedPaths)}</Row>
+              <Row k="Network">{full.guardrails.network}</Row>
+              <Row k="Pre-approved tools">{list(full.guardrails.preApproved)}</Row>
+              <Row k="Environments">
+                {full.deploy ? list(full.deploy.environments.map((e) => `${e.name}${e.production ? ' (production)' : ''}`)) : <span className="text-muted-foreground">none</span>}
+              </Row>
+              <Row k="Production reads">{full.deploy?.prodRead ? 'one sanctioned read-only path' : 'none'}</Row>
+            </Section>
+          </>
+        ) : (
+          <Section title="The rest">
+            <div className="px-4 py-3 text-[13px] text-ink-3" data-testid="settings-viewer-only">
+              Agents, budgets, tests, review levels, guardrails and deploys are for the instance's owners and writers (write on its repo).
+            </div>
+          </Section>
+        )}
       </div>
     </div>
   );
