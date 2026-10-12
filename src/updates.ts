@@ -44,12 +44,21 @@ export function heldUpdate(log: UpdateEntry[]): HeldUpdate | null {
 
 const EVENTS = new Set<string>(['attempt', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error']);
 
+/** What the updater follows: signed release tags, or main's tip. */
+export type UpdateChannel = 'release' | 'main';
+
+/** The channel an updates.json selects: "release" only when it says so; absent (an existing install) is main. */
+export function updateChannel(j: Record<string, unknown>): UpdateChannel {
+  return j.channel === 'release' ? 'release' : 'main';
+}
+
 /** The updater's settings, or null when it isn't set up on this machine. */
-export function updateSettings(path = UPDATES_CONFIG): { enabled: boolean; repo_url: string; branch: string; required_checks: string[] } | null {
+export function updateSettings(path = UPDATES_CONFIG): { enabled: boolean; channel: UpdateChannel; repo_url: string; branch: string; required_checks: string[] } | null {
   try {
     const j = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     return {
       enabled: j.enabled === true,
+      channel: updateChannel(j),
       repo_url: typeof j.repo_url === 'string' ? j.repo_url : '',
       branch: typeof j.branch === 'string' ? j.branch : 'main',
       required_checks: Array.isArray(j.required_checks) ? j.required_checks.filter((c): c is string => typeof c === 'string') : [],
