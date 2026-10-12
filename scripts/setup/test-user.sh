@@ -116,7 +116,8 @@ Group=$user
 Slice=worklane-test.slice
 Environment=HOME=$root/docker-home
 Environment=XDG_RUNTIME_DIR=/run/worklane-test-$name-docker
-Environment=PATH=$docker_dir:/usr/local/bin:/usr/bin:/bin
+# /usr/sbin and /sbin: dockerd-rootless.sh runs sysctl (and iptables) from there.
+Environment=PATH=$docker_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
 RuntimeDirectory=worklane-test-$name-docker
@@ -227,7 +228,8 @@ check_cmd() {
   say "caps, Docker, the helper"
   service_checks || fail=1
   say "inside the sandbox a run gets (the helper's own check)"
-  "$helper" "$name" check || fail=1
+  # As root, not as whoever ran sudo: the helper reads SUDO_USER as its caller, and refuses anyone but wl-<name>.
+  env -u SUDO_USER "$helper" "$name" check || fail=1
   [ "$fail" -eq 0 ] && echo "OK: all checks passed" || echo "FAILED: see the FAIL lines above" >&2
   return "$fail"
 }
@@ -293,6 +295,8 @@ install_cmd() {
   systemctl daemon-reload
   systemctl enable --now "$docker_unit_name"
   for _ in $(seq 60); do [ -S "/run/worklane-test-$name-docker/docker.sock" ] && break; sleep 1; done
+  systemctl is-active -q "$docker_unit_name" || { echo "$docker_unit_name didn't start; see: journalctl -u $docker_unit_name -n 50" >&2; systemctl --no-pager status "$docker_unit_name" >&2 || true; exit 1; }
+  echo "$docker_unit_name is active"
 
   say "sudoers: $coord may run $helper $name ..., nothing else"
   install_sudoers "worklane-test-$name" "$(sudoers_rule)"
