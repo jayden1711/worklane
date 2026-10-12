@@ -17,6 +17,7 @@
   "files": [
     "dist/src",
     "dist/web",
+    "examples/basic",
     "templates",
     "LICENSE",
     "NOTICE",
@@ -41,6 +42,7 @@
     "@types/node": "^22.10.0",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "6.1.1",
     "cmdk": "1.1.1",
     "lucide-react": "1.47.0",
@@ -51,6 +53,7 @@
     "vite": "8.3.0"
   },
   "dependencies": {
+    "ws": "8.21.3",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
   }

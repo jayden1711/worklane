@@ -10,7 +10,7 @@ import { waitCategoriesOf } from '../merge-policy.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
 import { rolePrompt } from '../roles.js';
 import { Delegation } from './delegation.js';
-import { COMMAND_TIMEOUT_MS, DEFAULT_REVIEW } from './shared.js';
+import { DEFAULT_REVIEW } from './shared.js';
 import { CORRECTIONS_DISALLOWED, CORRECTIONS_TOOLS } from './corrections.js';
 
 export abstract class Gardener extends Delegation {
@@ -66,7 +66,7 @@ export abstract class Gardener extends Delegation {
       maxBudgetUsd: Math.max(0.1, Math.min(g.max_usd, left)),
       jsonSchema: GARDENER_SCHEMA,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
     });
     this.emit('run.cost', { issue: null, role: 'gardener', model: r.model, usd: r.costUsd, turns: r.turns });
     if (r.reason !== 'succeeded') return done(`the gardener run ended: ${r.reason} (${r.detail.slice(0, 300)})`, { cost: r.costUsd });

@@ -17,7 +17,8 @@ import { tryAgentSlot } from '../slots.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
-import { COMMAND_TIMEOUT_MS, MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { buildRoute } from './model-routing.js';
+import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -221,7 +222,7 @@ export abstract class FixRuns extends Landing {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'ci-fix', model, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'ci-fix', r);
@@ -440,6 +441,7 @@ export abstract class FixRuns extends Landing {
   private async conflictAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, brief: string, attempt: number): Promise<{ summary: string } | { ended: string }> {
     const n = issue.number;
     const workers = this.d.cfg.agents.roles.workers!;
+    const fixModel = buildRoute(this.d.cfg, issue.labels, 1, true).model;
     const extra = [
       `Conflict fix ${attempt} for this issue's pull request (${pr.url}, branch ${pr.head}).`,
       brief,
@@ -454,15 +456,15 @@ export abstract class FixRuns extends Landing {
       prompt: issueBrief(issue, doneWhen, extra),
       appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
       cwd: path,
-      model: workers.model,
+      model: fixModel,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 100,
       maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
-      onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: workers.model, worktree: path, pid: p, pgid: p, attempt }),
+      timeoutMs: this.commandTimeoutMs,
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: fixModel, worktree: path, pid: p, pgid: p, attempt }),
     });
     this.cost(n, 'conflict-fix', r);
     this.emit('run.finished', { issue: n, role: 'conflict-fix', reason: r.reason, detail: r.detail.slice(0, 1000) });

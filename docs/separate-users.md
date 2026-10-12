@@ -2,7 +2,7 @@
 
 An instance's coordinator and its agents run as different OS users. The coordinator user holds the instance's credentials: its GitHub login and policy, in an instance home only it can read. Agents run as an unprivileged user that holds nothing worth taking, inside Claude Code's sandbox. An agent that tries to read the coordinator's token gets "permission denied" from the operating system, whatever tool or language it uses.
 
-This page is for Linux (systemd). macOS works the same way with `dscl`/System Settings for users and launchd for the service. Native Windows can't separate users this way; use WSL2.
+This page is for Linux with systemd: the setup scripts (`scripts/setup/`) are for that only. On macOS the engine runs as your own user, for development; there are no setup scripts for separate users there.
 
 Replace `<name>` with the instance name throughout. Every command marked **root** needs `sudo`.
 
@@ -79,7 +79,8 @@ In `instance.yaml`:
 ```yaml
 run_as:
   agent_user: wl-<name>-agent
-  agent_home: /home/wl-<name>-agent
+  agent_home: /home/wl-<name>-agent   # its home, as `getent passwd wl-<name>-agent` shows it
+  # path: /usr/local/bin:/usr/bin:/bin   # PATH for project commands; the default adds /opt/homebrew on macOS
 ```
 
 `policy.yaml` keeps the sandbox on (the default). Its lanes list the hosts agent commands may reach.

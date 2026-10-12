@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
+import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -30,6 +30,7 @@ import { SettingsPage } from './pages/Settings';
 import { BoardPage, BoardView, OutlineView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
 import type { OutlineItem } from './api';
+import { SetupConsoleView } from './pages/Setup';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -90,3 +91,5 @@ export const renderBoard = (boards: InstanceBoard[], filter: string | null = nul
 export const renderOutline = (items: OutlineItem[], ended: boolean) => renderToStaticMarkup(<OutlineView items={items} ended={ended} />);
 export const renderMachineSlots = (slots: State['slots']) => renderToStaticMarkup(<MachineSlots slots={slots} />);
 export { elapsed } from './pages/Board';
+export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
+export { keyData } from './pages/Setup';

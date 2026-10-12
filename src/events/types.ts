@@ -142,7 +142,10 @@ export const EventSchemas = {
   'intake.replied': z.strictObject({ id: z.string(), stage: z.string(), ok: z.boolean(), unknown: z.boolean().optional() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
-  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative() }),
+  /** `provider`: the open-model provider it ran on (local runs cost 0); tokens and seconds, when claude reported them. */
+  'run.cost': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), usd: z.number().nonnegative(), turns: z.number().int().nonnegative(), provider: z.string().optional(), tokens_in: z.number().int().nonnegative().optional(), tokens_out: z.number().int().nonnegative().optional(), secs: z.number().nonnegative().optional() }),
+  /** A run meant for an open-model provider ran on its normal model instead, and why (not opted in, no passing eval, down, slow, the GPU lock held, refused for the work). */
+  'provider.fallback': z.strictObject({ issue: issue.nullable(), role: z.string(), provider: z.string(), reason: z.string(), model: z.string() }),
   /**
    * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
    * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.
@@ -223,6 +226,25 @@ export const EventSchemas = {
   'gardener.run': z.strictObject({ started_at: z.string(), findings: z.number().int().nonnegative(), filed: z.array(issue), cost_usd: z.number().nonnegative(), log_issue: issue.nullable(), outcome: z.string() }),
   /** `role`: answered on the dashboard by someone it read as an owner or writer of the instance's repo. */
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string(), role: z.enum(['owner', 'writer']).optional() }),
+  // the setup console's asks (src/console/asks.ts): what the harness needs from the owner and can't do itself
+  /** An ask, as created. A paste_secret ask names the credential only; its value is never in any event. */
+  'ask.created': z.strictObject({
+    id: z.string(),
+    instance: z.string(),
+    title: z.string(),
+    detail: z.string(),
+    created_by: z.string(),
+    spec: z.discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('paste_secret'), credential: z.string(), where: z.string() }),
+      z.strictObject({ kind: z.literal('approve_link'), url: z.string() }),
+      z.strictObject({ kind: z.literal('question'), options: z.array(z.string()), writers_may_answer: z.boolean() }),
+      z.strictObject({ kind: z.literal('root_step'), command: z.string(), args: z.array(z.string()) }),
+    ]),
+  }),
+  /** An ask's one answer: who (and in what role), and the outcome; for a secret only that it was stored. */
+  'ask.answered': z.strictObject({ id: z.string(), by: z.string(), role: z.enum(['owner', 'writer']), answer: z.string(), detail: z.string() }),
+  /** An ask withdrawn before it was answered (by whatever created it, or the owner). */
+  'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),

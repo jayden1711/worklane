@@ -137,6 +137,8 @@ export interface HealthView {
     /** No verified copy, or the last one is over a day old. */
     stale: boolean;
   } | null;
+  /** An engine update this machine rolled back and holds (src/updates.ts heldUpdate); null when none. */
+  updateHold?: { at: string; sha: string | null; reason: string; migration: boolean } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
@@ -465,6 +467,36 @@ export async function decide(id: string, answer: string) {
   return api<{ ok: boolean }>('/api/decide', { method: 'POST', body: JSON.stringify({ id, answer }) });
 }
 
+/** A setup-console ask (src/console/asks.ts), as GET /api/asks serves it. */
+export type Ask = {
+  id: string;
+  instance: string;
+  title: string;
+  detail: string;
+  createdAt: string;
+  createdBy: string;
+  status: 'open' | 'answered' | 'cancelled';
+  answer: { by: string; role: 'owner' | 'writer'; answer: string; detail: string; at: string } | null;
+  cancelled: { by: string; why: string; at: string } | null;
+  /** Whether this person may answer it (the server checks again). */
+  canAnswer: boolean;
+} & (
+  | { kind: 'paste_secret'; credential: string; where: string }
+  | { kind: 'approve_link'; url: string }
+  | { kind: 'question'; options: string[]; writersMayAnswer: boolean }
+  | { kind: 'root_step'; command: string; args: string[]; allowed: boolean; refusal: string | null }
+);
+export interface AsksView {
+  role: 'owner' | 'writer' | 'viewer';
+  login: string;
+  asks: Ask[];
+}
+export const getAsks = () => api<AsksView>('/api/asks');
+export const answerAsk = (id: string, answer: string) => api<{ ok: boolean }>(`/api/asks/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) });
+/** A pasted secret, straight to the instance's server; nothing keeps it on this side. */
+export const pasteSecret = (id: string, value: string) => api<{ ok: boolean }>(`/api/asks/${id}/secret`, { method: 'POST', body: JSON.stringify({ value }) });
+export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}/run`, { method: 'POST', body: '{}' });
+
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
 
@@ -528,13 +560,13 @@ export interface Throughput {
   since: string;
   until: string;
   merged: { total: number; perDay: { day: string; merged: number }[]; perWeek: { week: string; merged: number }[] };
-  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; evaluatorOnL0Usd: number };
+  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; byModel?: { model: string; usd: number; perMergedPrUsd: number | null; share: number; tokensIn?: number; tokensOut?: number; secs?: number; perMergedPrTokens?: number | null }[]; evaluatorOnL0Usd: number };
   waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
 }
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
-export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held';
+export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {
   kind: WaitKind;
   since: string;

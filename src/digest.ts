@@ -4,6 +4,7 @@
 // daily digest is its Markdown, posted as a GitHub comment (`#n` and commit SHAs link themselves there).
 
 import { project } from './projection.js';
+import { heldUpdate, updateLog, type UpdateEntry } from './updates.js';
 
 interface Ev {
   type: string;
@@ -25,6 +26,7 @@ export const WAIT_KINDS = [
   'deploy_failed',
   'check_held',
   'hotspot_held',
+  'update_held',
 ] as const;
 export type WaitKind = (typeof WAIT_KINDS)[number];
 
@@ -41,6 +43,7 @@ export const WAIT_LABEL: Record<WaitKind, string> = {
   deploy_failed: 'Deploys that failed',
   check_held: 'PRs held back by a required check',
   hotspot_held: 'Tasks held behind another on the same files',
+  update_held: 'Engine updates rolled back and held',
 };
 
 export interface WaitItem {
@@ -105,7 +108,7 @@ export function mergedSince(events: Ev[], since: Date, now: Date): MergedItem[] 
  * that ends it: an answer, a merge or close, a resume, a later verified deploy, a release, a new head.
  * And the PRs merged on their own since the last digest (`since`; 24 hours back by default), for sampling.
  */
-export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date } = {}): Digest {
+export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; /** The machine's engine update log (updates.ts); read from its file when not given. */ updates?: UpdateEntry[] } = {}): Digest {
   const t = now.getTime();
   const evs = events.filter((e) => Date.parse(e.ts) <= t);
   const title = new Map<number, string>();
@@ -223,6 +226,11 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date }
     if (e.type === 'hotspot.released') holds.delete(q.issue);
   }
   for (const [issue, h] of holds) add('hotspot_held', h.ts, issue, null, `behind #${h.by}, on ${h.files.slice(0, 3).join(', ')}${h.files.length > 3 ? ` and ${h.files.length - 3} more` : ''}`);
+
+  // An engine update the machine rolled back and holds (a failed migration, or services that didn't come up):
+  // the owner's, until a later install succeeds. From the machine's update log, not this instance's events.
+  const held = heldUpdate((o.updates ?? updateLog()).filter((u) => Date.parse(u.at) <= t));
+  if (held) add('update_held', held.at, null, null, `${held.reason.split('\n')[0]!.slice(0, 240)}; the commit is held until a newer one, or until you turn updates off and on`, held.sha ? { sha: held.sha } : {});
 
   // By kind, then the longest-waiting first.
   items.sort((a, b) => WAIT_KINDS.indexOf(a.kind) - WAIT_KINDS.indexOf(b.kind) || a.since.localeCompare(b.since));

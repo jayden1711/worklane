@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote } from 'lucide-react';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
 import { hub, hubInstance, needsSignIn, selectInstance, signOut, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
@@ -10,6 +10,7 @@ import { Overview } from './pages/Overview';
 import { BoardPage } from './pages/Board';
 import { MachinePage } from './pages/Machine';
 import { InboxPage } from './pages/Inbox';
+import { SetupPage } from './pages/Setup';
 import { WaitingPage } from './pages/Waiting';
 import { Decisions } from './pages/Decisions';
 import { Issues } from './pages/Issues';
@@ -83,6 +84,7 @@ const NAV = [
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i', testId: 'nav-inbox' },
   { to: '/waiting', label: 'Waiting on you', icon: Hourglass, chord: 'w', testId: 'nav-waiting' },
   { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd', testId: 'nav-decisions' },
+  { to: '/setup', label: 'Setup console', icon: Wrench, chord: 'u', testId: 'nav-setup' },
   { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's', testId: 'nav-issues' },
   { to: '/intake', label: 'Intake', icon: MessagesSquare, chord: 'n', testId: 'nav-intake' },
   { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l', testId: 'nav-land' },
@@ -282,6 +284,7 @@ function Dashboard() {
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/waiting') page = <WaitingPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
+  else if (path === '/setup') page = <SetupPage />;
   else if (runMatch) page = <RunDetail id={runMatch[1]!} refused={runsRefusal(state)} />;
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
   else if (path.startsWith('/issues')) page = <Issues state={state} />;

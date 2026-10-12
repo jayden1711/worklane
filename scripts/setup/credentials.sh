@@ -22,6 +22,17 @@
 #       App's client secret (pasted, not shown) and a session secret (generated the first time; --rotate-session
 #       makes a new one, which signs everyone out), each 0400 for the hub's viewer user wl-dash only, in its home.
 #       The client id isn't secret: it goes to dashboards.sh --client-id.
+#   bash scripts/setup/credentials.sh <name> api-key [<key-file>]
+#   bash scripts/setup/credentials.sh <name> provider-key <credential> [<key-file>]
+#       An open-model provider's key (agents.yaml providers, docs/providers.md), pasted (not shown) or read from
+#       <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory of its own). Runs on that
+#       provider read it through apiKeyHelper, as the agent user: never an environment variable, and the coordinator
+#       only knows the path. Prints the credentials.yaml line to add.
+#       Bill the agents' runs to an Anthropic API key instead of the agent user's Claude login. The key is pasted
+#       (not shown) or read from <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory
+#       of its own). claude reads it through apiKeyHelper, as the agent user: it is never in an environment, the
+#       coordinator user can't read it, and the sandbox denies it to agent commands. Prints the credentials.yaml
+#       line to add. Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
 #   bash scripts/setup/credentials.sh <name> intake-discord
 #       Work intake (docs/intake.md): the chat bot's token. Pasted (not shown) and installed for wl-<name>
 #       only, 0400, in the instance home, which no agent user can read. Prints the credentials.yaml line to add.
@@ -36,11 +47,11 @@ source "$(dirname "$0")/lib.sh"
 as_root "$@"
 if [ "${1:-}" = dashboard-signin ]; then
   viewer=wl-dash
-  dir="/home/$viewer/.config/dashboard-signin"
   # Write one secret for the viewer only: 0400, in a 0700 directory of its own, never echoed.
   put_secret() { sudo -u "$viewer" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$1"; }
   say "the dashboard sign-in App's secrets, for $viewer only ($dir, 0400)"
   ensure_user "$viewer"
+  dir="$(home_of "$viewer")/.config/dashboard-signin"
   read -rsp "Paste the sign-in App's client secret, then Enter (it is not shown): " secret; echo
   [[ "$secret" =~ ^[A-Za-z0-9_]{20,100}$ ]] || { unset secret; echo "that doesn't look like a GitHub App client secret; nothing installed" >&2; exit 1; }
   printf '%s' "$secret" | put_secret "$dir/client-secret"; unset secret
@@ -52,15 +63,15 @@ if [ "${1:-}" = dashboard-signin ]; then
   echo "then: dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name>..."
   exit 0
 fi
-name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ... | credentials.sh dashboard-signin}"
-what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ...}"
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord ... | credentials.sh dashboard-signin}"
+what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"
 here="$(cd "$(dirname "$0")" && pwd)"
 # Mint a token as the coordinator user (who alone can read the key) and check what it reaches and may do.
 verify_app() { (cd / && sudo -u "$coord" node --input-type=module - "$@" < "$here/app-permissions.mjs"); }
 # Intake secrets: one file each, for the coordinator user only (0400), in a 0700 directory of its own.
-intake_dir="/home/$coord/.config/$name-intake"
+intake_dir="$(home_of "$coord")/.config/$name-intake"
 install_secret() {
   local file="$1" secret="$2"
   printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
@@ -75,7 +86,7 @@ case "$what" in
     [[ "$app_id" =~ ^[0-9]+$ && "$inst_id" =~ ^[0-9]+$ ]] || { echo "App and installation ids are numbers" >&2; exit 1; }
     [[ "$repo" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || { echo "repo must be owner/name" >&2; exit 1; }
     grep -q -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' "$src" || { echo "$src is not a PEM private key" >&2; exit 1; }
-    dir="/home/$coord/.config/$name-app"
+    dir="$(home_of "$coord")/.config/$name-app"
     key="$dir/private-key.pem"
     say "install the App's private key for $coord only ($key, 0400)"
     install -d -o "$coord" -g "$coord" -m 0700 "$dir"
@@ -83,7 +94,7 @@ case "$what" in
     say "verify as $coord: mint an installation token and list what the installation reaches"
     verify_app "$key" "$app_id" "$inst_id" "$repo"
     echo
-    creds="/home/$coord/.local/state/worklane/instances/$name/credentials.yaml"
+    creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
     if [ -f "$creds" ]; then
       sudo -u "$coord" sh -c 'umask 077; printf "%s\n" "version: 1" "github: { kind: app, app_id: $1, installation_id: $2, key_path: $3 }" > "$4"' _ "$app_id" "$inst_id" "$key" "$creds"
       echo "wrote $creds (the App; agents sign in to Claude as their own user)"
@@ -96,7 +107,7 @@ case "$what" in
     ;;
   verify-app)
     # Nothing is installed or written: the key, ids and repo come from the instance's own files.
-    home="/home/$coord/.local/state/worklane/instances/$name"
+    home="$(home_of "$coord")/.local/state/worklane/instances/$name"
     say "verify as $coord: the installed App key, its installation, and the token's permissions"
     read -r key app_id inst_id repo < <(cd / && sudo -u "$coord" node --input-type=module - "$home" <<'JS'
 import { createRequire } from 'node:module';
@@ -114,7 +125,7 @@ JS
     ;;
   github)
     echo "fallback: a personal access token instead of a GitHub App (prefer github-app)"
-    dir="/home/$coord/.config/$name-gh"
+    dir="$(home_of "$coord")/.config/$name-gh"
     say "GitHub: a fine-grained token limited to this instance's repo, with an expiry, stored in $dir"
     sudo -u "$coord" install -d -m 0700 "$dir"
     read -rsp "Paste the token, then Enter (it is not shown): " token; echo
@@ -136,11 +147,64 @@ JS
     # Evals are off unless you turn them on: no key, no eval lane, and the eval user needs no Claude login.
     [ "$flag" = --evals-on ] || { echo "evals are off for $name: no eval key is needed. Pass --evals-on only once you have an API key and want an eval lane." >&2; exit 2; }
     id -u "$eval_user" >/dev/null 2>&1 || { echo "no $eval_user; run instance.sh $name --eval first" >&2; exit 1; }
-    file="/home/$eval_user/.config/eval/anthropic_key"
+    file="$(home_of "$eval_user")/.config/eval/anthropic_key"
     read -rsp "Paste the API key, then Enter (it is not shown): " key; echo
     printf '%s' "$key" | sudo -u "$eval_user" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; cat > "$1"; chmod 0400 "$1"' _ "$file"
     unset key
     echo "set credentials.yaml eval_key: $file   (readable only by $eval_user)"
+    ;;
+  provider-key)
+    id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    cred="${3:?usage: credentials.sh <name> provider-key <credential> [<key-file>]}"
+    [[ "$cred" =~ ^[a-z][a-z0-9_-]{0,40}$ ]] || { echo "a credential name is lowercase letters, digits, _ or -; nothing installed" >&2; exit 1; }
+    dir="$(home_of "$agent")/.config/$name-provider-keys"
+    file="$dir/$cred"
+    if [ -n "${4:-}" ]; then
+      [ -f "$4" ] || { echo "$4: no such file" >&2; exit 1; }
+      key="$(tr -d '[:space:]' < "$4")"
+    else
+      read -rsp "Paste the provider's API key for $cred, then Enter (it is not shown): " key; echo
+    fi
+    [ "${#key}" -ge 16 ] || { unset key; echo "that key is too short to be real; nothing installed" >&2; exit 1; }
+    say "install the key for $agent only ($file, 0400, in a 0700 directory)"
+    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$1"; chmod 0700 "$1"; rm -f "$2"; cat > "$2"; chmod 0400 "$2"' _ "$dir" "$file"
+    unset key
+    echo "In credentials.yaml set (beside any others):"
+    echo "  provider_keys: { $cred: $file }"
+    echo "then opt the instance in (policy.yaml settings.providers) and restart it."
+    ;;
+  api-key)
+    id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    dir="$(home_of "$agent")/.config/$name-claude-key"
+    file="$dir/api_key"
+    if [ -n "$flag" ]; then
+      [ -f "$flag" ] || { echo "$flag: no such file" >&2; exit 1; }
+      key="$(tr -d '[:space:]' < "$flag")"
+    else
+      read -rsp "Paste the Anthropic API key, then Enter (it is not shown): " key; echo
+    fi
+    case "$key" in sk-ant-*) ;; *) unset key; echo "that doesn't look like an Anthropic API key (sk-ant-...); nothing installed" >&2; exit 1 ;; esac
+    say "install the key for $agent only ($file, 0400, in a 0700 directory)"
+    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$1"; chmod 0700 "$1"; rm -f "$2"; cat > "$2"; chmod 0400 "$2"' _ "$dir" "$file"
+    unset key
+    # claude auth status (the runner's preflight, run as the agent user) reads the agent's own settings; runs get the
+    # same helper in --settings from the coordinator, which passes only this path.
+    say "point $agent's Claude settings at it (apiKeyHelper), keeping its other settings"
+    (cd / && sudo -u "$agent" node --input-type=module - "$(home_of "$agent")/.claude/settings.json" "cat -- $file") <<'JS'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+const [file, helper] = process.argv.slice(2);
+const s = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+s.apiKeyHelper = helper;
+mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+writeFileSync(file, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
+JS
+    say "check, as $agent: claude reports API-key auth"
+    sudo -iu "$agent" claude auth status --json
+    echo "In credentials.yaml set:"
+    echo "  agent_api_key: $file"
+    echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
+    echo "and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;
   intake-discord)
     read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token; echo

@@ -49,6 +49,8 @@ export interface CoordinatorDeps {
   autoMerge?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
   settings?: () => { settings: InstanceSettings; error: string | null };
+  /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
+  providerKeys?: Record<string, string>;
   /** The clock (tests). */
   now?: () => Date;
   /** Nightly queuing (tests inject this). */
@@ -62,6 +64,7 @@ export interface CoordinatorDeps {
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number };
 }
 
+/** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */
 export const COMMAND_TIMEOUT_MS = 2 * 3600_000;
 /** How often the worktree pool is checked against main's tip. */
 export const POOL_CHECK_MS = 5 * 60_000;

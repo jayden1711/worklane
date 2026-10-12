@@ -1,0 +1,4 @@
+# Only what the Dockerfile copies: the build context stays small and never carries a checkout's secrets.
+*
+!scripts/bootstrap.sh
+!package.json

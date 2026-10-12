@@ -55,9 +55,9 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
   chmodSync(dest, 0o777);
   try {
     const repo = 'example-org/example shop';
-    let r = runAs(engine[0]!, ['site', `/srv/worklane/site/example shop`, repo]);
+    let r = runAs(engine[0]!, ['site', `/srv/worklane/site/example shop`, repo, '/var/lib/wl-site-agent']);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^worklane instance init site --repo \/srv\/worklane\/site\/example shop --github example-org\/example shop --agent-user wl-site-agent$/m);
+    assert.match(r.stdout, /^worklane instance init site --repo \/srv\/worklane\/site\/example shop --github example-org\/example shop --agent-user wl-site-agent --agent-home \/var\/lib\/wl-site-agent$/m);
     // Re-running after the instance exists (e.g. made by hand, naming another agent user) points it at wl-site-agent, once.
     const instDir = join(dest, '.local', 'state', 'worklane', 'instances', 'site');
     mkdirSync(instDir, { recursive: true, mode: 0o777 });
@@ -66,11 +66,11 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     writeFileSync(yaml, 'version: 1\nname: site\nrun_as:\n  agent_user: site-agent\n  agent_home: /home/site-agent\n', { mode: 0o666 });
     chmodSync(yaml, 0o666);
     const listed = `HOME=${dest}\nworklane() { if [ "$2" = list ]; then echo site; else echo "worklane $*"; fi; }\n`;
-    r = runAs(listed + engine[0]!, ['site', `/srv/worklane/site/example shop`, repo]);
+    r = runAs(listed + engine[0]!, ['site', `/srv/worklane/site/example shop`, repo, '/var/lib/wl-site-agent']);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, 'instance site exists; run_as now wl-site-agent\n');
-    assert.match(readFileSync(yaml, 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: \/home\/wl-site-agent$/m);
-    r = runAs(listed + engine[0]!, ['site', `/srv/worklane/site/example shop`, repo]);
+    assert.match(readFileSync(yaml, 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: \/var\/lib\/wl-site-agent$/m);
+    r = runAs(listed + engine[0]!, ['site', `/srv/worklane/site/example shop`, repo, '/var/lib/wl-site-agent']);
     assert.equal(r.stdout, 'instance site exists; agents run as wl-site-agent\n');
     r = runAs(checkout[0]!, ['site', dest, repo]);
     assert.equal(r.status, 0, r.stderr);
