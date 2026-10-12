@@ -95,7 +95,7 @@ test('replier role: follows the contract, and has eval cases for normal stages a
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const OWNER_ID = '123456789012';
 const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
-const config = (casual: boolean) => IntakeConfig.parse({ version: 1, casual_replies: casual, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'] } });
+const config = (casual: boolean) => IntakeConfig.parse({ version: 1, casual_replies: casual, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: [OWNER_ID] } });
 
 function setup(o: { casual: boolean; reply?: (req: RunRequest) => object; triage?: object; text?: string; replyCost?: number }) {
   const base = mkdtempSync(join(tmpdir(), 'replier-'));
