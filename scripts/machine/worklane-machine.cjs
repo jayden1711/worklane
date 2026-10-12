@@ -19,6 +19,8 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+// The setup scripts' and the TLS directory's paths are POSIX (the helper runs on Linux), whatever OS a test runs on.
+const posix = path.posix;
 const { execFileSync, spawnSync } = require('node:child_process');
 
 // Fixed paths: the installed helper takes none from its caller (environment or arguments).
@@ -93,7 +95,7 @@ function hubPort() {
   return p;
 }
 
-const script = (file, ...args) => ['bash', [path.join(SETUP, file), ...args]];
+const script = (file, ...args) => ['bash', [posix.join(SETUP, file), ...args]];
 const asUser = (user, ...cmd) => ['runuser', ['-u', user, '--', ...cmd]];
 
 /**
@@ -164,7 +166,7 @@ function tailscaleServe(httpsPort) {
   if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host)) throw new Error(`tailscale gave no usable name for this node (${JSON.stringify(host)}); is it logged in?`);
   fs.mkdirSync(TLS, { recursive: true, mode: 0o700 });
   fs.chmodSync(TLS, 0o700);
-  execFileSync(TAILSCALE, ['cert', '--cert-file', path.join(TLS, `${host}.crt`), '--key-file', path.join(TLS, `${host}.key`), host], { stdio: 'inherit', env });
+  execFileSync(TAILSCALE, ['cert', '--cert-file', posix.join(TLS, `${host}.crt`), '--key-file', posix.join(TLS, `${host}.key`), host], { stdio: 'inherit', env });
   execFileSync(TAILSCALE, ['serve', '--bg', `--https=${httpsPort}`, `http://127.0.0.1:${hub}`], { stdio: 'inherit', env });
   return { host, hub };
 }

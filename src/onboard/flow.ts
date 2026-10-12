@@ -18,6 +18,7 @@ import { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
 import { HUB_PORT } from '../dashboard-hub.js';
 import { MACHINE_HELPER } from '../machine.js';
+import { checkedPush, DEFAULT_PUSH_LIMITS } from '../push-check.js';
 import { ownerOnlyDir, stateDir, userExists, writeOwnerOnly } from '../os/index.js';
 import { RESEARCH_LABELS } from '../research.js';
 import { dropSecret, outputPath, readSecret, stagedSecrets, stageSecret } from './answer.js';
@@ -363,10 +364,16 @@ export class Onboarding {
     return env;
   }
 
-  /** Push the setup branch, and only it: the ref is fixed here, so no step can push the default branch. */
+  /**
+   * Push the setup branch, and only it: the ref is fixed here, so no step can push the default branch. Through
+   * checkedPush, like every engine push: the push limits apply, and it only ever fast-forwards.
+   */
   private pushSetupBranch(clone: string, env: NodeJS.ProcessEnv, defaultBranch: string) {
     if (defaultBranch === SETUP_BRANCH) throw new OnboardError(`the default branch is ${SETUP_BRANCH}; refusing to push it`);
-    this.deps.git(['push', '-q', 'origin', `HEAD:refs/heads/${SETUP_BRANCH}`], clone, env);
+    const head = this.deps.git(['rev-parse', 'HEAD'], clone, env).trim();
+    const base = this.deps.git(['rev-parse', `origin/${defaultBranch}`], clone, env).trim();
+    const r = checkedPush({ cwd: clone, remote: 'origin', base, head, ref: `refs/heads/${SETUP_BRANCH}`, limits: DEFAULT_PUSH_LIMITS, env });
+    if (!r.ok) throw new OnboardError(`pushing ${SETUP_BRANCH}: ${'refused' in r ? r.refused.join('; ') : r.error}`);
   }
 
   // ---- the steps ----

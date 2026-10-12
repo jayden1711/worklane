@@ -84,11 +84,11 @@ export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok:
  * it only if the remote is still exactly at that commit (never over someone
  * else's push); with neither, the push succeeds only as a fast-forward.
  */
-export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; force?: boolean; expect?: string }): PushResult {
+export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; force?: boolean; expect?: string; /** The push's environment (e.g. a credential helper's), else this process's. */ env?: NodeJS.ProcessEnv }): PushResult {
   const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
   if (refused.length) return { ok: false, refused };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
-  const push = spawnSync('git', ['push', ...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
+  const push = spawnSync('git', ['push', ...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8', ...(o.env ? { env: o.env } : {}) });
   if (push.status !== 0) return { ok: false, error: (push.stderr || '').trim() };
   return { ok: true };
 }
