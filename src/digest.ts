@@ -54,16 +54,56 @@ export interface WaitItem {
   sha?: string;
 }
 
+/** A PR the harness merged on its own, for the owner's morning sampling. */
+export interface MergedItem {
+  pr: number;
+  issue: number;
+  title: string;
+  url: string;
+  at: string;
+  /** The review level of the merged head (review.level_set), or null if none was recorded. */
+  level: string | null;
+  /** The evaluator's confidence in its verdict on the merged head (eval.verdict), or null. */
+  confidence: string | null;
+}
+
 export interface Digest {
   at: string;
   items: WaitItem[];
+  /** Since when `merged` reaches: the last digest, or 24 hours back. */
+  mergedSince: string;
+  merged: MergedItem[];
+}
+
+/**
+ * The PRs auto-merged after `since` (merge.done is the auto-merge path's), each with the review level and the
+ * evaluator's confidence for the head it merged (or the issue's latest, where none matches the head).
+ */
+export function mergedSince(events: Ev[], since: Date, now: Date): MergedItem[] {
+  const level = new Map<number, { head: string; level: string }[]>();
+  const verdict = new Map<number, { head: string; confidence: string }[]>();
+  for (const e of events) {
+    const p = e.payload as Record<string, unknown>;
+    if (e.type === 'review.level_set') level.set(Number(p.issue), [...(level.get(Number(p.issue)) ?? []), { head: String(p.head), level: String(p.level) }]);
+    if (e.type === 'eval.verdict') verdict.set(Number(p.issue), [...(verdict.get(Number(p.issue)) ?? []), { head: String(p.head), confidence: String(p.confidence) }]);
+  }
+  const at = <T extends { head: string }>(xs: T[] | undefined, head: string) => (xs ? (xs.filter((x) => x.head === head).at(-1) ?? xs.at(-1)) : undefined);
+  const out: MergedItem[] = [];
+  for (const e of events) {
+    const t = Date.parse(e.ts);
+    if (e.type !== 'merge.done' || t <= since.getTime() || t > now.getTime()) continue;
+    const p = e.payload as { issue: number; number: number; head: string; title: string; url: string };
+    out.push({ pr: p.number, issue: p.issue, title: p.title, url: p.url, at: e.ts, level: at(level.get(p.issue), p.head)?.level ?? null, confidence: at(verdict.get(p.issue), p.head)?.confidence ?? null });
+  }
+  return out;
 }
 
 /**
  * Every owner-held state open at `now`. Each one starts at the event that opened it and stays until the event
  * that ends it: an answer, a merge or close, a resume, a later verified deploy, a release, a new head.
+ * And the PRs merged on their own since the last digest (`since`; 24 hours back by default), for sampling.
  */
-export function waitingOnYou(events: Ev[], now = new Date()): Digest {
+export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date } = {}): Digest {
   const t = now.getTime();
   const evs = events.filter((e) => Date.parse(e.ts) <= t);
   const title = new Map<number, string>();
@@ -173,7 +213,8 @@ export function waitingOnYou(events: Ev[], now = new Date()): Digest {
 
   // By kind, then the longest-waiting first.
   items.sort((a, b) => WAIT_KINDS.indexOf(a.kind) - WAIT_KINDS.indexOf(b.kind) || a.since.localeCompare(b.since));
-  return { at: now.toISOString(), items };
+  const since = o.since ?? new Date(now.getTime() - 86_400_000);
+  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedSince(evs, since, now) };
 }
 
 /** How long, in words: minutes, hours, or days. */
@@ -191,8 +232,8 @@ export function waited(since: string, now: Date): string {
 export function digestMarkdown(d: Digest, o: { project?: string } = {}): string {
   const now = new Date(d.at);
   const head = `## Waiting on you${o.project ? `: ${o.project}` : ''}, ${d.at.slice(0, 10)} (${d.items.length})`;
-  if (!d.items.length) return `${head}\n\nNothing is waiting on you.\n`;
-  const out = [head, '', 'Nothing here times out: each waits until you act on it.'];
+  const out = [head, ''];
+  out.push(d.items.length ? 'Nothing here times out: each waits until you act on it.' : 'Nothing is waiting on you.');
   for (const kind of WAIT_KINDS) {
     const these = d.items.filter((i) => i.kind === kind);
     if (!these.length) continue;
@@ -204,5 +245,9 @@ export function digestMarkdown(d: Digest, o: { project?: string } = {}): string 
       out.push(`- ${subject ? `${subject}: ` : ''}${i.detail} (waiting ${waited(i.since, now)})`);
     }
   }
+  // The PRs merged on their own since the last digest, to sample: each with its review level and the evaluator's confidence.
+  out.push('', `**Merged since yesterday** (${d.merged.length})`);
+  if (!d.merged.length) out.push('- nothing merged on its own');
+  for (const m of d.merged) out.push(`- #${m.pr} for #${m.issue} ${m.title}: ${m.level ?? 'level not recorded'}, evaluator confidence ${m.confidence ?? 'not recorded'}`);
   return `${out.join('\n')}\n`;
 }

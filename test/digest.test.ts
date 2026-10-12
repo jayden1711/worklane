@@ -106,5 +106,41 @@ test('the digest\'s Markdown: a heading with the count, a section per kind, each
   assert.match(md, /\*\*Deploys that failed\*\* \(1\)\n- ffffffffffff: staging: health check 503 \(waiting 6 h\)/, 'a plain SHA, which GitHub links');
   assert.match(md, /\*\*Emergency stop in force\*\* \(1\)\n- by @example-owner: spend \(waiting 3 days\)/);
   assert.equal(digestMarkdown(waitingOnYou(log(), NOW), { project: 'example-shop' }), md, 'pure: the same text each time');
-  assert.equal(digestMarkdown(waitingOnYou([], NOW)), '## Waiting on you, 2026-10-15 (0)\n\nNothing is waiting on you.\n');
+  assert.equal(digestMarkdown(waitingOnYou([], NOW)), '## Waiting on you, 2026-10-15 (0)\n\nNothing is waiting on you.\n\n**Merged since yesterday** (0)\n- nothing merged on its own\n');
+});
+
+test('merged since yesterday: each PR merged on its own since the last digest, with the merged head\'s review level and the evaluator\'s confidence', () => {
+  const done = (issue: number, n: number, head: string, title: string, ts: string) => ev('merge.done', { issue, number: n, head, sha: sha('9'), url: `https://github.com/example-org/example-shop/pull/${n}`, title }, ts);
+  const level = (issue: number, head: string, l: string, ts: string) => ev('review.level_set', { issue, head, level: l, reasons: [] }, ts);
+  const verdict = (issue: number, head: string, confidence: string, ts: string) => ev('eval.verdict', { issue, head, patch_hash: 'p', patch_correct: true, test_correct: true, confidence, advice: '' }, ts);
+  const events = [
+    // Merged 30 hours ago: before yesterday's digest.
+    level(1, sha('a'), 'L0', h(31)),
+    verdict(1, sha('a'), 'high', h(31)),
+    done(1, 11, sha('a'), 'Fix the footer link', h(30)),
+    // Merged 5 hours ago: an earlier head was L1 with low confidence; the merged head is L0, high.
+    level(2, sha('b'), 'L1', h(9)),
+    verdict(2, sha('b'), 'low', h(9)),
+    level(2, sha('c'), 'L0', h(7)),
+    verdict(2, sha('c'), 'high', h(6)),
+    done(2, 21, sha('c'), 'Round totals to the cent', h(5)),
+    // Merged 2 hours ago, nothing recorded for its head: the issue's latest, else not recorded.
+    level(3, sha('d'), 'L1', h(4)),
+    done(3, 31, sha('e'), 'Document the rounding rule', h(2)),
+    // A PR merged by a person, not on its own (no merge.done): not listed.
+    ev('pr.closed', { issue: 4, number: 41, merged: true }, h(1)),
+  ];
+  const d = waitingOnYou(events, NOW);
+  assert.equal(d.mergedSince, h(24), '24 hours back by default');
+  assert.deepEqual(d.merged.map((m) => [m.pr, m.issue, m.title, m.level, m.confidence]), [
+    [21, 2, 'Round totals to the cent', 'L0', 'high'],
+    [31, 3, 'Document the rounding rule', 'L1', null],
+  ]);
+  assert.equal(d.merged[0]!.url, 'https://github.com/example-org/example-shop/pull/21');
+  // Since the last digest, when the coordinator says when that was.
+  assert.deepEqual(waitingOnYou(events, NOW, { since: new Date(h(3)) }).merged.map((m) => m.pr), [31]);
+  assert.deepEqual(waitingOnYou(events, NOW, { since: new Date(h(48)) }).merged.map((m) => m.pr), [11, 21, 31]);
+  const md = digestMarkdown(d);
+  assert.match(md, /\*\*Merged since yesterday\*\* \(2\)\n- #21 for #2 Round totals to the cent: L0, evaluator confidence high\n- #31 for #3 Document the rounding rule: L1, evaluator confidence not recorded\n$/);
+  assert.match(md, /^## Waiting on you, 2026-10-15 \(0\)\n\nNothing is waiting on you\./, 'the count is still what waits');
 });

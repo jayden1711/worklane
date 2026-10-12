@@ -456,9 +456,21 @@ export interface WaitItem {
   detail: string;
   sha?: string;
 }
+/** A PR merged on its own since the last digest, for sampling: its review level and the evaluator's confidence. */
+export interface MergedItem {
+  pr: number;
+  issue: number;
+  title: string;
+  url: string;
+  at: string;
+  level: string | null;
+  confidence: string | null;
+}
 export interface Waiting {
   at: string;
   items: WaitItem[];
+  mergedSince: string;
+  merged: MergedItem[];
   /** The daily digest as posted to GitHub. */
   markdown: string;
 }

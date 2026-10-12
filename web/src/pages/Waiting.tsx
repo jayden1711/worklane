@@ -3,9 +3,9 @@
 // hold, a stopped auto-merge, an emergency stop), how long each has waited, and its issue or PR. Nothing
 // here times out. The same list is the daily digest posted on GitHub; its Markdown is shown below.
 import { useEffect, useState } from 'react';
-import { api, type State, type WaitItem, type WaitKind, type Waiting } from '../api';
+import { api, type MergedItem, type State, type WaitItem, type WaitKind, type Waiting } from '../api';
 import { navigate } from '../App';
-import { Card, Empty } from '../components/ui';
+import { Badge, Card, Empty } from '../components/ui';
 import { Header } from './Overview';
 
 /** The kinds in the digest's order, with its headings (src/digest.ts). */
@@ -66,6 +66,56 @@ function Subject({ i }: { i: WaitItem }) {
 
 /** The list from its data (also what the render checks render). */
 export function WaitingView({ w, now }: { w: Waiting; now?: number }) {
+  return (
+    <div className="space-y-6">
+      <WaitList w={w} {...(now !== undefined ? { now } : {})} />
+      <MergedSince merged={w.merged} since={w.mergedSince} />
+    </div>
+  );
+}
+
+const CONFIDENCE_TONE: Record<string, 'ok' | 'warn' | 'danger'> = { high: 'ok', medium: 'warn', low: 'danger' };
+
+/** The PRs merged on their own since the last digest, for the owner to sample: each with its review level and the evaluator's confidence. */
+export function MergedSince({ merged, since }: { merged: MergedItem[]; since: string }) {
+  return (
+    <section aria-label="Merged since yesterday" data-testid="merged-since">
+      <div className="mb-1.5 flex items-baseline gap-2">
+        <span className="text-[13px] font-medium text-ink">Merged since yesterday</span>
+        <span className="text-[12px] tabular-nums text-ink-3">{merged.length}</span>
+        <span className="text-[12px] text-ink-3">merged on their own since {since.slice(0, 16).replace('T', ' ')} UTC, to sample</span>
+      </div>
+      {merged.length ? (
+        <Card className="overflow-hidden">
+          <ul className="divide-y divide-line">
+            {merged.map((m) => (
+              <li key={m.pr} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-2.5" data-testid="merged-item">
+                <a href={m.url} target="_blank" rel="noopener noreferrer" className="font-mono text-[12.5px] text-blue-ink hover:underline" data-testid="merged-pr">
+                  PR #{m.pr}
+                </a>
+                <span className="text-[12px] text-ink-3">for</span>
+                <button onClick={() => navigate(`/issues/${m.issue}`)} className="font-mono text-[12.5px] text-blue-ink hover:underline">
+                  #{m.issue}
+                </button>
+                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{m.title}</span>
+                <span data-testid="merged-level">
+                  <Badge>{m.level ?? 'level not recorded'}</Badge>
+                </span>
+                <span data-testid="merged-confidence">
+                  <Badge tone={m.confidence ? CONFIDENCE_TONE[m.confidence] ?? 'neutral' : 'neutral'}>{m.confidence ? `evaluator confidence ${m.confidence}` : 'confidence not recorded'}</Badge>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : (
+        <div className="text-[12.5px] text-ink-3">Nothing merged on its own.</div>
+      )}
+    </section>
+  );
+}
+
+function WaitList({ w, now }: { w: Waiting; now?: number }) {
   if (!w.items.length) return <Empty title="Nothing is waiting on you" hint="Decisions, held plans and PRs, blocks and stops show up here until you act on them; nothing times out." />;
   return (
     <div className="space-y-4">
