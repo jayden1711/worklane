@@ -86,6 +86,57 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: node scripts/push-gate.mjs --range "${BASE}..${GITHUB_SHA}"
 
+  hardened-macos:
+    # The macOS hardened setup run for real, with sudo, on a disposable runner: machine, two instances,
+    # the root helper, a launchd daemon as the coordinator user, then the isolation checks.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: machine and two instances
+        run: |
+          sudo bash scripts/setup/macos/machine.sh
+          sudo bash scripts/setup/macos/instance.sh ci
+          sudo bash scripts/setup/macos/instance.sh ci2
+          # Again: every step is safe to repeat.
+          sudo bash scripts/setup/macos/instance.sh ci
+          id wl-ci; id wl-ci-agent
+      - name: the root helper and its exact sudoers commands
+        run: |
+          sudo bash scripts/setup/machine-helper.sh ci ci2
+          sudo -u wl-ci sudo -n /usr/local/libexec/worklane-machine set-slots 3
+          grep -q '"max_agents":3' /etc/worklane/slots.json
+          if sudo -u wl-ci sudo -n /usr/local/libexec/worklane-machine set-slots 17; then echo "set-slots 17 was allowed" >&2; exit 1; fi
+          if sudo -u wl-ci-agent sudo -n /usr/local/libexec/worklane-machine set-slots 3; then echo "an agent changed the cap" >&2; exit 1; fi
+          tail -1 /var/lib/worklane/machine-changes.jsonl
+      - name: a launchd daemon as the coordinator user, with its limits
+        run: |
+          bash scripts/setup/macos/service.sh ci --print | sed 1d > ci.plist
+          plutil -lint ci.plist
+          # A stand-in program: the real one needs the engine installed (engine.sh).
+          plutil -replace ProgramArguments -json '["/bin/sleep","600"]' ci.plist
+          sudo install -d -o root -g wheel -m 0755 /var/log/worklane /var/tmp/worklane
+          sudo install -o wl-ci -g wl-ci -m 0640 /dev/null /var/log/worklane/ci.log
+          sudo install -d -o wl-ci -g wl-ci-work -m 1770 /var/tmp/worklane/ci
+          sudo install -o root -g wheel -m 0644 ci.plist /Library/LaunchDaemons/com.worklane.coordinator.ci.plist
+          sudo launchctl bootstrap system /Library/LaunchDaemons/com.worklane.coordinator.ci.plist
+          sleep 3
+          sudo launchctl print system/com.worklane.coordinator.ci | tee daemon.txt | sed -n '/state = /p;/pid = /p'
+          grep -q 'state = running' daemon.txt
+          pid="$(sed -n 's/^[[:space:]]*pid = //p' daemon.txt | head -1)"
+          ps -o user=,nice= -p "$pid" | tee ps.txt
+          grep -qE '^wl-ci +10$' ps.txt
+      - name: stand-in secrets where engine.sh and credentials.sh put them
+        run: |
+          sudo -H -u wl-ci bash -c 'd="$HOME/Library/Application Support/worklane/instances/ci"; umask 077; mkdir -p "$d"; echo "stand-in: not a secret" > "$d/credentials.yaml"'
+      - name: isolation checks
+        run: sudo bash scripts/setup/macos/check.sh ci ci2
+      - name: the daemon stops
+        if: always()
+        run: sudo launchctl bootout system/com.worklane.coordinator.ci || true
+
   denylist:
     # No project-specific details in the engine repo (see scripts/check-denylist.mjs).
     runs-on: ubuntu-latest

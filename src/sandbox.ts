@@ -43,9 +43,15 @@ export function sandboxSettings(s: SandboxInput) {
   };
 }
 
-/** Credential stores in an agent user's home that its commands never need. */
-export function homeCredentialStores(home: string): string[] {
-  return ['.ssh', '.aws', '.config/gh', '.gnupg', '.netrc', '.npmrc', '.pypirc', '.docker/config.json'].map((p) => `${home.replace(/\/$/, '')}/${p}`);
+/**
+ * Credential stores in an agent user's home that its commands never need. On macOS that includes the user's
+ * keychain files (Library/Keychains). Denying the files doesn't block the `security` tool, which asks the
+ * keychain service over IPC instead of reading them; agents get no secret in their keychain to find.
+ */
+export function homeCredentialStores(home: string, platform: NodeJS.Platform = process.platform): string[] {
+  const stores = ['.ssh', '.aws', '.config/gh', '.gnupg', '.netrc', '.npmrc', '.pypirc', '.docker/config.json'];
+  if (platform === 'darwin') stores.push('Library/Keychains');
+  return stores.map((p) => `${home.replace(/\/$/, '')}/${p}`);
 }
 
 /** The hosts a run's settings let its commands reach (none when there are no settings). */

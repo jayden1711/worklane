@@ -7,7 +7,8 @@
 # branch, for a PR you review and merge. Never pushes the default branch.
 # Re-running it fast-forwards an existing checkout (e.g. after that PR merges).
 #   bash scripts/setup/checkout.sh <name> <owner/repo>
-source "$(dirname "$0")/lib.sh"
+# On macOS the macOS helpers stand in (as_root without the Linux-with-systemd check, Directory Services users).
+if [ "$(uname -s)" = Darwin ]; then source "$(dirname "$0")/macos/lib.sh"; else source "$(dirname "$0")/lib.sh"; fi
 as_root "$@"
 name="${1:?usage: checkout.sh <name> <owner/repo>}"
 repo="${2:?the instance repo (owner/name) missing}"

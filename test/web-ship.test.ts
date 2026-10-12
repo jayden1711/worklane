@@ -22,5 +22,5 @@ test('the engine install builds the web UI and is incomplete without it', () => 
   assert.match(sh, /\[ -f "\$work\/src\/dist\/web\/index\.html" \] \|\| \{/);
   // Adding the UI to an install in use goes through a dotted temp name, then a rename.
   const add = sh.slice(sh.indexOf('dist/.web.new'));
-  assert.ok(add.indexOf('chown -R root:root "$dest/dist/.web.new"') < add.indexOf('mv "$dest/dist/.web.new" "$dest/dist/web"'), 'owned by root before it goes live');
+  assert.ok(add.indexOf('chown -R "root:$rootgrp" "$dest/dist/.web.new"') < add.indexOf('mv "$dest/dist/.web.new" "$dest/dist/web"'), 'owned by root before it goes live');
 });

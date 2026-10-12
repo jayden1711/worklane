@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -86,11 +86,14 @@ test("homes come from the user database: init writes the agent's real home, eval
   }
 });
 
+/** Every setup script, the macOS ones in macos/ too, relative to scripts/setup. */
+const setupScripts = () => [...readdirSync(setup), ...readdirSync(join(setup, 'macos')).map((f) => `macos/${f}`)].filter((f) => statSync(join(setup, f)).isFile());
+
 test('home_of reads the passwd database (getent), not /home/<user>', { skip: posix }, () => {
   const bin = fakeBin({ getent: 'wl-shop:x:1001:1001::/var/lib/wl-shop:/bin/bash' });
   const r = sh('home_of wl-shop', [], basePath(bin));
   assert.equal(r.stdout.trim(), '/var/lib/wl-shop', r.stderr);
-  for (const f of readdirSync(setup)) assert.doesNotMatch(readFileSync(join(setup, f), 'utf8').replace(/^\s*#.*$/gm, ''), /\/home\/\$/, `${f} assumes /home/<user>`);
+  for (const f of setupScripts()) assert.doesNotMatch(readFileSync(join(setup, f), 'utf8').replace(/^\s*#.*$/gm, ''), /\/home\/\$/, `${f} assumes /home/<user>`);
 });
 
 test('pkg_install detects apt-get, dnf, zypper, pacman or apk, maps package names, and says what it found when none', { skip: posix }, () => {
@@ -126,7 +129,7 @@ test('machine.json holds the checkout root and the slot ceiling; every script re
   assert.deepEqual([sh('checkouts_root "$@"', [conf]).stdout.trim(), sh('max_cap "$@"', [conf]).stdout.trim()], ['/srv/worklane', '16'], 'defaults without the file');
   writeFileSync(conf, '{"max_cap":32,"checkouts":"/data/worklane"}\n');
   assert.deepEqual([sh('checkouts_root "$@"', [conf]).stdout.trim(), sh('max_cap "$@"', [conf]).stdout.trim()], ['/data/worklane', '32']);
-  for (const f of readdirSync(setup).filter((x) => x !== 'lib.sh')) assert.doesNotMatch(readFileSync(join(setup, f), 'utf8').replace(/^\s*#.*$/gm, ''), /\/srv\/worklane/, `${f} names /srv/worklane`);
+  for (const f of setupScripts().filter((x) => x !== 'lib.sh')) assert.doesNotMatch(readFileSync(join(setup, f), 'utf8').replace(/^\s*#.*$/gm, ''), /\/srv\/worklane/, `${f} names /srv/worklane`);
   const m = readFileSync(join(setup, 'machine.sh'), 'utf8');
   assert.match(m, /--max-cap\) max=/);
   assert.match(m, /--checkouts\) checkouts=/);

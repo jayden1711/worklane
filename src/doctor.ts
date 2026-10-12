@@ -3,6 +3,7 @@
 // that can't run reports why.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
@@ -10,8 +11,9 @@ import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instancesDir, policiesForRepo, policyViolations, readPolicy } from './instance.js';
-import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
+import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
+import { canRunAgents, detectOs, shimsNeedShell, userExists, which, wslAvailable } from './os/index.js';
+import { isolationCheck, sandboxMechanism, serviceDefinition } from './os/isolation.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
 export type Level = 'ok' | 'warn' | 'fail';
@@ -82,6 +84,17 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     if (s.disableAllHooks !== false) add(`agent hooks ${name}`, 'fail', 'disableAllHooks is not pinned to false: a project file could turn the hooks off');
     const refusal = projectSettingsRefusal(root, s);
     if (refusal) add(`project settings`, 'fail', `${name}'s agent runs won't start: ${refusal}`);
+  }
+  // What keeps each instance's agents apart from its credentials, and what this OS can't limit.
+  for (const name of instances) {
+    let agentUser: string | null;
+    try {
+      agentUser = loadInstance(name).runAs?.user ?? null;
+    } catch {
+      continue; // an instance that doesn't load is reported by the checks above and by the coordinator itself
+    }
+    const r = isolationCheck({ os, instance: name, coordinatorUser: userInfo().username, agentUser, agentUserExists: !!agentUser && userExists(agentUser), sandbox: sandboxMechanism(os), service: serviceDefinition(os, name) });
+    add(`isolation ${name}`, r.level, r.detail);
   }
   const settingsPath = join(root, '.claude', 'settings.json');
   const where = instances.length ? ` (for people's sessions and local runs; ${instances.join(', ')}'s agents get theirs from their agent settings)` : '';

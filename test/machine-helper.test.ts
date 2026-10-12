@@ -100,7 +100,10 @@ test('setup: the slot cap becomes root:root 0644, changed only through the helpe
   assert.match(helper, /install_sudoers worklane-machine "\$\(machine_sudoers "\$\{users\[@\]\}"\)"/);
   assert.match(helper, /\[ "\$name" != dash \]/);
   assert.match(helper, /^chmod 0644 \/etc\/worklane\/slots\.json$/m);
-  assert.match(helper, /install -o root -g root -m 0755 "\$src" "\$tmp"/);
+  assert.match(helper, /install -o root -g "\$rootgrp" -m 0755 "\$src" "\$tmp"/);
+  // root's group is root on Linux and wheel on macOS, where `-g root` fails: never hardcoded.
+  assert.match(helper, /^rootgrp="\$\(id -gn root\)"$/m);
+  assert.doesNotMatch(helper, /-g root\b|root:root/);
 });
 
 test('the engine checks the cap before asking sudo, and explains a missing sudo rule', () => {

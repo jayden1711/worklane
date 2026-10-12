@@ -27,7 +27,8 @@
 # logs. Workflows is deliberately left out: GitHub refuses a push that changes .github/workflows without
 # it, so such a change can't go out through the coordinator. Administration and Actions write are refused
 # too. No webhook.
-source "$(dirname "$0")/lib.sh"
+# On macOS the macOS helpers stand in (as_root without the Linux-with-systemd check, Directory Services users).
+if [ "$(uname -s)" = Darwin ]; then source "$(dirname "$0")/macos/lib.sh"; else source "$(dirname "$0")/lib.sh"; fi
 as_root "$@"
 name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ...}"
 what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ...}"
@@ -60,20 +61,21 @@ case "$what" in
     say "verify as $coord: mint an installation token and list what the installation reaches"
     verify_app "$key" "$app_id" "$inst_id" "$repo"
     echo
-    creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
+    creds="$(state_root_of "$coord")/instances/$name/credentials.yaml"
     if [ -f "$creds" ]; then
       sudo -u "$coord" sh -c 'umask 077; printf "%s\n" "version: 1" "github: { kind: app, app_id: $1, installation_id: $2, key_path: $3 }" > "$4"' _ "$app_id" "$inst_id" "$key" "$creds"
       echo "wrote $creds (the App; agents sign in to Claude as their own user)"
     else
       echo "no instance home yet (run engine.sh first); then set in credentials.yaml: github: { kind: app, app_id: $app_id, installation_id: $inst_id, key_path: $key }"
     fi
-    read -rp "Delete the copy you brought to this machine ($src) now with shred? [y/N] " yn
-    if [ "$yn" = y ]; then shred -u "$src" && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
+    read -rp "Delete the copy you brought to this machine ($src) now? [y/N] " yn
+    # shred where there is one (Linux); macOS has none, and overwriting in place means little on APFS (copy on write).
+    if [ "$yn" = y ]; then if command -v shred >/dev/null; then shred -u "$src"; else rm -f "$src"; fi && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
     echo "Now delete the key on your other machine (the downloaded .pem). If it's ever lost, generate a new one in the App's settings."
     ;;
   verify-app)
     # Nothing is installed or written: the key, ids and repo come from the instance's own files.
-    home="$(home_of "$coord")/.local/state/worklane/instances/$name"
+    home="$(state_root_of "$coord")/instances/$name"
     say "verify as $coord: the installed App key, its installation, and the token's permissions"
     read -r key app_id inst_id repo < <(cd / && sudo -u "$coord" node --input-type=module - "$home" <<'JS'
 import { createRequire } from 'node:module';

@@ -4,17 +4,21 @@
 #
 #   bash scripts/setup/machine-helper.sh <name> [<name>...]     every instance on this machine
 #
-#   - Installs the helper as /usr/local/libexec/worklane-machine (root:root 0755). It accepts
+#   - Installs the helper as /usr/local/libexec/worklane-machine (root-owned, 0755). It accepts
 #     exactly `set-slots <1..max_cap>` and `set-updates on|off`, writes atomically, and logs each
 #     change to /var/lib/worklane/machine-changes.jsonl and the journal. max_cap is the one
 #     machine.sh records in /etc/worklane/machine.json (--max-cap; default 16).
 #   - Lets each coordinator user wl-<name> run exactly those commands as root (sudoers,
 #     listed one by one). The dashboard viewer wl-dash gets nothing.
-#   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
+#   - Makes /etc/worklane/slots.json root-owned 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
-source "$(dirname "$0")/lib.sh"
+# Nothing here needs systemd: on macOS the macOS helpers stand in (as_root without the Linux-with-systemd
+# check, Directory Services users).
+if [ "$(uname -s)" = Darwin ]; then source "$(dirname "$0")/macos/lib.sh"; else source "$(dirname "$0")/lib.sh"; fi
 as_root "$@"
+# root's group: root on Linux, wheel on macOS.
+rootgrp="$(id -gn root)"
 [ "$#" -ge 1 ] || { echo "usage: machine-helper.sh <name> [<name>...]" >&2; exit 2; }
 users=()
 for name in "$@"; do
@@ -30,22 +34,22 @@ say "the helper, root-owned"
 src="$(dirname "$0")/../machine/worklane-machine.cjs"
 # The temp name ends in .cjs: node --check refuses an unknown extension such as .tmp.
 tmp="$(dirname "$MACHINE_HELPER")/.worklane-machine.tmp.cjs"
-install -d -o root -g root -m 0755 "$(dirname "$MACHINE_HELPER")"
+install -d -o root -g "$rootgrp" -m 0755 "$(dirname "$MACHINE_HELPER")"
 rm -f "$(dirname "$MACHINE_HELPER")/.worklane-machine.tmp"   # left by an earlier run that failed on that name
-install -o root -g root -m 0755 "$src" "$tmp"
+install -o root -g "$rootgrp" -m 0755 "$src" "$tmp"
 node --check "$tmp"
 mv -f "$tmp" "$MACHINE_HELPER"
 echo "installed $MACHINE_HELPER"
 
 say "its change log"
-install -d -o root -g root -m 0755 /var/lib/worklane
-[ -f /var/lib/worklane/machine-changes.jsonl ] || install -o root -g root -m 0644 /dev/null /var/lib/worklane/machine-changes.jsonl
-chown root:root /var/lib/worklane/machine-changes.jsonl
+install -d -o root -g "$rootgrp" -m 0755 /var/lib/worklane
+[ -f /var/lib/worklane/machine-changes.jsonl ] || install -o root -g "$rootgrp" -m 0644 /dev/null /var/lib/worklane/machine-changes.jsonl
+chown "root:$rootgrp" /var/lib/worklane/machine-changes.jsonl
 chmod 0644 /var/lib/worklane/machine-changes.jsonl
 
 say "the slot cap: root-owned, readable by all, changed only through the helper"
 [ -f /etc/worklane/slots.json ] || printf '{"max_agents":2}\n' > /etc/worklane/slots.json
-chown root:root /etc/worklane/slots.json
+chown "root:$rootgrp" /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 

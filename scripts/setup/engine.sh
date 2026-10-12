@@ -5,7 +5,9 @@
 # agents' hooks call it, so it must not live in anyone's private home.
 # With an instance, also creates that instance's home as its coordinator.
 #   bash scripts/setup/engine.sh <engine-ref (commit sha or tag)> [<name> <owner/repo>]
-source "$(dirname "$0")/lib.sh"
+# On macOS the macOS helpers stand in (as_root without the Linux-with-systemd check, Directory Services users).
+if [ "$(uname -s)" = Darwin ]; then source "$(dirname "$0")/macos/lib.sh"; else source "$(dirname "$0")/lib.sh"; fi
+rootgrp="$(id -gn root)"   # root on Linux, wheel on macOS
 as_root "$@"
 ref="${1:?usage: engine.sh <engine-ref> [<name> <owner/repo>]}"
 name="${2:-}" repo="${3:-}"
@@ -27,11 +29,11 @@ if [ ! -f "$dest/dist/src/cli.js" ] || [ ! -f "$dest/dist/web/index.html" ]; the
   if [ -f "$dest/dist/src/cli.js" ]; then
     # Installed earlier without the UI, maybe in use by a running service: add only the UI, renamed into place.
     rm -rf "$dest/dist/.web.new" && mv "$work/src/dist/web" "$dest/dist/.web.new"
-    chown -R root:root "$dest/dist/.web.new" && chmod -R a+rX,go-w "$dest/dist/.web.new"
+    chown -R "root:$rootgrp" "$dest/dist/.web.new" && chmod -R a+rX,go-w "$dest/dist/.web.new"
     rm -rf "$dest/dist/web" && mv "$dest/dist/.web.new" "$dest/dist/web"
   else
     rm -rf "$dest" && mv "$work/src" "$dest"
-    chown -R root:root "$dest" && chmod -R a+rX,go-w "$dest"
+    chown -R "root:$rootgrp" "$dest" && chmod -R a+rX,go-w "$dest"
   fi
 fi
 ln -sfn "$dest" /opt/worklane/current
@@ -45,11 +47,11 @@ if [ -n "$name" ]; then
   id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
   say "instance home for $name, as $coord"
   run_as "$coord" '
-    agent="wl-$1-agent" agent_home="$4"
+    agent="wl-$1-agent" agent_home="$4" state="$5"
     [ -n "$agent_home" ] || { echo "no home for $agent in the user database; run instance.sh $1 first" >&2; exit 1; }
     if worklane instance list | grep -qx "$1"; then
       # An instance made earlier (or by hand) may name another agent user: point it at this one.
-      f="$HOME/.local/state/worklane/instances/$1/instance.yaml"
+      f="$state/instances/$1/instance.yaml"
       if grep -qx "  agent_user: $agent" "$f"; then echo "instance $1 exists; agents run as $agent"; exit 0; fi
       sed -e "s|^  agent_user: .*|  agent_user: $agent|" -e "s|^  agent_home: .*|  agent_home: $agent_home|" "$f" > "$f.new"
       cat "$f.new" > "$f" && rm -f "$f.new"
@@ -58,6 +60,6 @@ if [ -n "$name" ]; then
       exit 0
     fi
     worklane instance init "$1" --repo "$2" --github "$3" --agent-user "$agent" --agent-home "$agent_home"
-  ' "$name" "$(checkouts_root)/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
+  ' "$name" "$(checkouts_root)/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")" "$(state_root_of "$coord")"
   echo "next: credentials.sh $name github-app ..., then checkout.sh $name $repo"
 fi
