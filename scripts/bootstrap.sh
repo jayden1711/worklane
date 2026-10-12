@@ -201,11 +201,27 @@ else
   for f in "$here/package.json" "$here/../package.json"; do [ -f "$f" ] && { pkg="$f"; break; }; done
   engine_repo="$([ -n "$pkg" ] && sed -n 's#.*"url": *"[^"]*github\.com/\([^/"]*/[^/".]*\).*#\1#p' "$pkg" | head -1 || true)"
   [ -n "$engine_repo" ] || die "can't tell the engine's repo (no package.json with a GitHub repository next to this script); pass --engine <spec>"
-  spec="github:$engine_repo#$ENGINE_COMMIT" id="release:$ENGINE_TAG:$ENGINE_COMMIT"
+  spec="" id="release:$ENGINE_TAG:$ENGINE_COMMIT"
 fi
 if [ "$(cat "$marker" 2>/dev/null || true)" = "$id" ] && command -v "$CLI" >/dev/null 2>&1; then
   ok "$CLI $("$CLI" --version) ($id)"
 else
+  if [ -z "$spec" ]; then
+    # The release commit itself (a commit id is its own checksum), packed here: npm's own install from a git
+    # spec "prepares" it with a nested install that fails under a --prefix.
+    url="https://github.com/$engine_repo.git"
+    if [ "$DRY" = 1 ]; then
+      printf '   would fetch %s at %s (%s), check the commit, and pack it\n' "$url" "$ENGINE_COMMIT" "$ENGINE_TAG"
+      spec="$work/engine.tgz"
+    else
+      git init -q "$work/engine"
+      git -C "$work/engine" fetch -q --depth 1 "$url" "$ENGINE_COMMIT"
+      git -C "$work/engine" checkout -q --detach FETCH_HEAD
+      [ "$(git -C "$work/engine" rev-parse HEAD)" = "$ENGINE_COMMIT" ] || die "fetched $url but got $(git -C "$work/engine" rev-parse HEAD), not $ENGINE_COMMIT"
+      [ -f "$work/engine/dist/src/cli.js" ] || die "$ENGINE_TAG ($ENGINE_COMMIT) carries no built dist/: not a release commit"
+      spec="$work/$( (cd "$work/engine" && npm pack --ignore-scripts --silent --pack-destination "$work") | tail -1)"
+    fi
+  fi
   # --ignore-scripts: a release carries its built dist/, so nothing needs to run at install.
   run npm install -g --prefix "$PREFIX" --ignore-scripts --no-audit --no-fund "$spec"
   if [ "$DRY" = 1 ]; then printf '   would record %s in %s\n' "$id" "$marker"; else printf '%s\n' "$id" > "$marker"; fi

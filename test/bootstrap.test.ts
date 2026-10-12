@@ -46,6 +46,13 @@ function machine(o: { os?: 'Linux' | 'Darwin'; arch?: string; have?: Record<stri
   return { dir, bin, repo, prefix, run, calls, stub };
 }
 
+/** The pinned release recorded as installed (so a run never fetches it). */
+function released(m: ReturnType<typeof machine>) {
+  mkdirSync(join(m.prefix, 'share', 'worklane-bootstrap'), { recursive: true });
+  writeFileSync(join(m.prefix, 'share', 'worklane-bootstrap', 'engine'), 'release:v0.4.1:9c24a10eb91ffac894e24f0b0a54d8407f23d423\n');
+  return m;
+}
+
 /** Everything already installed at the right versions; the engine stub records its subcommands. */
 const installed = (over: Record<string, string> = {}) => ({
   node: 'echo v22.23.3',
@@ -78,7 +85,8 @@ test('bootstrap: a dry run on a bare Linux machine plans every step, pinned and 
   assert.match(r.out, /would download node-v22\.23\.3-linux-x64\.tar\.xz \(sha256 df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de\)/);
   assert.match(r.out, /would download gitleaks_8\.30\.1_linux_x64\.tar\.gz \(sha256 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb\)/);
   assert.match(r.out, /would run: npm install -g --prefix \S+ --no-audit --no-fund @anthropic-ai\/claude-code@2\.1\.296/);
-  assert.match(r.out, new RegExp(`would run: npm install -g --prefix \\S+ --ignore-scripts --no-audit --no-fund github:${esc(ENGINE_REPO)}#9c24a10eb91ffac894e24f0b0a54d8407f23d423`), 'the engine at its release commit, not main');
+  assert.match(r.out, new RegExp(`would fetch https://github\\.com/${esc(ENGINE_REPO)}\\.git at 9c24a10eb91ffac894e24f0b0a54d8407f23d423 \\(v0\\.4\\.1\\), check the commit, and pack it`), 'the engine at its release commit, not main');
+  assert.match(r.out, /would run: npm install -g --prefix \S+ --ignore-scripts --no-audit --no-fund \S+engine\.tgz/);
   assert.match(r.out, new RegExp(`would run: worklane install --root ${m.repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(r.out, /would run: worklane doctor --root/);
   assert.ok(!existsSync(m.prefix), 'nothing was created');
@@ -122,27 +130,28 @@ test('bootstrap: idempotent: with everything in place it installs nothing, sets 
   assert.deepEqual(calls, [`worklane install --root ${m.repo}`, 'worklane add --help', `worklane doctor --root ${m.repo}`, `worklane install --root ${m.repo}`, 'worklane add --help', `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
 });
 
-test('bootstrap: the engine is installed once per release (recorded), and again only when the source changes', { skip }, () => {
+test('bootstrap: the engine is installed once per source (recorded), and again only when the source changes', { skip }, () => {
+  // A local tarball here (the release path fetches from GitHub; its dry run is above and the CI job runs it).
   const m = machine({ have: installed() });
-  assert.equal(m.run(m.repo).code, 0);
-  assert.equal(m.run(m.repo).code, 0);
   const npm = () => m.calls().filter((c) => c.startsWith('npm '));
-  assert.equal(npm().length, 1, 'one engine install over two runs');
-  assert.match(npm()[0]!, new RegExp(`--ignore-scripts .*github:${esc(ENGINE_REPO)}#9c24a10`));
   const tgz = join(m.dir, 'engine.tgz');
   writeFileSync(tgz, 'a');
-  m.run('--engine', tgz, m.repo);
-  m.run('--engine', tgz, m.repo);
-  assert.equal(npm().length, 2, 'a local tarball: once for its content');
+  assert.equal(m.run('--engine', tgz, m.repo).code, 0);
+  assert.equal(m.run('--engine', tgz, m.repo).code, 0);
+  assert.equal(npm().length, 1, 'one engine install over two runs');
+  assert.match(npm()[0]!, /--ignore-scripts --no-audit --no-fund \S+engine\.tgz/);
   writeFileSync(tgz, 'b');
   m.run('--engine', tgz, m.repo);
-  assert.equal(npm().length, 3, 'new content, installed again');
+  assert.equal(npm().length, 2, 'new content, installed again');
+  m.run('--engine', 'some-spec@1.0.0', m.repo);
+  m.run('--engine', 'some-spec@1.0.0', m.repo);
+  assert.equal(npm().length, 3, 'an npm spec: once');
 });
 
 test("bootstrap: doctor's result is the script's; `add` runs when the engine has it", { skip }, () => {
-  const failing = machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.4.1 ;; doctor) exit 1 ;; add) exit 2 ;; *) exit 0 ;; esac' }) });
+  const failing = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.4.1 ;; doctor) exit 1 ;; add) exit 2 ;; *) exit 0 ;; esac' }) }));
   assert.equal(failing.run(failing.repo).code, 1);
-  const withAdd = machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.5.0 ;; *) exit 0 ;; esac' }) });
+  const withAdd = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.5.0 ;; *) exit 0 ;; esac' }) }));
   assert.equal(withAdd.run(withAdd.repo).code, 0);
   assert.ok(withAdd.calls().includes(`worklane add --root ${withAdd.repo}`));
 });
@@ -196,5 +205,5 @@ test("bootstrap: the release comes from the repo its package.json names; with no
   assert.match(r.stderr, /can't tell the engine's repo .* pass --engine/);
   writeFileSync(join(alone, 'package.json'), JSON.stringify({ repository: { type: 'git', url: 'git+https://github.com/example-org/engine-fork.git' } }));
   const f = spawnSync(join(m.bin, 'bash'), [join(alone, 'bootstrap.sh'), '--dry-run', '--no-repo'], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir, WORKLANE_PREFIX: m.prefix } });
-  assert.match(f.stdout, /github:example-org\/engine-fork#9c24a10eb91ffac894e24f0b0a54d8407f23d423/, 'a package.json beside it, as in the Docker image');
+  assert.match(f.stdout, /would fetch https:\/\/github\.com\/example-org\/engine-fork\.git at 9c24a10eb91ffac894e24f0b0a54d8407f23d423/, 'a package.json beside it, as in the Docker image');
 });
