@@ -680,3 +680,9 @@ test('a research run on its page: each search, each page fetched or refused (lin
   assert.match(html, /role="alert"[^>]*data-testid="run-research-capped"[\s\S]*?Stopped at a cap:[\s\S]*?searches: 20 of 20 today/);
   assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
 });
+
+test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
+  assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
+  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
+});

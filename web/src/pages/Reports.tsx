@@ -5,8 +5,14 @@ import { Header } from './Overview';
 
 const getReport = () => api<{ report: string }>('/api/report');
 
+/** For a viewer the state says may not read the preview, the refusal the server would give; null for the owner and writers. */
+export const reportRefusal = (state: Pick<State, 'canReadReports' | 'owners' | 'user'>) =>
+  state.canReadReports === false ? `the report preview is for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+
 export function Reports({ state, pulse }: { state: State; pulse: number }) {
-  const { data, error } = useFetch(getReport, pulse);
+  const refused = reportRefusal(state);
+  // Refused up front (the state says so): not asked for at all.
+  const { data, error } = useFetch(() => (refused ? Promise.resolve(null) : getReport()), pulse);
   return (
     <div data-testid="page-reports">
       <Header title="Reports" sub="posted at the configured times as comments on one report issue" />
@@ -16,7 +22,13 @@ export function Reports({ state, pulse }: { state: State; pulse: number }) {
       <div className="grid gap-6 p-6 lg:grid-cols-3">
         <Card className="lg:col-span-2" data-testid="report-preview">
           <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Next report (preview)</div>
-          <pre className="max-h-[640px] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-5">{error ? `Can't load the report: ${error}` : (data?.report ?? 'Loading…')}</pre>
+          {refused ? (
+            <div className="p-4 text-[13px] text-ink-3" data-testid="report-refused">
+              {refused.replace(/^the/, 'The')}.
+            </div>
+          ) : (
+            <pre className="max-h-[640px] overflow-auto whitespace-pre-wrap p-4 font-mono text-xs leading-5">{error ? `Can't load the report: ${error}` : (data?.report ?? 'Loading…')}</pre>
+          )}
         </Card>
         <Card className="overflow-hidden">
           <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Posted</div>

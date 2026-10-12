@@ -105,6 +105,11 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 
 export { mayAnswer };
 
+/** Who may read the next report's preview (spend, and the throughput section): the project's owner or one of its writers. */
+export function mayReadReports(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
+
 /** Who may read throughput (what runs cost, where PRs waited): the project's owner or one of its writers. */
 export function mayReadThroughput(user: string, owners: { default: string; writers: string[] }): boolean {
   return mayAnswer(owners.default, user, owners);
@@ -546,6 +551,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
       canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
+      // Whether this viewer may read the report preview, so the page asks for it only when it will get it.
+      canReadReports: mayReadReports(opts.user, opts.cfg.project.owners),
       // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
       canReadRuns: mayReadRuns(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
@@ -563,10 +570,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         if (!authed(req, url)) return json(res, 401, { error: 'missing or wrong token; open the URL printed by `dashboard`' });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state());
+        // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
+        // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
+          const owners = opts.cfg.project.owners;
+          if (!mayReadReports(opts.user, owners)) return json(res, 403, { error: `the report preview is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
           const events = readEvents(opts.eventsDb);
           const last = [...events].reverse().find((e) => e.type === 'report.posted');
-          return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000) }).markdown });
+          return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
         if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, settingsView(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {

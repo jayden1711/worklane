@@ -183,6 +183,8 @@ export interface State {
   brand: { name: string; cli: string };
   /** Whether this viewer may read the throughput panel (the owner or a writer); absent from an older server: yes. */
   canReadThroughput?: boolean;
+  /** Whether this viewer may read the report preview (the owner or a writer); absent from an older server: yes. */
+  canReadReports?: boolean;
   /** Whether this viewer may read agent runs (the owner or a writer); absent from an older server: yes. */
   canReadRuns?: boolean;
   project: { name: string; repo: string; landMode: string };
