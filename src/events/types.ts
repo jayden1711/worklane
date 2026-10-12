@@ -342,6 +342,33 @@ export const EventSchemas = {
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
+  /** PR mode with batching (coordinator/pr-batch.ts): a PR ready on its fast checks waits, at this head, for a batch. */
+  'pr_batch.queued': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  /**
+   * One step of a PR batch. built: the batch's merge commit (`sha`, on `base`) of `prs`, in queue order; green/red: its
+   * full run (`run`); checks_posted: the passing full check posted on that PR's head; culprit: the PR the bisection
+   * found, returned with the failing `tier`; dropped: a PR whose head changed (or that closed) left the batch; conflict:
+   * it does not merge onto the base; requeued: back in the queue for the next batch; abandoned: cut off by a restart
+   * before its run ended; resumed: a green batch's checks finished after a restart; error: the batch could not be
+   * built or run; finished: nothing more to do. `parent`: the batch a bisection step tests a prefix of.
+   */
+  'pr_batch.step': z.strictObject({
+    id: z.string(),
+    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished']),
+    prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha })),
+    sha: sha.nullable(),
+    base: sha.nullable(),
+    parent: z.string().nullable(),
+    tier: z.string().nullable(),
+    run: z
+      .strictObject({
+        id: z.string(),
+        ok: z.boolean(),
+        tiers: z.array(z.strictObject({ tier: z.string(), ok: z.boolean(), durationMs: z.number().nonnegative(), summary: z.string(), logRef: z.string() })),
+      })
+      .nullable(),
+    detail: z.string(),
+  }),
   /** `issue`: the issue whose landing triggered it (absent on older events and manual deploys). */
   'deploy.requested': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
   'deploy.verified': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
