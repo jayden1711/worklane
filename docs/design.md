@@ -4,7 +4,7 @@ Status: **accepted at step 0 (2026-10-07)**, with the answers in §19. Name: Wor
 
 > **Changed since (stage 3, 2026-10-09).** Worklane keeps only what has shown it catches real problems, plus the controls that limit damage whatever the evidence: separate OS users and credential checks, the sandbox, protected categories that need a human, checks the harness runs itself rather than agents' claims, and no push to main. Removed for lack of evidence: the adaptive agent cap (a fixed, configurable cap remains, default 2), the optional roles of step 7, trust stages, the scorecard, the lessons loop and the Stop gate hook (the coordinator re-runs every `done_when` check itself before anything lands). A removed feature comes back only if the same failure happens twice. Sections below that describe these are kept as history.
 
-This document is the contract for steps 1–7. Each section notes the precedent it follows (details and licenses in [prior-art.md](prior-art.md)) and the step that builds it. Examples describe a hypothetical project. Everything specific to a real project lives in that project's `.worklane/` folder (config plus a `NOTES.md`), never in this repo; a CI denylist check enforces this.
+This document describes the architecture. Each section notes the precedent it follows (details and licenses in [prior-art.md](prior-art.md)); the order it was built in is in §18. Examples describe a hypothetical project. Everything specific to a real project lives in that project's `.worklane/` folder (config plus a `NOTES.md`), never in this repo; a CI denylist check enforces this.
 
 ---
 
@@ -21,7 +21,7 @@ This document is the contract for steps 1–7. Each section notes the precedent 
 
 ## 2. Packaging, naming, platforms
 
-- **Engine:** this repo, installed as a pinned dev dependency: `npm install -D github:jayden1711/worklane#vX.Y.Z`. A `prepare` script builds `dist/` on install. Release tags are signed and the changelog says what changed in guardrails.
+- **Engine:** this repo, installed as a pinned dev dependency: `npm install -D github:jayden1711/worklane#vX.Y.Z`. A `prepare` script builds `dist/` on install. Signed release tags, and a changelog that says what changed in guardrails, are planned in the releases track.
 - **CLI:** `worklane`.
 
   | Command | What it does |
@@ -31,15 +31,16 @@ This document is the contract for steps 1–7. Each section notes the precedent 
   | `up` / `down` | Install or remove the coordinator service |
   | `dashboard` | Open the UI |
   | `guardrails check` | Check rules for conflicts |
-  | `land` | Manual land-queue operations |
   | `report` | Generate a report |
-  | `rename` | Rename the product (dev only) |
+  | `demo <dir>` | Seed a demo project worked by the real coordinator and open its dashboard |
+
+  These are the main ones; `worklane --help` lists every command. Renaming the product is a repo script, not a CLI command: `npm run rename -- <name>`.
 
 - **Config folder:** `.worklane/`, named after the tool following the `.github/`, `.claude/`, `.husky/` and `.pitboss/` precedent. `.harness/` was rejected because Harness.io already uses it, and projects often already call their test framework a "harness".
-- **Language:** TypeScript on Node. Hooks and `install`/`doctor` support Node ≥ 22.13, so they work in projects whose CI still pins Node 22. The coordinator requires Node ≥ 24 because it uses `node:sqlite`, which is release-candidate stability there and experimental on 22. `doctor` checks both.
+- **Language:** TypeScript on Node ≥ 22.13 (`engines` in package.json), so it works in projects whose CI still pins Node 22. The event log uses the built-in `node:sqlite`, which needs no flag from 22.13. CI runs everything on Node 22 and 24. `doctor` fails below 22.13.
 - **Dependencies:** few and permissive.
-  - Runtime: `@anthropic-ai/claude-agent-sdk`, `yaml`, `zod`. Built-ins cover SQLite, HTTP, SSE, file locks and `statfs`.
-  - The Agent SDK is not OSS; it's under Anthropic's terms. We depend on it from npm and never vendor it.
+  - Runtime: `yaml` and `zod`, nothing else. Built-ins cover SQLite, HTTP, SSE, file locks and `statfs`.
+  - Agents run through the locally installed Claude Code CLI (`claude -p`), which is not a dependency of the package and is never vendored.
 - **OS adapter layer** (`src/os/`). This is the only place OS-specific code may live, and a lint enforces that. The adapter is chosen by `os: auto | macos | linux | windows-wsl` (default `auto`).
 
   | Concern | macOS | Linux | Windows |
@@ -69,7 +70,7 @@ This document is the contract for steps 1–7. Each section notes the precedent 
  │                │ event log (SQLite)│──────────────► Dashboard (localhost) │
  │                └────────▲─────────┘                 reports, scorecard   │
  └─────────────────────────┼────────────────────────────────────────────────┘
-          spawn (Agent SDK, project settings only, no GitHub token)
+          spawn (claude -p, project settings only, no GitHub token)
      ┌───────────┬─────────┴──────┬───────────────┬──────────────┐
   worker×N     evaluator         pm        chief_of_staff     researcher …
   (worktree)  (read-only,        │                │
@@ -77,7 +78,7 @@ This document is the contract for steps 1–7. Each section notes the precedent 
      └── hooks: PreToolUse guardrails · PostToolUse format · Stop gate
 ```
 
-## 4. Configuration (step 1)
+## 4. Configuration
 
 All config sits in `<project>/.worklane/` and is validated by zod schemas at startup. Invalid config exits non-zero with every error, the file and the path: it fails loudly and never falls back to defaults. JSON Schema is exported from zod so editors can autocomplete.
 
@@ -114,7 +115,7 @@ roles:
 - Model aliases (`opus`, `sonnet`, `haiku`) are resolved to full model IDs when a run starts, and the full ID is recorded in the event log so runs are reproducible.
 - A role with `enabled: false` is never spawned. Turning one on or off from the dashboard is a config edit that lands through review level L3, because it is harness config.
 
-## 5. Event log (step 2)
+## 5. Event log
 
 - **Storage.** `node:sqlite` in WAL mode, behind a small data-access layer, so better-sqlite3 can replace it. One database per coordinator, at `~/.local/state/worklane/<owner>/<repo>/events.db` (the platform equivalent on each OS).
 - **Schema.** `events(id INTEGER PK, ts, type, actor, subject, run_id, payload JSON, source)` is **append-only**. The dashboard, reports, scorecard and inbox are **projections**: tables or views rebuilt from events, and deleting one and replaying gives the same result.
@@ -135,7 +136,7 @@ roles:
   - **Success is only reported after reading the copy back and comparing its checksum and its latest event id.** This is a day-one regression test (§17).
   - Optional off-machine push (e.g. to a private git branch or a bucket) is verified the same way: a remote read-back, not the exit code.
 
-## 6. Backlog and ownership (step 2)
+## 6. Backlog and ownership
 
 - **Tracker:** GitHub Issues on the project repo, through a `backlog` adapter: `github`, or `file` for tests and the example project.
 - **Labels** are created in step 2 by `worklane install --labels`:
@@ -175,7 +176,7 @@ roles:
   - **No agreed contract, no build:** the scheduler doesn't claim the issue.
   - `manual:` checks make the change at least L2.
 
-## 7. Coordinator (step 2)
+## 7. Coordinator
 
 - It is a long-running service installed by `worklane up`: a launchd, systemd or WSL unit with restart-always. **It does not depend on any Claude session.** The dashboard, scheduled reports, backups and deploy checks are all timers inside it. That gives it no session-bound watchers (regression test §17).
 - **Task state machine**, checkpointed to SQLite on every transition, so a crash resumes from the last state.
@@ -210,7 +211,7 @@ roles:
   - `collisions` lists unlanded changes that touch the same files.
 - **Agent runs** go through an `AgentRunner` interface with two implementations:
   - **`cli`** (default): spawns the locally installed `claude -p --output-format stream-json` with the user's existing auth and `--setting-sources project`.
-  - **`sdk`**: the Agent SDK `query()` with `ANTHROPIC_API_KEY`.
+  - **`sdk`**: the same CLI, authenticated with `ANTHROPIC_API_KEY` (passed through to the run). There is no in-process SDK runner.
 
   Both runners use the same settings:
   - `settingSources: ['project']`, so user-level plugins and hooks never load inside agent sessions.
@@ -244,13 +245,13 @@ roles:
   - A run with no event or tool call for `stall_minutes` is killed and requeued.
   - Per-run, per-role and daily budgets. When the daily budget is hit, nothing new starts; running work finishes or is checkpointed. Spend is visible on the Agents page.
   - `max_attempts` per issue, after which it becomes `blocked` with a decision for its owner.
-- **Auth.** There is no sign-in flow; the harness never handles credentials.
+- **Auth.** There is no sign-in flow for agents; the harness never handles their credentials. (People sign in to the dashboard hub with GitHub; their role per instance is their permission on its repo: docs/dashboard.md.)
   - The `cli` runner uses whatever auth the user configured for Claude Code.
   - The `sdk` runner uses `ANTHROPIC_API_KEY`.
   - Budgets track estimated cost either way, from `total_cost_usd`.
   - Terms for unattended subscription use are reviewed in `docs/auth.md` before step 2.
 
-## 8. Roles (steps 2, 5, 7)
+## 8. Roles
 
 | Role | Step | Context / tools | Output |
 |---|---|---|---|
@@ -273,7 +274,7 @@ roles:
 5. The verdict can say the *test* is wrong. Allow at most 2 feedback rounds, then the issue is blocked.
 6. If no repro is possible (docs, UI copy), the evaluator records `repro: not_applicable` with a reason. That sets the review level to at least L1.
 
-## 9. Review levels (step 2, thresholds tuned in step 5)
+## 9. Review levels
 
 - The level is computed by code from:
   - paths touched (globs)
@@ -311,7 +312,7 @@ How each level is cleared:
 - **Trust stages move the thresholds.** A promotion (e.g. bigger UI changes allowed at L1) is a decision the owner approves. A metric regression demotes automatically, and that is an event.
 - A project can start from its current practice. A team where agents already land their own changes can start at L0–L2 instead of "humans merge everything".
 
-## 10. Land queue (step 2 serial; step 4 batching)
+## 10. Land queue
 
 - **Modes:**
   - `land_mode: direct`: the coordinator fast-forward pushes to `main`. A plain non-force push is itself a compare-and-swap: it is rejected if `main` moved.
@@ -368,7 +369,7 @@ How each level is cleared:
   - "Get main green" is the first backlog item and red_attributor's first job.
 - **Machine-wide full-run lock.** Only one full suite runs per machine, across all harnesses on the box (§11).
 
-## 11. Speed and the resource governor (step 4)
+## 11. Speed and the resource governor
 
 - **Test-runner adapter interface:**
   ```ts
@@ -402,7 +403,7 @@ How each level is cleared:
   - Skills and slash commands cover repeated workflows.
   - A PostToolUse formatter runs only if the project has one.
 
-## 12. Guardrails (step 1)
+## 12. Guardrails
 
 **Two modes**, chosen by `WORKLANE_AGENT=1`, which the coordinator sets on every headless run:
 
@@ -502,7 +503,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
 - It **never** passes by default. "Busy" means wait or retry and then report; it never means skip.
 - The coordinator re-verifies independently before accepting a proposal, so the hook isn't the only gate.
 
-## 13. Deploy verification (step 2 for staging, step 5 for prod)
+## 13. Deploy verification
 
 - `deploy.yaml` declares environments and an adapter (generic adapters, e.g. Railway; project values are config).
 - Platform auto-deploys can't be trusted to fire. Some platforms silently skip path-filtered deploys, so the verifier never assumes one happened:
@@ -511,7 +512,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
 - A skipped deploy, a failed deploy, or a SHA mismatch is `deploy.failed`: a red row on the Deploys page and an Inbox item for the owner of deploys.
 - An issue is `done` only after `deploy.verified`.
 
-## 14. Dashboard (steps 3 and 6)
+## 14. Dashboard
 
 - **Stack:** Vite + React + TypeScript + Tailwind + shadcn/ui (Radix) + cmdk + TanStack Router, Table and Query, plus react-resizable-panels and sonner. All MIT.
   - Plane (AGPL) is a design reference only.
@@ -549,7 +550,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
 - Dark and light themes.
 - **Shared mode (step 6):** each coordinator pushes events to a small relay (a Cloudflare Worker + Durable Object, behind Cloudflare Access) that merges both humans' streams with GitHub webhooks. Local mode never needs it.
 
-## 15. Reports, scorecard, trust stages, learning (step 5)
+## 15. Reports, scorecard, trust stages, learning
 
 - **Reports** at the configured times, generated from the log by the chief_of_staff with a strict template:
   - what landed and deployed
@@ -602,7 +603,7 @@ Install adds config only. A project's application code is never changed. Any sma
 
 These ship in step 1 or step 2, whichever step introduces the code they guard. Step 1 ships the Stop gate, check-status and 403 tests.
 
-## 17a. Step 2 as built (2026-10-07)
+## 17a. As first built (2026-10-07)
 
 What exists, and where it deviates from the plan above:
 
@@ -616,7 +617,7 @@ What exists, and where it deviates from the plan above:
 - **Runner:** `claude -p` with `--setting-sources project`, `--strict-mcp-config`, `--permission-mode dontAsk`, explicit allowed tools, and per-run turn and USD caps. `claude auth status` is checked before each run. The Agent SDK path (`agent_runtime.kind: sdk`) uses the same CLI with an API key. An in-process SDK runner is deferred.
 - **Live verification:** the example project ran end to end with the real CLI (haiku for every role). Repro, then fix, then the coordinator's checks, then the verdict, then L1, then landed and closed, in under a minute for about $0.01.
 
-## 18. Build order
+## 18. Build order (history)
 
 | Step | Contents | Ends with |
 |---|---|---|
@@ -629,14 +630,14 @@ What exists, and where it deviates from the plan above:
 | 6 | remaining pages, Tauri, shared relay | |
 | 7 | security, red_attributor, ci_repair, qa_playtester, monitor, release_prep | |
 
-## 19. Decisions from step-0 review (2026-10-07)
+## 19. Decisions from the first design review (2026-10-07)
 
 1. **Name:** Worklane.
 2. **Owners** are per project, in `owners.yaml`: areas map to people, unassigned work goes to a default owner, and the owner can be changed per issue.
 3. **Budget:** `daily_budget_usd` is a **usage guard on estimated cost**, not an API bill. It applies whichever runner is used.
 4. **Auth and runner.** No sign-in flow.
    - **Default runner:** the locally installed Claude Code CLI (`claude -p`, stream-json) with whatever auth the user already configured.
-   - **Option:** the Agent SDK with `ANTHROPIC_API_KEY`.
+   - **Option:** the same CLI with `ANTHROPIC_API_KEY` (`agent_runtime.kind: sdk`).
    - Both runners sit behind one `AgentRunner` interface.
   - [auth.md](auth.md) cites Anthropic's docs and terms. The CLI runner checks `claude auth status` before each run and strips API keys from the agent environment, so a subscription is never silently swapped for per-token billing. It uses conservative concurrency and optional run windows.
 5. **Production DB:** agents get no production DB access until the project owner creates a read-only role (§12.1).

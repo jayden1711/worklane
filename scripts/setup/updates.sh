@@ -6,15 +6,19 @@
 #
 #   bash scripts/setup/updates.sh [--check "name" ...]      (repeat --check for each required check)
 #
-#   - /usr/local/libexec/worklane-update (root:root 0755): every 10 minutes, when on, installs main's
-#     newest commit only if it fast-forwards the installed engine, every check on it is green and every
+#   - /usr/local/libexec/worklane-update (root:root 0755): every 10 minutes, when on, installs the newest
+#     signed release tag (channel "release", new installs: verified with `git verify-tag` against
+#     /etc/worklane/allowed_signers, which the owner creates) or main's newest commit (channel "main", what an
+#     existing updates.json without a channel keeps), only if it moves forward, every check on it is green and every
 #     required check ran and passed (none missing, pending, failed or skipped), and no agent or full test
 #     run is going. It builds as a throwaway unprivileged user (systemd DynamicUser) with
 #     `npm ci --ignore-scripts`; root only copies the result. It restarts the worklane-*.service units and
 #     rolls back if any isn't active and steady within 2 minutes.
-#   - /etc/worklane/updates.json (root:root 0644): enabled (false), the repo and branch to follow (this
-#     checkout's origin, main), and the required checks (each --check, or the defaults below). An existing file
-#     keeps its values.
+#   - /etc/worklane/updates.json (root:root 0644): enabled (false), channel ("release"), allowed_signers, the repo
+#     and branch to follow (this checkout's origin, main), and the required checks (each --check, or the defaults
+#     below). An existing file keeps its values, its channel included.
+#   - /etc/worklane/allowed_signers (root:root 0644, yours to create): one line per key allowed to sign releases,
+#     `<email> <public key>` (git's allowed signers format). Without it the release channel installs nothing.
 #   - /var/lib/worklane/updates.jsonl (root:root 0644): every attempt, install, refusal and rollback.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
@@ -95,4 +99,5 @@ WantedBy=timers.target"
 systemctl daemon-reload
 systemctl enable --now worklane-update.timer
 systemctl list-timers worklane-update.timer --no-pager
+[ -f /etc/worklane/allowed_signers ] || echo "NOTE: no /etc/worklane/allowed_signers yet: the release channel installs nothing until it lists the key that signs releases"
 echo "updates are $(node -e 'process.stdout.write(require("/etc/worklane/updates.json").enabled ? "ON" : "OFF")'); turn them on from the hub's settings once machine-helper.sh is set up"

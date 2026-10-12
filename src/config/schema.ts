@@ -2,10 +2,29 @@
 // a typo fails loudly instead of silently falling back to a default.
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
+import { providerOf, providerRefusal } from '../providers.js';
+import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
+
+/** An open-model provider (src/providers.ts): an Anthropic-compatible endpoint, a credential by name, its model id. */
+const provider = z.strictObject({
+  base_url: z.string().url().refine((u) => /^https?:\/\//.test(u), 'an http(s) URL'),
+  /** The key's name in the instance's credentials.yaml provider_keys; the key itself is never in the repo. */
+  credential: z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/, 'a credential name (lowercase letters, digits, _ or -)'),
+  model: z.string().min(1),
+  /**
+   * A hosted model's price tier, by its per-token price against Anthropic's haiku, sonnet and opus: the instance's
+   * model cap applies to it as to theirs. Required for a hosted model to run at all; a local model costs nothing.
+   */
+  tier: z.enum(['haiku', 'sonnet', 'opus']).optional(),
+  usd_per_mtok_in: z.number().nonnegative().optional(),
+  usd_per_mtok_out: z.number().nonnegative().optional(),
+  gpu_lock: z.string().refine((p) => p.startsWith('/'), 'an absolute path').optional(),
+  latency_ms: z.number().int().positive().max(60_000).optional(),
+});
 const regex = z.string().refine(
   (s) => {
     try {
@@ -40,7 +59,8 @@ export const ProjectConfig = z.strictObject({
   runner: z.enum(['local', 'ci', 'remote-machine']).default('local'),
   agent_runtime: z
     .strictObject({
-      kind: z.enum(['cli', 'sdk']).default('cli'),
+      // cli: the claude CLI on a Claude subscription login. api_key: the claude CLI billed to an API key (`sdk` is the old name).
+      kind: z.enum(['cli', 'api_key', 'sdk']).default('cli').transform((k) => (k === 'sdk' ? 'api_key' : k)),
       max_concurrency: z.number().int().min(1).max(32).default(2),
       run_windows: z.array(z.strictObject({ from: hhmm, to: hhmm })).default([]),
     })
@@ -172,6 +192,34 @@ export const AgentsConfig = z
      * the evaluator role's model. A failed or uncertain verdict from the cheap model is judged once more by the
      * evaluator role's model before anything is rejected.
      */
+    /**
+     * Which model each kind of run uses (src/model-routing.ts); each key overrides its default. Builds: `build`
+     * (L1/L2) and `build_high_risk` (issues with a high_risk_labels label, or after escalate_after failed attempts).
+     */
+    model_routing: z
+      .strictObject({
+        build: model.optional(),
+        build_high_risk: model.optional(),
+        high_risk_labels: z.array(z.string().min(1)).optional(),
+        escalate_after: z.number().int().min(0).max(10).optional(),
+        planner: model.optional(),
+        research: model.optional(),
+        intake_triage: model.optional(),
+        intake_replier: model.optional(),
+        stage_judge: model.optional(),
+        eval_answer: model.optional(),
+      })
+      .optional(),
+    /**
+     * Open-model providers a model setting can name: `local`, or `hosted:<name>`. Each instance opts in (policy.yaml
+     * settings.providers); what each may run is fixed in code (src/providers.ts).
+     */
+    providers: z
+      .strictObject({
+        local: provider.optional(),
+        hosted: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,40}$/), provider).optional(),
+      })
+      .optional(),
     eval_routing: z
       .strictObject({
         cheap_model: model.default('sonnet'),
@@ -203,6 +251,26 @@ export const AgentsConfig = z
     if (c.roles.evaluator?.enabled === false && c.roles.workers?.enabled) {
       ctx.addIssue({ code: 'custom', path: ['roles', 'evaluator', 'enabled'], message: 'workers require an enabled evaluator' });
     }
+    // An open model only where code allows it, and only one that is configured.
+    for (const [key, value] of Object.entries(c.model_routing ?? {})) {
+      if (typeof value !== 'string') continue;
+      const named = providerOf(value);
+      if (!named) continue;
+      const route = key === 'build' ? 'build' : key === 'build_high_risk' ? 'build' : (key as RoutedRun);
+      const why = key === 'build_high_risk' ? 'hosted and local models never build high-risk work' : providerRefusal(named.kind, { route });
+      if (why) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: why });
+      const known = named.kind === 'local' ? c.providers?.local : c.providers?.hosted?.[named.name];
+      if (!known) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: `${value} is not configured under providers` });
+    }
+    // Everywhere else a model is named (role models, tiered evaluation, instruction evals), only Anthropic models.
+    const plain = (path: (string | number)[], m: string | undefined) => m && providerOf(m) && ctx.addIssue({ code: 'custom', path, message: `${m}: open models are only for model_routing (the evaluator and roles keep their models)` });
+    for (const [r, cfg] of Object.entries(c.roles)) {
+      plain(['roles', r, 'model'], cfg?.model);
+      plain(['roles', r, 'hard_issues_model'], cfg?.hard_issues_model);
+    }
+    plain(['eval_routing', 'cheap_model'], c.eval_routing.cheap_model);
+    plain(['instruction_evals', 'model'], c.instruction_evals.model);
+    plain(['instruction_evals', 'judge'], c.instruction_evals.judge);
   });
 
 // ---------- guardrails.yaml ----------
@@ -383,6 +451,8 @@ export const TestsConfig = z.strictObject({
     .prefault({}),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
   checks: z.array(z.string()).default([]),
+  /** How long a project command (a check, a suite, a setup step) or an agent run may take before it's stopped. */
+  command_timeout_s: z.number().int().min(60).max(86_400).default(7200),
   tiers: z
     .array(
       z.strictObject({

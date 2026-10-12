@@ -12,7 +12,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
 import { SETTING_KEYS } from '../src/settings.js';
-import { repoRoot } from './helpers.js';
+import { asPerson, exampleRoles, repoRoot } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -28,6 +28,8 @@ interface Render {
   renderThroughputPanel(state: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderSetup(data: unknown): string;
+  keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
@@ -46,6 +48,10 @@ interface Render {
   boundsOf(key: string, d: unknown): string;
   LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  probeMe(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  renderSignIn(): string;
+  renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
+  renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
   actionHref(a: unknown): string | null;
@@ -91,9 +97,9 @@ before(async () => {
     else process.env[`${BRAND.envPrefix}_STATE_DIR`] = prev;
   });
   const state = async (user: string) => {
-    const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'web-render-state-')), user, slotsDir: mkdtempSync(join(tmpdir(), 'web-render-slots-')) });
+    const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'web-render-state-')), user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'web-render-slots-')) });
     try {
-      return (await (await fetch(`${d.url.split('/?')[0]}/api/state`, { headers: { authorization: `Bearer ${d.token}` } })).json()) as State;
+      return (await (await fetch(`${d.url.split('/?')[0]}/api/state`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(user) } })).json()) as State;
     } finally {
       await d.close();
     }
@@ -197,6 +203,41 @@ test('the PR page: what waits for you and exactly why, what is moving, what auto
   }
 });
 
+test('sign-in: the hub page shows a GitHub sign-in when nobody is signed in; the signed-in person, their role and a sign-out; the owners\' audit log', async () => {
+  // Who is signed in is asked only on a hub page; a 401 there means: show the sign-in.
+  const asked: string[] = [];
+  const signedOut = async (url: string) => (asked.push(url), { ok: true, json: async () => ({ login: null, csrf: null, breakGlass: false }) });
+  assert.equal(await r.probeMe(false, signedOut), null);
+  assert.deepEqual(asked, [], "an instance's own dashboard has no sign-in: nothing asked");
+  assert.equal(await r.probeMe(true, signedOut, ''), null, 'not signed in');
+  assert.deepEqual(asked, ['/api/me']);
+  const signedIn = async () => ({ ok: true, json: async () => ({ login: 'example-collaborator', csrf: 'c', breakGlass: false }) });
+  assert.deepEqual(await r.probeMe(true, signedIn, ''), { login: 'example-collaborator', csrf: 'c', breakGlass: false });
+
+  const page = r.renderSignIn();
+  assert.match(page, /data-testid="sign-in"/);
+  assert.match(page, /<a href="\/auth\/login" data-testid="sign-in-github"[^>]*>Sign in with GitHub<\/a>/);
+
+  // The state the server gives each person: their login and role, read from the repo.
+  assert.equal(asOther.decisions.some((d) => d.canAnswer), false, 'a viewer may answer nothing');
+  const me = r.renderWhoAmI({ user: 'example-collaborator', role: 'writer', via: 'session' });
+  assert.match(me, /data-testid="who-login">@example-collaborator</);
+  assert.match(me, /data-testid="who-role"> · writer</);
+  assert.match(me, /data-testid="sign-out"/, 'a signed-in person can sign out');
+  const viewer = r.renderWhoAmI({ user: 'someone-else', role: 'viewer', via: 'session' });
+  assert.match(viewer, /data-testid="who-role"> · viewer</);
+  const glass = r.renderWhoAmI({ user: 'example-owner', role: 'owner', via: 'break-glass' });
+  assert.match(glass, /owner \(break-glass\)/);
+  assert.doesNotMatch(glass, /sign-out/, 'the break-glass has no session to end');
+
+  const audit = r.renderAudit([{ id: 2, at: new Date().toISOString(), login: 'example-collaborator', role: 'writer', via: 'session', instance: 'a', action: 'decision.answered', detail: { id: 'd-1', answer: 'approve' } }]);
+  assert.match(audit, /data-testid="audit-log"/);
+  assert.match(audit, /@example-collaborator/);
+  assert.match(audit, /decision\.answered/);
+  assert.match(audit, /id d-1, answer approve/);
+  assert.match(r.renderAudit([]), /No writes recorded yet/);
+});
+
 test('the UI asks for hub instances only when a hub served the page (no 404 on an instance\'s own dashboard)', async () => {
   const asked: string[] = [];
   const get = async (url: string) => (asked.push(url), { ok: true, json: async () => ({ instances: [{ name: 'a', up: true, error: null }] }) });
@@ -276,6 +317,10 @@ test('the off-machine backup on the health panel: not set up with the docs link;
   assert.match(none, /data-testid="health-offsite-none"[\s\S]*Nothing is copied off this machine[\s\S]*offsite-backup\.yaml/);
   assert.match(none, /href="https:\/\/example\.org\/acme\/engine\/blob\/main\/docs\/backups\.md"[^>]*data-testid="health-offsite-docs"/);
   assert.match(r.renderHealth({ ...base, offsiteBackup: null }), /<code[^>]*>docs\/backups\.md<\/code>/, 'no repository: the doc is named, not linked');
+  // An engine update the machine rolled back and holds: red, on the instance's panel and on the hub's.
+  const updateHold = { at: '2026-10-12T03:00:00.000Z', sha: 'b'.repeat(40), reason: 'rollback: migration failed: bob: disk full', migration: true };
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null, updateHold }), /role="alert"[^>]*data-testid="health-update-held"[\s\S]*?Engine update rolled back: a migration failed[\s\S]*?2026-10-12 03:00 UTC, bbbbbbbbbbbb[\s\S]*?rollback: migration failed: bob: disk full/);
+  assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, updateHold: null }), /health-update-held/);
   const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
   const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
   const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });
@@ -642,7 +687,7 @@ test('the Intake page: each report redacted with what became of it, views, a lin
   assert.match(health, /data-testid="health-intake-merged"[^>]*>report to merged fix: median 2\.5 h over 2 report\(s\)/);
   // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
   assert.equal((asOther as unknown as { canReadIntake: boolean }).canReadIntake, false);
-  assert.match(r.renderIntakePage(asOther), /data-testid="intake-refused"[^>]*>Intake reports are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderIntakePage(asOther), /data-testid="intake-refused"[^>]*>Intake reports are for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.equal(r.intakeRefusal(asOwner), null);
   assert.equal(r.intakeRefusal({ ...asOwner, canReadIntake: undefined }), null, 'an older server without the flag: asked as before');
 });
@@ -654,7 +699,7 @@ test('the throughput panel: merges, cost per merged PR by stage (zeros shown), t
     since: '2026-10-08T12:00:00.000Z',
     until: '2026-10-15T12:00:00.000Z',
     merged: { total: 3, perDay: Array.from({ length: 14 }, (_, i) => ({ day: `2026-10-${String(2 + i).padStart(2, '0')}`, merged: i === 10 ? 2 : i === 12 ? 1 : 0 })), perWeek: [{ week: '2026-10-05', merged: 2 }, { week: '2026-10-12', merged: 2 }] },
-    cost: { totalUsd: 10, perMergedPrUsd: 3.33, byStage: stages.map((stage) => ({ stage, usd: usd[stage], perMergedPrUsd: Math.round((usd[stage]! / 3) * 100) / 100, share: usd[stage]! / 10 })), evaluatorOnL0Usd: 1.5 },
+    cost: { totalUsd: 10, perMergedPrUsd: 3.33, byStage: stages.map((stage) => ({ stage, usd: usd[stage], perMergedPrUsd: Math.round((usd[stage]! / 3) * 100) / 100, share: usd[stage]! / 10 })), byModel: [{ model: 'opus', usd: 6, perMergedPrUsd: 2, share: 0.6 }, { model: 'sonnet', usd: 3.5, perMergedPrUsd: 1.17, share: 0.35 }, { model: 'haiku', usd: 0.5, perMergedPrUsd: 0.17, share: 0.05 }], evaluatorOnL0Usd: 1.5 },
     waits: [
       { kind: 'merge', label: 'merging a PR the harness left to you', owner: true, count: 1, open: 0, medianHours: 10, totalHours: 10, reasons: [{ reason: 'touches a high-risk area', count: 1 }] },
       { kind: 'decision:land', label: 'approving a change to land', owner: true, count: 1, open: 1, medianHours: 10, totalHours: 10, reasons: [] },
@@ -682,15 +727,20 @@ test('the throughput panel: merges, cost per merged PR by stage (zeros shown), t
   assert.match(html, /data-kind="merge"[\s\S]*?touches a high-risk area/);
   assert.match(html, /data-testid="throughput-other-wait"[^>]*>Also: 1 task\(s\) held behind another task/);
   assert.match(r.renderThroughput({ ...t, waits: [] }), /data-testid="throughput-no-waits"/);
-  assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  // Usage per merged PR by model, from run.cost's model.
+  assert.deepEqual([...html.matchAll(/data-testid="throughput-model" data-model="([a-z]+)"/g)].map((m) => m[1]), ['opus', 'sonnet', 'haiku']);
+  assert.match(html, /data-model="opus"[\s\S]*?Opus[\s\S]*?~\$2\.00[\s\S]*?~\$6\.00[\s\S]*?60%/);
+  assert.match(html, /data-model="haiku"[\s\S]*?Haiku[\s\S]*?~\$0\.17/);
+  assert.doesNotMatch(r.renderThroughput({ ...t, cost: { ...t.cost, byModel: [] } }), /throughput-models/, 'no table without model costs');
+  assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderThroughputPanel(asOwner), /throughput-refused/);
 });
 
 test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
-  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  const msg = "agent runs are for the instance's owners and writers (admin or write on its repo); @someone-else is a viewer";
   assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
   assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
-  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\.</);
   // From the state, before asking: the demo's dashboard for someone who is neither the owner nor a writer.
   assert.equal((asOther as unknown as { canReadRuns: boolean }).canReadRuns, false);
   assert.equal((asOwner as unknown as { canReadRuns: boolean }).canReadRuns, true);
@@ -762,12 +812,37 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   assert.match(r.renderWaiting({ ...w, merged: [] }, now), /Nothing merged on its own/);
   // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
   assert.equal((asOther as unknown as { canReadDigest: boolean }).canReadDigest, false);
-  assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
 });
 
 test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
   assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
-  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
+});
+
+test('the setup console shows each ask with its status; answer controls only where the server allows; a secret is a password field', () => {
+  const base = { instance: 'demo', detail: 'why', createdAt: '2026-10-12T10:00:00Z', createdBy: 'coordinator', cancelled: null };
+  const asks = [
+    { ...base, id: 'ask-000000000001', kind: 'paste_secret', title: 'Bot token', credential: 'intake-discord', where: 'intake', status: 'open', answer: null, canAnswer: true },
+    { ...base, id: 'ask-000000000002', kind: 'question', title: 'Owner question', options: ['yes', 'no'], writersMayAnswer: false, status: 'open', answer: null, canAnswer: false },
+    { ...base, id: 'ask-000000000003', kind: 'root_step', title: 'Install', command: 'apt-get', args: ['install', 'x'], allowed: false, refusal: 'it needs the helper extended', status: 'open', answer: null, canAnswer: true },
+    { ...base, id: 'ask-000000000004', kind: 'approve_link', title: 'Install the App', url: 'https://github.com/apps/x/installations/new', status: 'answered', answer: { by: 'olive', role: 'owner', answer: 'approved', detail: '', at: '2026-10-12T11:00:00Z' }, canAnswer: false },
+  ];
+  const html = r.renderSetup({ role: 'owner', login: 'olive', asks });
+  assert.equal((html.match(/data-testid="ask-card"/g) ?? []).length, 4);
+  const secret = html.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
+  assert.match(secret, /type="password"/);
+  assert.doesNotMatch(secret, /value=/, 'never prefilled');
+  assert.doesNotMatch(html, /data-testid="ask-option"/, "no answer buttons on a question this person can't answer");
+  assert.match(html, /Waiting on the owner/);
+  assert.match(html, /data-testid="ask-refusal"[^>]*>[^<]*it needs the helper extended/);
+  assert.match(html.match(/<button[^>]*data-testid="ask-run"[^>]*>/)?.[0] ?? '', /disabled=""/, "a step off the allowlist can't be run");
+  assert.match(html, /data-testid="ask-answered"[^>]*>approved by @olive \(owner\)/);
+  const viewer = r.renderSetup({ role: 'viewer', login: 'vic', asks: asks.map((a) => ({ ...a, canAnswer: false })) });
+  assert.doesNotMatch(viewer, /data-testid="ask-secret"|data-testid="ask-run"|data-testid="ask-option"/);
+  assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
+  assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
+  assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });

@@ -3,6 +3,7 @@ import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from './Overview';
+import { AuditLog } from '../components/AuditLog';
 
 const GROUPS: Record<string, (t: string) => boolean> = {
   All: () => true,
@@ -72,6 +73,7 @@ export function ActivityPage({ state }: { state: State }) {
             </div>
           )}
         </Card>
+        {state.canReadAudit && <AuditLog pulse={state.lastId} />}
       </div>
     </div>
   );

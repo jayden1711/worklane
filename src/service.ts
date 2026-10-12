@@ -26,7 +26,8 @@ import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
 import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
-import { instanceProblems, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
+import { instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
+import { instanceTargets, migrationGate, projectConfigFiles } from './migrations.js';
 import { settingsReader } from './settings.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
@@ -92,8 +93,23 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   return env;
 }
 
+/**
+ * How an instance's agents are billed: an API key only when its credentials.yaml names one (agent_api_key, which
+ * only the owner sets, with credentials.sh); otherwise the agent user's Claude subscription login. The repo's own
+ * agent_runtime doesn't decide this for an instance. The key never enters an environment (instanceEnv strips it).
+ */
+export function instanceRuntime(i: Pick<Instance, 'credentials'>): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
+  return i.credentials.agent_api_key ? { runtime: 'api_key', apiKeyFile: i.credentials.agent_api_key } : { runtime: 'cli' };
+}
+
 /** Run an instance's coordinator. Refuses to start without the instance's own credentials. */
 export async function runInstanceCoordinator(name: string, opts: { once?: boolean; intervalMs?: number } = {}): Promise<number> {
+  // Before the config is loaded: a file an older engine wrote, or a newer one, says what to do rather than failing to parse.
+  const gate = migrationGate(instanceTargets(join(instancesDir(), name)));
+  if (gate) {
+    console.error(`instance ${name} not started: ${gate}`);
+    return 1;
+  }
   const i = loadInstance(name);
   const missing = instanceProblems(i);
   if (missing.length) {
@@ -141,7 +157,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path)), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
@@ -151,10 +167,15 @@ function allLanes(i: ReturnType<typeof loadInstance>) {
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
+  const gate = migrationGate({ configFiles: projectConfigFiles(root), eventsDb: logPath(root) });
+  if (gate) {
+    console.error(`coordinator not started: ${gate}`);
+    return Promise.resolve(1);
+  }
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string> }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -169,7 +190,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   const log = new EventLog(site.logPath);
   // The same instance root keeps its dependency cache, in the group its agents share.
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());

@@ -1,16 +1,79 @@
 #!/usr/bin/env node
-// Cut a release tag whose commit contains the built dist/, so projects can
-// install `github:<owner>/<repo>#vX.Y.Z` without running install scripts
-// (npm 11 blocks them by default). main itself never holds build output:
-// the tag points at a release commit on top of main.
-//   node scripts/release.mjs 0.1.1
+// Releases. A release tag is SIGNED with the owner's own key (SSH or GPG, see scripts/lib/signing.mjs; nothing
+// is generated or stored here) and points at a release commit holding the built dist/, so projects can install
+// `github:<owner>/<repo>#vX.Y.Z` without running install scripts (npm 11 blocks them by default). main itself
+// never holds build output: the tag's commit sits on top of the main commit it was cut from.
+//
+//   node scripts/release.mjs changelog X.Y.Z [--repo owner/repo]
+//     Write CHANGELOG.md's section for X.Y.Z from the PRs merged since the previous release (one GitHub
+//     listing through `gh`). Commit it with the version bump in a normal PR.
+//   node scripts/release.mjs X.Y.Z
+//     On that merged commit: build, test, tag vX.Y.Z signed (`git tag -s`), verify the signature, and write
+//     the GitHub release notes (the changelog's section). Refuses without a signing key, saying how to set one.
 import { execFileSync } from 'node:child_process';
-const version = process.argv[2];
-if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) throw new Error('usage: release.mjs X.Y.Z');
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();
-if (git('status', '--porcelain')) throw new Error('working tree not clean');
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { changelogSection, prNumbers, sectionFor, withSection } from './lib/changelog.mjs';
+import { canVerify, signingProblem } from './lib/signing.mjs';
+
+const args = process.argv.slice(2);
+const changelogOnly = args[0] === 'changelog';
+const version = changelogOnly ? args[1] : args[0];
+const opt = (name) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 ? args[i + 1] : undefined;
+};
+const fail = (msg) => {
+  console.error(msg);
+  process.exit(1);
+};
+if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) fail('usage: release.mjs X.Y.Z | release.mjs changelog X.Y.Z [--repo owner/repo]');
+const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const gitConfig = (key) => {
+  try {
+    return git('config', '--get', key);
+  } catch {
+    return '';
+  }
+};
+const semver = (v) => v.split('.').map(Number);
+const older = (a, b) => {
+  const [x, y] = [semver(a), semver(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
+};
+
+if (changelogOnly) {
+  // The previous release: the newest vX.Y.Z tag older than this one; its range starts where it left main.
+  const prev = git('tag', '-l', 'v*').split('\n').map((t) => t.slice(1)).filter((t) => /^\d+\.\d+\.\d+$/.test(t) && older(t, version)).sort((a, b) => (older(a, b) ? -1 : 1)).at(-1);
+  const from = prev ? git('merge-base', `v${prev}`, 'HEAD') : null;
+  const subjects = git('log', '--first-parent', '--reverse', '--format=%s', ...(from ? [`${from}..HEAD`] : ['HEAD'])).split('\n').filter(Boolean);
+  const numbers = prNumbers(subjects);
+  const repo = opt('repo') ?? /github\.com[:/](.+?)(?:\.git)?$/.exec(git('remote', 'get-url', 'origin'))?.[1];
+  if (!repo) fail('which GitHub repo? pass --repo owner/repo');
+  const listed = numbers.length ? JSON.parse(execFileSync('gh', ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '1000', '--json', 'number,title,labels,files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) : [];
+  const byNumber = new Map(listed.map((p) => [p.number, { number: p.number, title: p.title, labels: (p.labels ?? []).map((l) => l.name), files: (p.files ?? []).map((f) => f.path) }]));
+  const prs = numbers.map((n) => byNumber.get(n) ?? { number: n, title: `#${n}`, labels: [], files: [] });
+  const section = changelogSection(version, new Date().toISOString().slice(0, 10), prs);
+  writeFileSync('CHANGELOG.md', withSection(existsSync('CHANGELOG.md') ? readFileSync('CHANGELOG.md', 'utf8') : '', version, section));
+  console.log(`CHANGELOG.md: v${version}, ${prs.length} PR(s) since ${prev ? `v${prev}` : 'the first commit'}. Review it, then commit it with the version bump in a PR.`);
+  process.exit(0);
+}
+
+if (git('status', '--porcelain')) fail('working tree not clean');
 const pkg = JSON.parse(git('show', 'HEAD:package.json'));
-if (pkg.version !== version) throw new Error(`package.json is ${pkg.version}, not ${version}`);
+if (pkg.version !== version) fail(`package.json is ${pkg.version}, not ${version}`);
+const cfg = { 'gpg.format': gitConfig('gpg.format'), 'user.signingkey': gitConfig('user.signingkey'), 'gpg.ssh.allowedsignersfile': gitConfig('gpg.ssh.allowedSignersFile') };
+const problem = signingProblem(cfg);
+if (problem) fail(`refusing to tag v${version}: ${problem}`);
+let notes = null;
+try {
+  notes = sectionFor(git('show', 'HEAD:CHANGELOG.md'), version);
+} catch {
+  // no CHANGELOG.md at HEAD
+}
+if (!notes) fail(`CHANGELOG.md at HEAD has no v${version} section: run \`node scripts/release.mjs changelog ${version}\` and merge it first`);
 const head = git('rev-parse', 'HEAD');
 // Where to come back to: the branch if on one, else the exact commit (a detached start has no `-`).
 let back = head;
@@ -26,12 +89,17 @@ git('checkout', '-q', '--detach');
 try {
   git('add', '-f', 'dist/src', 'dist/web');
   git('commit', '-q', '-s', '-m', `Release v${version} (with built dist/)`);
-  git('tag', '-a', `v${version}`, '-m', `v${version}`);
-  console.log(`tagged v${version} at ${git('rev-parse', 'HEAD')} (on top of ${head.slice(0, 7)})`);
+  git('tag', '-s', `v${version}`, '-m', `v${version}\n\n${notes}`);
+  if (canVerify(cfg)) git('tag', '-v', `v${version}`);
+  else console.log('(not verified here: set gpg.ssh.allowedSignersFile to check SSH signatures locally)');
+  console.log(`signed tag v${version} at ${git('rev-parse', 'HEAD')} (on top of ${head.slice(0, 7)})`);
 } finally {
   git('checkout', '-q', back);
   // Leaving the release commit deletes its tracked dist/ from the working tree.
   execFileSync('npm', ['run', 'build'], { stdio: 'ignore' });
   execFileSync('npm', ['run', 'build:web'], { stdio: 'ignore' });
 }
+const notesFile = join(tmpdir(), `release-notes-v${version}.md`);
+writeFileSync(notesFile, `${notes}\n`);
 console.log(`push with: git push origin v${version}`);
+console.log(`then the GitHub release: gh release create v${version} --verify-tag --title v${version} --notes-file ${notesFile}`);

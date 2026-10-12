@@ -9,7 +9,7 @@ import { consoleView, liveView, startDashboard } from '../src/dashboard.js';
 import { startHub } from '../src/dashboard-hub.js';
 import { EventLog } from '../src/events/log.js';
 import { RunFeed } from '../src/run-feed.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const RUN = '2026-01-01T00-00-00-000Z-worker-abc123';
 
@@ -28,9 +28,9 @@ function setup() {
 }
 
 async function serve(s: ReturnType<typeof setup>, user = 'example-owner') {
-  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user, slotsDir: join(s.dir, 'slots'), pollMs: 50 });
+  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(s.dir, 'slots'), pollMs: 50 });
   const base = d.url.split('/?')[0]!;
-  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' };
+  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(user) };
   return { d, base, h };
 }
 
@@ -54,18 +54,18 @@ async function readStream(res: Response, until: string, ms = 5000) {
 
 test('the live runs and a run\'s console: held messages, its events, and who may control it', () => {
   const s = setup();
-  const mine = liveView({ stateDir: s.dir, cfg: s.cfg, user: 'example-owner' });
+  const mine = liveView({ stateDir: s.dir, cfg: s.cfg, user: 'example-owner', role: 'owner' });
   assert.equal(mine.canControl, true);
   assert.deepEqual(mine.runs.map((r) => [r.run, r.issue, r.role, r.pending[0]!.text]), [[RUN, 7, 'worker', 'also update the README']]);
-  const theirs = liveView({ stateDir: s.dir, cfg: s.cfg, user: 'example-collaborator' });
+  const theirs = liveView({ stateDir: s.dir, cfg: s.cfg, user: 'example-collaborator', role: 'writer' });
   assert.equal(theirs.canControl, false);
   assert.equal(theirs.runs[0]!.pending[0]!.text, '', 'held messages\' text is the owner\'s');
-  const c = consoleView({ stateDir: s.dir, cfg: s.cfg, user: 'example-owner', eventsDb: s.eventsDb }, RUN);
+  const c = consoleView({ stateDir: s.dir, cfg: s.cfg, user: 'example-owner', role: 'owner', eventsDb: s.eventsDb }, RUN);
   assert.equal(c.live, true);
   assert.deepEqual(c.held.map((h) => [h.id, h.text]), [['m1', 'also update the README']], 'queued, not yet delivered');
   s.log.append('console.message_delivered', { run: RUN, issue: 7, role: 'worker', id: 'm1' }, 'c');
-  assert.deepEqual(consoleView({ stateDir: s.dir, cfg: s.cfg, user: 'example-owner', eventsDb: s.eventsDb }, RUN).held, [], 'delivered: no longer held');
-  assert.equal(consoleView({ stateDir: s.dir, cfg: s.cfg, user: 'example-collaborator', eventsDb: s.eventsDb }, RUN).events.every((e) => e.text === null), true);
+  assert.deepEqual(consoleView({ stateDir: s.dir, cfg: s.cfg, user: 'example-owner', role: 'owner', eventsDb: s.eventsDb }, RUN).held, [], 'delivered: no longer held');
+  assert.equal(consoleView({ stateDir: s.dir, cfg: s.cfg, user: 'example-collaborator', role: 'writer', eventsDb: s.eventsDb }, RUN).events.every((e) => e.text === null), true);
 });
 
 test('the owner follows a run over SSE: every feed item in order, live as it grows, then the end; others are refused', async () => {
@@ -103,7 +103,7 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
     const feed = await fetch(`${writer.base}/api/runs/${RUN}/feed?after=-1`, { headers: writer.h });
     assert.equal(feed.status, 200, 'a writer reads the feed');
     assert.equal(((await feed.json()) as { ended: boolean }).ended, true);
-    const r = await fetch(`${writer.base}/api/runs/${RUN}/live?t=${writer.d.token}`);
+    const r = await fetch(`${writer.base}/api/runs/${RUN}/live?t=${writer.d.token}`, { headers: asPerson('example-collaborator') });
     assert.equal(r.status, 200, 'and the live view');
     assert.equal(r.headers.get('content-type'), 'text/event-stream');
     await r.body?.cancel();
@@ -112,9 +112,9 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
   }
   const other = await serve(s, 'someone-else');
   try {
-    const r = await fetch(`${other.base}/api/runs/${RUN}/live?t=${other.d.token}`);
+    const r = await fetch(`${other.base}/api/runs/${RUN}/live?t=${other.d.token}`, { headers: asPerson('someone-else') });
     assert.equal(r.status, 403, 'neither the owner nor a writer');
-    assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the owner \(@example-owner\) and the project's writers; @someone-else isn't one/);
+    assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the instance's owners and writers \(admin or write on its repo\); @someone-else is a viewer/);
     assert.equal((await fetch(`${other.base}/api/live`, { headers: other.h })).status, 403, 'nor the list of live runs');
   } finally {
     await other.d.close();
@@ -158,7 +158,7 @@ test('through the hub, the live stream reaches the browser from the instance\'s 
   const h = await startHub({ instances: [{ name: 'shop', port: Number(new URL(x.d.url).port), tokenFile: join(s.dir, 'dashboard-token') }], stateDir: mkdtempSync(join(tmpdir(), 'dash-live-hub-')) });
   try {
     setTimeout(() => s.feed.end({ reason: 'stopped', costUsd: 0.1, turns: 1 }), 100);
-    const got = await readStream(await fetch(`${h.url.split('/?')[0]}/api/i/shop/runs/${RUN}/live?t=${h.token}`), 'event: end');
+    const got = await readStream(await fetch(`${h.breakGlassUrl.split('/?')[0]}/api/i/shop/runs/${RUN}/live?t=${h.token}`), 'event: end');
     assert.match(got, /"kind":"end","reason":"stopped"/);
   } finally {
     await h.close();

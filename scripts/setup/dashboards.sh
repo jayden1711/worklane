@@ -12,22 +12,52 @@
 #     gets nothing else: no read of any log, config or credential, and no
 #     write anywhere. No instance user gets any new access, so no instance
 #     can write, or read, another's log.
+#   - People sign in to the hub with their own GitHub account, through a
+#     GitHub App used only for sign-in (its client id here; its client secret
+#     installed first with credentials.sh dashboard-signin). Each instance's
+#     dashboard reads their role from their permission on its repo.
+#   - Both listen on 127.0.0.1 only: the hub's sign-in port 4399, which
+#     tailscale serve forwards over HTTPS, and the owner's break-glass port
+#     4398 (the token, on this machine only), which it never forwards.
 #
-#   bash scripts/setup/dashboards.sh <your GitHub login> <name> [<name>...]
+#   bash scripts/setup/credentials.sh dashboard-signin      (first, once)
+#   bash scripts/setup/dashboards.sh [--console-user <admin user>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
 #
-# Then from your laptop: ssh -N -L 4399:127.0.0.1:4399 <you>@<this-host>
-# and open the URL this prints.
+#   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh
+#     with the same user first. Without it the terminal never opens. With it, the hub's unit drops
+#     NoNewPrivileges and its read-only filesystem: sudo (to start the terminal, and in it) needs both.
+#
+# Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-login="${1:?usage: dashboards.sh <your GitHub login> <name> [<name>...]}"
-shift
-[ "$#" -ge 1 ] || { echo "usage: dashboards.sh <your GitHub login> <name> [<name>...]" >&2; exit 2; }
-[[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || { echo "GitHub login: letters, digits and dashes" >&2; exit 2; }
+usage="usage: dashboards.sh [--console-user <admin user>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
+client_id="" public_url="" console_user=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --client-id) client_id="${2:-}"; shift 2 ;;
+    --public-url) public_url="${2:-}"; shift 2 ;;
+    --console-user) console_user="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    -*) echo "$usage" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[ "$#" -ge 1 ] && [ -n "$client_id" ] && [ -n "$public_url" ] || { echo "$usage" >&2; exit 2; }
+[[ "$client_id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "--client-id: the sign-in App's client id (letters, digits, dots, dashes)" >&2; exit 2; }
+[[ "$public_url" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin, as browsers reach it through tailscale serve (https://<machine>.<tailnet>.ts.net)" >&2; exit 2; }
+if [ -n "$console_user" ]; then
+  [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
+  [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
+fi
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
+signin_dir="$(home_of "$viewer")/.config/dashboard-signin"
+for f in client-secret session-secret; do
+  [ -s "$signin_dir/$f" ] || { echo "no $signin_dir/$f: run credentials.sh dashboard-signin first" >&2; exit 1; }
+done
 
-state_of() { local coord="wl-$1"; echo "/home/$coord/.local/state/worklane/instances/$1/state"; }
+state_of() { local coord="wl-$1"; echo "$(home_of "$coord")/.local/state/worklane/instances/$1/state"; }
 for name in "$@"; do
   [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
@@ -39,7 +69,7 @@ done
 dash_unit() {
   cat <<EOF
 [Unit]
-Description=worklane dashboard for instance $1 (read its log, record answers), loopback only
+Description=worklane dashboard for instance $1 (read its log, record answers; roles from its repo), loopback only
 After=network.target
 
 [Service]
@@ -48,7 +78,7 @@ User=wl-$1
 Group=wl-$1
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --instance $1 --service --user $login
+ExecStart=/usr/local/bin/worklane dashboard --instance $1 --service
 Restart=on-failure
 UMask=0007
 RestartSec=10
@@ -64,7 +94,7 @@ EOF
 hub_unit() {
   cat <<EOF
 [Unit]
-Description=worklane dashboard hub: one view over $*, forwarding to each instance's own dashboard
+Description=worklane dashboard hub: sign-in with GitHub, one view over $*, forwarding to each instance's own dashboard
 After=network.target
 
 [Service]
@@ -73,18 +103,30 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${console_user:+ --console-user $console_user}
 Restart=on-failure
 UMask=0007
 RestartSec=10
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/home/$viewer
-PrivateTmp=yes
+$(hub_sandbox)
 
 [Install]
 WantedBy=multi-user.target
+EOF
+}
+
+# The hub's sandbox. With the owner terminal, sudo must be able to switch users (no NoNewPrivileges), and the
+# admin's shell, a child of the hub, must see the real filesystem (no read-only mounts), so both are dropped.
+hub_sandbox() {
+  if [ -n "$console_user" ]; then
+    echo "NoNewPrivileges=no"
+    return
+  fi
+  cat <<EOF
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$(home_of "$viewer")
+PrivateTmp=yes
 EOF
 }
 
@@ -121,7 +163,7 @@ for name in "$@"; do
   d="$state"
   while :; do
     setfacl -m "g:$viewer:--x" "$d"
-    [ "$d" = "/home/$coord" ] && break
+    [ "$d" = "$(home_of "$coord")" ] && break
     d="$(dirname "$d")"
   done
   setfacl -m "g:$viewer:r--" "$state/dashboard-token"
@@ -133,7 +175,7 @@ put worklane-dashboard-hub.service hub_unit "$@"
 systemctl daemon-reload
 systemctl enable --now worklane-dashboard-hub.service
 systemctl restart worklane-dashboard-hub.service
-hub_token_file="/home/$viewer/.local/state/worklane/dashboard-hub/dashboard-token"
+hub_token_file="$(home_of "$viewer")/.local/state/worklane/dashboard-hub/dashboard-token"
 wait_for "$hub_token_file" worklane-dashboard-hub.service
 
 say "check: $viewer reads each token and nothing else"
@@ -146,6 +188,9 @@ for name in "$@"; do
 done
 
 echo
-echo "hub: http://127.0.0.1:4399/?t=$(cat "$hub_token_file")"
-echo "from your laptop: ssh -N -L 4399:127.0.0.1:4399 <you>@<this-host>, then open the hub URL above"
+echo "sign-in: $public_url (people sign in with GitHub; their role on each instance is their permission on its repo)"
+echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS and HTTPS certificates on; docs/dashboard.md)"
+echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
+echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/?t=<the token in $hub_token_file>"
+echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"
 echo "logs: journalctl -u worklane-dashboard-hub.service; journalctl -u worklane-dashboard-<name>.service"

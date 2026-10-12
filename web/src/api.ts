@@ -137,6 +137,8 @@ export interface HealthView {
     /** No verified copy, or the last one is over a day old. */
     stale: boolean;
   } | null;
+  /** An engine update this machine rolled back and holds (src/updates.ts heldUpdate); null when none. */
+  updateHold?: { at: string; sha: string | null; reason: string; migration: boolean } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
@@ -192,7 +194,16 @@ export interface State {
   /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
   canReadDigest?: boolean;
   project: { name: string; repo: string; landMode: string };
+  /** Who this page is for: the signed-in person's login, or the owner's on the break-glass. */
   user: string;
+  /** Their role on this instance, read by its server from their permission on the repo; absent from an older server. */
+  role?: Role;
+  /** How they came in: signed in with GitHub, or the owner's break-glass on the machine. */
+  via?: 'session' | 'break-glass';
+  /** Whether they may write at all (viewers are read-only). */
+  canWrite?: boolean;
+  /** Whether they may read the audit log (owners only). */
+  canReadAudit?: boolean;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
   budget: number;
   slots: { cap: number; running: number; agents: { slot: string; owner: string; pid: number; acquiredAt: string }[]; fullRun: { owner: string; acquiredAt: string } | null };
@@ -300,6 +311,56 @@ function readToken(): string {
 
 export const token = readToken();
 
+/** Someone's role on an instance (src/dashboard-auth.ts): from their permission on its repo. */
+export type Role = 'owner' | 'writer' | 'viewer';
+
+/** Who is signed in to the hub: their login and this session's CSRF token; or the owner's break-glass (the token). */
+export interface Me {
+  login: string | null;
+  csrf: string | null;
+  breakGlass: boolean;
+}
+/**
+ * Who is signed in, asked only on a hub page: null when nobody is (the page then shows the sign-in), or on an
+ * instance's own dashboard (no sign-in there: its token is the owner's break-glass).
+ */
+export function probeMe(servedByHub: boolean, get: typeof fetch = fetch, auth = token): Promise<Me | null> {
+  if (!servedByHub) return Promise.resolve(null);
+  return get('/api/me', { headers: auth ? { authorization: `Bearer ${auth}` } : {} })
+    .then((r) => (r.ok ? (r.json() as Promise<Me>) : null))
+    .then((m) => (m && (m.login || m.breakGlass) ? m : null))
+    .catch(() => null);
+}
+const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
+export const me: Promise<Me | null> = probeMe(servedByHub);
+/** Whether this page needs a sign-in: a hub page, with no session and no break-glass token. */
+export const needsSignIn: Promise<boolean> = me.then((m) => servedByHub && !m);
+
+let csrf = '';
+void me.then((m) => {
+  csrf = m?.csrf ?? '';
+});
+
+/** What every API call carries: the break-glass token when there is one, and this session's CSRF token (every write needs it). */
+async function authHeaders(): Promise<Record<string, string>> {
+  await me;
+  return { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(csrf ? { 'x-csrf-token': csrf } : {}), 'content-type': 'application/json' };
+}
+
+/** A stream's URL: the break-glass token on it (EventSource sends no headers); a session's cookie goes by itself. */
+export const streamUrl = (path: string) => (token ? `${path}?t=${encodeURIComponent(token)}` : path);
+
+/** Sign out: the hub deletes the session (server-side), then the page shows the sign-in again. */
+export async function signOut(): Promise<void> {
+  await fetch('/auth/logout', { method: 'POST', headers: await authHeaders(), body: '{}' }).catch(() => undefined);
+  try {
+    sessionStorage.removeItem('dash-instance');
+  } catch {
+    // nothing kept
+  }
+  window.location.assign('/');
+}
+
 /** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */
 export interface HubInfo {
   instances: { name: string; up: boolean; error: string | null }[];
@@ -310,11 +371,11 @@ export interface HubInfo {
  */
 export function probeHub(servedByHub: boolean, get: typeof fetch = fetch, auth = token): Promise<HubInfo | null> {
   if (!servedByHub) return Promise.resolve(null);
-  return get('/api/hub', { headers: { authorization: `Bearer ${auth}` } })
+  return get('/api/hub', { headers: auth ? { authorization: `Bearer ${auth}` } : {} })
     .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
     .catch(() => null);
 }
-export const hub: Promise<HubInfo | null> = inBrowser ? probeHub(!!document.querySelector('meta[name="dashboard-hub"]')) : Promise.resolve(null);
+export const hub: Promise<HubInfo | null> = inBrowser ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null);
 
 /** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
 export const hubInstance: Promise<string | null> = hub.then((h) => {
@@ -346,14 +407,14 @@ export async function apiPath(path: string): Promise<string> {
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
 export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
   const body = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
   return body;
@@ -382,7 +443,7 @@ export function useLiveState() {
     let closed = false;
     void apiPath('/api/stream').then((p) => {
       if (closed) return;
-      es = new EventSource(`${p}?t=${encodeURIComponent(token)}`);
+      es = new EventSource(streamUrl(p));
       es.addEventListener('hello', () => setLive(true));
       es.addEventListener('change', () => {
         window.clearTimeout(timer.current);
@@ -405,6 +466,36 @@ export function useLiveState() {
 export async function decide(id: string, answer: string) {
   return api<{ ok: boolean }>('/api/decide', { method: 'POST', body: JSON.stringify({ id, answer }) });
 }
+
+/** A setup-console ask (src/console/asks.ts), as GET /api/asks serves it. */
+export type Ask = {
+  id: string;
+  instance: string;
+  title: string;
+  detail: string;
+  createdAt: string;
+  createdBy: string;
+  status: 'open' | 'answered' | 'cancelled';
+  answer: { by: string; role: 'owner' | 'writer'; answer: string; detail: string; at: string } | null;
+  cancelled: { by: string; why: string; at: string } | null;
+  /** Whether this person may answer it (the server checks again). */
+  canAnswer: boolean;
+} & (
+  | { kind: 'paste_secret'; credential: string; where: string }
+  | { kind: 'approve_link'; url: string }
+  | { kind: 'question'; options: string[]; writersMayAnswer: boolean }
+  | { kind: 'root_step'; command: string; args: string[]; allowed: boolean; refusal: string | null }
+);
+export interface AsksView {
+  role: 'owner' | 'writer' | 'viewer';
+  login: string;
+  asks: Ask[];
+}
+export const getAsks = () => api<AsksView>('/api/asks');
+export const answerAsk = (id: string, answer: string) => api<{ ok: boolean }>(`/api/asks/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) });
+/** A pasted secret, straight to the instance's server; nothing keeps it on this side. */
+export const pasteSecret = (id: string, value: string) => api<{ ok: boolean }>(`/api/asks/${id}/secret`, { method: 'POST', body: JSON.stringify({ value }) });
+export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}/run`, { method: 'POST', body: '{}' });
 
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
@@ -469,13 +560,13 @@ export interface Throughput {
   since: string;
   until: string;
   merged: { total: number; perDay: { day: string; merged: number }[]; perWeek: { week: string; merged: number }[] };
-  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; evaluatorOnL0Usd: number };
+  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; byModel?: { model: string; usd: number; perMergedPrUsd: number | null; share: number; tokensIn?: number; tokensOut?: number; secs?: number; perMergedPrTokens?: number | null }[]; evaluatorOnL0Usd: number };
   waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
 }
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
-export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held';
+export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {
   kind: WaitKind;
   since: string;

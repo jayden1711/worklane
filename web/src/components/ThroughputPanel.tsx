@@ -7,6 +7,17 @@ import { RecordsTable } from './patterns';
 import { Card, EST_NOTE, estUsd } from './ui';
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
+const MODEL_LABEL: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', local: 'Local model', unknown: 'Model not recorded' };
+/** A model's name for the table: a tier, the local model, a hosted provider by its name, or the model's id. */
+const modelLabel = (m: string) => MODEL_LABEL[m] ?? (m.startsWith('hosted:') ? `Hosted: ${m.slice(7)}` : m);
+/** Tokens and run time, for a model whose cost alone says little (a local model costs nothing). */
+const tokensAndTime = (m: { tokensIn?: number; tokensOut?: number; secs?: number }) => {
+  const t = (m.tokensIn ?? 0) + (m.tokensOut ?? 0);
+  if (!t) return '–';
+  const k = t >= 1_000_000 ? `${(t / 1_000_000).toFixed(1)}M` : t >= 1000 ? `${Math.round(t / 1000)}k` : String(t);
+  return `${k} tokens · ${Math.max(1, Math.round((m.secs ?? 0) / 60))} min`;
+};
+
 const STAGE_LABEL: Record<string, string> = {
   worker: 'Worker',
   evaluator: 'Evaluator',
@@ -20,8 +31,8 @@ const STAGE_LABEL: Record<string, string> = {
 };
 
 /** For a viewer the state says may not read throughput, the refusal the server would give; null for the owner and writers. */
-export const throughputRefusal = (state: Pick<State, 'canReadThroughput' | 'owners' | 'user'>) =>
-  state.canReadThroughput === false ? `throughput is for the owner (@${state.owners.default}) and the project's writers; @${state.user || 'unknown'} isn't one` : null;
+export const throughputRefusal = (state: Pick<State, 'canReadThroughput' | 'owners' | 'user' | 'role'>) =>
+  state.canReadThroughput === false ? `throughput is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 /** Merged PRs per day as one quiet series of bars (each hoverable), labelled at the ends. */
 function MergedBars({ days }: { days: Throughput['merged']['perDay'] }) {
@@ -119,6 +130,27 @@ export function ThroughputView({ t }: { t: Throughput }) {
           </tr>
         ))}
       </RecordsTable>
+
+      {(t.cost.byModel ?? []).length > 0 && (
+        <RecordsTable testId="throughput-models" head={['Model', 'Per merged PR', 'This week', 'Tokens, time', 'Share']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-28 [&_th:nth-child(4)]:w-40">
+          {(t.cost.byModel ?? []).map((m) => (
+            <tr key={m.model} className="border-b border-line last:border-0" data-testid="throughput-model" data-model={m.model}>
+              <td className="primitive-table-cell text-[13px] text-ink">{modelLabel(m.model)}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{m.perMergedPrUsd !== null ? estUsd(m.perMergedPrUsd) : '–'}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{estUsd(m.usd)}</td>
+              <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2" data-testid="throughput-model-tokens">{tokensAndTime(m)}</td>
+              <td className="primitive-table-cell">
+                <div className="flex items-center gap-2">
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-label={`${modelLabel(m.model)} share`} aria-valuenow={Math.round(m.share * 100)} aria-valuemin={0} aria-valuemax={100}>
+                    <div className="h-full rounded-full bg-blue" style={{ width: `${m.share * 100}%` }} />
+                  </div>
+                  <span className="w-9 text-right text-[12px] tabular-nums text-ink-3">{pct(m.share)}</span>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </RecordsTable>
+      )}
 
       <div className="space-y-1.5">
         <div className="text-[13px] font-medium text-ink">Where PRs waited for you</div>

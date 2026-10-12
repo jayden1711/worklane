@@ -51,6 +51,18 @@ export interface RunRequest {
   /** Before each wait on a transient error: which try failed, why (classified), and how long until the next. */
   onTransientRetry?: (r: TransientRetry) => void;
   signal?: AbortSignal;
+  /**
+   * An open-model provider this run goes to (src/providers.ts), resolved by the coordinator: claude talks to its
+   * Anthropic-compatible endpoint, with the key from its file through apiKeyHelper (never an environment variable),
+   * and `model` is the provider's own model id. Absent: Anthropic, as always.
+   */
+  provider?: { name: string; kind: 'local' | 'hosted'; baseUrl: string; keyFile: string };
+  /**
+   * What kind of work this is, for a model that names a provider (`local`, `hosted:<name>`): the coordinator
+   * resolves it to the provider, or to `fallback` (the role's normal model) when the provider may not or can't run
+   * it. A provider model without a route is never sent anywhere but the fallback.
+   */
+  route?: { kind: 'build' | 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'stage_judge' | 'eval_answer' | 'evaluator' | 'other'; highRisk?: boolean; fallback: string };
   /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
   lane?: string;
   /** The project's own variables (tests.yaml env); never one the harness sets. */
@@ -76,6 +88,11 @@ export interface RunResult {
   sessionId?: string;
   /** The run kept failing on an auth or transient error (token refresh, rate limit, overload, network), not on the task. */
   transient?: boolean;
+  /** Tokens in and out, and the run's wall time, from claude's result (for usage per model, local models included). */
+  tokens?: { in: number; out: number };
+  durationMs?: number;
+  /** The provider the run went to, when it wasn't Anthropic. */
+  provider?: string;
   /** Hosts the run was refused (outside its allowlist), each once: for the owner to decide on. */
   refusedHosts?: RefusedRequest[];
   /** Why the stuck-run guard stopped it (reason 'stuck'). */
@@ -111,10 +128,11 @@ const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'S
  * The agent's whole environment. Anything not listed is dropped, which
  * removes GitHub tokens, cloud keys, database URLs and the SSH agent.
  */
-export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
-  if (runtime === 'sdk' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
+  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
   Object.assign(env, {
     [`${BRAND.envPrefix}_AGENT`]: '1',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
@@ -129,6 +147,15 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'sdk', extra:
     ...extra,
   });
   return env;
+}
+
+/**
+ * claude's apiKeyHelper for an API-key file: a command claude runs (as the user it runs as) to read the key. The
+ * path is refused unless it is absolute and plain (no quote, space or shell character), so it can't become a command.
+ */
+export function apiKeyHelperCommand(file: string): string {
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(file)) throw new Error(`API key file path ${JSON.stringify(file)} must be absolute, with letters, digits and . _ - / only`);
+  return `cat -- ${file}`;
 }
 
 /** The one identity every commit an agent or the coordinator makes carries. */
@@ -152,6 +179,8 @@ export interface RunAs {
   home: string;
   /** Defaults to <home>/.claude. */
   claudeConfigDir?: string;
+  /** PATH for project commands run as this user (instance.yaml run_as.path; default: defaultAgentPath()). */
+  path?: string;
 }
 
 /** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */
@@ -286,11 +315,13 @@ interface ResultLine {
   session_id?: string;
   modelUsage?: Record<string, unknown>;
   api_error_status?: number | null;
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+  duration_ms?: number;
 }
 
 export class CliRunner implements AgentRunner {
   constructor(
-    private runtime: 'cli' | 'sdk' = 'cli',
+    private runtime: 'cli' | 'api_key' = 'cli',
     private base: NodeJS.ProcessEnv = process.env,
     private bin = 'claude',
     private runAs?: RunAs,
@@ -307,10 +338,16 @@ export class CliRunner implements AgentRunner {
      * Throws when there are none: the run doesn't start.
      */
     private guardrails?: () => Settings,
+    /**
+     * runtime api_key, for an instance: the agent user's API key file (0400, the agent user's own). It reaches claude
+     * through apiKeyHelper in --settings, which claude runs as the agent user; the key is never in an environment.
+     */
+    private apiKeyFile?: string,
   ) {}
 
   /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
   private loginOf(req: RunRequest): string {
+    if (req.provider) return `provider:${req.provider.name}`;
     const lane = this.lanes?.[req.lane ?? 'default'];
     const runAs = lane ? lane.runAs : this.runAs;
     if (runAs) return runAs.claudeConfigDir ?? posix.join(runAs.home, '.claude');
@@ -348,7 +385,14 @@ export class CliRunner implements AgentRunner {
   }
 
   private async runOnce(req: RunRequest): Promise<RunResult> {
-    const env = agentEnv(this.base, this.runtime, {
+    // With a key file, apiKeyHelper is the key's only way in: none from this process's environment.
+    const base = req.provider ? { ...this.base, ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined } : this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base;
+    // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
+    // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
+    const providerDir = req.provider && !this.runAs && !this.lanes?.[req.lane ?? 'default']?.runAs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-provider-`)) : null;
+    const env = agentEnv(base, req.provider ? 'cli' : this.runtime, {
+      ...(req.provider ? { ANTHROPIC_BASE_URL: req.provider.baseUrl } : {}),
+      ...(providerDir ? { CLAUDE_CONFIG_DIR: providerDir } : {}),
       ...safeProjectEnv(req.env),
       ...identityEnv(this.identity),
       [`${BRAND.envPrefix}_ROLE`]: req.role,
@@ -375,9 +419,9 @@ export class CliRunner implements AgentRunner {
     }
     // Preflight, inside the login lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
-    const status = claudeAuthStatus(runEnv, runAs, this.bin);
+    const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
     const auth = status.method;
-    const want = this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
+    const want = req.provider ? ['provider'] : this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}${status.text ? `: ${status.text}` : ''}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
@@ -389,7 +433,10 @@ export class CliRunner implements AgentRunner {
       writeFileSync(systemPromptFile, req.appendSystemPrompt!, { mode: 0o644 });
       chmodSync(promptDir, 0o755);
     }
-    const cleanup = () => promptDir && rmSync(promptDir, { recursive: true, force: true });
+    const cleanup = () => {
+      if (promptDir) rmSync(promptDir, { recursive: true, force: true });
+      if (providerDir) rmSync(providerDir, { recursive: true, force: true });
+    };
     // What the agent did, for the dashboard: written by this process into the coordinator's state dir (the dashboard can't read the agent user's home).
     const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) }) : null;
     // The live view of the same run, under the record's id: redacted and capped, ended when the run ends.
@@ -397,7 +444,15 @@ export class CliRunner implements AgentRunner {
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
     const laneSettings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
     // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
-    const settings = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
+    const pinned = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
+    // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),
+    // for runs as the instance's agent user only; a lane running as another user (the eval user) never gets it.
+    const asAgent = !runAs || !this.runAs || runAs.user === this.runAs.user;
+    const settings = req.provider
+      ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(req.provider.keyFile) }
+      : this.runtime === 'api_key' && this.apiKeyFile && asAgent
+        ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(this.apiKeyFile) }
+        : pinned;
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
@@ -510,7 +565,9 @@ export class CliRunner implements AgentRunner {
         clearTimeout(overall);
         const r = result as ResultLine | null;
         const model = Object.keys(r?.modelUsage ?? {})[0] ?? req.model;
-        const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}) };
+        const u = r?.usage;
+        const tokens = u ? { in: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), out: u.output_tokens ?? 0 } : undefined;
+        const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}), ...(tokens ? { tokens } : {}), ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}), ...(req.provider ? { provider: req.provider.name } : {}) };
         const done = (o: RunResult) => {
           const out: RunResult = { ...o, ...(refusals.refused.length ? { refusedHosts: refusals.refused } : {}), ...(o.reason === 'stuck' && stuck?.stopped ? { stuck: stuck.stopped } : {}) };
           record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}), ...(stuck ? { stuck: { ...stuck.detector.longest } } : {}) });

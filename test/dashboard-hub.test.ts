@@ -37,7 +37,8 @@ async function setup() {
     { name: 'b', port: b.port, tokenFile: join(b.dir, 'dashboard-token') },
   ];
   const h = await startHub({ instances, stateDir: mkdtempSync(join(tmpdir(), 'hub-state-')), webDir: web });
-  const base = h.url.split('/?')[0]!;
+  // The token is the owner's break-glass: its own loopback port, never the one tailscale serve forwards.
+  const base = h.breakGlassUrl.split('/?')[0]!;
   const hh = { authorization: `Bearer ${h.token}`, 'content-type': 'application/json' };
   const close = async () => {
     await h.close();
@@ -141,7 +142,20 @@ test('the dashboards setup gives the viewer read of each token and traverse on t
   assert.match(sh, /User=wl-\$1\n/, 'each instance\'s dashboard runs as that instance\'s coordinator');
   assert.match(sh, /User=\$viewer\n/, 'the hub runs as the viewer');
   assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --hub \$hub_arg --service/);
-  assert.match(sh, /ProtectHome=read-only\nReadWritePaths=\/home\/\$viewer/, 'the hub can write only its own home');
+  assert.match(sh, /ProtectHome=read-only\nReadWritePaths=\$\(home_of "\$viewer"\)/, 'the hub can write only its own home');
   assert.ok(sh.indexOf('"$@" > "$tmp"') < sh.indexOf('systemd-analyze verify') && sh.indexOf('systemd-analyze verify') < sh.indexOf('mv -f "$tmp"'), 'units: temp name, validate, move');
   assert.match(sh, /FAIL: \$viewer can write/, 'it checks the viewer can\'t write');
+  // Per-person sign-in: no single --user for people; the hub gets the sign-in App's client id and its public URL.
+  assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --instance \$1 --service\n/, 'an instance\'s dashboard names no person: roles come from its repo');
+  assert.doesNotMatch(sh, /--user/);
+  assert.match(sh, /--hub \$hub_arg --service --client-id \$client_id --public-url \$public_url --signin-dir \$signin_dir(\$\{console_user:\+ --console-user \$console_user\})?\n/);
+  assert.match(sh, /run credentials.sh dashboard-signin first/, 'it refuses to start the hub without the sign-in secrets');
+  assert.match(sh, /tailscale serve --bg --https=443 http:\/\/127\.0\.0\.1:4399/, 'tailscale serve forwards the sign-in port');
+  assert.doesNotMatch(sh, /tailscale serve --[^\n]*4398/, 'never the break-glass port');
+  const creds = readFileSync(join(repoRoot, 'scripts', 'setup', 'credentials.sh'), 'utf8');
+  const signin = creds.slice(creds.indexOf('if [ "${1:-}" = dashboard-signin ]'), creds.indexOf('\nfi\n', creds.indexOf('= dashboard-signin ]')));
+  assert.match(signin, /viewer=wl-dash/);
+  assert.match(signin, /read -rsp "Paste the sign-in App's client secret/, 'the secret is read without echo');
+  assert.match(signin, /sudo -u "\$viewer" sh -c 'umask 077;[^']*chmod 0400 "\$1"'/, 'each secret: the viewer\'s, 0400, written under umask 077');
+  assert.doesNotMatch(signin, /echo[^\n]*\$secret/, 'never printed');
 });

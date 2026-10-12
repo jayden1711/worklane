@@ -22,16 +22,43 @@ export interface UpdateEntry {
   diagnosis?: { unit: string; result: string; status: string; restarts: number; journal: string }[];
   /** On a rollback: the commit is now held. */
   held?: boolean;
+  /** On a rollback because an instance's migration failed: which, and why. */
+  migration?: { instance: string; error: string; restored?: string[]; unrestored?: string[] };
+}
+
+/** An engine update that was rolled back and is held: the owner's to look at, until an install succeeds. */
+export interface HeldUpdate {
+  at: string;
+  sha: string | null;
+  reason: string;
+  migration: boolean;
+}
+
+/** The held rollback, if the newest install or held rollback in the log is one. */
+export function heldUpdate(log: UpdateEntry[]): HeldUpdate | null {
+  const last = [...log].reverse().find((e) => e.event === 'installed' || (e.event === 'rolled_back' && e.held));
+  if (!last || last.event !== 'rolled_back') return null;
+  const reason = last.reason ?? (last.failed?.length ? `rolled back: ${last.failed.join('; ')}` : 'rolled back');
+  return { at: last.at, sha: last.from ?? null, reason, migration: !!last.migration || /migration failed/.test(reason) };
 }
 
 const EVENTS = new Set<string>(['attempt', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error']);
 
+/** What the updater follows: signed release tags, or main's tip. */
+export type UpdateChannel = 'release' | 'main';
+
+/** The channel an updates.json selects: "release" only when it says so; absent (an existing install) is main. */
+export function updateChannel(j: Record<string, unknown>): UpdateChannel {
+  return j.channel === 'release' ? 'release' : 'main';
+}
+
 /** The updater's settings, or null when it isn't set up on this machine. */
-export function updateSettings(path = UPDATES_CONFIG): { enabled: boolean; repo_url: string; branch: string; required_checks: string[] } | null {
+export function updateSettings(path = UPDATES_CONFIG): { enabled: boolean; channel: UpdateChannel; repo_url: string; branch: string; required_checks: string[] } | null {
   try {
     const j = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     return {
       enabled: j.enabled === true,
+      channel: updateChannel(j),
       repo_url: typeof j.repo_url === 'string' ? j.repo_url : '',
       branch: typeof j.branch === 'string' ? j.branch : 'main',
       required_checks: Array.isArray(j.required_checks) ? j.required_checks.filter((c): c is string => typeof c === 'string') : [],

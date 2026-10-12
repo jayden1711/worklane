@@ -17,6 +17,7 @@ import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
 import { ResearchOnDemand } from './research-on-demand.js';
 import { type CoordinatorDeps } from './shared.js';
+import { runRoute } from './model-routing.js';
 
 /** How often intake sources are pulled, by default. */
 const INTAKE_PULL_MS = 30_000;
@@ -171,13 +172,13 @@ export abstract class Intake extends ResearchOnDemand {
     const run = await this.d.runner.run({
       ...spec,
       stateDir: this.d.stateDir,
-      model: role.model,
+      ...runRoute(this.d.cfg, 'intake_triage'),
       maxTurns: 30,
       maxBudgetUsd: Math.max(0.05, Math.min(role.budget_usd ?? 1, caps.max_usd_per_day, left)),
       stallMs: 10 * 60_000,
       timeoutMs: 30 * 60_000,
     });
-    this.emit('run.cost', { issue: null, role: INTAKE_ROLE, model: run.model, usd: run.costUsd, turns: run.turns });
+    this.cost(null, INTAKE_ROLE, run);
     meter.recordDraft(run.costUsd);
     if (run.reason !== 'succeeded') return drop(`triage run ended: ${run.reason}`);
     const got = acceptTriage(run.structured);
@@ -285,10 +286,9 @@ export abstract class Intake extends ResearchOnDemand {
     const issue = trusted ? this.intakeIssues().get(id) : undefined;
     const f: ReplyFacts = { stage: facts, trusted, ...(issue !== undefined ? { issue } : {}) };
     const redacted = redactPii(r.text, { names: [...(r.sender.name ? [r.sender.name] : []), ...cfg.redact.names], patterns: cfg.redact.patterns });
-    const role = this.d.cfg.agents.roles.researcher ?? this.d.cfg.agents.roles.workers!;
     const cwd = replierDir(dirname(this.d.repo), this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, id, stage);
-    const run = await this.d.runner.run({ ...replierRun({ cwd, redacted, facts: f }), stateDir: this.d.stateDir, model: role.model, maxBudgetUsd: 0.25, stallMs: 2 * 60_000, timeoutMs: 5 * 60_000 });
-    this.emit('run.cost', { issue: null, role: REPLIER_ROLE, model: run.model, usd: run.costUsd, turns: run.turns });
+    const run = await this.d.runner.run({ ...replierRun({ cwd, redacted, facts: f }), stateDir: this.d.stateDir, ...runRoute(this.d.cfg, 'intake_replier'), maxBudgetUsd: 0.25, stallMs: 2 * 60_000, timeoutMs: 5 * 60_000 });
+    this.cost(null, REPLIER_ROLE, run);
     meter.recordSpend(run.costUsd);
     if (run.reason !== 'succeeded') return use(fixed, `the run ended: ${run.reason}`);
     const checked = checkReply((run.structured as { reply?: unknown } | undefined)?.reply, { redacted, facts: f });
@@ -345,7 +345,8 @@ export abstract class Intake extends ResearchOnDemand {
     for (const e of this.d.log.read(0, ['decision.asked'])) {
       const q = e.payload as EventPayload<'decision.asked'>;
       if (q.kind !== 'intake' || done.has(q.id)) continue;
-      const a = answers.find((x) => x.id === q.id && (x.by === this.d.instance || mayAnswer(q.owner, x.by, this.d.cfg.project.owners)));
+      // A role on the answer: the instance's own dashboard read the person as an owner or writer of its repo.
+      const a = answers.find((x) => x.id === q.id && (x.by === this.d.instance || x.role !== undefined || mayAnswer(q.owner, x.by, this.d.cfg.project.owners)));
       const rid = q.receipts.find((x) => x.startsWith('intake:'))?.slice('intake:'.length);
       if (!a || !rid || !/^[0-9a-f]{20}$/.test(rid)) continue;
       const file = join(this.d.stateDir, 'intake', 'drafts', `${rid}.json`);

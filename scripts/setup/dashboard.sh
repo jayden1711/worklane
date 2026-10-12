@@ -16,7 +16,8 @@ id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first
 [ -x /usr/local/bin/worklane ] || { echo "no engine installed; run engine.sh first" >&2; exit 1; }
 
 say "dashboard for $name, as $coord"
-# --user: who you are on the dashboard (decisions you may answer); without it, the project's default owner.
+# Its token is the owner's break-glass (it grants owner, on this machine only); --user only names who answered.
+# Anyone else signs in through the hub (dashboards.sh, docs/dashboard.md).
 run_as "$coord" '
   args=(dashboard --instance "$1" --no-open)
   [ -n "$2" ] && args+=(--user "$2")

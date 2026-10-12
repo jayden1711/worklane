@@ -16,9 +16,9 @@ Checked 2026-10-07. "Pitcrew" was dropped: GitHub org taken, all three domains r
 
 | # | Name | GitHub org | npm `@scope` org | Bare npm | Dev/agent collisions | Notes |
 |---|---|---|---|---|---|---|
-| 1 | **Rollcall** | taken (2014 org, 1 repo) | free | free | none in dev/agent tools. Nearest: `withtally/rollcall` (77★, cross-chain governance libs), attendance apps | Fits "who's on which task". `rollcall up`, `rollcall doctor` read well. **Current working name.** |
+| 1 | **Rollcall** | taken (2014 org, 1 repo) | free | free | none in dev/agent tools. Nearest: `withtally/rollcall` (77★, cross-chain governance libs), attendance apps | Fits "who's on which task". `rollcall up`, `rollcall doctor` read well. The working name before Worklane was chosen. |
 | 2 | **Taskhouse** | taken (2018 org, 3 repos) | free | free | none; one abandoned 0★ repo | Plain and descriptive, but generic. |
-| 3 | **Worklane** | taken (user, 0 repos) | free | free | `ericgichuri/worklane` (1★, workflow automation) | "Lane" echoes the land queue. Weak collision. |
+| 3 | **Worklane** | taken (user, 0 repos) | free | free | `ericgichuri/worklane` (1★, workflow automation) | "Lane" echoes the land queue. Weak collision. **Chosen (2026-10-07).** |
 | 4 | **Crewroom** | taken (user since 2025, 0 repos) | free | free | a few 0-1★ unrelated repos | Close to Pitcrew's "crew" metaphor without the racing theme. |
 | 5 | **Shopwork** | taken (2014 org, 0 repos) | free | free | `shopworker` repos (Shopify scripts, ~20★) | The Shopify association weakens it. |
 

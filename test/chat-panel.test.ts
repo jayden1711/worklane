@@ -8,7 +8,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { Backlog } from '../src/backlog/types.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const BODY = '**Outcome:** Totals round to the cent.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- test: test/totals.test.js\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n';
 
@@ -41,9 +41,9 @@ async function setup(user = 'example-owner', create: () => Promise<number> = asy
       return n;
     },
   } as unknown as Backlog;
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user, slotsDir: join(dir, 'slots'), backlog: () => backlog });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), backlog: () => backlog });
   const base = d.url.split('/?')[0]!;
-  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' };
+  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(user) };
   const ask = (question: string) => fetch(`${base}/api/chat`, { method: 'POST', headers: h, body: JSON.stringify({ question }) });
   const get = async (id: string) => (await fetch(`${base}/api/chat/${id}`, { headers: h })).json() as Promise<Record<string, unknown> & { state: string; answer?: ChatAnswer; owner: boolean; filed: { number: number } | null }>;
   const file = (id: string) => fetch(`${base}/api/chat/${id}/file-issue`, { method: 'POST', headers: h, body: '{}' });

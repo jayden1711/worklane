@@ -10,7 +10,7 @@ import { mayAnswer, settingsView, startDashboard, stopStatus } from '../src/dash
 import { emergencyStop, resumeAll, stopAll } from '../src/slots.js';
 import { EventLog } from '../src/events/log.js';
 import { inbox, project } from '../src/projection.js';
-import { exampleProject } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const seen = (issue: number, title = 't', author = 'example-owner') => ({ issue, title, labels: ['ready'], author, owner: null, actionable: true, why: 'opened by writer' });
 
@@ -120,7 +120,8 @@ test('settings show choices, never commands, fingerprints or deploy details', ()
   assert.match(shown, /"landMode"/);
 });
 
-async function server(withWeb = true, user = 'example-owner', slotsDir?: string) {
+/** A dashboard; with `user`, requests name that person (as the hub does), whose role comes from exampleRoles. Without, the owner's break-glass. */
+async function server(withWeb = true, user?: string, slotsDir?: string) {
   const { dir, log, db } = logWith();
   const { dir: root } = exampleProject();
   const web = join(dir, 'web');
@@ -128,9 +129,9 @@ async function server(withWeb = true, user = 'example-owner', slotsDir?: string)
     mkdirSync(web);
     writeFileSync(join(web, 'index.html'), '<!doctype html><title>ok</title>');
   }
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: join(dir, 'state'), user, webDir: web, pollMs: 50, slotsDir: slotsDir ?? join(dir, 'slots') });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, webDir: web, pollMs: 50, slotsDir: slotsDir ?? join(dir, 'slots') });
   const base = d.url.split('/?')[0]!;
-  return { d, log, base, h: { authorization: `Bearer ${d.token}` } };
+  return { d, log, base, h: { authorization: `Bearer ${d.token}`, ...(user ? asPerson(user) : {}) } };
 }
 
 test('dashboard API needs the token, binds locally, and serves state from the log', async () => {
@@ -206,7 +207,7 @@ test('answering a decision records a human event once, with a valid option only'
     const answered = s.log.read(0, ['decision.answered']);
     assert.equal(answered.length, 1);
     assert.equal(answered[0]!.source, 'human');
-    assert.deepEqual(answered[0]!.payload, { id: 'd-9', by: 'example-owner', answer: 'approve' });
+    assert.deepEqual(answered[0]!.payload, { id: 'd-9', by: 'example-owner', answer: 'approve', role: 'owner' });
   } finally {
     await s.d.close();
   }
@@ -227,29 +228,33 @@ test('saved views round-trip; without a built UI the server says how to build it
 });
 
 
-test('only the decision\'s owner or a writer can answer it from the dashboard', async () => {
-  // The example project's writers are example-owner and example-collaborator.
-  const asked = { kind: 'land' as const, issue: 9, question: 'Approve?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] };
+test('who can answer from the dashboard follows the role the repo gives, not the project\'s owners list', async () => {
+  // exampleRoles: example-owner an admin (owner), example-collaborator write (writer), anyone else read (viewer).
+  const asked = { issue: 9, question: 'Approve?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] };
   const s = await server(true, 'someone-else');
   try {
-    s.log.append('decision.asked', { ...asked, id: 'd-1', owner: 'example-owner' }, 'c');
-    s.log.append('decision.asked', { ...asked, id: 'd-2', owner: 'someone-else' }, 'c');
+    s.log.append('decision.asked', { ...asked, kind: 'question', id: 'd-1', owner: 'example-owner' }, 'c');
+    s.log.append('decision.asked', { ...asked, kind: 'question', id: 'd-2', owner: 'someone-else' }, 'c');
     const post = (id: string) => fetch(`${s.base}/api/decide`, { method: 'POST', headers: { ...s.h, 'content-type': 'application/json' }, body: JSON.stringify({ id, answer: 'approve' }) });
     const refused = await post('d-1');
-    assert.equal(refused.status, 403, 'not the owner and not a writer');
-    assert.match(((await refused.json()) as { error: string }).error, /for @example-owner/);
+    assert.equal(refused.status, 403, 'a viewer answers nothing');
+    assert.match(((await refused.json()) as { error: string }).error, /@someone-else is a viewer/);
+    assert.equal((await post('d-2')).status, 403, "even a decision addressed to them: project.owners grants nothing");
     assert.equal(s.log.read(0, ['decision.answered']).length, 0, 'nothing recorded');
-    assert.equal((await post('d-2')).status, 200, 'the owner can');
     const st = (await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { decisions: { id: string; canAnswer: boolean }[] };
-    assert.deepEqual(Object.fromEntries(st.decisions.map((d) => [d.id, d.canAnswer])), { 'd-1': false, 'd-2': true }, 'the UI is told which it may answer');
+    assert.deepEqual(Object.fromEntries(st.decisions.map((d) => [d.id, d.canAnswer])), { 'd-1': false, 'd-2': false }, 'the UI is told which it may answer');
   } finally {
     await s.d.close();
   }
   const w = await server(true, 'Example-Collaborator');
   try {
-    w.log.append('decision.asked', { ...asked, id: 'd-3', owner: 'example-owner' }, 'c');
-    const r = await fetch(`${w.base}/api/decide`, { method: 'POST', headers: { ...w.h, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'd-3', answer: 'reject' }) });
-    assert.equal(r.status, 200, 'a writer can, whatever the case of the login');
+    w.log.append('decision.asked', { ...asked, kind: 'question', id: 'd-3', owner: 'example-owner' }, 'c');
+    w.log.append('decision.asked', { ...asked, kind: 'land', id: 'd-4', owner: 'example-owner' }, 'c');
+    const post = (id: string) => fetch(`${w.base}/api/decide`, { method: 'POST', headers: { ...w.h, 'content-type': 'application/json' }, body: JSON.stringify({ id, answer: 'reject' }) });
+    assert.equal((await post('d-3')).status, 200, 'a writer answers an ordinary decision, whatever the case of the login');
+    assert.equal((await post('d-4')).status, 403, 'but not a high-risk merge');
+    const st = (await (await fetch(`${w.base}/api/state`, { headers: w.h })).json()) as { decisions: { id: string; canAnswer: boolean }[] };
+    assert.deepEqual(Object.fromEntries(st.decisions.map((d) => [d.id, d.canAnswer])), { 'd-3': true, 'd-4': false });
   } finally {
     await w.d.close();
   }
