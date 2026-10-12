@@ -6,6 +6,7 @@
 //
 // The bundle lives under the research bundles' root: the research lane's hook refuses every read outside it.
 import { join } from 'node:path';
+import { DRAFT_FORMAT } from '../backlog/types.js';
 import { writeBundle } from '../bundle.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE } from '../research.js';
 import type { Candidate } from './dedupe.js';
@@ -24,7 +25,7 @@ Read report.md, candidates.json (open issues and recent reports that may be the 
 - kind: bug, feature, question, duplicate, not_actionable, or needs_info.
 - duplicate_of: an issue number from candidates.json when this is the same bug or request; group_with: a recent report id from candidates.json when it's the same as one with no issue yet. Only ids you were shown.
 - reproduction (bugs): whether you could reproduce or locate it from the code you can read (reproduced / not_reproduced / fixed_on_main / not_tried), with the detail and, for fixed_on_main, the commit.
-- draft (bugs and features you can act on): a title and a body with the problem in plain words and a closed \`\`\`done_when block whose commands are YAML block scalars (command: |).
+- draft (bugs and features you can act on): a title and a body in ${DRAFT_FORMAT} Sources are the files or areas you found it in; the review point is your best guess, for the owner to correct.
 - reply (needs_info / not_actionable): one short, polite message to the reporter asking for what's missing. No internal details, links or issue numbers.`;
 
 /** The per-report bundle: what the intake agent may read. */

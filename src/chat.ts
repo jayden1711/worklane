@@ -12,7 +12,7 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { parseContract } from './backlog/types.js';
+import { checkDraftedIssue } from './backlog/types.js';
 import { writeBundle } from './bundle.js';
 import type { Config } from './config/load.js';
 import { redact, redactString } from './events/redact.js';
@@ -152,15 +152,9 @@ export interface ChatAnswer {
   costUsd: number;
 }
 
-/** A draft issue the harness can check: a ```done_when block parseContract accepts, commands as block scalars. */
+/** A draft issue the harness can check: the five parts, checked by the contract parser (checkDraftedIssue). */
 export function validateDraft(title: string, body: string): IssueDraft {
-  if (!title.trim()) return { ok: false, title, body, why: 'no title' };
-  const block = body.match(/```done_when\s*\n([\s\S]*?)\n```/)?.[1];
-  if (block !== undefined) {
-    const inline = block.split('\n').filter((l) => /^\s*-\s*command:\s*\S/.test(l) && !/^\s*-\s*command:\s*[|>][-+]?\s*$/.test(l));
-    if (inline.length) return { ok: false, title, body, why: `commands must be YAML block scalars ("- command: |"), not inline: ${inline[0]!.trim()}` };
-  }
-  const c = parseContract(body);
+  const c = checkDraftedIssue(title, body);
   return c.ok ? { ok: true, title: title.trim(), body, labels: ['ready'] } : { ok: false, title, body, why: c.why };
 }
 

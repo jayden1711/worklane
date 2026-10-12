@@ -3,7 +3,7 @@
 // kind, an optional duplicate/group target, a reproduction result, an issue draft
 // and a reply. It has no field for labels, trust, config or decisions, and any
 // such field it returns anyway is dropped and named.
-import { parseContract } from '../backlog/types.js';
+import { checkDraftedIssue, DRAFT_FORMAT } from '../backlog/types.js';
 import { TRIAGE_KINDS, type TriageKind } from './report.js';
 
 export const INTAKE_SCHEMA = {
@@ -28,7 +28,7 @@ export const INTAKE_SCHEMA = {
       type: 'object',
       additionalProperties: false,
       required: ['title', 'body'],
-      properties: { title: { type: 'string' }, body: { type: 'string', description: 'Markdown with a closed ```done_when block; commands as YAML block scalars (|).' } },
+      properties: { title: { type: 'string' }, body: { type: 'string', description: `Markdown in ${DRAFT_FORMAT}` } },
     },
     reply: { type: 'string', description: 'What to ask the reporter, for needs_info or not_actionable. Short and polite; no internal details.' },
   },
@@ -64,16 +64,8 @@ export function acceptTriage(raw: unknown): { ok: true; triage: Triage; dropped:
   return { ok: true, triage: t, dropped };
 }
 
-/**
- * Is a draft fileable? Its done_when must parse with the engine's contract parser, and every command must be written
- * as a YAML block scalar (`command: |`), which keeps quoting and colons inside commands from breaking the block.
- */
+/** Is a draft fileable? The five parts, checked by the engine's contract parser (checkDraftedIssue). */
 export function checkDraft(draft: { title: string; body: string }): { ok: true } | { ok: false; why: string } {
-  if (!draft.title.trim()) return { ok: false, why: 'the draft has no title' };
-  const c = parseContract(draft.body);
-  if (!c.ok) return { ok: false, why: c.why };
-  const block = draft.body.match(/```done_when\s*\n([\s\S]*?)\n```/)![1]!;
-  const inline = block.split('\n').filter((l) => /^\s*-?\s*command:\s*\S/.test(l) && !/^\s*-?\s*command:\s*[|>][-+]?\s*$/.test(l));
-  if (inline.length) return { ok: false, why: `commands must be YAML block scalars (command: |), not inline: ${inline[0]!.trim()}` };
-  return { ok: true };
+  const c = checkDraftedIssue(draft.title, draft.body);
+  return c.ok ? { ok: true } : c;
 }
