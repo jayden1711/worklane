@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig, FlowStep } from '../config/schema.js';
 import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
-import { findChrome, launchChrome, portInUse, sleep, until, type Cdp } from './cdp.js';
+import { findChrome, launchChrome, portInUse, sleep, stopTree, until, type Cdp } from './cdp.js';
 import { targetExpr } from './targets.js';
 import { summarizeTrace, TRACE_CATEGORIES, type TraceEvent, type TraceSummary } from './trace.js';
 
@@ -51,24 +51,24 @@ export interface FlowEvidence {
   trace: TraceSummary | null;
   screenshot: string | null;
   durationMs: number;
+  /** What went wrong cleaning up (a profile left behind): reported, never judged. */
+  notes?: string[];
 }
 
 export type FlowRun = FlowEvidence | { flow: string; skipped: string };
 
 /** Stop the app and everything it started (a dev server's own children too), through the OS adapter. */
-async function stopApp(p: ChildProcess, runAs?: { user: string; home: string }) {
-  if (p.exitCode !== null || p.signalCode !== null) return;
-  const gone = new Promise((r) => p.once('exit', r));
-  if (runAs) killTreeAs(runAs.user, p.pid);
-  else killTree(p.pid, () => p.kill('SIGKILL'));
-  await Promise.race([gone, sleep(5000)]);
+function stopApp(p: ChildProcess, runAs?: { user: string; home: string }): Promise<boolean> {
+  return stopTree(p, () => (runAs ? killTreeAs(runAs.user, p.pid) : killTree(p.pid, () => p.kill('SIGKILL'))));
 }
 
 /**
- * Run `flow` from `app` against the app started in `cwd`. Evidence lands in `outDir` (the screenshot). Throws only
- * when the app can't be started or never becomes ready (its output tail in the message); a failing step is evidence.
+ * Run `flow` from `app` against the app started in `cwd`. Evidence lands in `outDir` (the screenshot). Throws when
+ * the app can't be started or never becomes ready (its output tail in the message), or the browser fails; a failing
+ * step is evidence. However it ends, Chrome and the app's whole process tree are stopped first. Chrome's temporary
+ * profile goes under `chromeProfileRoot` when given (the system temp folder otherwise).
  */
-export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; outDir: string; chrome?: string | null; noSandbox?: boolean; runAs?: { user: string; home: string } }): Promise<FlowRun> {
+export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; outDir: string; chrome?: string | null; noSandbox?: boolean; runAs?: { user: string; home: string }; chromeProfileRoot?: string }): Promise<FlowRun> {
   const steps = o.app.flows[o.flow];
   if (!steps) throw new Error(`no flow "${o.flow}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
   // undefined: look for one; null: there is none (what a machine without a browser, or a test, says).
@@ -87,7 +87,9 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
   const tail = (d: Buffer) => (appOut = (appOut + d.toString()).slice(-4000));
   app.stdout?.on('data', tail);
   app.stderr?.on('data', tail);
+  app.on('error', (e) => (appOut += `\n${e.message}`));
   let browser: Awaited<ReturnType<typeof launchChrome>> | null = null;
+  let ev: FlowEvidence | null = null;
   try {
     await until(
       `the app to answer ${base}${o.app.start.ready.path}`,
@@ -101,9 +103,9 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
       throw new Error(`${e.message}\nthe app said:\n${appOut.trim().split('\n').slice(-20).join('\n') || '(nothing)'}`);
     });
 
-    browser = await launchChrome(chrome, { ...(o.noSandbox ? { noSandbox: true } : {}) });
+    browser = await launchChrome(chrome, { ...(o.noSandbox ? { noSandbox: true } : {}), ...(o.chromeProfileRoot ? { profileRoot: o.chromeProfileRoot } : {}) });
     const cdp = browser.cdp;
-    const ev: FlowEvidence = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, durationMs: 0 };
+    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, durationMs: 0 };
     watch(cdp, ev, o.app.thresholds.slow_request_ms);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
@@ -139,13 +141,23 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
     ev.durationMs = Date.now() - t0;
     return ev;
   } finally {
+    // Every path ends here, a thrown error included, and each part of teardown runs whatever the one before
+    // did: a browser or an app left running would outlive the check (and keep a test run from ever exiting).
+    const notes: string[] = [];
     try {
       browser?.cdp.close();
     } catch {
       // already closed
     }
-    await browser?.close();
-    await stopApp(app, o.runAs);
+    const chromeNote = browser ? await browser.close() : null;
+    if (chromeNote) notes.push(chromeNote);
+    try {
+      if (!(await stopApp(app, o.runAs))) notes.push(`the app (pid ${app.pid}) didn't stop`);
+    } catch (e) {
+      notes.push(`stopping the app failed: ${(e as Error).message}`);
+    }
+    // Cleanup is reported, never a reason the flow fails.
+    if (ev && notes.length) ev.notes = [...(ev.notes ?? []), ...notes];
   }
 }
 

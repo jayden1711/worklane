@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfig } from '../src/config/schema.js';
@@ -132,4 +133,63 @@ test('with no Chrome or Chromium, a run is skipped and says why, starting nothin
   assert.deepEqual(r, { flow: 'home', skipped: 'no Chrome or Chromium on this machine (set CHROME to its path); browser checks skipped' });
   assert.equal(existsSync(join(dir, 'started')), false, 'the app was not even started');
   await assert.rejects(runFlow({ app, flow: 'nope', cwd: dir, outDir: dir, chrome: null }), /no flow "nope" in app.yaml \(it has: home\)/);
+});
+
+const pidGone = async (pid: number) => {
+  for (let i = 0; i < 50; i++) {
+    try {
+      process.kill(pid, 0);
+      await new Promise((r) => setTimeout(r, 100));
+    } catch {
+      return true;
+    }
+  }
+  return false;
+};
+
+test("a browser that can't start fails the run at once, and the app (already running) and its children are stopped", { timeout: 60_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
+  fixtureApp(dir);
+  const port = await freePort();
+  const app = AppConfig.parse({ version: 1, start: { command: `"${process.execPath}" server.mjs`, port, ready: { timeout_s: 30 } }, ui_paths: ['web/**'], flows: { home: [{ goto: '/' }] } });
+  const t0 = Date.now();
+  await assert.rejects(runFlow({ app, flow: 'home', cwd: dir, outDir: join(dir, 'evidence'), chrome: join(dir, 'no-such-browser') }), /Chrome couldn't be started/);
+  assert.ok(Date.now() - t0 < 15_000, 'not at the DevTools timeout');
+  assert.equal(await portInUse(port), false, 'the app stopped');
+  assert.equal(await pidGone(Number(readFileSync(join(dir, 'child.pid'), 'utf8'))), true, "the app's child was stopped with it");
+});
+
+// Removing a directory's entry needs its parent writable: lock the parent once Chrome's profile is in it, and the
+// profile can't be removed at teardown (as when Chrome is still letting go of its cache). Root ignores this, and so
+// does Windows' chmod.
+const cannotLock = process.platform === 'win32' || process.getuid?.() === 0;
+
+test("a teardown that goes wrong (the profile can't be removed) is a note, never a failed run; Chrome and the app's whole tree are still stopped", { skip: (!chrome && 'no Chrome or Chromium on this machine') || (cannotLock && 'needs a directory permission that holds (not Windows, not root)'), timeout: 120_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
+  fixtureApp(dir);
+  const root = join(dir, 'profiles');
+  mkdirSync(root);
+  const port = await freePort();
+  const app = AppConfig.parse({ version: 1, start: { command: `"${process.execPath}" server.mjs`, port, ready: { timeout_s: 30 } }, ui_paths: ['web/**'], flows: { home: [{ goto: '/' }, { wait: 'testid:go' }] } });
+  const run = runFlow({ app, flow: 'home', cwd: dir, outDir: join(dir, 'evidence'), chrome, chromeProfileRoot: root });
+  let profile = '';
+  for (let i = 0; i < 1200 && !profile; i++) {
+    profile = readdirSync(root).find((f) => f.startsWith('cdp-chrome-')) ?? '';
+    if (!profile) await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.ok(profile, 'Chrome got a profile');
+  chmodSync(root, 0o555);
+  try {
+    const ev = (await run) as FlowEvidence;
+    assert.equal(ev.ok, true, JSON.stringify(ev.steps));
+    assert.match((ev.notes ?? []).join('\n'), /temporary profile .* wasn't removed/, 'the cleanup failure is a note');
+    // Nothing still runs from this profile: Chrome and all its helpers are gone.
+    const ps = spawnSync('ps', ['-ax', '-o', 'pid=,command='], { encoding: 'utf8' }).stdout;
+    assert.deepEqual(ps.split('\n').filter((l) => l.includes(join(root, profile))), [], 'no Chrome process outlived the run');
+    assert.equal(await portInUse(port), false, 'the app stopped');
+    assert.equal(await pidGone(Number(readFileSync(join(dir, 'child.pid'), 'utf8'))), true, "the app's child was stopped with it");
+  } finally {
+    chmodSync(root, 0o755);
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
 });
