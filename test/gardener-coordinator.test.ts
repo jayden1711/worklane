@@ -63,7 +63,7 @@ test('a due run is read-only and capped; every finding goes to one log issue; a 
   assert.ok(run.maxBudgetUsd <= 2, `capped at max_usd: ${run.maxBudgetUsd}`);
   assert.deepEqual(t.of('gardener.filed').map((p) => p.pattern), ['copy-paste-retry'], 'the most-seen one, within max_prs 1');
   const fix = await t.backlog.get(t.of('gardener.filed')[0]!.issue as number);
-  assert.deepEqual(fix.labels.sort(), ['gardener', 'ready']);
+  assert.deepEqual(fix.labels, ['gardener'], 'never ready: the owner chooses what gets built');
   const done = t.of('gardener.run')[0]!;
   assert.deepEqual([done.outcome, done.findings, done.filed], ['done', 4, [fix.number]]);
   const log = await t.backlog.get(done.log_issue as number);
@@ -107,4 +107,19 @@ test('the tick starts the gardener', async () => {
   await t.c.tick();
   await t.c.idle();
   assert.equal(t.of('gardener.run').length, 1);
+});
+
+test("the owner chooses which gardener fixes get built (filed without ready), while a correction's fix is filed ready", async () => {
+  const t = fixture(() => ({ findings: [finding('copy-paste-retry', ['src/a.js', 'src/b.js', 'src/c.js'])] }));
+  await t.check();
+  const filed = await t.backlog.get(t.of('gardener.filed')[0]!.issue as number);
+  assert.ok(!filed.labels.includes('ready'), JSON.stringify(filed.labels));
+  assert.deepEqual(await t.backlog.list('ready'), [], 'nothing the dispatcher would pick up');
+  // A correction on the same instance: its fix is still filed ready.
+  const c = fixture((req) => (req.role === 'corrections' ? { same_as: '', fix_kind: 'check', why_not_stronger: 'a lint is the strongest that fits', title: 'Lint: no payments client in handlers', body: DRAFT, why: 'the lint fails on it' } : { findings: [] }), (cfg) => void (cfg.project.gardener.enabled = false));
+  c.log.append('plan.decided', { issue: 7, decision: 'd-1', answer: 'reject', by: 'example-owner', note: 'never call payments from a handler' }, 'test');
+  await c.c.checkCorrections();
+  await c.c.idle();
+  const fix = (await c.backlog.list('correction'))[0]!;
+  assert.deepEqual(fix.labels.sort(), ['correction', 'ready']);
 });

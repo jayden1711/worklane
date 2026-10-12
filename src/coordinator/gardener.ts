@@ -1,6 +1,7 @@
 // The gardener's schedule and run: due once per period at an off-hours time, one read-only run within its budget,
 // every finding appended to the instance's one log issue, and a fix filed only for a pattern seen 3+ times, at most
-// max_prs per run, never in a high-risk or safety-floor path. See src/gardener.ts.
+// max_prs per run, never in a high-risk or safety-floor path. Filed without `ready`: the owner chooses which get
+// built. See src/gardener.ts.
 import type { ReviewConfig } from '../config/schema.js';
 import { protectedCategories } from '../delegation.js';
 import type { EventPayload } from '../events/types.js';
@@ -76,7 +77,7 @@ export abstract class Gardener extends Delegation {
     const plan = toFile(findings, history, { maxPrs: g.max_prs, isProtected: this.protectedPath() });
     const filed: { pattern: string; issue: number }[] = [];
     for (const f of plan.file) {
-      const n = await this.d.backlog.createIssue(f.fix!.title, `${f.fix!.body}\n\n_From the gardener: pattern \`${f.pattern}\`, seen in ${f.where.length} place(s) this run._`, ['ready', GARDENER_LABEL]);
+      const n = await this.d.backlog.createIssue(f.fix!.title, `${f.fix!.body}\n\n_From the gardener: pattern \`${f.pattern}\`, seen in ${f.where.length} place(s) this run. Label it \`ready\` to have it built._`, [GARDENER_LABEL]);
       this.emit('gardener.filed', { pattern: f.pattern, issue: n });
       filed.push({ pattern: f.pattern, issue: n });
     }
