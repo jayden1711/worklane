@@ -9,6 +9,7 @@ import { hub, instanceStream, onInstance, type BoardCard, type BoardColumn, type
 import { navigate } from '../App';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
+import { TestRunsPanel } from '../components/TestRuns';
 import { ago, Badge, Button, cx, Empty, LevelBadge } from '../components/ui';
 import { Header } from './Overview';
 
@@ -413,6 +414,19 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
     <div data-testid="page-board">
       <Header title="Board" sub={`every task in flight, by stage · ${state.project.repo}`} />
       {boards ? <BoardView boards={boards} filter={filter} onFilter={pick} now={now} onChanged={() => setTick((t) => t + 1)} /> : <Loading />}
+      {/* Each instance's test runs: the queue, the slots running and each run's tiers. */}
+      {boards ? (
+        <div className="space-y-4 px-6 pb-6" data-testid="board-test-runs">
+          {boards
+            .filter((b) => !filter || b.name === filter)
+            .map((b) => (
+              <div key={b.name ?? ''} className="space-y-1">
+                {b.name && boards.length > 1 ? <div className="text-[12px] text-ink-3">{b.name}</div> : null}
+                <TestRunsPanel instance={b.name} pulse={tick + pulse} compact />
+              </div>
+            ))}
+        </div>
+      ) : null}
     </div>
   );
 }

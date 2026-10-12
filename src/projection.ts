@@ -151,6 +151,11 @@ export function summarize(e: StoredEvent): string {
       return `@${p.by} answered ${p.answer}`;
     case 'land.queued':
       return `queued for landing (${p.level})`;
+    case 'testrun.finished': {
+      const r = p.results as { tier: string; ok: boolean }[];
+      const failed = r.filter((x) => !x.ok).map((x) => x.tier);
+      return `${p.kind} test run ${p.outcome === 'done' ? (p.ok ? 'passed' : `failed${failed.length ? `: ${failed.join(', ')}` : ''}`) : p.outcome} on ${String(p.sha).slice(0, 8)}${(p.prs as number[]).length ? ` (${(p.prs as number[]).map((n) => `#${n}`).join(', ')})` : ''}`;
+    }
     case 'land.result':
       return `landing ${p.outcome}${p.landed ? ` at ${String(p.landed).slice(0, 8)}` : ''}`;
     case 'deploy.verified':

@@ -29,6 +29,8 @@ export const VIEWER_EVENTS: Readonly<Record<string, readonly string[]>> = Object
   'deploy.requested': ['issue', 'env', 'sha'],
   'deploy.verified': ['issue', 'env', 'sha'],
   'deploy.failed': ['issue', 'env', 'sha', 'why'],
+  // A test run's outcome: each tier's pass or fail (results holds { tier, ok } only), never its log or summary.
+  'testrun.finished': ['id', 'sha', 'kind', 'prs', 'ok', 'outcome', 'results'],
 });
 
 export const viewerMaySee = (type: string) => Object.hasOwn(VIEWER_EVENTS, type);

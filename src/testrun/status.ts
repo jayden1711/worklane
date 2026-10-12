@@ -127,3 +127,38 @@ export function viewerTestRuns(s: TestRunStatus) {
   const row = (r: TestRunRow) => ({ id: r.id, sha: r.sha, kind: r.kind, prs: r.prs, state: r.state, tiers: r.tiers.map((t) => ({ tier: t.tier, ok: t.ok })) });
   return { queue: s.queue.map(row), running: s.running.map(row), recent: s.recent.map(row) };
 }
+
+export interface TestRunsViewInput {
+  events: readonly StoredEvent[];
+  /** tests.yaml has a test_run section. */
+  configured: boolean;
+  /** Whether this person is an owner or writer (else a viewer). */
+  writer: boolean;
+  cap: number;
+  slots: { slot: string; owner: string; acquiredAt: string }[];
+  lock: { path: string; holders: { pid: number; mode: 'shared' | 'exclusive' }[] | null };
+}
+
+/**
+ * The test runs as the dashboard shows them. Owners and writers: the queue, the running slots and their holders,
+ * the full-run lock's holders, results with each tier's summary, per-tier figures, and the problems. A viewer: the
+ * runs' commits, PRs, states and tiers' pass or fail, and the slot counts; never a log, summary, holder or problem.
+ */
+export function testRunsView(i: TestRunsViewInput) {
+  const s = testRunStatus(i.events);
+  const base = { configured: i.configured, cap: i.cap, inUse: i.slots.length };
+  if (!i.writer) return { ...base, viewer: true as const, ...viewerTestRuns(s) };
+  return {
+    ...base,
+    viewer: false as const,
+    slots: i.slots,
+    lock: i.lock,
+    queue: s.queue,
+    running: s.running,
+    recent: s.recent,
+    tierStats: s.tierStats,
+    sandbox: s.sandbox,
+    checksPermission: s.checksPermission,
+    problems: s.problems,
+  };
+}
