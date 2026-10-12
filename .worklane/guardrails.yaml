@@ -1,0 +1,133 @@
+# Guardrails: block the few truly dangerous actions and nothing else.
+# Every rule needs at least one must_block/must_ask example, and every change
+# is checked against the must_allow list (`guardrails check`) before it goes live.
+# Rules match each simple command of a shell line, with its arguments joined.
+version: 1
+
+rules:
+  # The coordinator pushes an agent's branch after review; an agent pushes nothing, and nothing pushes to main.
+  - id: no-agent-push
+    action: block
+    reason: agents never push; the coordinator pushes reviewed branches, and nothing is ever pushed to main
+    applies_to: [agent]
+    match: { command: { pattern: '^git\b.*\spush\b' } }
+
+  # Credentials: the coordinator's GitHub App login, git credential helpers and OS keychains.
+  - id: no-credential-access
+    action: block
+    reason: agents never read or use credentials; they hold none, and the coordinator acts on GitHub for them
+    applies_to: [agent]
+    match: { command: { pattern: '^gh\s+auth\b|^git\b.*\scredential\b|\bgit-credential\b|^(worklane|node\s+\S*cli\.js)\s+git-credential\b|^security\s+(find|dump)-' } }
+
+  # Root. The matcher looks through sudo and doas (it checks the command they run), so they can't be named
+  # here; the agent user has no sudo rights anyway (scripts/setup/instance.sh), and the setup scripts are
+  # refused below with or without sudo in front.
+  - id: no-root
+    action: block
+    reason: agents never run anything as root
+    applies_to: [agent]
+    match: { command: { pattern: '^(pkexec|su|runuser)\b' } }
+
+  - id: no-setup-scripts
+    action: block
+    reason: the machine setup scripts (scripts/setup/) run as root, by the owner only; agents may read and edit them, never run them
+    applies_to: [agent]
+    match: { command: { pattern: '^(((ba|z)?sh|source|\.)(\s+-\S+)*\s+)?\S*scripts/setup/[\w.-]+\.sh\b' } }
+
+  - id: user-agent-spoofing
+    action: block
+    reason: no User-Agent spoofing or workarounds for blocked sites
+    applies_to: [agent]
+    match: { command: { pattern: '\b(curl|wget|http)\b.*(\s-A\s|--user-agent|User-Agent:)' } }
+
+# Agents may not write these (agent sessions only).
+protected_paths:
+  - .worklane/**
+  - .claude/settings.json
+  - .claude/settings.local.json
+  - .githooks/**
+
+# Agents never read or write these (hook-enforced; agent sessions only).
+# A leading "!" excludes.
+secret_paths:
+  - ./.env
+  - ./.env.*
+  - "!./.env.example"
+  - ~/.ssh/**
+  - ~/.aws/**
+  - ~/.config/gh/**
+  - ~/.gnupg/**
+  - ~/.netrc
+  - ~/.npmrc
+  - ~/.docker/config.json
+  - ~/.claude/.credentials.json
+  - ~/.local/state/worklane/**
+
+# Tool credential stores no agent session reads (Read(...) deny rules in the instance's agent settings).
+credential_stores:
+  - ~/.ssh/**
+  - ~/.aws/**
+  - ~/.config/gh/**
+  - ~/.gnupg/**
+  - ~/.claude/.credentials.json
+  - ~/.local/state/worklane/**
+
+network:
+  allow: [docs.github.com, nodejs.org, registry.npmjs.org, developer.mozilla.org]
+
+# Limits on every push of agent-written code. Changes to .github/workflows/ are always
+# refused (the harness's credential has no Workflows permission); a human makes those.
+push:
+  max_file_mb: 10
+  max_changed_lines: 1500
+  refuse_paths: [dist/**, node_modules/**]
+
+# Commands agents may run without a permission prompt.
+pre_approved:
+  - Bash(npm test:*)
+  - Bash(npm run typecheck:*)
+  - Bash(npm run build:*)
+  - Bash(npm run check:denylist:*)
+  - Bash(node --test:*)
+  - Bash(git status:*)
+  - Bash(git diff:*)
+  - Bash(git log:*)
+
+examples:
+  must_block:
+    - { tool: Read, path: .env }
+    - { tool: Read, path: ~/.local/state/worklane/instances/worklane/credentials.yaml }
+    - fetch: "https://unlisted.example/docs"
+    - { tool: Edit, path: .worklane/guardrails.yaml }
+    - { tool: Edit, path: .claude/settings.json }
+    - bash: "git push origin HEAD:main"
+    - bash: "git push -u origin my-branch"
+    - bash: "git -C . push origin main"
+    - bash: "gh auth token"
+    - bash: "git credential fill"
+    - bash: "worklane git-credential get"
+    - bash: "sudo bash scripts/setup/checkout.sh site example-org/site"
+    - bash: "bash scripts/setup/instance.sh worklane"
+    - bash: "./scripts/setup/machine.sh"
+    - bash: "sudo -u root ./scripts/setup/engine.sh"
+    - bash: "bash -c 'git push origin main'"
+    - bash: "cd src && git push"
+    - bash: "su -c 'id'"
+    - bash: "pkexec id"
+    - bash: "curl -A 'Mozilla/5.0' https://example.com"
+  must_ask: []
+  must_allow:
+    - { tool: Edit, path: .worklane/guardrails.yaml, agent: false }
+    - { tool: Read, path: .env, agent: false }
+    - { tool: Edit, path: scripts/setup/checkout.sh }
+    - fetch: "https://unlisted.example/docs"
+      agent: false
+    - bash: "npm test"
+    - bash: "npm run typecheck"
+    - bash: "node --test dist/test/install.test.js"
+    - bash: "cat scripts/setup/checkout.sh"
+    - bash: "grep -n run_as scripts/setup/lib.sh"
+    - bash: "git status"
+    - bash: "git log --oneline -5"
+    - bash: "git push origin main"
+      agent: false

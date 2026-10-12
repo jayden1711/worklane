@@ -4,16 +4,13 @@
 // thresholds. Slow and blocked requests are reported, never judged. A check that couldn't run (no browser on
 // the machine, no app declared) is unavailable, never passed.
 //
-// The coordinator's DoneWhen doesn't accept `browser:` yet: its verify() would pass over a kind it doesn't run.
-// The wiring adds BrowserDoneWhenItem to DoneWhen and calls runBrowserCheck from verify(), together.
-import { z } from 'zod';
+// The done_when item itself lives in the contract (src/contract.ts), beside the other kinds.
 import { BRAND } from '../brand.js';
 import type { AppConfig } from '../config/schema.js';
+import { BrowserDoneWhenItem } from '../contract.js';
 import { runFlow, type FlowEvidence, type FlowRun } from './run.js';
 
-/** A done_when item: `- browser: checkout` runs the app's `checkout` flow. */
-export const BrowserDoneWhenItem = z.strictObject({ browser: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'a flow name from app.yaml') });
-export type BrowserDoneWhenItem = z.infer<typeof BrowserDoneWhenItem>;
+export { BrowserDoneWhenItem };
 
 export interface BrowserVerdict {
   pass: boolean;
@@ -57,6 +54,7 @@ export function judgeFlow(ev: FlowEvidence, thresholds: AppConfig['thresholds'],
   } else notes.push('no performance trace was recorded');
   if (ev.slowRequests.length) notes.push(`${ev.slowRequests.length} slow request(s), slowest ${Math.max(...ev.slowRequests.map((r) => r.ms))} ms`);
   if (ev.blockedRequests.length) notes.push(`${ev.blockedRequests.length} request(s) to other hosts refused`);
+  for (const n of ev.notes ?? []) notes.push(`cleanup: ${n}`);
   return { pass: reasons.length === 0, reasons, notes };
 }
 
@@ -64,6 +62,7 @@ export function judgeFlow(ev: FlowEvidence, thresholds: AppConfig['thresholds'],
 export interface BrowserCheckResult {
   check: string;
   status: 'pass' | 'fail' | 'unavailable';
+  kind: 'browser';
   exitCode: null;
   tail: string;
   evidence: FlowEvidence | null;
@@ -76,7 +75,7 @@ export interface BrowserCheckResult {
  */
 export async function runBrowserCheck(o: { item: BrowserDoneWhenItem; app: AppConfig | undefined; cwd: string; outDir: string; baseline?: FlowEvidence | null; chrome?: string | null; runAs?: { user: string; home: string } }): Promise<BrowserCheckResult> {
   const check = `browser ${o.item.browser}`;
-  const result = (status: BrowserCheckResult['status'], tail: string, evidence: FlowEvidence | null = null, verdict: BrowserVerdict | null = null): BrowserCheckResult => ({ check, status, exitCode: null, tail, evidence, verdict });
+  const result = (status: BrowserCheckResult['status'], tail: string, evidence: FlowEvidence | null = null, verdict: BrowserVerdict | null = null): BrowserCheckResult => ({ check, status, kind: 'browser', exitCode: null, tail, evidence, verdict });
   if (!o.app) return result('unavailable', `no app is declared (${BRAND.configDir}/app.yaml), so there is nothing to run a browser check against`);
   if (!o.app.flows[o.item.browser]) return result('fail', `no flow "${o.item.browser}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
   let run: FlowRun;

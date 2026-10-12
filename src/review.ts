@@ -11,7 +11,18 @@ export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
 const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
 
+/**
+ * The agents' own instructions: the config folder's roles and skills (the one part of it agents may edit), the root
+ * AGENTS.md and every CLAUDE.md. Always high-risk, so their PRs never auto-merge (merge-policy.ts
+ * waitCategoriesOf), whatever review.yaml says; review.yaml can't redefine, drop or loosen it.
+ */
+export const AGENT_INSTRUCTIONS = 'agent-instructions';
+export const LOCKED_CATEGORIES: Record<string, string[]> = {
+  [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
+};
+
 /** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
+
 export const DEFAULT_CATEGORIES: Record<string, string[]> = {
   docs: ['**/*.md', 'docs/**', '**/*.txt', 'art/**', 'assets/**'],
   tests: ['test/**', 'tests/**', '**/*.test.*', '**/*.spec.*', '**/__tests__/**'],
@@ -75,7 +86,7 @@ export function loadMoneyPaths(root: string, src: ReviewConfig['money_path_sourc
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
-  const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories };
+  const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories, ...LOCKED_CATEGORIES };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));
   const categories: Record<string, string[]> = {};
   const add = (cat: string, path: string) => (categories[cat] ??= []).push(path);

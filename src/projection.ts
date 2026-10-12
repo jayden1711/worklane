@@ -12,12 +12,13 @@ export type TaskStatus =
   | 'evaluating'
   | 'awaiting_decision'
   | 'queued'
+  | 'in_review'
   | 'landed'
   | 'done'
   | 'blocked'
   | 'released';
 
-export const STATUS_ORDER: TaskStatus[] = ['triage', 'ready', 'claimed', 'reproducing', 'building', 'verifying', 'evaluating', 'awaiting_decision', 'queued', 'landed', 'done', 'blocked', 'released'];
+export const STATUS_ORDER: TaskStatus[] = ['triage', 'ready', 'claimed', 'reproducing', 'building', 'verifying', 'evaluating', 'awaiting_decision', 'queued', 'in_review', 'landed', 'done', 'blocked', 'released'];
 
 export interface Verdict {
   patch_correct: boolean;
@@ -315,6 +316,10 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
           t!.landed = String(p.landed);
           t!.status = 'landed';
           if (e.ts.startsWith(today)) landedToday++;
+        } else if (p.outcome === 'pr_opened') {
+          // PR mode: the change is out for review, not blocked.
+          t!.status = 'in_review';
+          t!.blockedReason = null;
         } else {
           t!.status = 'blocked';
           t!.blockedReason = `landing ${p.outcome}: ${String(p.detail).split('\n')[0]}`;
@@ -328,6 +333,8 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
         break;
       case 'issue.released':
         if (t!.status === 'landed' || p.why === 'landed') t!.status = 'done';
+        // A PR in review: its claim is released when it opens; the task is done once the merge closes the issue.
+        else if (t!.status === 'in_review') t!.status = p.why === 'issue closed on GitHub' ? 'done' : 'in_review';
         else if (t!.status !== 'blocked') t!.status = 'released';
         t!.delegate = null;
         break;
@@ -514,7 +521,7 @@ export interface PrView {
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   /** After an auto-merge: the default branch's required checks on the merge commit. */
-  mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
+  mainResult: { at: string; outcome: 'green' | 'red' | 'timed_out'; failed: string[] } | null;
   /**
    * The last conflict with main and its fix: detected, being resolved (a merge of main, attempt n), or done with
    * its outcome, the files it touched, and whether the result waits for a person (and why).
@@ -596,7 +603,7 @@ export function prsView(events: StoredEvent[]): PrsView {
         if (pr) pr.mergeFailed = { at: e.ts, why: String(p.why) };
         break;
       case 'merge.main_result':
-        if (pr) pr.mainResult = { at: e.ts, outcome: p.outcome as 'green' | 'red', failed: p.failed as string[] };
+        if (pr) pr.mainResult = { at: e.ts, outcome: p.outcome as 'green' | 'red' | 'timed_out', failed: p.failed as string[] };
         break;
       case 'pr.closed':
         if (pr) {
