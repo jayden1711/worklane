@@ -20,7 +20,7 @@ You need:
 3. Add `~/.local/bin` to your PATH if the script says it isn't there.
 
 The bootstrap does the following:
-1. Checks for Node.js 24 or newer, and installs `node@24` from Homebrew if it's missing or older.
+1. Keeps Node.js 22.13 or newer if you have it; otherwise installs Node 24 LTS (`node@24`) from Homebrew.
 2. Installs gitleaks, pinned and checked against its sha256.
 3. Installs Claude Code at a pinned version through npm.
 4. Installs the engine at the release tag pinned in the script, by its commit, into `~/.local`.
@@ -36,7 +36,7 @@ The same command:
 bash scripts/bootstrap.sh ~/code/your-repo
 ```
 
-On Linux, Node.js comes from the official tarball on nodejs.org, checked against the sha256 pinned in the script and unpacked into `~/.local/lib`. Nothing needs sudo.
+On Linux, Node.js 22.13+ is kept if you have it; otherwise Node 24 LTS comes from the official tarball on nodejs.org, checked against the sha256 pinned in the script and unpacked into `~/.local/lib`. Nothing needs sudo.
 
 ### A shared server (hardened, multi-user)
 

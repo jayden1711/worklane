@@ -98,15 +98,19 @@ test('bootstrap: on a Mac, Node comes from Homebrew (never a piped installer); w
   const bare = machine({ os: 'Darwin', arch: 'arm64' });
   const r = bare.run('--dry-run', bare.repo);
   assert.equal(r.code, 1);
-  assert.match(r.out, /no Node\.js 24\.0\+ and no Homebrew: install Homebrew/);
+  assert.match(r.out, /no Node\.js 22\.13\+ and no Homebrew: install Homebrew/);
   const brew = machine({ os: 'Darwin', arch: 'arm64', have: { brew: 'echo /opt/homebrew/opt/node@24' } });
   const b = brew.run('--dry-run', brew.repo);
   assert.equal(b.code, 0, b.out);
   assert.match(b.out, /would run: brew install node@24/);
   assert.match(b.out, /gitleaks_8\.30\.1_darwin_arm64\.tar\.gz \(sha256 b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5\)/);
   assert.match(machine({ os: 'Darwin', arch: 'x86_64', have: { brew: 'true' } }).run('--dry-run', '--no-repo').out, /darwin_x64\.tar\.gz \(sha256 dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709\)/);
-  const old = machine({ os: 'Darwin', arch: 'arm64', have: { node: 'echo v22.23.3', brew: 'true' } });
-  assert.match(old.run('--dry-run', old.repo).out, /would run: brew install node@24/, 'Node 22 is too old for the coordinator');
+  const old = machine({ os: 'Darwin', arch: 'arm64', have: { node: 'echo v22.12.0', brew: 'true' } });
+  assert.match(old.run('--dry-run', old.repo).out, /would run: brew install node@24/, 'Node 22.12 is too old: Node 24 LTS is installed');
+  const supported = machine({ os: 'Darwin', arch: 'arm64', have: { node: 'echo v22.13.0', brew: 'true' } });
+  const s = supported.run('--dry-run', supported.repo);
+  assert.match(s.out, /ok: node v22\.13\.0/, 'Node 22.13 is supported and kept, not replaced by 24');
+  assert.doesNotMatch(s.out, /brew install node/);
 });
 
 test('bootstrap: a download that does not match its pinned checksum is refused and removed', { skip }, () => {
