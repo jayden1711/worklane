@@ -5,7 +5,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rm
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
-import { parseContract } from '../src/backlog/types.js';
+import { parseContract, type DoneWhenList } from '../src/backlog/types.js';
 import { BRAND } from '../src/brand.js';
 import { claim, claimRef } from '../src/claims.js';
 import { resumeAll, slotStatus, stopAll, tryAgentSlot } from '../src/slots.js';
@@ -2506,4 +2506,22 @@ test("the project's own variables reach its agents, its worktree setup and its c
   const { duration_ms: _ms, ...probe } = verify.checks.find((x) => x.check.includes('PROJECT_PROBE')) as { check: string; duration_ms?: number };
   assert.deepEqual(probe, { check: 'test "$PROJECT_PROBE" = yes', status: 'pass', exitCode: 0 });
   assert.equal(f.log.read(0, ['coordinator.error']).length, 0, 'worktree setup saw the variable');
+});
+
+test('verify: a done_when item of a kind it has no branch for fails the attempt ("unknown done_when kind"), never passes by being skipped', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const head = git(f.repo, 'rev-parse', 'HEAD');
+  // A kind the DoneWhen type doesn't have yet (one a future track adds), cast past the type as bad data would be.
+  const doneWhen = [{ manual: 'looks right on a phone' }, { browser: 'checkout page' }] as unknown as DoneWhenList;
+  const verify = (c as unknown as { verify: (n: number, path: string, head: string, d: DoneWhenList, r: null) => Promise<{ check: string; status: string; tail: string }[]> }).verify.bind(c);
+  const checks = await verify(n, f.repo, head, doneWhen, null);
+  const bad = checks.find((x) => /unknown done_when kind/.test(x.tail));
+  assert.ok(bad, `a failed check names the unknown kind: ${JSON.stringify(checks)}`);
+  assert.equal(bad.status, 'fail');
+  assert.match(bad.check, /browser/);
+  assert.ok(!checks.some((x) => /phone/.test(x.check)), 'a manual item is not run (it is NOT CHECKED in the receipts)');
+  const recorded = (lastOf(f.log, 'check.result') as { checks: { status: string }[] }).checks;
+  assert.ok(recorded.some((x) => x.status === 'fail'), 'recorded as a failure');
 });

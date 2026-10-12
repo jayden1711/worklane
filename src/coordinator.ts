@@ -889,6 +889,16 @@ export class Coordinator extends MergeFlow {
         if (one) await run(one.replaceAll('{file}', d.test));
         else checks.push({ check: `test ${d.test}`, status: 'unavailable', exitCode: null, tail: 'tests.yaml runner.one not set' });
       }
+      // A person checks it: listed under NOT CHECKED in the PR's receipts, never run here.
+      else if ('manual' in d) continue;
+      // The frozen reproduction test, run below from `repro`.
+      else if ('repro' in d) continue;
+      else {
+        // A done_when kind without a branch here must not pass by being skipped: typecheck fails on a new kind
+        // (d is never), and anything that reaches this at run time fails the attempt.
+        const unknown: never = d;
+        checks.push({ check: `done_when ${JSON.stringify(unknown).slice(0, 200)}`, status: 'fail', exitCode: null, tail: 'unknown done_when kind: the coordinator has no way to check it' });
+      }
     }
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
     // The project's checks can be long (a full suite): once the issue's own checks have failed the attempt
