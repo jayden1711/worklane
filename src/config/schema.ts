@@ -73,6 +73,17 @@ export const ProjectConfig = z.strictObject({
    * WebFetch only. Fetches of a listed domain (or any subdomain of it) are refused and recorded.
    */
   research: z.strictObject({ domain_blocklist: z.array(z.string().min(1)).default([]) }).prefault({}),
+  /**
+   * Corrections become durable rules: when a writer rejects a PR, revises or rejects a held plan, requests
+   * changes in a review, or corrects the chat ("correction: ..."), a read-only agent proposes the strongest
+   * durable fix as an issue the pipeline builds into a reviewed PR. At most `max_per_day` agent runs a day.
+   */
+  corrections: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      max_per_day: z.number().int().min(0).default(10),
+    })
+    .prefault({}),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),
@@ -129,6 +140,7 @@ export const RoleNames = [
   'ci_repair',
   'monitor',
   'release_prep',
+  'corrections',
 ] as const;
 
 export const AgentsConfig = z

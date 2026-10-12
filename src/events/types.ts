@@ -151,6 +151,14 @@ export const EventSchemas = {
   'plan.decided': z.strictObject({ issue, decision: z.string(), answer: z.enum(['approve', 'revise', 'reject']), by: z.string(), note: z.string() }),
   /** The owner (or a writer) objected to a plan that was built at once: the task stopped. */
   'plan.objected': z.strictObject({ issue, by: z.string(), why: z.string() }),
+  /** A writer corrected the harness (a rejected PR or landing, a revised or rejected plan, a review asking for changes, a chat correction): recorded once per source. */
+  'correction.recorded': z.strictObject({ key: z.string(), kind: z.enum(['pr_rejected', 'land_rejected', 'plan_revised', 'plan_rejected', 'review_changes', 'chat']), issue: issue.nullable(), pr: z.number().int().positive().nullable(), by: z.string(), text: z.string() }),
+  /** The corrections agent's durable fix, filed as an issue the pipeline builds into a reviewed PR. */
+  'correction.proposed': z.strictObject({ key: z.string(), fix_kind: z.enum(['impossible', 'check', 'rule', 'style']), issue, title: z.string(), why: z.string() }),
+  /** A correction that repeats an earlier one: grouped with it, never proposed twice. `how`: same words, or the agent. */
+  'correction.grouped': z.strictObject({ key: z.string(), same_as: z.string(), how: z.enum(['same words', 'the agent']) }),
+  /** No durable fix: the agent found none (why), or the run failed (failed: true; it isn't retried). */
+  'correction.no_fix': z.strictObject({ key: z.string(), why: z.string(), failed: z.boolean() }),
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
