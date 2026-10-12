@@ -6,7 +6,7 @@
 import type { Config } from '../config/load.js';
 import type { InstanceSettings } from '../instance.js';
 import { flockHeld } from '../os/index.js';
-import { gatePasses, healthCheck, providerOf, providerRefusal, type ProviderConfig } from '../providers.js';
+import { gatePasses, healthCheck, providerOf, providerRefusal, tierRefusal, type ProviderConfig } from '../providers.js';
 import type { RunRequest } from '../runner.js';
 import type { ReviewConfig } from '../config/schema.js';
 import { computeLevel, type ChangeFile } from '../review.js';
@@ -37,6 +37,10 @@ export async function resolveProvider(req: RunRequest, d: ProviderDeps): Promise
   if (!keyFile) return back(`${label}'s key (${p.credential}) is not installed (credentials.yaml provider_keys)`);
   const refused = providerRefusal(named.kind, { route: req.route.kind, highRisk: req.route.highRisk === true });
   if (refused) return back(refused);
+  // The instance's model cap holds for hosted models by their price tier; above it, the run takes its fallback,
+  // which the cap then applies to as to any Anthropic run.
+  const overCap = tierRefusal(named.kind, p.tier, d.settings.model_cap);
+  if (overCap) return back(overCap);
   const gate = gatePasses(d.stateDir, req.role, p.model);
   if (!gate.ok) return back(`not evaluated to pass: ${gate.why}`);
   if (named.kind === 'local') {

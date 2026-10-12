@@ -15,6 +15,11 @@ const provider = z.strictObject({
   /** The key's name in the instance's credentials.yaml provider_keys; the key itself is never in the repo. */
   credential: z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/, 'a credential name (lowercase letters, digits, _ or -)'),
   model: z.string().min(1),
+  /**
+   * A hosted model's price tier, by its per-token price against Anthropic's haiku, sonnet and opus: the instance's
+   * model cap applies to it as to theirs. Required for a hosted model to run at all; a local model costs nothing.
+   */
+  tier: z.enum(['haiku', 'sonnet', 'opus']).optional(),
   usd_per_mtok_in: z.number().nonnegative().optional(),
   usd_per_mtok_out: z.number().nonnegative().optional(),
   gpu_lock: z.string().refine((p) => p.startsWith('/'), 'an absolute path').optional(),

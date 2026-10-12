@@ -21,7 +21,7 @@ providers:
             gpu_lock: <a lock file another workload holds while it runs>, latency_ms: 3000 }
   hosted:
     glm:  { base_url: https://<provider endpoint>, credential: glm, model: <the provider's model id>,
-            usd_per_mtok_in: 0.6, usd_per_mtok_out: 2.2 }
+            tier: haiku, usd_per_mtok_in: 0.6, usd_per_mtok_out: 2.2 }
 model_routing: { intake_replier: local, research: hosted:glm }
 ```
 
@@ -40,6 +40,16 @@ provider_keys: { glm: /home/<agent user>/.config/<name>-provider-keys/glm }
 ```
 
 A local server that needs no key still gets a placeholder key file, because `claude` needs one.
+
+## Hosted models and the instance's model cap
+
+- **The tier:** every hosted model declares a price `tier` (`haiku`, `sonnet` or `opus`), set by its per-token price
+  against Anthropic's models.
+- **The cap applies to it:** the instance's `model_cap` (policy.yaml settings) applies to that tier exactly as it does
+  to Anthropic models. A hosted model above the cap never runs: the run takes its fallback, which the cap then
+  applies to, as to any Anthropic run.
+- **No tier, no run:** a hosted model with no tier declared never runs.
+- **Local models** cost nothing and have no tier.
 
 ## Keys never reach an agent's environment
 

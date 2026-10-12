@@ -9,7 +9,7 @@
 // the provider is up; otherwise it runs on its normal model, and the fallback is recorded.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { RoutedRun } from './model-routing.js';
+import { MODEL_TIERS, type ModelTier, type RoutedRun } from './model-routing.js';
 
 export type ProviderKind = 'local' | 'hosted';
 
@@ -20,6 +20,8 @@ export interface ProviderConfig {
   credential: string;
   /** The provider's own model id, passed to claude --model. */
   model: string;
+  /** Hosted: its price tier (haiku, sonnet or opus by per-token price); the instance's model cap applies to it. */
+  tier?: ModelTier | undefined;
   /** Estimated price per million tokens, in and out (hosted); local runs cost nothing. */
   usd_per_mtok_in?: number | undefined;
   usd_per_mtok_out?: number | undefined;
@@ -47,6 +49,17 @@ export function providerRefusal(kind: ProviderKind, use: { route: RoutedRun | 'b
   if (use.route === 'evaluator') return 'the evaluator never runs on an open model at L1+';
   if (!(PROVIDER_USES[kind] as readonly string[]).includes(use.route)) return `${kind} models run only ${PROVIDER_USES[kind].join(', ')}, not ${use.route}`;
   if (kind === 'hosted' && use.highRisk) return 'hosted models never build high-risk, L3, money-path or agent-instructions work';
+  return null;
+}
+
+/**
+ * Why a hosted model may not run under the instance's model cap (or null): it declares no price tier, or its tier is
+ * above the cap. Local models cost nothing and have no tier.
+ */
+export function tierRefusal(kind: ProviderKind, tier: ModelTier | undefined, cap: ModelTier | undefined): string | null {
+  if (kind === 'local') return null;
+  if (!tier) return 'it has no price tier declared (agents.yaml providers.hosted.<name>.tier): a hosted model without one never runs';
+  if (cap && MODEL_TIERS.indexOf(tier) > MODEL_TIERS.indexOf(cap)) return `its price tier (${tier}) is above this instance's model cap (${cap})`;
   return null;
 }
 

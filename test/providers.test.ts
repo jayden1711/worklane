@@ -40,7 +40,7 @@ test('what each provider may run is fixed in code: local for replies, triage and
 });
 
 const base = { daily_budget_usd: 10, roles: { workers: { enabled: true, model: 'sonnet' }, evaluator: { enabled: true, model: 'opus' } } };
-const PROVIDERS = { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'small-1' }, hosted: { glm: { base_url: 'https://open.example.com/anthropic', credential: 'glm', model: 'glm-x', usd_per_mtok_in: 1, usd_per_mtok_out: 2 } } };
+const PROVIDERS = { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'small-1' }, hosted: { glm: { base_url: 'https://open.example.com/anthropic', credential: 'glm', model: 'glm-x', tier: 'sonnet', usd_per_mtok_in: 1, usd_per_mtok_out: 2 } } };
 
 test('schema: a provider only where code allows it and only one that is configured; never a role\'s, the evaluator\'s or a high-risk build\'s model', () => {
   const ok = (o: object) => AgentsConfig.safeParse({ ...base, ...o }).success;
@@ -267,4 +267,42 @@ test('wired: a provider run falls back with an event when it may not run, goes t
   } finally {
     server.close();
   }
+});
+
+// ---- hosted models count against the instance's model cap, by their declared price tier
+
+test('the cap: a hosted model above it never runs (it falls back, then the cap applies to the fallback); at or under it, it runs', async () => {
+  const hosted = (tier: string | null, cap?: string) => {
+    const d = deps({ settings: { providers: { local: true, hosted: ['glm'] }, ...(cap ? { model_cap: cap } : {}) } });
+    const glm = { ...PROVIDERS.hosted.glm, ...(tier ? { tier } : {}) };
+    if (!tier) delete (glm as { tier?: string }).tier;
+    d.cfg.agents = AgentsConfig.parse({ ...base, providers: { ...PROVIDERS, hosted: { glm } }, model_routing: { research: 'hosted:glm' } });
+    return resolveProvider({ ...replier(), role: 'researcher', model: 'hosted:glm', route: { kind: 'research', fallback: 'sonnet' } }, d);
+  };
+  const above = await hosted('opus', 'sonnet');
+  assert.equal(above.req.provider, undefined, 'never on the provider');
+  assert.equal(above.req.model, 'sonnet', 'its fallback');
+  assert.match(above.fellBack!.reason, /price tier \(opus\) is above this instance's model cap \(sonnet\)/);
+  assert.equal((await hosted('sonnet', 'sonnet')).req.provider?.name, 'hosted:glm', 'at the cap: runs');
+  assert.equal((await hosted('haiku', 'sonnet')).req.provider?.name, 'hosted:glm', 'under the cap: runs');
+  assert.equal((await hosted('opus')).req.provider?.name, 'hosted:glm', 'no cap: runs');
+  const none = await hosted(null);
+  assert.equal(none.req.provider, undefined);
+  assert.match(none.fellBack!.reason, /no price tier declared/);
+  assert.equal(AgentsConfig.safeParse({ ...base, providers: { hosted: { glm: { ...PROVIDERS.hosted.glm, tier: 'gold' } } } }).success, false, 'a tier is haiku, sonnet or opus');
+});
+
+test('wired: a hosted model above the cap runs as the cap does for Anthropic models: on the capped fallback, recorded', async () => {
+  const { dir, stateDir } = exampleProject();
+  const cfg = loadConfig(dir);
+  cfg.agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: { ...PROVIDERS.hosted.glm, tier: 'opus' } } }, model_routing: { research: 'hosted:glm' } });
+  mkdirSync(join(stateDir, 'evals'), { recursive: true });
+  writeFileSync(join(stateDir, PROVIDER_GATE_FILE), JSON.stringify({ researcher: { 'glm-x': { held_out: { passed: 20, total: 20 }, baseline: { passed: 20, total: 20 }, visible: { passed: 12, total: 12 }, samples: 3, at: 'now' } } }));
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'prov-cap-')), 'events.db'));
+  const runner = new FakeRunner(() => ({}));
+  const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(stateDir, 'b.json'), 'c'), runner, repo: dir, instance: 'alice', stateDir, slotsDir: mkdtempSync(join(tmpdir(), 'prov-slots-')), providerKeys: { glm: '/k/glm' }, settings: () => ({ settings: InstanceSettings.parse({ model_cap: 'haiku', providers: { hosted: ['glm'] } }), error: null }), machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
+  await (c as unknown as { d: { runner: FakeRunner } }).d.runner.run({ ...replier(), role: 'researcher', model: 'hosted:glm', route: { kind: 'research', fallback: 'sonnet' } });
+  assert.equal(runner.calls.at(-1)!.provider, undefined, 'not the hosted model');
+  assert.equal(runner.calls.at(-1)!.model, 'haiku', 'the fallback, capped');
+  assert.match((log.read(0, ['provider.fallback']).at(-1)!.payload as { reason: string }).reason, /above this instance's model cap \(haiku\)/);
 });
