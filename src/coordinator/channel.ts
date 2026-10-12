@@ -97,7 +97,8 @@ export abstract class Channel extends ResearchOnDemand {
    * left for intake, and those dropped by rule (to acknowledge).
    */
   protected async channelInbound(cfg: IntakeConfig, reports: IncomingReport[]): Promise<{ rest: IncomingReport[]; ignored: IncomingReport[] }> {
-    if (!this.channelOn(cfg)) return { rest: reports, ignored: [] };
+    // Off (no mapping, or Discord off for this instance): nothing is read as a thread reply.
+    if (!this.channelOn(cfg)) return { rest: reports.filter((r) => r.thread?.kind !== 'thread'), ignored: reports.filter((r) => r.thread?.kind === 'thread') };
     const src = this.chatSource()!;
     const threads = this.channelThreads();
     const rest: IncomingReport[] = [];
@@ -113,7 +114,9 @@ export abstract class Channel extends ResearchOnDemand {
       }
       const target = r.thread?.kind === 'thread' ? threads.get(r.thread.id) : undefined;
       if (!target) {
-        rest.push(r);
+        // A reply in a thread that isn't one of this instance's: never an answer here, and never a report.
+        if (r.thread?.kind === 'thread') ignored.push(r);
+        else rest.push(r);
         continue;
       }
       // Each message is taken once (the seen ledger), however often the gateway delivers it.
