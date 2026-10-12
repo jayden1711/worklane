@@ -17,6 +17,11 @@ export interface Issue {
 export interface Backlog {
   list(label: string): Promise<Issue[]>;
   get(n: number): Promise<Issue>;
+  /**
+   * Issues (not PRs) now closed and last updated at or after `since` (ISO): every one closed since then, and maybe
+   * some closed earlier. One listing, however many issues it covers.
+   */
+  closedSince(since: string): Promise<number[]>;
   /** Logins that added `label` to the issue, oldest first. */
   labelAdders(n: number, label: string): Promise<string[]>;
   addLabels(n: number, labels: string[]): Promise<void>;

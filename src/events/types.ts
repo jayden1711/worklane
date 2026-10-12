@@ -29,6 +29,8 @@ export const EventSchemas = {
   'issue.claimed': z.strictObject({ issue, instance: z.string(), lease: sha, base: sha, owner: z.string() }),
   'issue.claim_lost': z.strictObject({ issue, instance: z.string(), holder: z.string().nullable() }),
   'issue.released': z.strictObject({ issue, instance: z.string(), why: z.string() }),
+  /** The issue was closed on GitHub by someone, outside the loop (seen by reconcile): nothing it held waits on anyone now. */
+  'issue.closed': z.strictObject({ issue }),
   /** `retry_after`: a rate-limit or budget block retries on its own after then (up to a cap); absent: it waits for a relabel. */
   'issue.blocked': z.strictObject({ issue, owner: z.string(), why: z.string(), retry_after: z.string().optional(), retry_kind: z.enum(['rate_limit', 'budget']).optional() }),
   /** A held block retried on its own (relabelled ready), or, at the cap, left blocked (`gave_up`). */

@@ -90,7 +90,7 @@ export function contextFromEvents(events: StoredEvent[]): Pick<ChatContext, 'iss
     const p = e.payload as Record<string, unknown>;
     if (e.type === 'issue.seen') issues.set(p.issue as number, { number: p.issue as number, title: String(p.title), status: 'seen', labels: (p.labels as string[]) ?? [] });
     const i = typeof p.issue === 'number' ? issues.get(p.issue) : undefined;
-    if (i && ['issue.claimed', 'issue.blocked', 'issue.released', 'land.queued'].includes(e.type)) i.status = e.type.split('.')[1]!;
+    if (i && ['issue.claimed', 'issue.blocked', 'issue.released', 'issue.closed', 'land.queued'].includes(e.type)) i.status = e.type.split('.')[1]!;
     if (e.type === 'pr.opened') prs.set(p.number as number, { number: p.number as number, issue: (p.issue as number) ?? null, title: issues.get(p.issue as number)?.title ?? `#${p.issue}`, state: 'open', url: String(p.url) });
     const pr = typeof p.number === 'number' ? prs.get(p.number) : undefined;
     if (pr && e.type === 'pr.ready') pr.state = 'ready';

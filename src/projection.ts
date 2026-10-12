@@ -161,6 +161,8 @@ export function summarize(e: StoredEvent): string {
       return `released: ${p.why}`;
     case 'issue.blocked':
       return `blocked: ${p.why}`;
+    case 'issue.closed':
+      return 'closed on GitHub';
     case 'baseline.recorded':
       return `baseline: ${(p.failing as string[]).length} failing at ${String(p.sha).slice(0, 8)}`;
     case 'issue.seen':
@@ -335,7 +337,14 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
         if (t!.status === 'landed' || p.why === 'landed') t!.status = 'done';
         // A PR in review: its claim is released when it opens; the task is done once the merge closes the issue.
         else if (t!.status === 'in_review') t!.status = p.why === 'issue closed on GitHub' ? 'done' : 'in_review';
-        else if (t!.status !== 'blocked') t!.status = 'released';
+        else if (t!.status !== 'blocked' && t!.status !== 'done') t!.status = 'released';
+        t!.delegate = null;
+        break;
+      case 'issue.closed':
+        // Closed by hand on GitHub: done, whatever held it (a block, a decision); a later claim (reopened) starts it again.
+        t!.status = 'done';
+        t!.blockedReason = null;
+        t!.openDecision = null;
         t!.delegate = null;
         break;
       case 'run.finished':
