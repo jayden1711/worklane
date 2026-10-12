@@ -89,6 +89,16 @@ test('a migration runs once and is recorded: backed up first, the config edited 
   log.close();
 });
 
+test('all or nothing: a failing step restores every file and log the run had migrated, and says so', () => {
+  const p = project();
+  const before = readFileSync(join(p.root, BRAND.configDir, 'tests.yaml'), 'utf8');
+  const next = nextVersion();
+  next.state[1] = { to: 2, what: 'version 2: fails', apply: () => { throw new Error('disk full'); } };
+  assert.throws(() => applyMigrations(p.targets, next), (e: Error & { restored?: { path: string }[] }) => /disk full; every file migrated was restored from its backup/.test(e.message) && e.restored!.length === 2);
+  assert.equal(readFileSync(join(p.root, BRAND.configDir, 'tests.yaml'), 'utf8'), before, 'the config migrated before the failure is back');
+  assert.equal(recorded(p.db).version, 1);
+});
+
 test('an unmigrated config or log refuses start, saying to run migrate; a step marked auto is applied at start instead', () => {
   const p = project();
   const next = nextVersion();

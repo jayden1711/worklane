@@ -9,8 +9,12 @@
 //   - the machine is quiet: no agent slot or full-run lock is held and no emergency stop is on.
 // It builds as a throwaway unprivileged user (a systemd DynamicUser) with `npm ci
 // --ignore-scripts` from the lockfile; root only copies the built tree into /opt/worklane/<sha>.
-// Then it switches /opt/worklane/current, restarts the instance and dashboard services, and if
-// any of them isn't active and steady within 2 minutes, switches back and restarts again.
+// Before switching, it stops the services and migrates every instance's config and state with the NEW engine
+// (`migrate --instance <name> --json`, run as that instance's coordinator user through systemd-run, as the
+// instance's own unit runs; each file is backed up first). If a migration fails, it restores every instance's
+// backups, starts the services again on the old engine and holds the commit. Otherwise it switches
+// /opt/worklane/current and restarts the instance and dashboard services, and if any of them isn't active and
+// steady within 2 minutes, it restores the migration backups, switches back and restarts again.
 // Every attempt, install, refusal and rollback is one JSON line in /var/lib/worklane/updates.jsonl.
 'use strict';
 const fs = require('node:fs');
@@ -222,6 +226,50 @@ function installTree(sha, opt = OPT, buildDir = BUILD_DIR, owner = 'root:root') 
   fs.renameSync(tmp, dest);
 }
 
+/**
+ * The coordinator units among the restarted ones, with the instance each runs and its user: from
+ * `systemctl show -p User,Environment,ExecStart` (ExecStart names `coordinator run --instance <name>`).
+ */
+function parseInstance(unit, text) {
+  const kv = {};
+  for (const line of String(text).split('\n')) {
+    const i = line.indexOf('=');
+    if (i > 0) kv[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  const m = /\bcoordinator run --instance ([a-z][a-z0-9-]{0,40})\b/.exec(kv.ExecStart || '');
+  if (!m || !/^[a-z_][a-z0-9_-]{0,31}$/.test(kv.User || '')) return null;
+  const env = String(kv.Environment || '').split(/\s+/).filter((e) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(e));
+  return { unit, name: m[1], user: kv.User, env };
+}
+
+/** As the instance's own unit runs: its user, its slice, its home as the working directory, its environment. */
+function asInstance(inst, argv) {
+  const env = inst.env.some((e) => e.startsWith('PATH=')) ? inst.env : ['PATH=/usr/local/bin:/usr/bin:/bin', ...inst.env];
+  return ['systemd-run', '--wait', '--collect', '--pipe', '--quiet', '-p', `User=${inst.user}`, '-p', 'Slice=worklane.slice', '-p', 'WorkingDirectory=~', ...env.map((e) => `--setenv=${e}`), ...argv];
+}
+
+/** The new engine's `migrate` for one instance, run as its coordinator user. */
+function migrateCommand(inst, sha, opt = OPT) {
+  // node through env: found on the unit's own PATH, as the instance's service finds it.
+  return asInstance(inst, ['/usr/bin/env', 'node', path.join(opt, sha, 'dist', 'src', 'cli.js'), 'migrate', '--instance', inst.name, '--json']);
+}
+
+/** Put one backup back, as the instance's user (the files are its own): a log loses the migrated one's WAL files. */
+function restoreCommand(inst, b) {
+  return asInstance(inst, ['/bin/sh', '-c', 'cp -p -- "$1" "$2" && rm -f -- "$2-wal" "$2-shm"', '_', b.backup, b.path]);
+}
+
+/** `migrate --json`'s answer, or a failure when it printed none. */
+function parseMigrate(out) {
+  const line = String(out || '').trim().split('\n').filter(Boolean).at(-1) || '';
+  try {
+    const j = JSON.parse(line);
+    return { ok: j.ok === true, error: j.error || null, made: Array.isArray(j.made) ? j.made.filter((b) => b && typeof b.path === 'string' && typeof b.backup === 'string') : [], applied: Array.isArray(j.applied) ? j.applied : [] };
+  } catch {
+    return { ok: false, error: `no answer from migrate: ${line.slice(0, 300)}`, made: [], applied: [] };
+  }
+}
+
 // ---------- the run ----------
 
 async function run(deps) {
@@ -260,6 +308,22 @@ async function run(deps) {
     return deps.note('build_failed', head, String((e && e.message) || e).slice(-500), true);
   }
   const units = parseUnits(deps.exec('systemctl', ['list-units', '--type=service', '--all', '--plain', '--no-legend', '--full', 'worklane-*.service']));
+  const instances = units.map((u) => parseInstance(u, deps.exec('systemctl', ['show', '-p', 'User,Environment,ExecStart', u]))).filter(Boolean);
+  // Every backup the migrations made, per instance: what a rollback puts back.
+  const migrated = [];
+  const restoreAll = () => {
+    const failed = [];
+    for (const { inst, made } of migrated) {
+      for (const b of [...made].reverse()) {
+        try {
+          deps.exec(...splitCmd(restoreCommand(inst, b)));
+        } catch (e) {
+          failed.push(`${inst.name}: ${b.path}: ${String((e && e.message) || e).split('\n')[0]}`);
+        }
+      }
+    }
+    return failed;
+  };
   const settle = async () => {
     deps.exec('systemctl', ['restart', ...units]);
     const start = deps.now();
@@ -273,10 +337,34 @@ async function run(deps) {
       await deps.sleep(POLL_MS);
     }
   };
+  if (instances.length) {
+    // Migrate with the new engine while nothing runs: stop, migrate each instance, and only then switch.
+    deps.exec('systemctl', ['stop', ...units]);
+    for (const inst of instances) {
+      let r;
+      try {
+        r = parseMigrate(deps.exec(...splitCmd(migrateCommand(inst, head)), { timeout: 10 * 60_000 }));
+      } catch (e) {
+        r = parseMigrate(e && e.stdout);
+        if (!r.error || /^no answer/.test(r.error)) r.error = `${r.error ? `${r.error}; ` : ''}${String((e && e.message) || e).split('\n')[0]}`;
+      }
+      if (!r.ok) {
+        // The failing migrate restored its own files; the instances migrated before it are restored here.
+        const unrestored = restoreAll();
+        const back = await settle();
+        const at = new Date(deps.now()).toISOString();
+        const reason = `rollback: migration failed: ${inst.name}: ${String(r.error).slice(0, 500)}`;
+        deps.hold({ sha: head, at, failed: [reason] });
+        deps.log({ event: 'rolled_back', from: head, to: current, units, reason, migration: { instance: inst.name, error: String(r.error).slice(0, 2000), restored: migrated.map((m) => m.inst.name), unrestored }, back: back.h, held: true });
+        return 'rolled_back';
+      }
+      migrated.push({ inst, made: r.made, applied: r.applied });
+    }
+  }
   deps.switchTo(head);
   const after = await settle();
   if (after.h === 'healthy') {
-    deps.log({ event: 'installed', from: current, to: head, units });
+    deps.log({ event: 'installed', from: current, to: head, units, ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}) });
     return 'installed';
   }
   const bad = Object.entries(after.states).filter(([, s]) => s.state !== 'active' || s.sub === 'auto-restart' || s.restarts > 0);
@@ -294,13 +382,19 @@ async function run(deps) {
     const status = get('systemctl', ['show', '-p', 'ExecMainStatus', '--value', u]).trim();
     return { unit: u, result: show.result, status, restarts: show.restarts, journal: tail(redact(get('journalctl', ['-u', u, '-n', '30', '--no-pager', '-o', 'short-iso'])).trim(), 4000) };
   });
+  // The old engine refuses config and state newer than it knows: put the migrations' backups back first.
+  if (instances.length) deps.exec('systemctl', ['stop', ...units]);
+  const unrestored = restoreAll();
   if (current) deps.switchTo(current);
   const back = current ? await settle() : { h: 'failed' };
   const at = new Date(deps.now()).toISOString();
   deps.hold({ sha: head, at, failed: down });
-  deps.log({ event: 'rolled_back', from: head, to: current, units, failed: down, back: back.h, diagnosis, held: true });
+  deps.log({ event: 'rolled_back', from: head, to: current, units, failed: down, back: back.h, diagnosis, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
   return 'rolled_back';
 }
+
+/** [file, args] of an argv. */
+const splitCmd = (argv) => [argv[0], argv.slice(1)];
 
 // ---------- the machine (real effects) ----------
 
@@ -394,4 +488,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

@@ -137,6 +137,8 @@ export interface HealthView {
     /** No verified copy, or the last one is over a day old. */
     stale: boolean;
   } | null;
+  /** An engine update this machine rolled back and holds (src/updates.ts heldUpdate); null when none. */
+  updateHold?: { at: string; sha: string | null; reason: string; migration: boolean } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
@@ -475,7 +477,7 @@ export interface Throughput {
 }
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
-export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held';
+export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {
   kind: WaitKind;
   since: string;

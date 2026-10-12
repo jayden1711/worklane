@@ -9,7 +9,7 @@
 // parsed YAML document in place (comments are kept); the version is stamped by the framework. A state step runs
 // inside one transaction with the version bump and its record. Nothing here touches events themselves: the log
 // stays append-only. test/migrations.test.ts shows how to test one.
-import { copyFileSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { parseDocument, type Document } from 'yaml';
@@ -137,24 +137,66 @@ export function stampNewLog(db: DatabaseSync, now = new Date()) {
   db.exec(`PRAGMA user_version = ${STATE_VERSION}`);
 }
 
+/** A file or log and the backup made of it before it was migrated. */
+export interface Backup {
+  kind: 'config' | 'state';
+  path: string;
+  backup: string;
+}
+
+/** Put backups back: each file as it was; a log as it was, without the write-ahead files of the migrated one. */
+export function restoreBackups(made: Backup[]): void {
+  for (const b of [...made].reverse()) {
+    copyFileSync(b.backup, b.path);
+    if (b.kind === 'state') for (const x of ['-wal', '-shm']) rmSync(`${b.path}${x}`, { force: true });
+  }
+}
+
+/** A migration failed; every file and log it had touched was restored from its backup first. */
+export class MigrationFailed extends Error {
+  constructor(
+    message: string,
+    readonly restored: Backup[],
+  ) {
+    super(message);
+  }
+}
+
 /**
  * Apply every pending step (only the `auto` ones with `onlyAuto`), each file or log backed up first beside it
  * (`<name>.bak-v<from>-<time>`). Returns what was applied and the backups. A file or log newer than this engine
- * is never touched.
+ * is never touched. If any step fails, everything this call migrated is restored and MigrationFailed is thrown:
+ * all or nothing.
  */
-export function applyMigrations(t: Targets, o: { config?: ConfigMigration[]; state?: StateMigration[]; onlyAuto?: boolean; now?: () => Date } = {}): { applied: Pending[]; backups: string[] } {
+export function applyMigrations(t: Targets, o: { config?: ConfigMigration[]; state?: StateMigration[]; onlyAuto?: boolean; now?: () => Date } = {}): { applied: Pending[]; backups: string[]; made: Backup[] } {
   const config = o.config ?? CONFIG_MIGRATIONS;
   const state = o.state ?? STATE_MIGRATIONS;
   const now = (o.now ?? (() => new Date()))();
   const plan = planMigrations(t, { config, state });
   const applied: Pending[] = [];
   const backups: string[] = [];
-  for (const p of plan.pending) {
-    if (o.onlyAuto && !p.auto) continue;
+  const made: Backup[] = [];
+  try {
+    for (const p of plan.pending) {
+      if (o.onlyAuto && !p.auto) continue;
+      migrateOne(p, now, config, state, made);
+      backups.push(made.at(-1)!.backup);
+      applied.push(p);
+    }
+  } catch (e) {
+    restoreBackups(made);
+    throw new MigrationFailed(`${(e as Error).message}; every file migrated was restored from its backup`, made);
+  }
+  return { applied, backups, made };
+}
+
+function migrateOne(p: Pending, now: Date, config: ConfigMigration[], state: StateMigration[], made: Backup[]): void {
+  {
     const backup = `${p.path}.bak-v${p.from}-${stamp(now)}`;
     if (p.kind === 'config') {
       const doc = parseDocument(readFileSync(p.path, 'utf8'));
       copyFileSync(p.path, backup);
+      made.push({ kind: 'config', path: p.path, backup });
       for (const m of config.filter((x) => x.to > p.from).sort((a, b) => a.to - b.to)) {
         m.apply(doc, basename(p.path));
         doc.set('version', m.to);
@@ -165,6 +207,7 @@ export function applyMigrations(t: Targets, o: { config?: ConfigMigration[]; sta
       try {
         db.exec('PRAGMA busy_timeout = 5000');
         db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+        made.push({ kind: 'state', path: p.path, backup });
         db.exec(RECORD);
         for (const m of state.filter((x) => x.to > p.from).sort((a, b) => a.to - b.to)) {
           db.exec('BEGIN IMMEDIATE');
@@ -182,10 +225,7 @@ export function applyMigrations(t: Targets, o: { config?: ConfigMigration[]; sta
         db.close();
       }
     }
-    backups.push(backup);
-    applied.push(p);
   }
-  return { applied, backups };
 }
 
 /** Why the coordinator can't start on these targets, or null: anything newer than this engine, or a pending step `migrate` must apply. */

@@ -22,6 +22,24 @@ export interface UpdateEntry {
   diagnosis?: { unit: string; result: string; status: string; restarts: number; journal: string }[];
   /** On a rollback: the commit is now held. */
   held?: boolean;
+  /** On a rollback because an instance's migration failed: which, and why. */
+  migration?: { instance: string; error: string; restored?: string[]; unrestored?: string[] };
+}
+
+/** An engine update that was rolled back and is held: the owner's to look at, until an install succeeds. */
+export interface HeldUpdate {
+  at: string;
+  sha: string | null;
+  reason: string;
+  migration: boolean;
+}
+
+/** The held rollback, if the newest install or held rollback in the log is one. */
+export function heldUpdate(log: UpdateEntry[]): HeldUpdate | null {
+  const last = [...log].reverse().find((e) => e.event === 'installed' || (e.event === 'rolled_back' && e.held));
+  if (!last || last.event !== 'rolled_back') return null;
+  const reason = last.reason ?? (last.failed?.length ? `rolled back: ${last.failed.join('; ')}` : 'rolled back');
+  return { at: last.at, sha: last.from ?? null, reason, migration: !!last.migration || /migration failed/.test(reason) };
 }
 
 const EVENTS = new Set<string>(['attempt', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error']);

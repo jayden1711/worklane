@@ -29,7 +29,7 @@ import { HUB_PORT, parseHubArg, startHub } from './dashboard-hub.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
-import { applyMigrations, instanceTargets, planMigrations, projectConfigFiles } from './migrations.js';
+import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
@@ -185,12 +185,29 @@ async function main(argv: string[]): Promise<number> {
     case 'migrate': {
       // Each pending step, after a backup beside its file; the instance's files and repo config with --instance.
       const targets = instanceOpt ? instanceTargets(join(instancesDir(), instanceOpt)) : { configFiles: projectConfigFiles(root), eventsDb: logPath(root) };
+      // --json: for the engine updater, which migrates each instance as part of installing an engine and restores
+      // these backups if anything after fails.
+      const json = flag(args, '--json');
       const plan = planMigrations(targets);
       if (plan.newer.length) {
-        console.error(`${plan.newer.join('\n')}\nnewer than this engine: nothing migrated. Update the engine, or restore a backup.`);
+        const error = `${plan.newer.join('\n')}\nnewer than this engine: nothing migrated. Update the engine, or restore a backup.`;
+        if (json) console.log(JSON.stringify({ ok: false, error, made: [] }));
+        else console.error(error);
         return 1;
       }
-      const r = applyMigrations(targets);
+      let r: ReturnType<typeof applyMigrations>;
+      try {
+        r = applyMigrations(targets);
+      } catch (e) {
+        const restored = e instanceof MigrationFailed ? e.restored : [];
+        if (json) console.log(JSON.stringify({ ok: false, error: (e as Error).message, made: [], restored }));
+        else console.error(`migration failed: ${(e as Error).message}`);
+        return 1;
+      }
+      if (json) {
+        console.log(JSON.stringify({ ok: true, applied: r.applied.map((p) => ({ kind: p.kind, path: p.path, from: p.from, to: p.to })), made: r.made }));
+        return 0;
+      }
       if (!r.applied.length) console.log('nothing to migrate: config and state are at the current versions');
       for (const [k, p] of r.applied.entries()) console.log(`migrated ${p.path}: ${p.kind} version ${p.from} -> ${p.to} (${p.steps.join('; ')}); backup ${r.backups[k]}`);
       if (r.applied.some((p) => p.kind === 'config' && !p.path.startsWith(instanceOpt ? join(instancesDir(), instanceOpt) : '\0'))) console.log(`the repo's ${BRAND.configDir}/ changed: commit it in a PR`);
