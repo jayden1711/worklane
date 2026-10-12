@@ -218,6 +218,9 @@ test('PowerShell: the dashboard port matches the engine\'s; .wslconfig keeps wha
   assert.deepEqual(gaps.stdout.trim().split(/\r?\n/).map(Number), [0, 5]);
   const list = ps(`. ${q(join(win, 'lib.ps1'))}; ConvertFrom-WslList "  NAME      STATE           VERSION\`n* Ubuntu    Running         2\`n  Worklane  Stopped         2\`n" | ForEach-Object { "$($_.Name) $($_.State) $($_.Version) $($_.Default)" }`);
   assert.deepEqual(list.stdout.trim().split(/\r?\n/), ['Ubuntu Running 2 True', 'Worklane Stopped 2 False']);
+  // WSL installed with no distro prints a sentence instead of a table (seen on CI's windows-latest).
+  const none = ps(`. ${q(join(win, 'lib.ps1'))}; @(ConvertFrom-WslList "Windows Subsystem for Linux has no installed distributions.\`nYou can resolve this by installing a distribution with the instructions below:\`n\`nUse 'wsl.exe --list --online' to list available distributions\`n").Count`);
+  assert.equal(none.stdout.trim(), '0', none.stderr);
   const roots = ps(`. ${q(join(win, 'lib.ps1'))}; Get-CheckoutsRoot '{"max_cap":16,"checkouts":"/data/worklane"}'; Get-CheckoutsRoot ''; Get-CheckoutsRoot '{"checkouts":"relative"}'`);
   assert.deepEqual(roots.stdout.trim().split(/\r?\n/), ['/data/worklane', '/srv/worklane', '/srv/worklane']);
 });

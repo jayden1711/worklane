@@ -132,7 +132,8 @@ function ConvertFrom-WslList([string]$Text) {
     if (-not $line.Trim() -or $line -match '^\s*\*?\s*NAME\s+STATE\s+VERSION') { continue }
     $default = $line.TrimStart().StartsWith('*')
     $f = ($line.TrimStart().TrimStart('*').Trim()) -split '\s+'
-    if ($f.Count -ge 3) { $rows += [pscustomobject]@{ Name = $f[0]; State = $f[1]; Version = [int]$f[2]; Default = $default } }
+    # A row is NAME STATE VERSION; anything else (WSL's "has no installed distributions" message, help text) isn't.
+    if ($f.Count -eq 3 -and $f[2] -match '^\d+$') { $rows += [pscustomobject]@{ Name = $f[0]; State = $f[1]; Version = [int]$f[2]; Default = $default } }
   }
   # One row at a time down the pipeline (callers filter them with Where-Object, and wrap the result in @()).
   return $rows
