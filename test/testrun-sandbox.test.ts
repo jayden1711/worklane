@@ -102,6 +102,32 @@ test('test-user.sh --print: the slice caps below the instances, rootless Docker 
   assert.ok(r.stdout.includes(readFileSync(helperSrc, 'utf8')), 'the helper is printed as it will be installed');
 });
 
+test('regression: the Docker unit\'s PATH has /usr/sbin and /sbin (dockerd-rootless.sh runs sysctl from there)', { skip: !posix && 'bash' }, () => {
+  // Without them the unit exited 127: "failed to execute sysctl: No such file or directory".
+  const r = printInstall();
+  assert.equal(r.status, 0, r.stderr);
+  const docker = r.stdout.slice(r.stdout.indexOf('# /etc/systemd/system/worklane-test-shop-docker.service'), r.stdout.indexOf('# sudoers rule'));
+  const path = /^Environment=PATH=(.+)$/m.exec(docker)?.[1]?.split(':') ?? [];
+  for (const dir of ['/usr/sbin', '/sbin', '/usr/bin', '/bin']) assert.ok(path.includes(dir), `PATH has ${dir}: ${path.join(':')}`);
+});
+
+test('regression: check, run as root through sudo, calls the helper as root, not as the admin who ran sudo', { skip: !posix && 'bash' }, () => {
+  // `sudo bash test-user.sh check <name>` leaves SUDO_USER=<admin>; the helper read that as its caller and refused
+  // ("<admin> may not use <name>'s test runs"). The helper's own refusal for other users stays.
+  const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
+  const helperCalls = sh.split('\n').filter((l) => /"\$helper" "\$name" check/.test(l));
+  assert.ok(helperCalls.length > 0, 'check calls the helper');
+  for (const l of helperCalls) assert.match(l, /env -u SUDO_USER "\$helper" "\$name" check/, l.trim());
+  const refused = spawnSync('bash', [helperSrc, 'shop', 'check'], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'admin' } });
+  assert.match(refused.stderr, /admin may not use shop's test runs/, 'still refused when a real sudo caller is someone else');
+});
+
+test('install stops, naming the journal, when the Docker unit isn\'t active', { skip: !posix && 'bash' }, () => {
+  const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
+  const install = sh.slice(sh.indexOf('install_cmd() {'), sh.indexOf('\n}\n', sh.indexOf('install_cmd() {')));
+  assert.match(install, /systemctl is-active -q "\$docker_unit_name" \|\| \{[^}]*journalctl -u "?\$docker_unit_name[^}]*exit 1; \}/, 'install fails right after starting Docker if it is not running');
+});
+
 test('test-user.sh refuses bad arguments before doing anything', { skip: !posix && 'bash' }, () => {
   for (const [args, err] of [
     [['--cpus', 'x'], /--cpus: a CPU list/],
