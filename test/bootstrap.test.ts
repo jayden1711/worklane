@@ -58,7 +58,7 @@ const installed = (over: Record<string, string> = {}) => ({
   node: 'echo v24.21.0',
   gitleaks: 'echo 8.30.1',
   claude: 'echo "2.1.296 (Claude Code)"',
-  worklane: 'case "$1" in --version) echo 0.4.1 ;; add) exit 2 ;; *) exit 0 ;; esac',
+  worklane: 'case "$1" in --version) echo 0.4.1 ;; *) exit 0 ;; esac',
   npm: 'exit 0',
   ...over,
 });
@@ -131,7 +131,7 @@ test('bootstrap: idempotent: with everything in place it installs nothing, sets 
     for (const what of ['node v24.21.0', 'gitleaks 8.30.1', 'claude 2.1.296', 'worklane 0.4.1']) assert.match(r.out, new RegExp(`ok: ${what}`));
   }
   const calls = m.calls().filter((c) => !/--version|^node |^gitleaks |^claude /.test(c));
-  assert.deepEqual(calls, [`worklane install --root ${m.repo}`, 'worklane add --help', `worklane doctor --root ${m.repo}`, `worklane install --root ${m.repo}`, 'worklane add --help', `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
+  assert.deepEqual(calls, [`worklane install --root ${m.repo}`, `worklane doctor --root ${m.repo}`, `worklane install --root ${m.repo}`, `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
 });
 
 test('bootstrap: the engine is installed once per source (recorded), and again only when the source changes', { skip }, () => {
@@ -152,12 +152,15 @@ test('bootstrap: the engine is installed once per source (recorded), and again o
   assert.equal(npm().length, 3, 'an npm spec: once');
 });
 
-test("bootstrap: doctor's result is the script's; `add` runs when the engine has it", { skip }, () => {
-  const failing = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.4.1 ;; doctor) exit 1 ;; add) exit 2 ;; *) exit 0 ;; esac' }) }));
+test("bootstrap: doctor's result is the script's; on success it ends with the next steps, by hand", { skip }, () => {
+  const failing = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.4.1 ;; doctor) exit 1 ;; *) exit 0 ;; esac' }) }));
   assert.equal(failing.run(failing.repo).code, 1);
-  const withAdd = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.5.0 ;; *) exit 0 ;; esac' }) }));
-  assert.equal(withAdd.run(withAdd.repo).code, 0);
-  assert.ok(withAdd.calls().includes(`worklane add --root ${withAdd.repo}`));
+  const passing = released(machine({ have: installed() }));
+  const r = passing.run(passing.repo);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /next: worklane up --root/);
+  assert.match(r.out, /Setting up a project by\s+hand/);
+  assert.deepEqual(passing.calls().filter((c) => c.startsWith('worklane ') && !c.includes('--version')).map((c) => c.split(' ')[1]), ['install', 'doctor'], 'nothing past install and doctor');
 });
 
 test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts in order, then the credentials by hand', { skip }, () => {

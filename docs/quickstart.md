@@ -66,6 +66,22 @@ docker run -it -v "$PWD:/repo" -v "$HOME/.claude:/home/user/.claude" worklane wo
 
 That command mounts your Claude login. Sign in once with `docker run -it ... worklane claude` if you'd rather keep it in a volume.
 
+## Setting up a project by hand
+
+`worklane install` (which the bootstrap runs) scaffolds `.worklane/` in a repo that has none, and leaves one that exists alone. Before the first run, look over what it wrote:
+
+1. In **`.worklane/config.yaml`**:
+   - `project.repo` must be the repo's `owner/name` on GitHub (filled in from its `origin` remote when there is one);
+   - `owners.default` is you;
+   - `owners.writers` lists the accounts whose issues the harness will work on;
+   - `land_mode` is `pr` (the default) or `direct`.
+2. In **`.worklane/tests.yaml`**:
+   - `runner.changed`, `runner.full` and `runner.one` are your project's real test commands;
+   - `vacuity.test_globs` matches your test files.
+3. Run `worklane doctor --root <repo>` again until it passes, and commit `.worklane/`.
+
+To add another repo later, run the bootstrap again with that repo, or just `worklane install --root <repo>` and the same three steps.
+
 ## Your first issue
 
 1. **Start it.** `worklane up --root ~/code/your-repo` installs the coordinator as a service for your user (launchd on macOS, `systemd --user` on Linux). `worklane down` removes it.

@@ -236,12 +236,6 @@ fi
 
 say "set up $REPO"
 run "$CLI" install --root "$REPO"
-# Onboarding a repo (`add`) comes with newer engines: run it when this one has it.
-if [ "$DRY" = 0 ] && "$CLI" add --help >/dev/null 2>&1; then
-  "$CLI" add --root "$REPO" || echo "   note: $CLI add didn't finish; run it again when you're ready" >&2
-elif [ "$DRY" = 1 ]; then
-  printf '   would run: %s add --root %s (if this engine has it)\n' "$CLI" "$REPO"
-fi
 
 say "check it"
 case ":$ORIG_PATH:" in
@@ -258,6 +252,7 @@ if [ "$status" = 0 ]; then
   echo
   echo "next: $CLI up --root $REPO        (starts the coordinator as a service)"
   echo "      $CLI dashboard --root $REPO (the dashboard)"
-  echo "      docs/quickstart.md: your first issue, and where to look"
+  echo "      docs/quickstart.md: set the repo and its owners in .worklane/config.yaml (\"Setting up a project by"
+  echo "      hand\"), then your first issue, and where to look"
 fi
 exit "$status"
