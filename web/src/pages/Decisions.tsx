@@ -28,7 +28,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
   };
   // Only the option the recommendation names; a free-text recommendation (in its pill above) marks none.
   const recommended = (o: string) => o === d.recommendation;
-  const receipts = d.receipts.filter(Boolean);
+  const receipts = (d.receipts ?? []).filter(Boolean);
   return (
     <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
       <div className="primitive-card-pad">

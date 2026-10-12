@@ -40,7 +40,8 @@ export interface Decision {
   question: string;
   options: string[];
   recommendation: string;
-  receipts: string[];
+  /** Absent for a viewer (run and agent detail). */
+  receipts?: string[];
   askedAt: string;
   answer: { by: string; answer: string; at: string } | null;
   /** Whether the dashboard's user may answer it (its owner or a writer); the server refuses otherwise. */
@@ -212,7 +213,8 @@ export interface State {
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
   /** Absent for a viewer (the budget, spend and agent runs are the owners' and writers'). */
   budget?: number;
-  slots: { cap: number; running: number; agents: { slot: string; owner: string; pid: number; acquiredAt: string }[]; fullRun: { owner: string; acquiredAt: string } | null };
+  /** A viewer gets the counts only (cap, running), not which agents hold the slots. */
+  slots: { cap: number; running: number; agents?: { slot: string; owner: string; pid: number; acquiredAt: string }[]; fullRun?: { owner: string; acquiredAt: string } | null };
   lastId: number;
   tasks: Task[];
   decisions: Decision[];
@@ -224,7 +226,9 @@ export interface State {
   baseline: { sha: string; failing: string[]; at: string } | null;
   deploys: { env: string; sha: string; status: string; why?: string; at: string }[];
   coordinator: { instance: string; startedAt: string; lastTick: string | null } | null;
-  errors: { at: string; where: string; message: string }[];
+  /** The coordinator's recent errors; a viewer gets only how many (errorCount), never their text. */
+  errors?: { at: string; where: string; message: string }[];
+  errorCount?: number;
   activity: Activity[];
   inbox: { decisions: Decision[]; blocked: Task[]; notify: Task[] };
   runs?: { active: Run[]; recent: Run[] };

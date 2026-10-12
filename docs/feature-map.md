@@ -89,6 +89,7 @@ Any other path shows Overview.
 | Auto-merged PRs | `prs` | the "Auto-merged" table: merge commit, main afterwards, why it merged | – | `[data-testid="prs-auto-merged"]`, `[data-testid="prs-auto-merged-table"]`, `[data-testid="pr-merged-row"]`, `[data-testid="pr-merge-commit-link"]`, `[data-testid="pr-merge-reasons"]` |
 | Closed without merging | `prs` | the "Closed" list | – | `[data-testid="prs-closed"]` |
 | Refused pushes | `prs` | the "Pushes the harness refused" table | – | `[data-testid="prs-refused"]`, `[data-testid="prs-refused-table"]`, `[data-testid="refused-row"]`, `[data-testid="refused-issue-link"]` |
+| Coordinator errors for a viewer | `overview` | in the Coordinator card for a viewer: how many errors the coordinator reported, never their text | – | `[data-testid="coordinator-errors-count"]` |
 | Spend for a viewer | `overview` | in place of the spend card for a viewer (read on the repo): costs, spend and the budget are for the owners and writers | – | `[data-testid="spend-viewer-only"]` |
 | Logs refused | `logs` | for a viewer: the service log is for the owners and writers, and the page doesn't ask for it | – | `[data-testid="logs-refused"]` |
 | Machine health | `overview` | the "Machine health" section below the headline figures; on a hub it also compares the instances | – | `[data-testid="health-panel"]` |

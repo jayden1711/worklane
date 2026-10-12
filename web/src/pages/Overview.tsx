@@ -108,7 +108,12 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
             ) : (
               <div className="mt-2 text-xs text-muted-foreground">Not started on this machine.</div>
             )}
-            {!!state.errors.length && (
+            {!state.errors && !!state.errorCount && (
+              <div className="mt-3 text-xs text-danger" data-testid="coordinator-errors-count">
+                The coordinator reported errors ({state.errorCount}).
+              </div>
+            )}
+            {!!state.errors?.length && (
               <div className="mt-3 space-y-1">
                 {state.errors.slice(0, 3).map((e, i) => (
                   <div key={i} className="truncate text-xs text-danger" title={e.message}>

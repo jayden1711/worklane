@@ -24,6 +24,7 @@ async function serve() {
   log.append('research.searched', { issue: 1, run: 'r-1', query: 'what the agent searched for' }, 'c');
   log.append('run.cost', { issue: 1, role: 'worker', model: 'sonnet', usd: 1.25, turns: 3 }, 'c');
   log.append('decision.asked', asked, 'c');
+  log.append('coordinator.error', { instance: 'demo', where: 'tick', kind: 'error', message: 'agent output: /home/example/secret path' }, 'c');
   const { dir: root } = exampleProject();
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), pollMs: 50 });
   const base = d.url.split('/?')[0]!;
@@ -43,7 +44,7 @@ test('a viewer gets only the allowlisted events and fields on /api/events and in
       assert.deepEqual(Object.keys(v[1]!.payload).sort(), ['id', 'issue', 'kind', 'options', 'owner', 'question', 'recommendation'], 'only the allowlisted fields (no receipts)');
       for (const who of ['example-collaborator', 'example-owner']) {
         const full = await s.get<Ev[]>(path, who);
-        assert.deepEqual(full.map((e) => e.type), ['issue.seen', 'research.searched', 'run.cost', 'decision.asked'], `${path}: everything for ${who}`);
+        assert.deepEqual(full.map((e) => e.type), ['issue.seen', 'research.searched', 'run.cost', 'decision.asked', ...(path.includes('issue=') ? [] : ['coordinator.error'])], `${path}: everything for ${who}`);
         assert.deepEqual(full[3]!.payload.receipts, asked.receipts);
       }
     }
@@ -163,4 +164,30 @@ test('a viewer\'s state has no costs, spend, budget or agent runs; a writer\'s a
 test('a state key or task field added later is hidden from viewers until allowed', () => {
   const st = stateForViewer({ project: { name: 'x' }, futureSecret: 'hidden', runs: { active: [], recent: [] }, tasks: [{ issue: 1, title: 't', costUsd: 2, futureField: 'hidden' }], inbox: { decisions: [], blocked: [{ issue: 1, costUsd: 2 }], notify: [] } });
   assert.deepEqual(st, { project: { name: 'x' }, tasks: [{ issue: 1, title: 't' }], inbox: { decisions: [], blocked: [{ issue: 1 }], notify: [] } });
+});
+
+test('a viewer gets the slot counts, not which agents hold them; a count of the coordinator\'s errors, not their text; decisions without receipts', async () => {
+  const s = await serve();
+  try {
+    type St = { slots: Record<string, unknown>; errors?: unknown; errorCount?: number; decisions: Record<string, unknown>[]; inbox: { decisions: Record<string, unknown>[] } };
+    const v = await s.get<St>('/api/state', 'someone-else');
+    assert.deepEqual(Object.keys(v.slots).sort(), ['cap', 'running'], 'slot counts only');
+    assert.ok(!('errors' in v), 'no error text');
+    assert.equal(v.errorCount, 1);
+    assert.ok(!JSON.stringify(v).includes('secret path'), "the error's text appears nowhere");
+    assert.ok(v.decisions.length && v.decisions.every((d) => !('receipts' in d)), 'no receipts on decisions');
+    assert.ok(v.inbox.decisions.every((d) => !('receipts' in d)), 'nor on the inbox\'s');
+    assert.ok(!JSON.stringify(v).includes('secret-ish receipt'));
+    for (const who of ['example-collaborator', 'example-owner']) {
+      const full = await s.get<St>('/api/state', who);
+      assert.ok('agents' in full.slots && 'fullRun' in full.slots, `${who} sees which agents hold the slots`);
+      assert.equal((full.errors as { message: string }[])[0]!.message, 'agent output: /home/example/secret path');
+      assert.deepEqual(full.decisions[0]!.receipts, asked.receipts);
+    }
+  } finally {
+    await s.d.close();
+  }
+  // The same rules on the allowlist itself: an agent in a slot, a decision field added later.
+  const st = stateForViewer({ slots: { cap: 2, running: 1, agents: [{ slot: 's1', owner: 'worker #4', pid: 9, acquiredAt: 'x' }], fullRun: { owner: 'y', acquiredAt: 'x' } }, errors: [{ message: 'm' }, { message: 'n' }], decisions: [{ id: 'd', question: 'q', receipts: ['r'], futureField: 'x' }] });
+  assert.deepEqual(st, { slots: { cap: 2, running: 1 }, errorCount: 2, decisions: [{ id: 'd', question: 'q' }] });
 });

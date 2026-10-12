@@ -58,7 +58,7 @@ export function viewerActivity(events: StoredEvent[]) {
  */
 export const VIEWER_STATE_KEYS: readonly string[] = Object.freeze([
   'brand', 'project', 'user', 'role', 'via', 'owners', 'slots', 'lastId', 'tasks', 'decisions', 'landedToday', 'baseline', 'deploys',
-  'coordinator', 'errors', 'activity', 'landQueue', 'batches', 'governor', 'emergency', 'reports', 'inbox', 'prCounts', 'costBasis',
+  'coordinator', 'activity', 'landQueue', 'batches', 'governor', 'emergency', 'reports', 'inbox', 'prCounts', 'costBasis',
   'canReadIntake', 'canReadThroughput', 'canReadReports', 'canReadRuns', 'canReadDigest', 'canReadLogs', 'canReadMachine', 'canWrite', 'canReadAudit',
 ]);
 export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
@@ -66,16 +66,29 @@ export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
   'attempts', 'head', 'landed', 'deployed', 'repro', 'openDecision', 'blockedReason', 'lastActivity', 'firstSeen', 'eventIds',
 ]);
 
-const pick = (o: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
-const tasksOnly = (ts: unknown) => (Array.isArray(ts) ? ts.map((t) => pick(t as Record<string, unknown>, VIEWER_TASK_FIELDS)) : []);
+/** A decision's fields a viewer sees: the question and its answer, never its receipts (run and agent detail). */
+export const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'issue', 'owner', 'question', 'options', 'recommendation', 'askedAt', 'answer', 'canAnswer']);
+/** The machine's slots as a viewer sees them: how many are in use and how many there are, not which agents hold them. */
+export const VIEWER_SLOT_FIELDS: readonly string[] = Object.freeze(['cap', 'running']);
 
-/** A state as a viewer may have it: only the allowlisted keys; tasks (also the inbox's) with only the allowlisted fields. */
+const pick = (o: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
+const each = (keys: readonly string[]) => (xs: unknown) => (Array.isArray(xs) ? xs.map((x) => pick(x as Record<string, unknown>, keys)) : []);
+const tasksOnly = each(VIEWER_TASK_FIELDS);
+const decisionsOnly = each(VIEWER_DECISION_FIELDS);
+
+/**
+ * A state as a viewer may have it: only the allowlisted keys; tasks and decisions (also the inbox's) with only
+ * their allowlisted fields; the slots as counts; the coordinator's errors as a count, never their text.
+ */
 export function stateForViewer(state: Record<string, unknown>): Record<string, unknown> {
   const out = pick(state, VIEWER_STATE_KEYS);
   if ('tasks' in out) out.tasks = tasksOnly(out.tasks);
+  if ('decisions' in out) out.decisions = decisionsOnly(out.decisions);
+  if (out.slots && typeof out.slots === 'object') out.slots = pick(out.slots as Record<string, unknown>, VIEWER_SLOT_FIELDS);
   if (out.inbox && typeof out.inbox === 'object') {
     const ib = out.inbox as Record<string, unknown>;
-    out.inbox = { decisions: ib.decisions, blocked: tasksOnly(ib.blocked), notify: tasksOnly(ib.notify) };
+    out.inbox = { decisions: decisionsOnly(ib.decisions), blocked: tasksOnly(ib.blocked), notify: tasksOnly(ib.notify) };
   }
+  if (Array.isArray(state.errors)) out.errorCount = state.errors.length;
   return out;
 }

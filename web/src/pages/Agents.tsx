@@ -37,7 +37,8 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
           <Card className="p-3">
             <div className="text-[12px] font-medium text-ink-3">Slots on this machine</div>
             <ul className="mt-2 space-y-1 text-[12px] text-ink">
-              {state.slots.agents.map((a) => (
+              {!state.slots.agents && <li className="text-ink-3">{state.slots.running} of {state.slots.cap} in use. Which agents hold them is for the owners and writers.</li>}
+              {(state.slots.agents ?? []).map((a) => (
                 <li key={a.slot} className="flex justify-between gap-2">
                   <span className="truncate">{a.owner}</span>
                   <span className="text-ink-3">
@@ -45,7 +46,7 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
                   </span>
                 </li>
               ))}
-              {!state.slots.agents.length && <li className="text-ink-3">All free.</li>}
+              {state.slots.agents && !state.slots.agents.length && <li className="text-ink-3">All free.</li>}
               {state.slots.fullRun && <li className="pt-1">Full test run: {state.slots.fullRun.owner}</li>}
             </ul>
           </Card>
