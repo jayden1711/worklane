@@ -182,22 +182,23 @@ export function batchSummaries(events: StoredEvent[]): BatchSummary[] {
     const b = st.batches.get(id);
     return b?.parent ? rootOf(b.parent) : id;
   };
-  const extra = new Map<string, { passed: number[]; culprits: BatchSummary['culprits']; requeued: number[]; dropped: number[] }>();
+  const extra = new Map<string, { passed: number[]; culprits: BatchSummary['culprits']; requeued: number[]; dropped: number[]; stale: number[] }>();
   for (const e of events) {
     if (e.type !== 'pr_batch.step') continue;
     const s = e.payload as Step;
-    const x = extra.get(rootOf(s.id)) ?? { passed: [], culprits: [], requeued: [], dropped: [] };
+    const x = extra.get(rootOf(s.id)) ?? { passed: [], culprits: [], requeued: [], dropped: [], stale: [] };
     extra.set(rootOf(s.id), x);
     const nums = s.prs.map((p) => p.number);
     if (s.step === 'checks_posted') x.passed.push(...nums);
     if (s.step === 'culprit') x.culprits.push(...nums.map((number) => ({ number, tier: s.tier })));
     if (s.step === 'requeued') x.requeued.push(...nums);
+    if (s.step === 'stale') x.stale.push(...nums);
     if (s.step === 'dropped') x.dropped.push(...nums);
   }
   const out: BatchSummary[] = [];
   for (const b of st.batches.values()) {
     if (b.parent) continue;
-    const x = extra.get(b.id) ?? { passed: [], culprits: [], requeued: [], dropped: [] };
+    const x = extra.get(b.id) ?? { passed: [], culprits: [], requeued: [], dropped: [], stale: [] };
     const status: BatchStatus = b.steps.includes('abandoned')
       ? 'abandoned'
       : b.steps.includes('green')
@@ -216,6 +217,7 @@ export function batchSummaries(events: StoredEvent[]): BatchSummary[] {
       x.passed.length ? `passed ${list(x.passed)}` : '',
       ...x.culprits.map((c) => `returned #${c.number} (${c.tier ?? 'full run'} failed)`),
       x.requeued.length ? `re-batched ${list(x.requeued)}` : '',
+      x.stale.length ? `main moved before ${list(x.stale)} merged: tested again` : '',
       x.dropped.length ? `dropped ${list(x.dropped)} (head changed or closed)` : '',
     ].filter(Boolean);
     out.push({ id: b.id, status, open: b.open, prs: b.prs.map((p) => ({ issue: p.issue, number: p.number })), passed: [...new Set(x.passed)], culprits: x.culprits, requeued: [...new Set(x.requeued)], dropped: [...new Set(x.dropped)], at: b.at, last: b.last, detail: parts.join('; ') });

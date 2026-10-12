@@ -116,3 +116,16 @@ test('viewers: a PR batch step is its id and step only; the state keeps a batch 
   assert.deepEqual(Object.keys((st.batches as Record<string, unknown>[])[1]!).sort(), ['at', 'id', 'issues', 'kind', 'outcome', 'prs']);
   assert.ok(!JSON.stringify(st).includes('secret-path') && !JSON.stringify(st).includes('totals.test.js'));
 });
+
+test('summaries: PRs a green batch could not merge because main moved say so', () => {
+  const log = seed();
+  const p13 = { issue: 3, number: 13, head: D };
+  const step = (step: EventPayload<'pr_batch.step'>['step'], o: Partial<EventPayload<'pr_batch.step'>> = {}) =>
+    log.append('pr_batch.step', { id: 'batch-3', step, prs: [p13], sha: null, base: null, parent: null, tier: null, run: null, detail: '', ...o }, 'c');
+  step('green', { sha: A, base: A, run: run(true) });
+  step('checks_posted', { sha: A });
+  step('finished');
+  step('stale', { detail: 'main moved' });
+  const s = batchSummaries(log.read()).find((b) => b.id === 'batch-3')!;
+  assert.equal(s.detail, 'passed #13; main moved before #13 merged: tested again');
+});
