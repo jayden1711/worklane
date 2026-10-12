@@ -11,6 +11,8 @@ import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
+import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
+import { projectStateDir } from './guardrails/context.js';
 import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
@@ -57,6 +59,17 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     add('config', 'ok', `${BRAND.configDir}/ valid`);
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
+  }
+
+  // Migrations: anything newer than this engine, or pending steps the coordinator won't start with.
+  const targets: [string, Targets][] = [['migrations', { configFiles: projectConfigFiles(root), eventsDb: join(projectStateDir(root), 'events.db') }], ...(opts.instance ? [[`migrations ${opts.instance}`, instanceTargets(join(instancesDir(), opts.instance))] as [string, Targets]] : [])];
+  for (const [name, t] of targets) {
+    const plan = planMigrations(t);
+    const manual = plan.pending.filter((p) => !p.auto);
+    const lines = [...plan.newer, ...plan.pending.map((p) => `${p.path}: ${p.kind} version ${p.from} -> ${p.to}${p.auto ? ' (applied at the next start)' : ''}: ${p.steps.join('; ')}`)];
+    if (plan.newer.length) add(name, 'fail', `${lines.join('\n')}\nnewer than this engine: update the engine, or restore the backup made before the migration`);
+    else if (manual.length) add(name, 'fail', `${lines.join('\n')}\nthe coordinator won't start until you run \`${BRAND.cli} migrate${name === 'migrations' ? '' : ` --instance ${opts.instance}`}\` (it backs each file up first)`);
+    else add(name, 'ok', lines.length ? lines.join('\n') : 'config and state at the current versions');
   }
 
   // A repo config may only tighten the policy of the instance that runs it; the coordinator refuses to start otherwise.

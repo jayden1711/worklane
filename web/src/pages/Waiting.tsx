@@ -22,6 +22,7 @@ export const KINDS: [WaitKind, string][] = [
   ['deploy_failed', 'Deploys that failed'],
   ['check_held', 'PRs held back by a required check'],
   ['hotspot_held', 'Tasks held behind another on the same files'],
+  ['update_held', 'Engine updates rolled back and held'],
 ];
 
 /** How long, in words (the digest's own wording). */

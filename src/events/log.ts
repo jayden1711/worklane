@@ -6,6 +6,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { EventSchemas, type EventPayload, type EventType, type StoredEvent } from './types.js';
 import { redact } from './redact.js';
+import { stampNewLog } from '../migrations.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
@@ -30,7 +31,10 @@ export class EventLog {
     this.db = new DatabaseSync(path);
     if (path !== ':memory:') groupOnly(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+    const fresh = !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get();
     this.db.exec(SCHEMA);
+    // A new log starts at the engine's state version; an existing one moves only through migrations.ts.
+    if (fresh) stampNewLog(this.db);
     if (path !== ':memory:') groupOnly(path, `${path}-wal`, `${path}-shm`);
   }
 
