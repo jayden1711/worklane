@@ -14,6 +14,8 @@ const CheckRunSchema = z.strictObject({
   tail: z.string().max(2000).optional(),
   /** How long the check ran (absent for one that didn't run, and in older events). */
   duration_ms: z.number().int().nonnegative().optional(),
+  /** A browser check (src/browser/check.ts), not a command: what backs a claim about the browser. */
+  kind: z.literal('browser').optional(),
 });
 
 export const EventSchemas = {

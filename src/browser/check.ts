@@ -64,6 +64,7 @@ export function judgeFlow(ev: FlowEvidence, thresholds: AppConfig['thresholds'],
 export interface BrowserCheckResult {
   check: string;
   status: 'pass' | 'fail' | 'unavailable';
+  kind: 'browser';
   exitCode: null;
   tail: string;
   evidence: FlowEvidence | null;
@@ -76,7 +77,7 @@ export interface BrowserCheckResult {
  */
 export async function runBrowserCheck(o: { item: BrowserDoneWhenItem; app: AppConfig | undefined; cwd: string; outDir: string; baseline?: FlowEvidence | null; chrome?: string | null; runAs?: { user: string; home: string } }): Promise<BrowserCheckResult> {
   const check = `browser ${o.item.browser}`;
-  const result = (status: BrowserCheckResult['status'], tail: string, evidence: FlowEvidence | null = null, verdict: BrowserVerdict | null = null): BrowserCheckResult => ({ check, status, exitCode: null, tail, evidence, verdict });
+  const result = (status: BrowserCheckResult['status'], tail: string, evidence: FlowEvidence | null = null, verdict: BrowserVerdict | null = null): BrowserCheckResult => ({ check, status, kind: 'browser', exitCode: null, tail, evidence, verdict });
   if (!o.app) return result('unavailable', `no app is declared (${BRAND.configDir}/app.yaml), so there is nothing to run a browser check against`);
   if (!o.app.flows[o.item.browser]) return result('fail', `no flow "${o.item.browser}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
   let run: FlowRun;

@@ -83,6 +83,21 @@ fails.
   files it touched (the first 10).
 - Anything else, or a project with no app, runs none.
 
+## Evidence in the PR and its receipts (`src/browser/evidence.ts`)
+
+The PR description gets a `BROWSER CHECKS` section:
+- why checks ran or didn't, and the UI files touched;
+- per flow: its result, a one-line summary (steps held, console errors, failed and slow requests, the longest
+  task, dropped frames), the reasons it failed, and the errors and requests seen (5 of each at most);
+- for a UI fix, the reproduction run before the change beside the run after it.
+
+Text from the app (console messages, URLs) is shown as code, so its markup or mentions never render. The
+screenshot is named, not given by path: the path is on the machine that ran the check.
+
+In the claims receipts, a passing browser check is recorded as one (`kind: browser` on the check, never inferred
+from its name). It backs a worker's claim about the browser, the UI or a screenshot. It doesn't back a claim
+about a phone, another browser, staging or checking by hand.
+
 ## Not yet
 
 - A `browser:` check in an issue's `done_when` is refused until the coordinator runs browser checks, so one can
