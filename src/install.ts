@@ -14,7 +14,7 @@ import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from '.
 import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
-import { writeOwnerOnly } from './os/index.js';
+import { detectOs, procMounts, writeOwnerOnly, wslCheckoutRefusal, type OsKind } from './os/index.js';
 
 export { HOOK_MARKER };
 export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
@@ -123,6 +123,9 @@ function scaffoldWithinPolicies(cfgDir: string, repo: string): string[] {
 
 export interface InstallOptions {
   root: string;
+  /** The OS, as detected (tests set it), and under WSL the distro's mounts. */
+  os?: OsKind;
+  mounts?: string;
   /** Path to the engine's cli.js (defaults to this running engine). */
   engineCli?: string;
   gitHooks?: boolean;
@@ -161,6 +164,11 @@ export function agentSettings(enginePath: string, preApproved: string[], domains
 
 export function install(opts: InstallOptions): InstallReport {
   const root = resolve(opts.root);
+  // Under WSL, never a checkout on a Windows drive: Linux permissions and the sandbox don't hold there.
+  if ((opts.os ?? detectOs()) === 'windows-wsl') {
+    const refusal = wslCheckoutRefusal(root, opts.mounts ?? procMounts());
+    if (refusal) throw new Error(refusal);
+  }
   const notes: string[] = [];
   const cfgDir = join(root, BRAND.configDir);
   // An instance's home must exist before anything is written for it.

@@ -97,6 +97,70 @@ jobs:
           worklane --version
           worklane demo "$RUNNER_TEMP/demo"
 
+  windows-host:
+    # Windows hardened mode's Windows side (scripts/setup/windows/), as far as a hosted runner can go: it has no nested
+    # virtualization, so no WSL2. The installer's dry run and pin check under both Windows PowerShell 5.1 and
+    # PowerShell 7, and the Windows doctor and the engine's doctor in native single-user mode.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: installer dry run, Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $out = & .\scripts\setup\windows\install.ps1 -Instance demo -Repo owner/repo -DryRun | Out-String
+          $out
+          if ($out -notmatch 'would run: wsl\.exe --import Worklane') { throw 'no import step in the plan' }
+      - name: installer dry run, PowerShell 7
+        shell: pwsh
+        run: |
+          $out = & ./scripts/setup/windows/install.ps1 -Instance demo -Repo owner/repo -DryRun | Out-String
+          if ($out -notmatch "would register scheduled task 'Worklane WSL keep-alive'") { throw 'no keep-alive in the plan' }
+      - name: a distro image that isn't the pinned one is refused
+        shell: powershell
+        run: |
+          Set-Content -Path "$env:RUNNER_TEMP\fake.wsl" -Value 'not the image'
+          & powershell -NoProfile -File .\scripts\setup\windows\install.ps1 -Instance demo -Repo owner/repo -DryRun -DistroFile "$env:RUNNER_TEMP\fake.wsl" *> "$env:RUNNER_TEMP\pin.log"
+          if ($LASTEXITCODE -eq 0) { throw 'a mismatching image was accepted' }
+          if (-not (Select-String -Path "$env:RUNNER_TEMP\pin.log" -Pattern 'checksum mismatch' -Quiet)) { Get-Content "$env:RUNNER_TEMP\pin.log"; throw 'no checksum message' }
+          $global:LASTEXITCODE = 0
+      - name: single-user mode, the Windows doctor and the engine's
+        shell: powershell
+        run: |
+          .\scripts\setup\windows\doctor.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'the Windows doctor failed on a single-user host' }
+          node dist/src/cli.js doctor --root examples/basic --json | Out-File "$env:RUNNER_TEMP\doctor.json"
+          $os = (Get-Content -Raw "$env:RUNNER_TEMP\doctor.json" | ConvertFrom-Json) | Where-Object name -EQ 'os'
+          $os.detail
+          if ($os.detail -notmatch '^Windows host, native single-user') { throw 'the engine doctor did not report single-user mode' }
+          # Only the os line is checked here (the example repo has no hooks installed, so doctor itself exits 1).
+          $global:LASTEXITCODE = 0
+
+  wsl2-isolation:
+    # WSL2 hardened mode for real: needs a self-hosted Windows runner with WSL2 and the Worklane distro installed by
+    # scripts/setup/windows/install.ps1 (and an instance, e.g. "ci"). Off until the owner registers one with the labels
+    # self-hosted, windows, wsl2 and sets the repo variable WSL2_RUNNER=true.
+    if: vars.WSL2_RUNNER == 'true'
+    runs-on: [self-hosted, windows, wsl2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: the Windows doctor, hardened required
+        shell: powershell
+        run: |
+          .\scripts\setup\windows\doctor.ps1 -Hardened -Instance ${{ vars.WSL2_INSTANCE || 'ci' }}
+          if ($LASTEXITCODE -ne 0) { throw 'not hardened' }
+      - name: inside the distro, nothing reaches Windows
+        shell: powershell
+        run: |
+          $env:WSL_UTF8 = '1'
+          Get-Content -Raw scripts\setup\windows\isolation-check.sh | wsl.exe -d Worklane -u root -- bash -c "tr -d '\r' > /tmp/isolation-check.sh && bash /tmp/isolation-check.sh wl-${{ vars.WSL2_INSTANCE || 'ci' }}-work"
+          if ($LASTEXITCODE -ne 0) { throw 'the distro is not isolated from Windows' }
+
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.
     runs-on: ubuntu-latest

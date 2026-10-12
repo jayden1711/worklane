@@ -11,7 +11,7 @@ import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, policiesForRepo, policyViolations, readPolicy } from './instance.js';
-import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, hostSummary, procMounts, readWslFacts, shimsNeedShell, which, wslAvailable, wslCheckoutRefusal, wslGpu, wslIsolation, type WslFacts, type WslGpu } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
 export type Level = 'ok' | 'warn' | 'fail';
@@ -27,7 +27,7 @@ function nodeMajor(): number {
   return Number(process.versions.node.split('.')[0]);
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** Under WSL: the distro's facts and GPU, as read (tests pass them). */ wsl?: { facts?: WslFacts; gpu?: WslGpu } } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -59,8 +59,18 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   const os = detectOs(cfg?.project.os ?? 'auto');
-  if (canRunAgents(os)) add('os', 'ok', os);
-  else add('os', 'warn', wslAvailable() ? 'native Windows: run agents inside WSL2' : 'native Windows without WSL2: dashboard and Issues only; agents run on another machine');
+  if (os === 'windows' || os === 'windows-wsl') {
+    // A Windows host: agents only in WSL2's hardened mode, whose isolation is Linux's inside the VM.
+    const facts = opts.wsl?.facts ?? (os === 'windows-wsl' ? readWslFacts() : null);
+    const h = hostSummary(os, facts ? wslIsolation(facts) : null, os === 'windows' && wslAvailable());
+    add('os', h.status, h.detail);
+    if (os === 'windows-wsl') {
+      const refusal = wslCheckoutRefusal(root, facts?.mounts ?? procMounts());
+      if (refusal) add('checkout', 'fail', refusal);
+      const gpu = opts.wsl?.gpu ?? wslGpu();
+      if (gpu.nvidiaSmi || gpu.dxg) add('gpu', 'ok', gpu.nvidiaSmi ? `NVIDIA through WSL (${gpu.nvidiaSmi}${gpu.cuda ? ', CUDA driver present' : ''})` : 'a GPU through WSL (/dev/dxg), no NVIDIA tools');
+    }
+  } else if (canRunAgents(os)) add('os', 'ok', os);
 
   // Hook wiring. An instance's agents get their hooks and rules from its agent settings, for agent runs only
   // (agent-settings.ts). The checkout's .claude/settings.json is for local runs without an instance, and is where

@@ -551,3 +551,15 @@ export function replaceFileAtomically(path: string, data: string, mode: number):
 export function cpuCount(): number {
   return availableParallelism();
 }
+
+export { hostSummary, readWslFacts, wslCheckoutRefusal, wslGpu, wslIsolation, WSL_GPU_DIR, type WslFacts, type WslGpu, type WslIsolation } from './windows/wsl.js';
+
+/** /proc/mounts on Linux (WSL included); empty elsewhere. */
+export function procMounts(): string {
+  if (process.platform !== 'linux') return '';
+  try {
+    return readFileSync('/proc/mounts', 'utf8');
+  } catch {
+    return '';
+  }
+}

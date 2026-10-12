@@ -73,7 +73,15 @@ case "$(uname -m)" in
   aarch64 | arm64) ARCH=arm64 ;;
   *) die "unsupported architecture $(uname -m)" ;;
 esac
-case "$OS" in Darwin | Linux) ;; *) die "unsupported system $OS (macOS and Linux only; on Windows, use WSL or the Docker image)" ;; esac
+case "$OS" in Darwin | Linux) ;; *) die "unsupported system $OS (macOS and Linux only; on Windows, run scripts/setup/windows/install.ps1 for WSL2 hardened mode, or use the Docker image)" ;; esac
+
+# Inside WSL (Windows' Linux VM). Repos there live on WSL's own filesystem, never a Windows drive under /mnt.
+is_wsl() { [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; }
+refuse_windows_fs() {
+  case "$1" in
+    /mnt | /mnt/*) die "$1 is under /mnt, where WSL mounts Windows drives: clone the repo on WSL's own filesystem (e.g. ~/src) and run this again" ;;
+  esac
+}
 
 sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
@@ -98,6 +106,10 @@ at_least() {
 if [ "$HARDENED" = 1 ]; then
   [ "$OS" = Linux ] || die "--hardened is for Linux servers (apt and systemd); on a Mac use the single-user path"
   command -v apt-get >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 || die "--hardened needs apt-get and systemd"
+  # WSL boots without systemd unless /etc/wsl.conf asks for it; the services need it (scripts/setup/windows/install.ps1 sets it).
+  if is_wsl && [ "$DRY" = 0 ] && [ "$(cat /proc/1/comm 2>/dev/null)" != systemd ]; then
+    die "systemd isn't running in this WSL distro: set [boot] systemd=true in /etc/wsl.conf, run 'wsl --terminate <distro>' from Windows, then run this again"
+  fi
   [ -n "$NAME" ] && [ -n "$GITHUB" ] || die "usage: bootstrap.sh --hardened <instance-name> <owner/repo>"
   [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "instance name must be lowercase letters, digits and dashes"
   [[ "$GITHUB" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || die "the repo must be owner/name"
@@ -134,8 +146,10 @@ fi
 
 [ "$NO_REPO" = 1 ] || [ -n "$REPO" ] || { echo "bootstrap: give the repo to set up, or --no-repo" >&2; usage >&2; exit 2; }
 if [ "$NO_REPO" = 0 ]; then
+  if is_wsl; then refuse_windows_fs "$REPO"; fi
   [ -d "$REPO" ] || die "no directory $REPO"
   REPO="$(cd "$REPO" && pwd)"
+  if is_wsl; then refuse_windows_fs "$REPO"; fi
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO is not a git repository"
 fi
 ORIG_PATH="$PATH"
