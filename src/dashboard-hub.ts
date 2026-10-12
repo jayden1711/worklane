@@ -33,7 +33,7 @@ export interface HubOptions {
    * The owner terminal (src/console/terminal.ts): the admin user it runs as (console_user; none: it never
    * opens), and who is asking (#197's session; none until then, so it never opens). The rest is for tests.
    */
-  terminal?: { consoleUser: string | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
+  terminal?: { consoleUser: string | null; devices?: string[]; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
 }
 
 /** The hub's port: next to the instances' range (4400-4899). */
@@ -135,6 +135,7 @@ export function startHub(opts: HubOptions): Promise<{ server: Server; url: strin
     instances: opts.instances.map((i) => i.name),
     session: t?.session ?? (() => null),
     audit: t?.audit ?? fileAudit(join(opts.stateDir, 'terminal-audit.jsonl')),
+    devices: { allow: t?.devices ?? [], ...(t?.whois ? { whois: t.whois } : {}), ...(t?.peerUid ? { peerUid: t.peerUid } : {}) },
     ...(t?.spawnPty ? { spawnPty: t.spawnPty } : {}),
     ...(t?.exec ? { exec: t.exec } : {}),
     ...(t?.now ? { now: t.now } : {}),

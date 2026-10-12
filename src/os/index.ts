@@ -168,6 +168,48 @@ export function ptyCommand(argv: string[], size: { cols: number; rows: number })
   return ['/usr/bin/script', ['-q', '-f', '-e', '-c', `stty cols ${cols} rows ${rows}; exec ${argv.join(' ')}`, '/dev/null']];
 }
 
+const hexPort = (p: number) => p.toString(16).toUpperCase().padStart(4, '0');
+
+/**
+ * The uid that owns the client end of a loopback TCP connection to this process, from a /proc/net/tcp or
+ * /proc/net/tcp6 table: the row whose local address is the client's (127.0.0.1 or ::1, `clientPort`) and whose
+ * remote address is our listening port. Null when there's no such row.
+ */
+export function peerUidFromProcNet(table: string, clientPort: number, serverPort: number): number | null {
+  const v4 = '0100007F';
+  const v6 = ['00000000000000000000000001000000', '0000000000000000FFFF00000100007F'];
+  const ok = (addr: string, port: number) => {
+    const [ip, p] = addr.split(':');
+    return p === hexPort(port) && (ip === v4 || v6.includes(ip!));
+  };
+  for (const line of table.split('\n').slice(1)) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 8) continue;
+    if (ok(f[1]!, clientPort) && ok(f[2]!, serverPort)) {
+      const uid = Number(f[7]);
+      return Number.isInteger(uid) ? uid : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Which OS user opened a loopback connection to us (the kernel's record, not anything the client says). Linux
+ * only, from /proc/net/tcp{,6}; null elsewhere, or when the connection isn't found.
+ */
+export function loopbackPeerUid(clientPort: number, serverPort: number): number | null {
+  if (process.platform !== 'linux') return null;
+  for (const f of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    try {
+      const uid = peerUidFromProcNet(readFileSync(f, 'utf8'), clientPort, serverPort);
+      if (uid !== null) return uid;
+    } catch {
+      // no such table
+    }
+  }
+  return null;
+}
+
 /** The OS user this process runs as. */
 export function currentUser(): string {
   try {

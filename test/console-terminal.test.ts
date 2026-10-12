@@ -8,6 +8,8 @@ import { CONSOLE_SHELL, CommandRecorder, openTerminal, type AuditEntry, type Pty
 import type { ConsoleSession } from '../src/console/session.js';
 import { startHub } from '../src/dashboard-hub.js';
 
+const NET = ['tail1234', 'ts', 'net'].join('.');
+const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
 const NOW = Date.parse('2026-10-12T20:00:00Z');
 const ADMIN = 'adminx';
 const cfg: TerminalConfig = { consoleUser: ADMIN, hubUser: 'wl-dash' };
@@ -48,6 +50,7 @@ function open(over: Partial<Parameters<typeof openTerminal>[0]> = {}) {
     audit: { record: (e) => void audit.push(e) },
     send: () => {},
     closed: (why) => void closed.push(why),
+    device: () => ({ why: null, device: { name: `laptop.${NET}`, tags: ['tag:owner'] } }),
     spawnPty: p.spawn,
     exec: (file, args) => {
       execCalls.push([file, ...args]);
@@ -177,13 +180,13 @@ test('the hub serves the terminal over a WebSocket: same origin only, refused wi
   const h = await startHub({
     instances: [{ name: 'demo', port: 1, tokenFile: join(dir, 'none') }],
     stateDir: dir,
-    terminal: { consoleUser: ADMIN, hubUser: 'wl-dash', session: () => session, audit: { record: (e) => void audit.push(e) }, spawnPty: p.spawn, exec: passwordRequired, now: () => NOW },
+    terminal: { consoleUser: ADMIN, hubUser: 'wl-dash', devices: ['tag:owner'], peerUid: () => 0, whois: () => JSON.stringify({ Node: { Name: `laptop.${NET}.`, Tags: ['tag:owner'] } }), session: () => session, audit: { record: (e) => void audit.push(e) }, spawnPty: p.spawn, exec: passwordRequired, now: () => NOW },
   });
   const base = h.url.split('/?')[0]!.replace('http', 'ws');
   const origin = h.url.split('/?')[0]!;
   const connect = (o: string, instance = 'demo') =>
     new Promise<{ msgs: { type: string; why?: string; data?: string }[]; ws: WebSocket; error?: string }>((done) => {
-      const ws = new WebSocket(`${base}/api/terminal?instance=${instance}`, { origin: o });
+      const ws = new WebSocket(`${base}/api/terminal?instance=${instance}`, { origin: o, headers: { 'x-forwarded-for': ip(3) } });
       const msgs: { type: string; why?: string; data?: string }[] = [];
       ws.on('message', (m) => msgs.push(JSON.parse(String(m))));
       ws.on('unexpected-response', (_req, res) => done({ msgs, ws, error: String(res.statusCode) }));

@@ -26,6 +26,7 @@ import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
 import { HUB_PORT, parseHubArg, startHub } from './dashboard-hub.js';
+import { parseDeviceList } from './console/terminal-devices.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
@@ -82,10 +83,11 @@ usage: ${BRAND.cli} <command> [options]
   dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user)
-  dashboard --hub name=<state dir>[,...] [--port n] [--service] [--console-user admin]
+  dashboard --hub name=<state dir>[,...] [--port n] [--service] [--console-user admin --console-devices tag:x,node]
                                    one view over several instances' own dashboards; it forwards
                                    to each, so writes stay with that instance's server and user;
                                    --console-user: the admin user the owner terminal runs as
+                                   from the Tailscale devices --console-devices lists (none: refused)
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -431,7 +433,7 @@ async function main(argv: string[]): Promise<number> {
         const instances = parseHubArg(hubArg, instancePort);
         const hubState = join(stateDir(), 'dashboard-hub');
         const portOpt = option(opts, '--port');
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, terminal: { consoleUser: option(opts, '--console-user') ?? null } });
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
         console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  ${service ? `${h.url.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.url}\n(local only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(h.url);
         await new Promise(() => {});

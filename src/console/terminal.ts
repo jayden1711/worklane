@@ -6,6 +6,9 @@
 // It opens only when all of these hold, and is refused, saying which, otherwise:
 // - the person is the owner of the instance it's opened from, and signed in with GitHub in the last 5 minutes
 //   (#197's session; until #197 lands no session has a sign-in time, so it never opens);
+// - then, on top of those: it's opened from a Tailscale device the owner listed (console_devices: tags or node
+//   names), identified by Tailscale itself (terminal-devices.ts); an empty list, or a device that can't be
+//   identified, is refused;
 // - a console user is configured, isn't root, and isn't the user the hub runs as;
 // - `sudo -n true` as that user FAILS (the console shell's `check`): if it succeeds (passwordless sudo, or a
 //   cached sudo timestamp) the terminal would be root without a password, so it's refused. The shell itself
@@ -43,6 +46,8 @@ export interface AuditEntry {
   shown?: string;
   why?: string;
   user?: string;
+  /** The Tailscale device (its name and tags), once identified. */
+  device?: string;
 }
 
 export interface AuditSink {
@@ -228,6 +233,11 @@ export interface OpenTerminal {
   send: (data: string) => void;
   /** The terminal ended (why); the connection should close. */
   closed: (why: string) => void;
+  /**
+   * The Tailscale device it's opened from, checked after the owner checks (terminal-devices.ts): a refusal
+   * (why) or none, with the device when it was identified. Required, so a caller can't leave the check out.
+   */
+  device: () => { why: string | null; device: { name: string; tags: string[] } | null };
   spawnPty?: SpawnPty;
   exec?: Exec;
   now?: () => number;
@@ -245,12 +255,17 @@ export function openTerminal(o: OpenTerminal): TerminalHandle | { refused: strin
   const now = o.now ?? Date.now;
   const at = () => new Date(now()).toISOString();
   const login = o.session?.login ?? '';
+  let device: string | undefined;
   const refuse = (why: string) => {
-    o.audit.record({ at: at(), login, instance: o.instance, kind: 'refused', why });
+    o.audit.record({ at: at(), login, instance: o.instance, kind: 'refused', why, ...(device ? { device } : {}) });
     return { refused: why };
   };
   const why = terminalRefusal(o.session, o.config, now());
   if (why) return refuse(why);
+  // On top of the owner checks: the Tailscale device it's opened from must be one the owner allowed.
+  const d = o.device();
+  if (d.device) device = `${d.device.name}${d.device.tags.length ? ` [${d.device.tags.join(',')}]` : ''}`;
+  if (d.why) return refuse(d.why);
   const user = o.config.consoleUser!;
   const pre = sudoPreflight(user, o.exec ?? defaultExec);
   if (pre) return refuse(pre);
@@ -260,7 +275,7 @@ export function openTerminal(o: OpenTerminal): TerminalHandle | { refused: strin
   } catch (e) {
     return refuse(`couldn't start the terminal: ${String((e as Error).message).split('\n')[0]}`);
   }
-  o.audit.record({ at: at(), login, instance: o.instance, kind: 'opened', user });
+  o.audit.record({ at: at(), login, instance: o.instance, kind: 'opened', user, ...(device ? { device } : {}) });
   const recorder = new CommandRecorder((e) => o.audit.record({ at: at(), login, instance: o.instance, ...e }));
   let open = true;
   let idle: NodeJS.Timeout | null = null;

@@ -8,6 +8,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { openTerminal, type AuditSink, type Exec, type SpawnPty, type TerminalConfig, type TerminalHandle } from './terminal.js';
 import type { SessionOf } from './session.js';
+import { deviceRefusal, type DeviceOptions } from './terminal-devices.js';
 
 export interface TerminalServerOptions {
   config: TerminalConfig;
@@ -15,6 +16,8 @@ export interface TerminalServerOptions {
   instances: string[];
   session: SessionOf;
   audit: AuditSink;
+  /** The Tailscale devices allowed to open it (console_devices), and how they're identified (terminal-devices.ts). */
+  devices: DeviceOptions;
   spawnPty?: SpawnPty;
   exec?: Exec;
   now?: () => number;
@@ -42,15 +45,19 @@ export function attachTerminal(server: Server, o: TerminalServerOptions): () => 
   const open = new Set<TerminalHandle>();
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const instance = url.searchParams.get('instance') ?? '';
+    const refused = (why: string) => o.audit.record({ at: new Date((o.now ?? Date.now)()).toISOString(), login: '', instance, kind: 'refused', why });
     if (url.pathname !== TERMINAL_PATH || !sameOrigin(req)) {
+      if (url.pathname === TERMINAL_PATH) refused(`a terminal request from another origin (${String(req.headers.origin ?? 'none').slice(0, 100)})`);
       socket.end('HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n');
       return;
     }
-    const instance = url.searchParams.get('instance') ?? '';
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
       const say = (m: object) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(m));
       if (!o.instances.includes(instance)) {
-        say({ type: 'refused', why: `no instance ${instance || '(none)'} in this hub` });
+        const why = `no instance ${instance || '(none)'} in this hub`;
+        refused(why);
+        say({ type: 'refused', why });
         return ws.close(1008);
       }
       const cols = Number(url.searchParams.get('cols')) || 80;
@@ -60,6 +67,7 @@ export function attachTerminal(server: Server, o: TerminalServerOptions): () => 
         instance,
         config: o.config,
         audit: o.audit,
+        device: () => deviceRefusal(req, o.devices),
         send: (data) => say({ type: 'output', data }),
         closed: (why) => {
           say({ type: 'closed', why });
