@@ -57,6 +57,24 @@ name other than lowercase letters, digits and dashes is refused, with the reason
 With no Chrome or Chromium on the machine (set `CHROME` to its path), the run is skipped with that reason and
 nothing is started.
 
+## The `browser:` check (`src/browser/check.ts`)
+
+`- browser: checkout` in `done_when` runs the app's `checkout` flow and judges it. It passes only when:
+
+- every step ran and held;
+- there are no new console errors or uncaught exceptions;
+- there are no new failed requests (4xx/5xx or a network error);
+- the longest main-thread task is within `max_long_task_ms`, and the share of dropped frames within
+  `max_dropped_frame_pct`.
+
+"New" is against a baseline run of the same flow when there is one (before the change). An error or failed
+request already there is the same one even on another port, line or query string. With no baseline, every one
+counts. Slow requests, refused requests to other hosts, and frames that couldn't be measured are notes, never
+judged.
+
+With no app declared, or no browser on the machine, the check is **unavailable**, never passed. An unknown flow
+fails.
+
 ## Not yet
 
 - A `browser:` check in an issue's `done_when` is refused until the coordinator runs browser checks, so one can
