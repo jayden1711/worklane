@@ -38,7 +38,7 @@ import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
-import { Corrections } from './coordinator/corrections.js';
+import { Delegation } from './coordinator/delegation.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
@@ -47,7 +47,7 @@ export { logTail } from './coordinator/shared.js';
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends Corrections {
+export class Coordinator extends Delegation {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -74,6 +74,7 @@ export class Coordinator extends Corrections {
     await step('merged', () => this.watchMerges(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
+    await step('delegation', () => this.checkDelegation(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });

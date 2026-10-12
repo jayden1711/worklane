@@ -21,3 +21,12 @@ merge:
   max_lines: 400
   max_files: 10
   wait_categories: []
+  # Categories you stopped waiting on through gradual delegation (below). L3 categories, ci-config and
+  # dependency can never be listed here: the config is refused.
+  loosened: []
+# Gradual delegation, suggest-only: when a category in wait_categories has min_clean PRs in a row approved
+# unchanged (none reverted, main never red after one, no later fix), you're asked whether to stop waiting on
+# it, with the evidence. A loosened category that goes wrong is proposed for waiting again. Never automatic.
+delegation:
+  enabled: false
+  min_clean: 10

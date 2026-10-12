@@ -1,5 +1,6 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
+import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { projectEnvProblem } from '../project-env.js';
 
@@ -404,8 +405,25 @@ export const ReviewConfig = z.strictObject({
       max_files: z.number().int().positive().default(10),
       /** Categories (built-in or from `categories`) that wait, on top of the L3 ones, ci-config and dependency. */
       wait_categories: z.array(z.string()).default([]),
+      /**
+       * Categories the owner stopped waiting on (gradual delegation); a revert, a red main or a later fix in one
+       * proposes waiting again. High-risk and safety-floor categories can never be listed here.
+       */
+      loosened: z.array(z.string()).default([]),
     })
     .prefault({}),
+  /**
+   * Gradual delegation, suggest-only: a waiting category whose last `min_clean` PRs were approved unchanged, with
+   * no revert, red main or later fix, is put to the owner for loosening, with the evidence. Never automatic.
+   */
+  delegation: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      min_clean: z.number().int().min(3).default(10),
+    })
+    .prefault({}),
+}).superRefine((r, ctx) => {
+  for (const message of loosenedProblems(r)) ctx.addIssue({ code: 'custom', path: ['merge', 'loosened'], message });
 });
 
 // ---------- deploy.yaml ----------
