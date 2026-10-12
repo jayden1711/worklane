@@ -28,11 +28,12 @@
 // demo's owner, example-owner: e.g. someone-else to see what anyone but the owner and writers gets).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { baselineErrors, errorKey, findPage, loadFeatureMap, pagePath, parseCommand, readyText, targetExpr } from './feature-map.mjs';
+// The DevTools client and its helpers, shared with the project-app runner (src/browser/cdp.ts, built).
+import { Cdp, findChrome as sharedFindChrome, freePort, sleep, until } from '../../dist/src/browser/cdp.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
@@ -47,88 +48,12 @@ const engine = resolve(option('--engine', fileURLToPath(new URL('../..', import.
 const theme = option('--theme', 'light');
 const say = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 
+/** Chrome or Chromium: --chrome, CHROME, then the usual places (src/browser/cdp.ts, shared with the project-app runner). */
 export function findChrome(given = option('--chrome', process.env.CHROME)) {
-  if (given) return given;
-  const candidates =
-    process.platform === 'darwin'
-      ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium']
-      : process.platform === 'win32'
-        ? [join(process.env.PROGRAMFILES ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'), join(process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'), join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe')]
-        : [];
-  for (const c of candidates) if (existsSync(c)) return c;
-  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
-    const r = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { encoding: 'utf8' });
-    if (r.status === 0 && r.stdout.trim()) return r.stdout.trim().split(/\r?\n/)[0];
-  }
-  return null;
+  return sharedFindChrome(given);
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function until(what, fn, ms = 15_000, every = 100) {
-  const end = Date.now() + ms;
-  let last;
-  while (Date.now() < end) {
-    try {
-      last = await fn();
-      if (last) return last;
-    } catch (e) {
-      last = e;
-    }
-    await sleep(every);
-  }
-  throw new Error(`timed out after ${ms} ms waiting for ${what}${last instanceof Error ? `: ${last.message}` : ''}`);
-}
-
-/** A minimal DevTools protocol client over the WebSocket Node ships with. */
-class Cdp {
-  static async connect(url) {
-    const ws = new WebSocket(url);
-    await new Promise((ok, fail) => {
-      ws.addEventListener('open', ok, { once: true });
-      ws.addEventListener('error', () => fail(new Error(`DevTools WebSocket ${url} refused`)), { once: true });
-    });
-    return new Cdp(ws);
-  }
-  constructor(ws) {
-    this.ws = ws;
-    this.next = 1;
-    this.pending = new Map();
-    this.handlers = new Map();
-    ws.addEventListener('message', (m) => {
-      const msg = JSON.parse(String(m.data));
-      if (msg.id && this.pending.has(msg.id)) {
-        const { ok, fail, method } = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        if (msg.error) fail(new Error(`${method}: ${msg.error.message}`));
-        else ok(msg.result);
-      } else if (msg.method) for (const h of this.handlers.get(msg.method) ?? []) h(msg.params);
-    });
-  }
-  send(method, params = {}) {
-    const id = this.next++;
-    this.ws.send(JSON.stringify({ id, method, params }));
-    return new Promise((ok, fail) => this.pending.set(id, { ok, fail, method }));
-  }
-  on(method, fn) {
-    this.handlers.set(method, [...(this.handlers.get(method) ?? []), fn]);
-  }
-  close() {
-    this.ws.close();
-  }
-}
-
-/** A free loopback port (so Chrome's DevTools and the dashboard don't collide with anything running). */
-export function freePort() {
-  return new Promise((ok, fail) => {
-    const s = createServer();
-    s.on('error', fail);
-    s.listen(0, '127.0.0.1', () => {
-      const { port } = s.address();
-      s.close(() => ok(port));
-    });
-  });
-}
+export { freePort };
 
 /** Seed the demo, start its dashboard, start Chrome: everything under one temporary directory. */
 async function start() {
