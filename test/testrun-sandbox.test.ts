@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TestsConfig } from '../src/config/schema.js';
 import { checkName, TestRunConfig } from '../src/testrun/config.js';
 import { localHost, newRunId, RUN_ID, sandboxHost } from '../src/testrun/host.js';
-import { createWorkspace, runEnv, wipeWorkspace } from '../src/testrun/workspace.js';
+import { cloneScript, createWorkspace, runEnv, wipeWorkspace } from '../src/testrun/workspace.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -264,7 +264,7 @@ test('isolation: a wipe leaves nothing behind (workspace, temp files, home, cont
   assert.match(id, RUN_ID);
   const ws = await createWorkspace(host, p.dir, p.sha, id);
   assert.ok(existsSync(join(ws.workdir, '.worklane', 'config.yaml')), 'the commit\'s tree');
-  assert.ok(!existsSync(join(ws.workdir, '.git')), 'never the coordinator\'s .git');
+  assert.ok(!existsSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates')), 'its own objects, never the coordinator\'s');
   const db = await host.startDb(id, { image: pin, name: 'test', readyS: 5 });
   const r = await host.exec(id, 'echo leftover > "$TMPDIR/t"; echo cached > "$HOME/h"; mkdir -p node_modules/x && echo 1 > node_modules/x/y; echo ok', runEnv({}, {}, db), 30_000);
   assert.equal(r.code, 0, r.out);
@@ -356,4 +356,100 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
     'shop wipe fast-abc-1',
   ]);
   rmSync(dir, { recursive: true, force: true });
+});
+
+/** The example project with history: a commit on main, then a PR head on a branch. */
+function projectWithHead() {
+  const p = exampleProject();
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: p.dir, encoding: 'utf8' }).trim();
+  const main = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '-b', 'feature');
+  writeFileSync(join(p.dir, 'feature.txt'), 'the change\n');
+  git('add', 'feature.txt');
+  git('commit', '-q', '-m', 'the change');
+  const head = git('rev-parse', 'HEAD');
+  git('checkout', '-q', 'main');
+  return { ...p, git, main, head };
+}
+
+/** Everything about a repo a run could change: its refs, config, objects and files. */
+function repoState(dir: string) {
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' }).trim();
+  return { refs: git('for-each-ref', '--format=%(refname) %(objectname)'), config: readFileSync(join(dir, '.git', 'config'), 'utf8'), objects: git('count-objects', '-v'), status: git('status', '--porcelain'), files: readdirSync(join(dir, '.git')).sort().join(',') };
+}
+
+test('a run\'s workspace is a git clone of its own: the head checked out, main and origin/main present, git log main works', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  const host = localHost(mkdtempSync(join(tmpdir(), 'tr-git-')), { docker: '/nonexistent/docker' });
+  const id = newRunId('fast', p.head);
+  const ws = await createWorkspace(host, p.dir, p.head, id);
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: ws.workdir, encoding: 'utf8' }).trim();
+  assert.equal(git('rev-parse', 'HEAD'), p.head);
+  assert.equal(git('rev-parse', 'main'), p.main);
+  assert.equal(git('rev-parse', 'origin/main'), p.main);
+  assert.match(git('log', '--format=%s', 'main'), /init/);
+  assert.deepEqual(git('diff', '--name-only', 'origin/main...HEAD').split('\n'), ['feature.txt']);
+  assert.equal(git('status', '--porcelain'), '', 'a clean checkout');
+  assert.ok(!existsSync(join(ws.workdir, '..', 'tree.bundle')), 'the bundle is removed once cloned');
+  // The run sees it the same way.
+  const r = await host.exec(id, 'git log --oneline main | wc -l && git rev-parse --abbrev-ref origin/HEAD', {}, 30_000);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /origin\/main/);
+  await wipeWorkspace(host, id);
+  assert.ok(!existsSync(ws.workdir));
+});
+
+test('isolation: the workspace\'s git has no remote, no credential helper, no hooks, no alternates, nothing of the coordinator\'s config', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  // The coordinator's clone has a remote with a credential helper and hooks: none of it may reach a run.
+  p.git('remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git');
+  p.git('config', 'credential.helper', '!/usr/local/bin/harness git-credential');
+  p.git('config', 'core.hooksPath', '.githooks');
+  p.git('update-ref', 'refs/remotes/origin/main', p.main);
+  const host = localHost(mkdtempSync(join(tmpdir(), 'tr-git-')), { docker: '/nonexistent/docker' });
+  const id = newRunId('fast', p.head);
+  const ws = await createWorkspace(host, p.dir, p.head, id);
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: ws.workdir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+  assert.equal(git('remote'), '', 'no remote');
+  const config = readFileSync(join(ws.workdir, '.git', 'config'), 'utf8');
+  assert.doesNotMatch(config, /\[remote|url\s*=|github\.com|git-credential|\.githooks/);
+  assert.equal(git('config', '--get', 'credential.helper'), '', 'the credential helper is set empty');
+  assert.equal(git('config', '--get', 'core.hooksPath'), '/dev/null');
+  assert.ok(!existsSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates')), 'a copy of the objects, never shared alternates');
+  assert.ok(statSync(join(ws.workdir, '.git')).isDirectory(), 'its own .git, not a worktree link into the coordinator\'s');
+  assert.equal(git('rev-parse', 'origin/main'), p.main);
+  await wipeWorkspace(host, id);
+});
+
+test('isolation: the coordinator\'s repo is unchanged after a run that tries to write to it', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  p.git('remote', 'add', 'origin', p.dir);
+  const before = repoState(p.dir);
+  const host = localHost(mkdtempSync(join(tmpdir(), 'tr-git-')), { docker: '/nonexistent/docker' });
+  const id = newRunId('fast', p.head);
+  await createWorkspace(host, p.dir, p.head, id);
+  // Everything a run could try from its workspace's git: push to whatever remote it has, write through
+  // alternates or a worktree's gitdir link, commit and move refs locally.
+  const attack = [
+    'set +e',
+    'git -c user.name=x -c user.email=x@x commit -q --allow-empty -m evil',
+    'git push -q origin HEAD:refs/heads/evil 2>/dev/null',
+    'for r in $(git remote); do git push -q "$r" HEAD:refs/heads/evil; done 2>/dev/null',
+    'if [ -f .git/objects/info/alternates ]; then while read -r d; do echo evil > "$d/evil"; done < .git/objects/info/alternates; fi',
+    'if [ -f .git ]; then d=$(sed -n "s/^gitdir: //p" .git); git --git-dir="$d" update-ref refs/heads/evil HEAD; fi',
+    'git update-ref refs/heads/main HEAD',
+    'exit 0',
+  ].join('\n');
+  const r = await host.exec(id, attack, {}, 60_000);
+  assert.equal(r.code, 0, r.out);
+  await wipeWorkspace(host, id);
+  assert.deepEqual(repoState(p.dir), before, 'refs, config, objects and files as they were, and the run\'s temporary bundle refs gone');
+});
+
+test('the sandbox helper clones exactly as the engine does', () => {
+  const helper = readFileSync(helperSrc, 'utf8');
+  const clone = /^CLONE='([\s\S]*?)'$/m.exec(helper)?.[1];
+  assert.equal(clone, cloneScript());
+  assert.match(helper, /\[ "\$head" = "refs\/worklane\/test-run\/\$id\/head" \] && \[ "\$base" = "refs\/worklane\/test-run\/\$id\/base" \]/);
+  assert.match(helper, /runuser -u "\$user" -- env -i PATH=[^ ]+ HOME="\$d\/home" LANG=C\.UTF-8 bash -c "\$CLONE"/, 'as the test user, with nothing of the caller\'s environment');
 });

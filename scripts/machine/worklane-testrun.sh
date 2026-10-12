@@ -4,7 +4,7 @@
 # <name> only, so an instance reaches its own test user and nothing else. Every other argument is checked here,
 # before anything is read or written. docs/test-runs.md has the why of each choice.
 #
-#   worklane-testrun <name> create <id>                       a new run: its workspace from a tar on stdin
+#   worklane-testrun <name> create <id> <branch> <head> <base> a new run: its workspace, a clone from a bundle on stdin
 #   worklane-testrun <name> file <id> changed-files           the change's paths (stdin) for {changed_files}
 #   worklane-testrun <name> cache <cache> <key>               a cache's directory for this key (printed)
 #   worklane-testrun <name> shared <dir>                      a directory all runs share, never wiped (printed)
@@ -64,15 +64,37 @@ valid_env() {
   if [ "$k" != DATABASE_URL ] && [[ "$(printf %s "$k" | tr '[:lower:]' '[:upper:]')" =~ TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE ]]; then die "--env $k: looks like a secret; a test run gets none"; fi
 }
 
+# The clone a run's workspace is made with, as the test user: the same commands as src/testrun/workspace.ts
+# cloneScript (a test checks they match). No remote, no credential helper, hooks off, no one's global config.
+CLONE='set -euo pipefail
+bundle="$1" work="$2" branch="$3" head="$4" base="$5"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+git init -q -b "$branch" "$work"
+cd "$work"
+git config core.hooksPath /dev/null
+git config credential.helper ""
+git config user.name test-run
+git config user.email test-run@example.com
+git fetch -q --no-tags --no-write-fetch-head --update-head-ok "$bundle" "+$head:refs/test-run/head" "+$base:refs/heads/$branch"
+git update-ref "refs/remotes/origin/$branch" "refs/heads/$branch"
+git symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$branch"
+git checkout -q --detach refs/test-run/head
+git update-ref -d refs/test-run/head
+rm -f "$bundle"'
+
 create() {
-  local id="${1:-}" d
-  [ "$#" -eq 1 ] || die "usage: create <id>"
+  local id="${1:-}" branch="${2:-}" head="${3:-}" base="${4:-}" d
+  [ "$#" -eq 4 ] || die "usage: create <id> <branch> <head ref> <base ref>"
   valid_id "$id"; d="$(run_dir "$id")"
+  [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$branch" != *..* ]] || die "not a branch name: $branch"
+  [ "$head" = "refs/worklane/test-run/$id/head" ] && [ "$base" = "refs/worklane/test-run/$id/base" ] || die "not run $id's bundle refs"
   [ ! -e "$d" ] || die "run $id exists; wipe it first"
   install -d -o root -g root -m 0711 "$root/runs"
   install -d -o "$user" -g "$user" -m 0700 "$d" "$d/work" "$d/tmp" "$d/home"
-  # The tree arrives as a tar on stdin and is unpacked as the test user: nothing in it is ever written as root.
-  as_user tar -x -C "$d/work" --no-same-owner --no-same-permissions --delay-directory-restore -f -
+  # The bundle (a copy of the objects, never the coordinator's .git) arrives on stdin; the clone is made from it as
+  # the test user, so nothing in it is ever written as root and the test user owns it all.
+  as_user sh -c 'cat > "$1"' _ "$d/tree.bundle"
+  (cd "$d" && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/home" LANG=C.UTF-8 bash -c "$CLONE" _ "$d/tree.bundle" "$d/work" "$branch" "$head" "$base") >&2
   echo "$d/work"
 }
 
@@ -194,6 +216,14 @@ wipe() {
   echo "wiped $id"
 }
 
+# A bundle of one empty commit under run <id>'s refs, for the sandbox probe.
+probe_bundle() {
+  local id="$1" t
+  t="$(runuser -u "$user" -- mktemp -d)"
+  runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$t" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash -c 'set -e; cd "$1"; git init -q; git -c user.name=p -c user.email=p@example.com commit -q --allow-empty -m probe; git update-ref "refs/worklane/test-run/$2/head" HEAD; git update-ref "refs/worklane/test-run/$2/base" HEAD; git bundle create --quiet - "refs/worklane/test-run/$2/head" "refs/worklane/test-run/$2/base"' _ "$t" "$id"
+  rm -rf "$t"
+}
+
 # PASS when the test user can't read, write or enter each protected path, as itself and inside the sandbox. A probe
 # that can't run is a FAIL, never a pass.
 check() {
@@ -209,7 +239,7 @@ check() {
   done < <(protected_paths)
   # The same, inside the sandbox a run gets: a probe run, wiped after.
   id="probe-$$"
-  tar -cf - -T /dev/null | create "$id" >/dev/null
+  probe_bundle "$id" | create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" >/dev/null
   out="$( (exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; echo probed; exit $n' <<<"$(protected_paths)") 2>&1 || true)"
   wipe "$id" >/dev/null || { echo "FAIL the probe run was not wiped"; fail=1; }
   if [ "$(tail -n1 <<<"$out")" = probed ] && ! grep -q '^open ' <<<"$out"; then echo "PASS a sandboxed run reaches none of them"

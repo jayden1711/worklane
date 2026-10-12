@@ -26,7 +26,7 @@ test_run:
 ```
 
 - **Tiers.** `fast` tiers run on every PR, and again on each new head. `full` tiers run once per batch of approved PRs (PR mode). Each tier is one command, run under bash with pipefail in the run's workspace. It posts one check.
-- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. The workspace has no `.git` (see below), so a plan that runs `git diff` itself won't work there. `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
+- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
 - **Database.** A tier with `database: true` gets the run's own Postgres in `DATABASE_URL`: a container named after the run, on a port the daemon picks, on `127.0.0.1` only, with a random password. Its data is on a tmpfs, and it is removed with the run.
 - **Checks.** Several tiers of one kind may map to one check (say three full tiers to `suite`): it passes only when all of them passed. A check can't have both fast and full tiers.
 - **Shared directories.** Concurrent runs that must coordinate (a registry of test ports, say) get a directory of the instance's that every run can write and no wipe removes, in the variable named. It lives outside each run's `TMPDIR`, which is wiped.
@@ -44,7 +44,11 @@ test_run:
 | `worklane-test-<name>-docker.service` | Rootless Docker as the test user, for the runs' databases. There is no root daemon and no `docker` group. Published ports bind `127.0.0.1`. |
 | `/var/lib/worklane-test/<name>` | Per instance: `runs/<id>` (one per run), `cache/`, Docker's data. |
 
-**One run.** The coordinator makes a run's workspace from `git archive` of the commit, piped to the helper, which unpacks it as the test user into `runs/<id>/work`. The test user never reads the coordinator's checkout or its `.git`. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
+**One run.** A run's workspace is a git clone of its own, owned by the test user, so suites that call git (`git log main`, a diff against `origin/main`, LFS paths) work as on CI.
+- The coordinator writes a `git bundle` of the commit and the default branch, under temporary refs it removes at once. The bundle is a copy of the objects, never shared alternates or the coordinator's `.git`, and it is piped to the helper.
+- As the test user, the helper clones it into `runs/<id>/work`: the commit checked out, and the default branch as `main` and `origin/main` (and `origin/HEAD`).
+- The clone has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config.
+- The test user never reads the coordinator's checkout, and has no path back to it to write. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
 
 - a read-only system (`ProtectSystem=strict`), no `/home`, `/root` or `/run/user` (`ProtectHome=tmpfs`);
 - every protected path above inaccessible, and the Docker socket too, so only the helper starts containers;
@@ -93,6 +97,15 @@ With `test_run` in tests.yaml and the sandbox's check passing at start (`testrun
 - **New head:** the run on the old head is cancelled, and a run starts on the new one. A closed PR's run is cancelled too. A cancelled run posts no check.
 - **Restarts:** a head already run isn't run again. A run a restart cut short is wiped at start, recorded as `interrupted`, and run again.
 - **Bots:** a bot's PR gets the fast tier. Its full tiers (a batch, in PR mode) wait until the owner approves it (`fullRunAllowed`).
+
+## Agents skip local full runs
+
+With `test_run` on and full tiers in it, the coordinator's test run is the full run. So neither an agent nor the coordinator's verify of its change runs the full suite on the machine as well (src/testrun/local.ts):
+
+- A done_when `suite: full` is recorded as the issue says. The agent's brief and the verify use `suite: changed` instead, and so do CI fix runs and conflict runs.
+- The full tiers still run, once per batch, as the test run's checks, which the PR waits for. Nothing CI checks is removed; only the duplicate local run goes.
+- Direct landing (`land_mode: direct`) has no PR to carry the test run's checks, so its land gates are unchanged. `land.pre` steps aren't test runs. The nightly full run stays: it records main's baseline.
+- With `test_run` off, nothing changes.
 
 ## How many at once
 
