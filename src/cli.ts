@@ -41,7 +41,7 @@ import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 import { Onboarding, realDeps } from './onboard/flow.js';
-import { ghOwner, restGitHub } from './onboard/github.js';
+import { ghOwner, repoOfCheckout, restGitHub } from './onboard/github.js';
 import { discordApi } from './onboard/discord.js';
 import { answerInTerminal } from './onboard/terminal.js';
 import { onboardService } from './onboard/http.js';
@@ -102,7 +102,7 @@ usage: ${BRAND.cli} <command> [options]
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
-  add <owner/repo> [--name n] [--owner login]
+  add <owner/repo> | add --root <checkout> [--name n] [--owner login]
                                    onboard a project: its GitHub App, labels, config PR, ruleset,
                                    users, service, Claude sign-in, optional Discord and Tailscale,
                                    then doctor; each step you must do is asked, and a re-run continues
@@ -687,14 +687,27 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'add': {
-      const repo = sub;
-      if (!repo) {
-        console.error('usage: add <owner/repo> [--name <instance>] [--owner <your GitHub login>]');
+      const addUsage = `usage: ${BRAND.cli} add <owner/repo> | add --root <checkout> [--name <instance>] [--owner <your GitHub login>]\n  onboard a project; with --root, the GitHub repo that checkout's origin points at`;
+      // Options anywhere after `add`; what's left is the one positional, owner/repo.
+      const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
+      if (flag(opts, '--help') || flag(opts, '-h') || opts[0] === 'help') {
+        console.log(addUsage);
+        return 0;
+      }
+      const name = option(opts, '--name');
+      const ownerOpt = option(opts, '--owner');
+      if (opts.length > 1 || opts.some((o) => o.startsWith('-'))) {
+        console.error(`unexpected ${opts.join(' ')}\n${addUsage}`);
         return 2;
       }
-      const name = option(rest, '--name');
+      // `add --root <checkout>` (the quickstart's form): the repo its origin points at.
+      const repo = opts[0] ?? (rootOpt ? repoOfCheckout(root) : null);
+      if (!repo) {
+        console.error(rootOpt ? `${root}: its origin isn't a GitHub repo; give it as add <owner/repo>\n${addUsage}` : addUsage);
+        return 2;
+      }
       const owner = ghOwner();
-      const by = option(rest, '--owner') ?? (await owner.login());
+      const by = ownerOpt ?? (await owner.login());
       if (!by) {
         console.error('who owns the project? sign in with `gh auth login` as yourself, or pass --owner <your GitHub login>');
         return 2;

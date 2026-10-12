@@ -14,11 +14,12 @@ import { setAgentApiKey, setInstanceBudget } from '../src/onboard/budget.js';
 import { BOT_PERMISSION_BITS, discordApi, inviteUrl } from '../src/onboard/discord.js';
 import { fixFor, onboardDoctor, parseDoctor } from '../src/onboard/doctor.js';
 import { appPermissionRules, ENGINE_LABELS, instanceNameFor } from '../src/onboard/flow.js';
-import { proposedRuleset } from '../src/onboard/github.js';
+import { proposedRuleset, repoOfCheckout } from '../src/onboard/github.js';
 import { onboardService } from '../src/onboard/http.js';
 import { appManifest, appName, APP_PERMISSIONS, installUrl, manifestPage, startManifestServer } from '../src/onboard/manifest.js';
 import { detectStack, writeProjectConfig } from '../src/onboard/stack.js';
-import { repoRoot } from './helpers.js';
+import { engineCli, repoRoot } from './helpers.js';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 const posix = process.platform !== 'win32';
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
@@ -176,6 +177,25 @@ test("Discord: the invite asks for view, send, send in threads and read history 
   assert.deepEqual(calls, ['GET /api/users/@me', 'GET /api/applications/@me']);
   const user = discordApi((async () => new Response(JSON.stringify({ id: '1', username: 'u' }), { status: 200 })) as typeof fetch);
   assert.match((await user.check('t')).problem!, /user's token/);
+});
+
+test('the CLI forms the quickstart calls: add --help exits 0; add --root <checkout> takes the repo its origin points at', () => {
+  const help = spawnSync(process.execPath, [engineCli, 'add', '--help'], { encoding: 'utf8' });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /add <owner\/repo> \| add --root <checkout>/);
+  for (const [url, want] of [
+    ['https://github.com/acme/shop.git', 'acme/shop'],
+    [`git${'@'}github.com:acme/shop.web.git`, 'acme/shop.web'],
+    ['ssh://git@github.com/acme/shop', 'acme/shop'],
+    ['https://gitlab.example/acme/shop.git', null],
+  ] as const)
+    assert.equal(repoOfCheckout('.', () => url), want, url);
+  assert.equal(repoOfCheckout('.', () => { throw new Error('no origin'); }), null);
+  const d = tmp('no-origin-');
+  execFileSync('git', ['init', '-q', d]);
+  const bad = spawnSync(process.execPath, [engineCli, 'add', '--root', d, '--owner', 'ada'], { encoding: 'utf8' });
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /its origin isn't a GitHub repo/);
 });
 
 test('instance names from repos', () => {

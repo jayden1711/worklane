@@ -103,6 +103,18 @@ export function restGitHub(fetchImpl: Fetch = fetch, api = 'https://api.github.c
   };
 }
 
+/** The GitHub repo (owner/name) a checkout's origin points at, or null when it isn't a GitHub remote. */
+export function repoOfCheckout(dir: string, run: (args: string[]) => string = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })): string | null {
+  let url: string;
+  try {
+    url = run(['remote', 'get-url', 'origin']).trim();
+  } catch {
+    return null;
+  }
+  const m = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*?)(?:\.git)?\/?$/.exec(url);
+  return m ? m[1]! : null;
+}
+
 /** The ruleset proposed for the default branch: the detected checks required, and up to date before merging. */
 export function proposedRuleset(checks: string[], name: string) {
   return {
