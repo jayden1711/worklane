@@ -8,7 +8,12 @@
 // can write another instance's log.
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
+import { attachTerminal } from './console/terminal-server.js';
+import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
+import type { SessionOf } from './console/session.js';
+import { currentUser } from './os/index.js';
 
 export interface HubInstance {
   name: string;
@@ -24,6 +29,11 @@ export interface HubOptions {
   stateDir: string;
   port?: number;
   webDir?: string;
+  /**
+   * The owner terminal (src/console/terminal.ts): the admin user it runs as (console_user; none: it never
+   * opens), and who is asking (#197's session; none until then, so it never opens). The rest is for tests.
+   */
+  terminal?: { consoleUser: string | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
 }
 
 /** The hub's port: next to the instances' range (4400-4899). */
@@ -118,6 +128,18 @@ export function startHub(opts: HubOptions): Promise<{ server: Server; url: strin
       json(res, 500, { error: (e as Error).message });
     }
   });
+  // The owner terminal, on WebSocket upgrades (src/console/terminal-server.ts); every attempt and command goes to the hub's audit log.
+  const t = opts.terminal;
+  const detachTerminal = attachTerminal(server, {
+    config: { consoleUser: t?.consoleUser ?? null, hubUser: t?.hubUser ?? currentUser() },
+    instances: opts.instances.map((i) => i.name),
+    session: t?.session ?? (() => null),
+    audit: t?.audit ?? fileAudit(join(opts.stateDir, 'terminal-audit.jsonl')),
+    ...(t?.spawnPty ? { spawnPty: t.spawnPty } : {}),
+    ...(t?.exec ? { exec: t.exec } : {}),
+    ...(t?.now ? { now: t.now } : {}),
+    ...(t?.idleMs ? { idleMs: t.idleMs } : {}),
+  });
   return new Promise((resolveStart) => {
     server.listen(opts.port ?? 0, '127.0.0.1', () => {
       const addr = server.address();
@@ -128,6 +150,7 @@ export function startHub(opts: HubOptions): Promise<{ server: Server; url: strin
         token,
         close: () =>
           new Promise<void>((r) => {
+            detachTerminal();
             server.closeAllConnections();
             server.close(() => r());
           }),

@@ -82,9 +82,10 @@ usage: ${BRAND.cli} <command> [options]
   dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user)
-  dashboard --hub name=<state dir>[,...] [--port n] [--service]
+  dashboard --hub name=<state dir>[,...] [--port n] [--service] [--console-user admin]
                                    one view over several instances' own dashboards; it forwards
-                                   to each, so writes stay with that instance's server and user
+                                   to each, so writes stay with that instance's server and user;
+                                   --console-user: the admin user the owner terminal runs as
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -430,7 +431,7 @@ async function main(argv: string[]): Promise<number> {
         const instances = parseHubArg(hubArg, instancePort);
         const hubState = join(stateDir(), 'dashboard-hub');
         const portOpt = option(opts, '--port');
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT });
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, terminal: { consoleUser: option(opts, '--console-user') ?? null } });
         console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  ${service ? `${h.url.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.url}\n(local only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(h.url);
         await new Promise(() => {});
@@ -454,7 +455,7 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       user = user || cfg.project.owners.default;
-      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port });
+      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, ...(instance ? { instance } : {}), port: portOpt ? Number(portOpt) : site.port });
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
