@@ -40,6 +40,7 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './wor
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
+import { maybePostDigest } from './coordinator/digest.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
@@ -69,6 +70,7 @@ export class Coordinator extends MergeFlow {
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
+    await step('digest', () => maybePostDigest({ log: this.d.log, backlog: this.d.backlog, project: this.d.cfg.project, emit: (p) => this.emit('digest.posted', p) }), null);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
