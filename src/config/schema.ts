@@ -85,6 +85,20 @@ export const ProjectConfig = z.strictObject({
       max_per_day: z.number().int().min(0).default(10),
     })
     .prefault({}),
+  /**
+   * The gardener: every `every_days` days at `at` (local, off-hours; it starts within 3 hours of it), one read-only
+   * run (at most `max_usd`) looks for tech debt and anti-patterns. Findings go to one log issue; a fix is filed only
+   * for a pattern seen 3+ times, at most `max_prs` per run, never in a high-risk or safety-floor path.
+   */
+  gardener: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      every_days: z.number().int().min(1).max(90).default(7),
+      at: hhmm.default('03:00'),
+      max_usd: z.number().positive().max(100).default(5),
+      max_prs: z.number().int().min(0).max(10).default(1),
+    })
+    .prefault({}),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),
@@ -142,6 +156,7 @@ export const RoleNames = [
   'monitor',
   'release_prep',
   'corrections',
+  'gardener',
 ] as const;
 
 export const AgentsConfig = z
