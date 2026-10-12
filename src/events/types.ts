@@ -120,6 +120,8 @@ export const EventSchemas = {
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
+  /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
+  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -128,6 +130,8 @@ export const EventSchemas = {
     test_correct: z.boolean(),
     confidence: z.enum(['high', 'medium', 'low']),
     advice: z.string(),
+    /** The worker's claims no recorded command or check backs: never evidence; `confidence` was lowered for them. */
+    unverified_claims: z.array(z.string()).optional(),
     /** Changed files the evaluator didn't read; any means the change goes to a human. */
     unread: z.array(z.string()).optional(),
     /** The evaluator's binding design-level flag; absent (an older or failed verdict) counts as doubt. */

@@ -1512,6 +1512,44 @@ function realMerges(t: Awaited<ReturnType<typeof openPr>>) {
 
 const reasonsOf = (t: Awaited<ReturnType<typeof openPr>>) => (lastOf(t.f.log, 'merge.decided') as { auto: boolean; reasons: string[] });
 
+/** The default worker's fix, reporting `summary`. */
+const workerSaying = (summary: string) => (req: RunRequest) => {
+  const p = join(req.cwd, 'src', 'price.js');
+  writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+  commitAll(req.cwd, 'Ignore non-positive quantities in totals');
+  return { summary };
+};
+
+test('claims receipts: the PR description lists VERIFIED checks, the worker\'s unbacked claims, and what was NOT CHECKED', { skip }, async () => {
+  const t = await openPr({ worker: workerSaying('Guarded totals against non-positive quantities. The price tests pass. Tested on mobile Safari too.') });
+  const body = t.pr().body;
+  const section = (name: string) => body.split(`### ${name}\n`)[1]!.split('\n\n')[0]!;
+  assert.match(section('VERIFIED'), /^- `.+`: pass/m, 'each check the coordinator ran, with its result');
+  assert.doesNotMatch(section('VERIFIED'), /mobile/);
+  assert.match(section('NOT VERIFIED'), /"Tested on mobile Safari too\." \(claimed by the worker; no recorded command or check backs it/);
+  assert.doesNotMatch(section('NOT VERIFIED'), /price tests pass/, 'a claim the passing checks back is not listed');
+  assert.equal(section('NOT CHECKED').trim(), '- nothing');
+  const v = lastOf(t.f.log, 'eval.verdict') as { confidence: string; unverified_claims?: string[] };
+  assert.deepEqual([v.confidence, v.unverified_claims], ['medium', ['Tested on mobile Safari too.']], 'the evaluator said high; the unbacked claim lowers it');
+  assert.match(body, /confidence medium \(lowered: 1 unverified claim\(s\)\)/);
+  const brief = t.runner.calls.find((r) => r.role === 'evaluator-verdict')!.prompt;
+  assert.match(brief, /NOT VERIFIED \(the worker claimed these; no recorded command or check backs them, so they are not evidence\): "Tested on mobile Safari too\."/);
+});
+
+test('claims receipts: an unbacked claim keeps a clean PR from auto-merging (evaluator confidence lowered); backed claims change nothing', { skip }, async () => {
+  const t = await openPr({ worker: workerSaying('Fixed it. Verified by hand in the browser.'), 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  await green(t);
+  assert.equal(reasonsOf(t).auto, false);
+  assert.ok(reasonsOf(t).reasons.includes('doubt: evaluator confidence medium'), reasonsOf(t).reasons.join('; '));
+  assert.ok(!t.pr().merged);
+
+  const ok = await openPr({ worker: workerSaying('Fixed it. The price tests pass.'), 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  assert.equal((lastOf(ok.f.log, 'eval.verdict') as { confidence: string }).confidence, 'high');
+  assert.match(ok.pr().body, /### NOT VERIFIED\n- nothing/);
+  await green(ok);
+  assert.ok(ok.pr().merged, 'backed claims: merges as before');
+});
+
 test('auto-merge: a clean ready PR is merged with a merge commit pinned to the evaluated head', { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
   const calls: { sha: string; title: string }[] = [];

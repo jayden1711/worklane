@@ -31,7 +31,8 @@ import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pic
 import { conflictBrief, conflictFixesUsed, conflictTrigger, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from './conflicts.js';
 import { abortMerge, changedFiles, mergeBaseInto } from './merge-base.js';
 import { importsOf, lightCheckPlan, lightOutcome } from './light-check.js';
-import { runIssue } from './run-record.js';
+import { readRun, runIssue, runsForIssue } from './run-record.js';
+import { claimsOf, lowerConfidence, receiptLines, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow, intakeCaps, researchCaps, researchRepoAccess } from './settings.js';
 import { acceptResearch, researchCapHold, researchComment, ResearchMeter, researchRun, researchTrigger, researchUsageToday, writeResearchBundle } from './research.js';
 import type { InstanceSettings } from './instance.js';
@@ -1201,6 +1202,8 @@ export class Coordinator {
       await this.block(n, owner, s.blocked);
       return { stop: true as const };
     }
+    // What the worker says it verified: checked against the record at evaluation, listed in the PR's receipts.
+    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? '') });
     return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}) };
   }
 
@@ -1419,10 +1422,12 @@ export class Coordinator {
   private async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[], opts: { extra?: string[]; schema?: object } = {}) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.evaluator!;
+    const unverified = this.unverifiedClaims(n, checks);
     const extra = [
       `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
       `Reproduction test: ${repro?.path || 'none'}`,
       `Coordinator's check results: ${checks.map((c) => `${c.check}=${c.status}`).join(', ') || 'none'}`,
+      ...(unverified.length ? [`NOT VERIFIED (the worker claimed these; no recorded command or check backs them, so they are not evidence): ${unverified.map((c) => `"${c}"`).join('; ')}`] : []),
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
       ...(opts.extra ?? []),
     ];
@@ -1448,16 +1453,31 @@ export class Coordinator {
     const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
     const unread = changed.filter((f) => !reviewed.has(f));
     // No verdict is a failed verdict, never a pass.
+    // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
     const v = {
       patch_correct: r.reason === 'succeeded' && s?.patch_correct === true,
       test_correct: r.reason === 'succeeded' && s?.test_correct !== false,
-      confidence: (r.reason === 'succeeded' && s?.confidence) || 'low',
+      confidence: lowerConfidence((r.reason === 'succeeded' && s?.confidence) || 'low', unverified.length),
       advice: r.reason === 'succeeded' ? (s?.advice ?? '') : `evaluator run ${r.reason}: ${r.detail}`,
+      ...(unverified.length ? { unverified_claims: unverified } : {}),
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
     this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
+  }
+
+  /**
+   * The latest worker's claims that no record backs: not the coordinator's passing checks, nor a command the
+   * worker's last run recorded as succeeding.
+   */
+  private unverifiedClaims(n: number, checks: { check: string; status: string }[]): string[] {
+    const claims = (this.events(n).filter((e) => e.type === 'worker.claims').at(-1)?.payload as EventPayload<'worker.claims'> | undefined)?.claims ?? [];
+    if (!claims.length) return [];
+    const run = this.d.stateDir ? runsForIssue(this.d.stateDir, n).filter((r) => r.role === 'worker').at(-1) : undefined;
+    const steps = run ? (readRun(this.d.stateDir!, run.id)?.steps ?? []) : [];
+    const commands = steps.filter((st) => st.kind === 'command' && st.status === 'ok').map((st) => st.what);
+    return unbackedClaims(claims, { checks: checks as CheckRecord[], commands });
   }
 
   private cost(issue: number, role: string, r: RunResult) {
@@ -2346,8 +2366,9 @@ export class Coordinator {
     }
     const last = <T>(type: Parameters<EventLog['read']>[1] extends (infer U)[] | undefined ? U : never) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
     const lvl = last<{ level: string; reasons: string[] }>('review.level_set');
-    const verdict = last<{ patch_correct: boolean; confidence: string; advice: string }>('eval.verdict');
-    const checks = last<{ checks: { check: string; status: string }[] }>('check.result');
+    const verdict = last<EventPayload<'eval.verdict'>>('eval.verdict');
+    const checks = last<EventPayload<'check.result'>>('check.result');
+    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
     const issue = await this.d.backlog.get(n);
     const body = [
       `Closes #${n}`,
@@ -2355,9 +2376,10 @@ export class Coordinator {
       `Opened by ${BRAND.name}. It merges this itself only if the instance's merge policy allows (required checks green on the evaluated commit, nothing high-risk, design-level, big or in doubt); otherwise it waits for a human.`,
       '',
       `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
-      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
-      `**Checks run by the harness:** ${checks?.checks.map((c) => `${c.check} ${c.status}`).join(', ') || 'none'}`,
+      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.unverified_claims?.length ? ` (lowered: ${verdict.unverified_claims.length} unverified claim(s))` : ''}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
       ...evalLines(this.instructionResults(n)),
+      '',
+      ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
     ].join('\n');
     let url: string;
     try {
