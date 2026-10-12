@@ -80,7 +80,8 @@ UPDATE_DEFAULT_CHECKS=("agentshield" "denylist" "desktop" "push-gate" "scan" "te
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {
-  node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
+  # A new install follows signed release tags; an existing updates.json (no channel) keeps following main.
+  node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, channel: "release", allowed_signers: "/etc/worklane/allowed_signers", repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
 }
 
 # The sudoers rule for the dashboard's owner terminal: the hub's viewer user may run the console shell as the

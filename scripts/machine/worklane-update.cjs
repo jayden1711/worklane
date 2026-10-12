@@ -2,8 +2,14 @@
 // Engine updates, run as root by worklane-update.timer every 10 minutes and installed as
 // /usr/local/libexec/worklane-update by scripts/setup/updates.sh. It does nothing unless
 // /etc/worklane/updates.json has "enabled": true (set through the machine helper's
-// `set-updates on`). When it is on, it installs main's newest commit only if:
-//   - the commit is a fast-forward of the installed engine (never older, never a rewrite);
+// `set-updates on`). Its "channel" says what it follows:
+//   - "release" (new installs): the newest release tag vX.Y.Z, only when it is newer than the installed
+//     version, its signature verifies (`git verify-tag`) against the owner's allowed signers file
+//     (updates.json allowed_signers), and its commit is the main commit it was cut from plus dist/ only.
+//     The checks below are read on that main commit (CI runs on main, not on tags).
+//   - "main" (the default when the field is absent, so an existing install keeps following main): main's
+//     newest commit, only when it is a fast-forward of the installed engine (never older, never a rewrite).
+// Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
 //   - the machine is quiet: no agent slot or full-run lock is held and no emergency stop is on.
@@ -24,6 +30,8 @@ const STATE = '/var/lib/worklane/update-state.json';
 const HELD = '/var/lib/worklane/update-held.json'; // the last rolled-back commit: { sha, at, failed }
 const OPT = '/opt/worklane';
 const SLOTS = '/var/lib/worklane/agent-slots';
+const VERIFY_GIT = '/var/lib/worklane/verify.git'; // a root-owned bare clone, only for checking release tags
+const ALLOWED_SIGNERS = '/etc/worklane/allowed_signers';
 const BUILD_STATE = 'worklane-build'; // the DynamicUser's StateDirectory, /var/lib/worklane-build
 const BUILD_DIR = `/var/lib/${BUILD_STATE}`;
 
@@ -222,6 +230,74 @@ function installTree(sha, opt = OPT, buildDir = BUILD_DIR, owner = 'root:root') 
   fs.renameSync(tmp, dest);
 }
 
+/** What updates.json follows: "release" or "main"; absent or anything else is main (an existing install keeps it). */
+const channelOf = (cfg) => (cfg && cfg.channel === 'release' ? 'release' : 'main');
+
+const semver = (v) => (/^\d+\.\d+\.\d+$/.test(String(v)) ? String(v).split('.').map(Number) : null);
+/** a > b, as X.Y.Z versions. */
+function newer(a, b) {
+  const [x, y] = [semver(a), semver(b)];
+  if (!x || !y) return !!x && !y;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
+/**
+ * `git ls-remote --tags <repo> 'refs/tags/v*'` as release tags: { tag, version, object, commit, annotated }. An
+ * annotated tag's line names the tag object and its `^{}` line the commit; a lightweight tag (no `^{}`) can't be signed.
+ */
+function parseTags(listing) {
+  const tags = new Map();
+  for (const line of String(listing).split('\n')) {
+    const m = /^([0-9a-f]{40})\trefs\/tags\/v(\d+\.\d+\.\d+)(\^\{\})?$/.exec(line.trim());
+    if (!m) continue;
+    const t = tags.get(m[2]) || { tag: `v${m[2]}`, version: m[2], object: null, commit: null };
+    if (m[3]) t.commit = m[1];
+    else t.object = m[1];
+    tags.set(m[2], t);
+  }
+  return [...tags.values()].map((t) => ({ ...t, commit: t.commit || t.object, annotated: !!t.commit }));
+}
+
+/** The newest release tag. */
+function newestRelease(tags) {
+  return tags.reduce((best, t) => (!best || newer(t.version, best.version) ? t : best), null);
+}
+
+/**
+ * Check a release tag before anything is built: fetched into a root-owned bare clone, its signature verified by
+ * `git verify-tag` against the allowed signers file (SSH signatures), its commit one commit on top of a commit on
+ * main that adds only dist/. Returns { ok, base } (base: the main commit whose checks count) or { ok: false, reason }.
+ */
+function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists = fs.existsSync) {
+  if (!exists(signers)) return { ok: false, reason: `no allowed signers file at ${signers}: the release channel installs only tags signed by a key listed there` };
+  const g = (...a) => exec('git', ['--git-dir', gitDir, ...a]).trim();
+  try {
+    if (!exists(gitDir)) exec('git', ['init', '-q', '--bare', gitDir]);
+    g('fetch', '-q', '--force', '--no-tags', repoUrl, `+refs/tags/${tag}:refs/tags/${tag}`, '+refs/heads/main:refs/heads/main');
+  } catch (e) {
+    return { ok: false, reason: `couldn't fetch ${tag}: ${String((e && e.message) || e).split('\n')[0]}` };
+  }
+  if (g('cat-file', '-t', `refs/tags/${tag}`) !== 'tag') return { ok: false, reason: `${tag} is a lightweight tag: it can't carry a signature` };
+  try {
+    g('-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-tag', tag);
+  } catch (e) {
+    const said = String((e && e.stderr) || (e && e.message) || e).split('\n').filter(Boolean).slice(-1)[0];
+    return { ok: false, reason: `${tag}'s signature doesn't verify against ${signers}: ${said || 'no signature'}` };
+  }
+  const commit = g('rev-parse', `${tag}^{commit}`);
+  const parents = g('rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
+  if (parents.length !== 1) return { ok: false, reason: `${tag}'s commit has ${parents.length} parents; a release commit has one, the main commit it was cut from` };
+  try {
+    g('merge-base', '--is-ancestor', parents[0], 'refs/heads/main');
+  } catch {
+    return { ok: false, reason: `${tag} wasn't cut from main: ${parents[0].slice(0, 12)} isn't on main` };
+  }
+  const outside = g('diff', '--name-only', parents[0], commit).split('\n').filter((f) => f && !f.startsWith('dist/'));
+  if (outside.length) return { ok: false, reason: `${tag}'s release commit changes more than dist/: ${outside.slice(0, 5).join(', ')}` };
+  return { ok: true, base: parents[0] };
+}
+
 // ---------- the run ----------
 
 async function run(deps) {
@@ -230,9 +306,22 @@ async function run(deps) {
   const gh = repoFromUrl(cfg.repo_url);
   if (!gh) return deps.note('refused', null, `updates.json repo_url isn't a GitHub repository: ${cfg.repo_url}`, true);
   const current = deps.installed();
-  const head = deps.exec('git', ['ls-remote', cfg.repo_url, `refs/heads/${cfg.branch || 'main'}`]).split(/\s/)[0];
-  if (!/^[0-9a-f]{40}$/.test(head)) return deps.note('refused', null, `no ${cfg.branch || 'main'} on ${cfg.repo_url}`, true);
-  if (head === current) return 'current';
+  const release = channelOf(cfg) === 'release';
+  let head;
+  let tag = null;
+  if (release) {
+    tag = newestRelease(parseTags(deps.exec('git', ['ls-remote', '--tags', cfg.repo_url, 'refs/tags/v*'])));
+    if (!tag) return deps.note('waiting', null, `no release tag vX.Y.Z on ${cfg.repo_url} yet`, false);
+    head = tag.commit;
+    if (head === current) return 'current';
+    // Never back: a tag no newer than the installed engine's version is not an update.
+    const installedVersion = deps.installedVersion();
+    if (installedVersion && !newer(tag.version, installedVersion)) return 'current';
+  } else {
+    head = deps.exec('git', ['ls-remote', cfg.repo_url, `refs/heads/${cfg.branch || 'main'}`]).split(/\s/)[0];
+    if (!/^[0-9a-f]{40}$/.test(head)) return deps.note('refused', null, `no ${cfg.branch || 'main'} on ${cfg.repo_url}`, true);
+    if (head === current) return 'current';
+  }
   // A commit that was rolled back is never retried by itself: only a newer commit, or the owner turning
   // updates off and on again after the rollback (updates.json written later), releases it.
   const held = deps.held();
@@ -240,14 +329,22 @@ async function run(deps) {
     return deps.note('held', head, `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`, true);
   }
   const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
-  const ff = fastForward(current ? await deps.fetchJson(`${api}/compare/${current}...${head}`) : { status: 'ahead', behind_by: 0, ahead_by: 0 });
-  if (!ff.ok) return deps.note('refused', head, ff.reason, true);
-  const checks = evaluateChecks(((await deps.fetchJson(`${api}/commits/${head}/check-runs?per_page=100`)) || {}).check_runs, cfg.required_checks);
+  // The commit whose checks count: the release's main commit, or main's newest commit itself.
+  let checked = head;
+  if (release) {
+    const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
+    if (!v.ok) return deps.note('refused', head, v.reason, true);
+    checked = v.base;
+  } else {
+    const ff = fastForward(current ? await deps.fetchJson(`${api}/compare/${current}...${head}`) : { status: 'ahead', behind_by: 0, ahead_by: 0 });
+    if (!ff.ok) return deps.note('refused', head, ff.reason, true);
+  }
+  const checks = evaluateChecks(((await deps.fetchJson(`${api}/commits/${checked}/check-runs?per_page=100`)) || {}).check_runs, cfg.required_checks);
   if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   const q = quiet(deps.slots(), deps.alive);
   if (!q.quiet) return deps.note('waiting', head, `not quiet: ${q.why}`, false);
 
-  deps.log({ event: 'attempt', from: current, to: head });
+  deps.log({ event: 'attempt', from: current, to: head, ...(tag ? { tag: tag.tag } : {}) });
   const [file, ...args] = buildCommand(cfg.repo_url, head);
   try {
     deps.exec(file, args, { timeout: 40 * 60_000 });
@@ -345,6 +442,8 @@ function realDeps() {
       }
     },
     installTree: (sha) => installTree(sha),
+    installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
+    verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
     held: () => readJson(HELD),
     hold: (entry) => {
       const tmp = `${HELD}.tmp`;
@@ -394,4 +493,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { channelOf, newer, parseTags, newestRelease, verifyRelease, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
