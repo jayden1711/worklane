@@ -419,6 +419,11 @@ export class Coordinator {
     this.stopped = true;
   }
 
+  /** An emergency stop is in force (read now, not only at the last check): nothing lands and nothing merges. */
+  private emergencyInForce(): boolean {
+    return this.halt.signal.aborted || emergencyStop(this.d.slotsDir) !== null;
+  }
+
   private async reconcile(): Promise<number> {
     // Tasks whose issue was closed elsewhere are cancelled, never re-dispatched.
     let n = 0;
@@ -2122,7 +2127,8 @@ export class Coordinator {
   }
 
   private async landNext() {
-    if (this.landing) return;
+    // Safety floor: under an emergency stop the queue waits; it lands once the stop is lifted.
+    if (this.landing || this.emergencyInForce()) return;
     const queue = this.landQueue();
     if (!queue.length) return;
     this.landing = true;
@@ -2262,6 +2268,11 @@ export class Coordinator {
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
+      // A stop that came in while the gates ran: left queued, landed once it's lifted.
+      if (this.emergencyInForce()) {
+        for (const q of applied) result(q.issue, 'deferred', null, 'emergency stop in force; lands once it is lifted');
+        return;
+      }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
       const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push });
       if (!push.ok && 'refused' in push) {
@@ -2493,6 +2504,8 @@ export class Coordinator {
    * it merges cleanly; otherwise ask the owner once per head, saying why.
    */
   private async mergeOrWait(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+    // Safety floor: nothing auto-merges under an emergency stop; the next poll after it's lifted decides.
+    if (this.emergencyInForce()) return;
     const { issue: n, number } = w;
     const prior = this.d.log
       .read(0, ['merge.decided'])
@@ -2521,6 +2534,8 @@ export class Coordinator {
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
+    // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
+    if (this.emergencyInForce()) return;
     const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
