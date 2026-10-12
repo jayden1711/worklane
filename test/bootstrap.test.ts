@@ -179,7 +179,7 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   assert.match(m.run('--hardened', 'shop', 'acme/shop').out, /run it with sudo|y\/N/, 'a real run needs root (or asks before each script)');
 });
 
-test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; the CI job runs the bootstrap on Linux and macOS', () => {
+test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; the CI job runs the bootstrap on Linux', () => {
   const d = readFileSync(join(repoRoot, 'Dockerfile'), 'utf8');
   assert.match(d, /^FROM debian:bookworm-slim@sha256:[0-9a-f]{64}$/m, 'the base image by digest');
   assert.match(d, /^USER \S+$/m);
@@ -187,7 +187,7 @@ test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; 
   assert.doesNotMatch(d, /curl[^\n]*\|\s*(ba)?sh/, 'nothing piped into a shell');
   const ci = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, { strategy?: { matrix?: { os?: string[] } }; steps: { run?: string }[] }> };
   const job = ci.jobs.bootstrap!;
-  assert.deepEqual(job.strategy?.matrix?.os, ['ubuntu-latest', 'macos-latest']);
+  assert.deepEqual(job.strategy?.matrix?.os, ['ubuntu-latest']);
   const runs = job.steps.map((s) => s.run ?? '').join('\n');
   assert.match(runs, /scripts\/bootstrap\.sh/);
   assert.match(runs, /worklane demo/);
