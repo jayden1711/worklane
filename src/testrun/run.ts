@@ -36,6 +36,8 @@ export interface TestRunResult {
   kind: 'fast' | 'full';
   ok: boolean;
   tiers: TierResult[];
+  /** How the run ended: anything but `done` (cancelled, or it couldn't go ahead) is no verdict on the code. */
+  outcome?: 'done' | 'cancelled' | 'error';
 }
 
 /** The machine-wide full-run lock: test runs take it shared, agents' and other full runs exclusive. */
@@ -107,7 +109,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   let slot: Lock | null = null;
   let lock: HeldFlock | null = null;
   let created = false;
-  let outcome: EventPayload<'testrun.finished'>['outcome'] = 'done';
+  let outcome: 'done' | 'cancelled' | 'error' = 'done';
   let detail = '';
   try {
     slot = await waitTestSlot(`${d.actor} test run ${id}`, { ...(d.slotsDir ? { dir: d.slotsDir } : {}), ...(d.slotPollMs ? { pollMs: d.slotPollMs } : {}), ...(o.signal ? { signal: o.signal } : {}) });
@@ -171,7 +173,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   const ok = outcome === 'done' && tiers.length > 0 && results.length === tiers.length && results.every((r) => r.ok);
   if (!tiers.length) detail = `no ${req.kind} tiers in tests.yaml test_run`;
   emit('testrun.finished', { id, sha: req.sha, kind: req.kind, prs: req.prs, ok, outcome, results: results.map((r) => ({ tier: r.tier, ok: r.ok })), detail });
-  return { id, sha: req.sha, kind: req.kind, ok, tiers: results };
+  return { id, sha: req.sha, kind: req.kind, ok, tiers: results, outcome };
 }
 
 /** A sharded full run's shards as one result: each tier passes only if it passed in every shard that ran it. */

@@ -120,6 +120,7 @@ function rig(n: number, suite: string) {
   });
   const stopped = new AbortController();
   const tested: number[] = [];
+  const blamed: string[] = [];
   const b = new PrBatcher({
     log,
     instance: 'alice',
@@ -130,15 +131,15 @@ function rig(n: number, suite: string) {
     config: () => CFG,
     testRuns: batchTestRuns(config, stopped.signal),
     pullRequest: async (k) => ({ ...w.prs.get(k)! }),
-    comment: async () => {},
-    addLabels: async () => {},
+    comment: async (k, body) => void blamed.push(`comment #${k}: ${body.slice(0, 80)}`),
+    addLabels: async (k, ls) => void blamed.push(`labels #${k}: ${ls.join(',')}`),
     removeLabel: async () => {},
     ownerOf: () => 'example-owner',
     tested: (e) => void tested.push(e.number),
   });
   const entry = (k: number): BatchEntry => ({ issue: 100 + k, number: k, head: w.prs.get(k)!.headSha });
   const finished = () => log.read(0, ['testrun.finished']).map((e) => e.payload as EventPayload<'testrun.finished'>);
-  return { w, log, b, h, helperRoot, stopped, tested, posted, entry, finished };
+  return { w, log, b, h, helperRoot, stopped, tested, blamed, posted, entry, finished };
 }
 
 test('a batch runs through the real startTestRun: a clone of the batch commit with main, the full tier, the wipe, and the full check on each PR head', { skip: !hasPerl && 'perl for the flock holder' }, async () => {
@@ -195,6 +196,32 @@ test('the coordinator stopping cancels a batch\'s run in flight: the signal reac
     assert.equal(r.finished()[0]!.outcome, 'cancelled');
     assert.ok(!r.posted.some((p) => p.conclusion === 'success'));
     assert.ok(!existsSync(join(r.helperRoot, 'runs', r.finished()[0]!.id)), 'wiped');
+  } finally {
+    useTestRuns(null);
+  }
+});
+
+test('a batch dropped mid-run (a PR\'s head moved) cancels the real run: it is wiped, the batch is abandoned and batched again, nobody is blamed', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig(2, 'sleep 30');
+  try {
+    for (const k of [1, 2]) r.b.enqueue(r.entry(k));
+    r.b.tick();
+    for (let i = 0; i < 100 && !r.log.read(0, ['testrun.started']).length; i++) await new Promise((res) => setTimeout(res, 100));
+    await new Promise((res) => setTimeout(res, 300));
+    const t0 = Date.now();
+    // The PR watch sees #2's head move while the batch's run is going.
+    r.b.observe(2, 'f'.repeat(40), 'open');
+    await r.b.idle();
+    assert.ok(Date.now() - t0 < 15_000, 'the run was cancelled, not run to the end');
+    const run = r.finished()[0]!;
+    assert.equal(run.outcome, 'cancelled');
+    assert.ok(!existsSync(join(r.helperRoot, 'runs', run.id)), 'wiped');
+    const steps = r.log.read(0, ['pr_batch.step']).map((e) => e.payload as { step: string; detail?: string });
+    assert.ok(steps.some((x) => x.step === 'abandoned' && /nobody blamed/.test(x.detail ?? '')), JSON.stringify(steps));
+    assert.ok(!steps.some((x) => x.step === 'red' || x.step === 'culprit'), 'never red, never bisected');
+    assert.deepEqual(r.blamed, [], 'no comment or label on any PR');
+    assert.ok(!r.posted.length, 'no check posted');
+    assert.deepEqual(r.tested, []);
   } finally {
     useTestRuns(null);
   }
