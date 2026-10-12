@@ -26,7 +26,8 @@ import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
 import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
-import { instanceProblems, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
+import { instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
+import { instanceTargets, migrationGate, projectConfigFiles } from './migrations.js';
 import { settingsReader } from './settings.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
@@ -94,6 +95,12 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
 
 /** Run an instance's coordinator. Refuses to start without the instance's own credentials. */
 export async function runInstanceCoordinator(name: string, opts: { once?: boolean; intervalMs?: number } = {}): Promise<number> {
+  // Before the config is loaded: a file an older engine wrote, or a newer one, says what to do rather than failing to parse.
+  const gate = migrationGate(instanceTargets(join(instancesDir(), name)));
+  if (gate) {
+    console.error(`instance ${name} not started: ${gate}`);
+    return 1;
+  }
   const i = loadInstance(name);
   const missing = instanceProblems(i);
   if (missing.length) {
@@ -151,6 +158,11 @@ function allLanes(i: ReturnType<typeof loadInstance>) {
 }
 
 export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?: number; backupDir?: string } = {}): Promise<number> {
+  const gate = migrationGate({ configFiles: projectConfigFiles(root), eventsDb: logPath(root) });
+  if (gate) {
+    console.error(`coordinator not started: ${gate}`);
+    return Promise.resolve(1);
+  }
   return runSite(siteForRoot(root), opts);
 }
 

@@ -28,7 +28,8 @@ import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuil
 import { HUB_PORT, parseHubArg, startHub } from './dashboard-hub.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceProblems, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { applyMigrations, instanceTargets, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
@@ -91,6 +92,8 @@ usage: ${BRAND.cli} <command> [options]
   tune <instance> [--full] [--dry-run]
                                    profile the test suite at 1/2/4/all cores' workers and open a PR
                                    with the recommended worker settings (run as the coordinator user)
+  migrate [--instance name]        apply pending config and state migrations, each file backed up first
+                                   (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
@@ -176,6 +179,21 @@ async function main(argv: string[]): Promise<number> {
       if (r.gitHook) console.log(`pre-commit secret scan: ${r.gitHook}`);
       for (const n of r.notes) console.log(`note: ${n}`);
       console.log(`next: ${BRAND.cli} doctor`);
+      return 0;
+    }
+
+    case 'migrate': {
+      // Each pending step, after a backup beside its file; the instance's files and repo config with --instance.
+      const targets = instanceOpt ? instanceTargets(join(instancesDir(), instanceOpt)) : { configFiles: projectConfigFiles(root), eventsDb: logPath(root) };
+      const plan = planMigrations(targets);
+      if (plan.newer.length) {
+        console.error(`${plan.newer.join('\n')}\nnewer than this engine: nothing migrated. Update the engine, or restore a backup.`);
+        return 1;
+      }
+      const r = applyMigrations(targets);
+      if (!r.applied.length) console.log('nothing to migrate: config and state are at the current versions');
+      for (const [k, p] of r.applied.entries()) console.log(`migrated ${p.path}: ${p.kind} version ${p.from} -> ${p.to} (${p.steps.join('; ')}); backup ${r.backups[k]}`);
+      if (r.applied.some((p) => p.kind === 'config' && !p.path.startsWith(instanceOpt ? join(instancesDir(), instanceOpt) : '\0'))) console.log(`the repo's ${BRAND.configDir}/ changed: commit it in a PR`);
       return 0;
     }
 
