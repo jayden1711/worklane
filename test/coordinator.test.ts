@@ -1252,6 +1252,32 @@ test('PR watch: a draft until the required checks pass on the evaluated commit, 
   assert.deepEqual(c.watchedPrs(), [], 'no longer watched');
 });
 
+test("the board's numbers are recorded: a change's lines added and removed, and a PR's size and comments each time they change", { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0 });
+  await c.tick();
+  await c.idle();
+  const change = f.log.read(0, ['change.proposed']).at(-1)!.payload as { lines: number; added?: number; removed?: number };
+  assert.ok(typeof change.added === 'number' && typeof change.removed === 'number', 'added and removed are recorded');
+  assert.equal(change.added! + change.removed!, change.lines);
+  await c.tick(); // opens the PR and polls it
+  const opened = f.log.read(0, ['pr.opened']).at(-1)!.payload as { number: number; head: string };
+  const stats = () => f.log.read(0, ['pr.stats']).map((e) => e.payload as { number: number; head: string; additions: number; deletions: number; files: number; comments: number });
+  assert.deepEqual(stats(), [], 'a tracker that reports no stats: nothing recorded');
+  f.backlog.setPr(opened.number, { stats: { additions: 30, deletions: 4, files: 2 } });
+  await c.tick();
+  const comments = f.backlog.prs().find((p) => p.number === opened.number)!.comments.length;
+  assert.deepEqual(stats(), [{ issue: 1, number: opened.number, head: opened.head, additions: 30, deletions: 4, files: 2, comments }]);
+  await c.tick();
+  assert.equal(stats().length, 1, 'unchanged: not recorded again');
+  await f.backlog.comment(opened.number, 'looks good');
+  await c.tick();
+  assert.equal(stats().at(-1)!.comments, comments + 1, 'a new comment is recorded');
+});
+
 test('PR watch: with no required checks configured, a PR is never marked ready, whatever passes', { skip }, async () => {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
@@ -2269,7 +2295,7 @@ test('console: the owner stops a live run; the task is blocked saying who stoppe
   assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
 });
 
-test("console: a request that isn't the owner's, or for a run that isn't live, is refused and recorded", { skip }, async () => {
+test("console: a stop that isn't the owner's, a message from someone neither owner nor writer, or one for a run that isn't live, is refused and recorded; a writer's message is taken", { skip }, async () => {
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const w = liveWorker();
@@ -2280,11 +2306,18 @@ test("console: a request that isn't the owner's, or for a run that isn't live, i
   mkdirSync(join(f.stateDir, 'console', 'requests'), { recursive: true });
   writeFileSync(join(f.stateDir, 'console', 'requests', '1.json'), JSON.stringify({ v: 1, id: 'x1', at: '', by: 'mallory', run: 'run-w1', kind: 'stop' }));
   writeFileSync(join(f.stateDir, 'console', 'requests', '2.json'), JSON.stringify({ v: 1, id: 'x2', at: '', by: 'example-owner', run: 'run-gone', kind: 'message', text: 'hi' }));
+  writeFileSync(join(f.stateDir, 'console', 'requests', '3.json'), JSON.stringify({ v: 1, id: 'x3', at: '', by: 'mallory', run: 'run-w1', kind: 'message', text: 'hi' }));
+  // One the dashboard read as a writer: a message is theirs to send, a stop isn't.
+  writeFileSync(join(f.stateDir, 'console', 'requests', '4.json'), JSON.stringify({ v: 1, id: 'x4', at: '', by: 'wendy', writer: true, run: 'run-w1', kind: 'stop' }));
+  writeFileSync(join(f.stateDir, 'console', 'requests', '5.json'), JSON.stringify({ v: 1, id: 'x5', at: '', by: 'wendy', writer: true, run: 'run-w1', kind: 'message', text: 'try the other file' }));
   c.checkConsole();
   assert.deepEqual(f.log.read(0, ['console.request_refused']).map((e) => [(e.payload as { request: string }).request, (e.payload as { why: string }).why]), [
-    ['x1', 'only the owner (@example-owner) may use the console'],
+    ['x1', 'only the owner (@example-owner) may stop a run; @mallory may not'],
     ['x2', "run run-gone isn't live"],
+    ['x3', 'only the owner (@example-owner) or a writer may message a run; @mallory may not'],
+    ['x4', 'only the owner (@example-owner) may stop a run; @wendy may not'],
   ]);
+  assert.deepEqual(f.log.read(0, ['console.message_queued']).map((e) => [(e.payload as { id: string }).id, (e.payload as { by: string }).by]), [['x5', 'wendy']]);
   assert.equal(f.log.read(0, ['console.run_stopped']).length, 0);
   w.finish('succeeded');
   await c.idle();

@@ -140,13 +140,13 @@ test('the owner messages and stops a live run through the console; a non-owner, 
   }
   const other = await serve(s, 'example-collaborator');
   try {
-    // A writer may read the run (the runs gate lets them through) but neither stops nor messages it.
+    // A writer reads the run (the runs gate lets them through) and messages it, but doesn't stop it.
     const r = await fetch(`${other.base}/api/runs/${RUN}/stop`, { method: 'POST', headers: other.h, body: '{}' });
     assert.equal(r.status, 403);
+    assert.match(((await r.json()) as { error: string }).error, /only the owner/);
     const m = await fetch(`${other.base}/api/runs/${RUN}/message`, { method: 'POST', headers: other.h, body: JSON.stringify({ text: 'hi' }) });
-    assert.equal(m.status, 403);
-    assert.match(((await m.json()) as { error: string }).error, /only the owner/);
-    assert.equal(requests().length, 2, 'nothing more requested');
+    assert.equal(m.status, 200);
+    assert.equal(requests().length, 3, "only the writer's message was requested");
   } finally {
     await other.d.close();
   }

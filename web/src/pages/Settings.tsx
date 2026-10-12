@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { getSettings, useFetch } from '../api';
 import { InstanceSettings } from '../components/InstanceSettings';
-import { MachineSettings } from '../components/MachineSettings';
+import { navigate } from '../App';
 import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
 import { Header } from './Overview';
@@ -43,9 +43,12 @@ export function SettingsPage() {
       <div className="px-6 pt-6">
         <InstanceSettings />
       </div>
-      <div className="px-6 pt-6">
-        {/* The machine settings are the owners' and writers' (a viewer isn't sent them). */}
-        {full && <MachineSettings />}
+      <div className="px-6 pt-6 text-[12.5px] text-ink-2">
+        The machine-wide settings (the agent slot cap, engine updates) and their history are on the{' '}
+        <button className="text-blue-ink hover:underline" onClick={() => navigate('/machine')} data-testid="settings-machine-link">
+          Machine page
+        </button>
+        .
       </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <Section title="Project">

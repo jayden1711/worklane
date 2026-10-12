@@ -12,6 +12,8 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
 import { SETTING_KEYS } from '../src/settings.js';
+import { writeLive } from '../src/console.js';
+import { EventLog } from '../src/events/log.js';
 import { asPerson, exampleRoles, repoRoot } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
@@ -49,6 +51,9 @@ interface Render {
   LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   probeMe(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
+  renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], filter?: string | null, now?: number): string;
+  renderMachineSlots(slots: unknown): string;
+  elapsed(since: string, now?: number): string;
   renderSignIn(): string;
   renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
   renderAudit(entries: unknown[]): string;
@@ -63,6 +68,10 @@ interface Render {
 let r: Render;
 let asOwner: State;
 let asOther: State;
+let asWriter: State;
+type Board = { role: string; instance: string; cards: { issue: number; column: string; actions: { watch: string | null; steer: boolean; answer: boolean; approve: unknown } }[] };
+/** The board each role gets from a real dashboard over the demo, with an agent running live on one task. */
+const boards: Record<'owner' | 'writer' | 'viewer', Board> = {} as never;
 
 /** What a page reads from the browser while rendering: a location and preference storage. */
 function browserStubs() {
@@ -106,6 +115,27 @@ before(async () => {
   };
   asOwner = await state('example-owner');
   asOther = await state('someone-else');
+  asWriter = await state('example-collaborator');
+
+  // An agent running live on the demo's ready task, so the board has something to watch and steer; and a
+  // high-risk landing waiting for the owner on its migration, so it has something only the owner approves.
+  const ready = asOwner.tasks.find((t) => t.status === 'ready')!;
+  const migration = asOwner.tasks.find((t) => /orders table/.test(t.title))!;
+  const log = new EventLog(demo.eventsDb);
+  log.append('run.started', { issue: ready.issue, role: 'worker', model: 'sonnet', worktree: '/w', pid: process.pid, pgid: process.pid, attempt: 1 }, 'demo@local');
+  log.append('review.level_set', { issue: migration.issue, head: 'c'.repeat(40), level: 'L3', reasons: ['migrations'] }, 'demo@local');
+  log.append('decision.asked', { id: 'demo-land', kind: 'land', issue: migration.issue, owner: 'example-owner', question: `Approve landing #${migration.issue} (L3)?`, options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'demo@local');
+  log.close();
+  const liveDir = mkdtempSync(join(tmpdir(), 'web-render-board-'));
+  writeLive(liveDir, [{ run: 'demo-live-run', issue: ready.issue, role: 'worker', model: 'sonnet', startedAt: new Date().toISOString(), pending: [] }]);
+  const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: liveDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'web-render-slots-')), instance: 'demo' });
+  try {
+    for (const [role, login] of [['owner', 'example-owner'], ['writer', 'example-collaborator'], ['viewer', 'someone-else']] as const) {
+      boards[role] = (await (await fetch(`${d.url.split('/?')[0]}/api/board`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(login) } })).json()) as Board;
+    }
+  } finally {
+    await d.close();
+  }
   browserStubs();
 });
 
@@ -545,7 +575,11 @@ test('the live run: text, thinking, tool calls with their results, diffs, messag
   for (const id of ['console-panel', 'console-input', 'console-send', 'console-stop', 'console-pending', 'console-pending-item']) assert.match(panel, new RegExp(`data-testid="${id}"`), id);
   assert.match(panel, /data-testid="console-pending-item"[\s\S]*held[\s\S]*also update the README/);
   assert.doesNotMatch(panel, /data-testid="console-stop-confirm"/, 'stop needs a second click');
-  assert.match(r.renderConsole({ ...con, canControl: false }), /data-testid="console-read-only"[^>]*>Only the owner, @example-owner, can message or stop this run\./);
+  assert.match(r.renderConsole({ ...con, canControl: false, canMessage: false }), /data-testid="console-read-only"[^>]*>The owner, @example-owner, and the writers can message this run; only the owner can stop it\./);
+  // A writer messages the run but doesn't stop it.
+  const writer = r.renderConsole({ ...con, canControl: false, canMessage: true });
+  assert.match(writer, /data-testid="console-send"/);
+  assert.doesNotMatch(writer, /data-testid="console-stop"|console-read-only/);
   assert.equal(r.renderConsole({ ...con, live: false }), '', 'nothing to control once the run has ended');
 
   const run = { issue: asOwner.tasks[0]!.issue, role: 'worker', model: 'sonnet', pid: 1, attempt: 1, startedAt: at, lastHeartbeat: null, note: null, finishedAt: null, reason: null, costUsd: 0 };
@@ -827,6 +861,96 @@ test('the report preview: refused to anyone but the owner and the writers withou
   assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
   assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
+});
+
+/** Render, failing on anything React reports (console.error) as well as on a throw. */
+function clean(render: () => string): string {
+  const errors: unknown[] = [];
+  const prev = console.error;
+  console.error = (...a: unknown[]) => void errors.push(a);
+  try {
+    return render();
+  } finally {
+    console.error = prev;
+    assert.deepEqual(errors, [], 'no errors while rendering');
+  }
+}
+
+test('the Board renders for the owner, a writer and a viewer without errors: five columns, every card, the instance filter', () => {
+  for (const role of ['owner', 'writer', 'viewer'] as const) {
+    const b = boards[role];
+    assert.equal(b.role, role, `the server read ${role}`);
+    assert.ok(b.cards.length >= 4, 'the demo has work in flight');
+    const html = clean(() => r.renderBoard([{ name: null, data: b, error: null }]));
+    assert.equal((html.match(/data-testid="board-column"/g) ?? []).length, 5);
+    for (const [col, label] of [['planning', 'Planning'], ['building', 'Building'], ['verifying', 'Verifying'], ['waiting', 'Waiting on you'], ['landing', 'Landing']]) assert.match(html, new RegExp(`data-column="${col}"[^>]*>[\\s\\S]*?${label}`));
+    assert.equal((html.match(/data-testid="board-card"/g) ?? []).length, b.cards.length, `${role}: every card`);
+    for (const id of ['board', 'board-filter', 'board-card-ref', 'board-card-title', 'board-card-elapsed']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
+    if (role === 'viewer') {
+      // A viewer's cards carry no run or agent details, no change size and no checks: the server left them out.
+      for (const c of b.cards) for (const k of ['run', 'diff', 'comments', 'checks']) assert.ok(!(k in c), `a viewer's card has no ${k}`);
+      for (const id of ['board-card-run', 'board-card-usage', 'board-card-diff', 'board-card-comments', 'board-card-checks', 'board-watch']) assert.doesNotMatch(html, new RegExp(`data-testid="${id}"`), `viewer: no ${id}`);
+    } else {
+      for (const id of ['board-card-diff', 'board-card-comments', 'board-card-checks']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
+      assert.match(html, /data-testid="board-card-run"[\s\S]*?data-testid="board-card-usage"/, 'the running agent and its resource use');
+    }
+    assert.doesNotMatch(html, /<select/, "an instance's own dashboard: no instance picker");
+    // The page itself, and the Machine page, render for each role too.
+    assert.match(clean(() => r.renderPage('board', { owner: asOwner, writer: asWriter, viewer: asOther }[role])), /data-testid="page-board"[\s\S]*<h1[^>]*>Board</);
+  }
+  // On a hub: every instance, a filter to pick one, the instance on each card.
+  const hub = clean(() => r.renderBoard([{ name: 'a', data: boards.owner, error: null }, { name: 'b', data: { ...boards.viewer, instance: 'b', cards: boards.viewer.cards.map((c) => ({ ...c, instance: 'b' })) }, error: null }, { name: 'c', data: null, error: 'answered 502' }]));
+  assert.match(hub, /<select[^>]*data-testid="board-filter"/);
+  assert.match(hub, /<option value=""[^>]*>All instances \(3\)<\/option>/);
+  assert.equal((hub.match(/data-testid="board-card"/g) ?? []).length, boards.owner.cards.length + boards.viewer.cards.length);
+  assert.match(hub, /data-testid="board-instance-error"[^>]*>c: can&#x27;t load its board: answered 502/);
+  const onlyB = clean(() => r.renderBoard([{ name: 'a', data: boards.owner, error: null }, { name: 'b', data: { ...boards.viewer, cards: boards.viewer.cards.map((c) => ({ ...c, instance: 'b' })) }, error: null }], 'b'));
+  assert.equal((onlyB.match(/data-testid="board-card"/g) ?? []).length, boards.viewer.cards.length);
+  assert.doesNotMatch(onlyB, /data-instance="demo"/, 'filtered to b');
+});
+
+test('each role sees only its actions on the Board: viewers none; writers Watch, Steer and Answer what they may; the owner also Approves', () => {
+  const html = (role: 'owner' | 'writer' | 'viewer') => clean(() => r.renderBoard([{ name: null, data: boards[role], error: null }]));
+  const count = (h: string, id: string) => (h.match(new RegExp(`data-testid="${id}"`, 'g')) ?? []).length;
+  const owner = html('owner');
+  const writer = html('writer');
+  const viewer = html('viewer');
+  assert.equal(count(owner, 'board-watch'), 1);
+  assert.match(owner, /data-testid="board-watch" data-mode="feed"/);
+  assert.equal(count(owner, 'board-steer'), 1, 'the owner steers the live run');
+  assert.ok(count(owner, 'board-approve') >= 1, 'the demo\'s high-risk landing waits for the owner');
+  assert.ok(count(owner, 'board-answer') >= 1);
+
+  assert.match(writer, /data-testid="board-watch" data-mode="feed"/);
+  assert.equal(count(writer, 'board-steer'), 1, 'a writer steers the live run');
+  assert.equal(count(writer, 'board-approve') + count(writer, 'board-merge'), 0, 'high-risk merges are the owner\'s');
+  assert.ok(count(writer, 'board-answer') >= 1, 'a writer answers the demo\'s question');
+
+  for (const id of ['board-watch', 'board-steer', 'board-answer', 'board-approve', 'board-merge', 'board-card-actions']) assert.equal(count(viewer, id), 0, `a viewer has no ${id}`);
+  // What the server said each may do is exactly what shows.
+  for (const role of ['owner', 'writer', 'viewer'] as const) {
+    const a = boards[role].cards.map((c) => c.actions);
+    const h = html(role);
+    assert.equal(count(h, 'board-steer'), a.filter((x) => x.steer).length);
+    assert.equal(count(h, 'board-answer'), a.filter((x) => x.answer).length);
+    assert.equal(count(h, 'board-approve') + count(h, 'board-merge'), a.filter((x) => x.approve).length);
+  }
+  assert.equal(r.elapsed(new Date(Date.now() - 135 * 60_000).toISOString()), '2h 15m');
+});
+
+test('the Machine page renders for the owner, a writer and a viewer without errors: the slots, then health and machine settings', () => {
+  for (const s of [asOwner, asWriter, asOther]) {
+    const html = clean(() => r.renderPage('machine', s));
+    assert.match(html, /data-testid="page-machine"[\s\S]*<h1[^>]*>Machine</);
+    assert.match(html, /data-testid="machine-slots"/);
+  }
+  const slots = clean(() => r.renderMachineSlots({ cap: 2, running: 1, agents: [{ slot: 'agent-0', owner: 'cli shop #4', pid: 1, acquiredAt: new Date().toISOString() }], fullRun: null }));
+  assert.match(slots, /1 of 2 in use/);
+  assert.match(slots, /data-testid="machine-slot-row"[\s\S]*cli shop #4/);
+  // Overview keeps a line and a link where the health panel was.
+  const overview = clean(() => r.renderPage('overview', asOwner));
+  assert.match(overview, /data-testid="overview-machine"[\s\S]*data-testid="overview-machine-link"/);
+  assert.doesNotMatch(overview, /data-testid="health-panel"/, 'machine health moved to the Machine page');
 });
 
 test('the setup console shows each ask with its status; answer controls only where the server allows; a secret is a password field', () => {

@@ -123,6 +123,8 @@ test('GitHub pullRequest: merged, closed and open states, head branch and sha', 
   assert.deepEqual([m.title, m.mergeable, m.mergeableState], ['T', true, 'clean']);
   assert.equal((await g({ state: 'closed', merged: true })).state, 'merged');
   assert.equal((await g({ state: 'closed', merged: false })).state, 'closed');
+  // The single-PR endpoint's counts: lines added and removed, files, and comments with review comments.
+  assert.deepEqual((await g({ state: 'open', additions: 30, deletions: 4, changed_files: 2, comments: 3, review_comments: 2 })).stats, { additions: 30, deletions: 4, files: 2, comments: 5 });
 });
 
 test('GitHub jobLog: the log text; 403 is no Actions: read permission, 404 no log, a rate limit is an error to retry', async () => {

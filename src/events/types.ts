@@ -164,7 +164,8 @@ export const EventSchemas = {
   // verification
   'repro.frozen': z.strictObject({ issue, path: z.string(), hash: z.string().describe('git blob id of the committed test'), fails_on_base: z.literal(true) }),
   'repro.unavailable': z.strictObject({ issue, why: z.string() }),
-  'change.proposed': z.strictObject({ issue, branch: z.string(), base: sha, head: sha, files: z.array(z.string()), lines: z.number().int().nonnegative(), patch_hash: z.string() }),
+  /** `added`/`removed`: the lines added and removed (the board's diff +/−); absent in older events, which have only `lines`. */
+  'change.proposed': z.strictObject({ issue, branch: z.string(), base: sha, head: sha, files: z.array(z.string()), lines: z.number().int().nonnegative(), added: z.number().int().nonnegative().optional(), removed: z.number().int().nonnegative().optional(), patch_hash: z.string() }),
   'change.rejected': z.strictObject({ issue, why: z.string() }),
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
@@ -266,6 +267,8 @@ export const EventSchemas = {
     reasons: z.array(z.string()),
     checks: z.array(z.strictObject({ name: z.string(), outcome: z.enum(['pass', 'fail', 'pending', 'cancelled', 'skipped', 'missing']) })),
   }),
+  /** The PR's size and conversation as GitHub reports them at `head` (lines added and removed, files, comments and review comments), recorded when they change. */
+  'pr.stats': z.strictObject({ issue, number: z.number().int().positive(), head: sha, additions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), files: z.number().int().nonnegative(), comments: z.number().int().nonnegative() }),
   'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),

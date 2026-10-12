@@ -32,7 +32,8 @@ test('pages are found by feature-map id or by path, with their parameters', () =
   assert.equal(find(map, 'decisions')?.page.id, 'decisions');
   assert.deepEqual(find(map, '/issues/12'), { page: map.pages.find((p) => p.id === 'issue-detail'), params: { n: '12' } });
   assert.equal(find(map, '/issues?view=board')?.page.id, 'issues');
-  assert.equal(find(map, '/')?.page.id, 'overview');
+  assert.equal(find(map, '/')?.page.id, 'board');
+  assert.equal(find(map, '/overview')?.page.id, 'overview');
   assert.equal(find(map, '/nowhere'), null);
   const path = fm.pagePath as (p: unknown, params: object) => string;
   assert.equal(path(map.pages.find((p) => p.id === 'issue-detail'), { n: 3 }), '/issues/3');

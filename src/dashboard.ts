@@ -30,7 +30,8 @@ import { healthView } from './health.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
-import { machineStats, type MachineStats } from './os/stats.js';
+import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
+import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN } from './machine.js';
 import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
@@ -109,6 +110,8 @@ export interface DashboardOptions {
   policyFile?: string | null;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
+  /** What running agents' process groups use now, for the board; the OS adapter's processGroupUsage when unset. */
+  processUsage?: (pgids: number[]) => Map<number, ProcessGroupUsage>;
   /** The backlog a confirmed chat draft is filed to (the instance's); made when first needed. */
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
@@ -178,9 +181,9 @@ const writersOnly = (what: string, who: Who) => `${what} for the instance's owne
 
 /**
  * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
- * everything under /api/runs, and the list of live runs (/api/live).
+ * everything under /api/runs, the list of live runs (/api/live), and the Board's Watch (/api/board/watch/<run>).
  */
-export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live';
+export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live' || pathname.startsWith('/api/board/watch/');
 
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
 
@@ -277,9 +280,9 @@ function feedOrWait(o: Pick<DashboardOptions, 'stateDir'>, run: string, after: n
 }
 
 /**
- * What the run page's console needs: whether the run is live, whether this user (the owner) may message or
- * stop it, its messages held until the agent's turn ends, and the console's events for it (queued, delivered,
- * dropped, stopped, refused), oldest first.
+ * What the run page's console needs: whether the run is live, whether this user may message it (the owner and the
+ * writers) or stop it (the owner), its messages held until the agent's turn ends, and the console's events for it
+ * (queued, delivered, dropped, stopped, refused), oldest first. Messages' text stays the owner's to read.
  */
 export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user' | 'eventsDb'> & { role?: Role | null }, run: string) {
   const owner = o.cfg.project.owners.default;
@@ -293,7 +296,7 @@ export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user
     });
   const settled = new Set(events.filter((e) => e.type === 'message_delivered' || e.type === 'message_dropped').map((e) => e.id));
   const held = events.filter((e) => e.type === 'message_queued' && !settled.has(e.id));
-  return { owner, canControl, live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
+  return { owner, canControl, canMessage: isWriter(o.role), live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
 }
 
 /**
@@ -694,6 +697,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
+        // Everyone with a role reads it; a viewer gets only the allowlisted card fields (no runs, agents or costs).
+        // Each action is refused again by the route it calls (decide, the console).
+        if (url.pathname === '/api/board' && req.method === 'GET') {
+          const slots = slotStatus(opts.slotsDir);
+          const board = boardView({ events: readEvents(opts.eventsDb), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) });
+          return json(res, 200, who.role === 'owner' || who.role === 'writer' ? board : boardForViewer(board));
+        }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
           if (!isOwnerHere) return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
@@ -726,6 +737,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
         if (isRunsPath(url.pathname) && !mayReadRuns(who.role)) return json(res, 403, { error: writersOnly('agent runs are', who) });
+        // The Board's Watch: the run's live feed so far, for those the runs gate lets through (the owner and the writers).
+        const watch = url.pathname.match(/^\/api\/board\/watch\/([A-Za-z0-9_-]+)$/);
+        if (watch && req.method === 'GET') {
+          try {
+            return json(res, 200, feedOrWait(opts, watch[1]!, Number(url.searchParams.get('after') ?? -1)));
+          } catch (e) {
+            if (e instanceof ConsoleError) return json(res, 404, { error: e.message });
+            throw e;
+          }
+        }
         // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
         if (url.pathname === '/api/runs' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
@@ -847,7 +868,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if ((what === 'message' || what === 'stop') && req.method === 'POST') {
             const body = (await readBody(req)) as { text?: string };
             try {
-              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: who.login, owner: isOwnerHere }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: who.login, owner: isOwnerHere });
+              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: who.login, owner: isOwnerHere, writer: isWriter(who.role) }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: who.login, owner: isOwnerHere });
               audit(who, what === 'message' ? 'console.message' : 'console.stop', { run, request: r.id });
               return json(res, 200, { ok: true, ...r });
             } catch (e) {

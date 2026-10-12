@@ -58,9 +58,9 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 
 | Permission on the repo | Role | May |
 | --- | --- | --- |
-| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message, stop), filing chat drafts, the audit log |
-| maintain, write | writer | read runs, throughput, reports, intake and the digest; ask the chat; answer ordinary decisions and intake approvals; save views |
-| triage, read | viewer | the tasks (without costs), decisions, PRs and deploys; not the service log, the machine settings, spend, the budget, agent runs, which agents hold the slots (only the counts), the coordinator's error text (only a count) or decisions' receipts; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part. No writes at all |
+| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message and stop a run; asks, root steps, the terminal), filing chat drafts, the audit log |
+| maintain, write | writer | read runs, throughput, reports, intake and the digest; message (steer) a running agent, not stop it; ask the chat; answer ordinary decisions and intake approvals; save views |
+| triage, read | viewer | the tasks (without costs), decisions, PRs and deploys; not the service log, the machine settings, spend, the budget, agent runs, which agents hold the slots (only the counts), the coordinator's error text (only a count) or decisions' receipts; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part. No writes at all; no Watch on the Board, and Board cards without runs, usage, diffs or checks |
 | none, or any error looking it up | none | nothing: the instance isn't listed, and any call to it gets 403 |
 
 - The permission is read with the instance's own installation token (`GET /repos/{owner}/{repo}/collaborators/{login}/permission`), never with the person's token, and cached at most 5 minutes per instance and login. So someone removed from the repo loses access within 5 minutes.
@@ -162,7 +162,26 @@ How the device is identified: the hub sits behind `tailscale serve --https=443 h
 
 A request through an ssh tunnel, or on the break-glass port 4398, can't be tied to a device, so the terminal is refused there.
 
-An open question, already on main: each instance's dashboard unit sets `NoNewPrivileges=yes`, and the dashboard calls `sudo -n /usr/local/libexec/worklane-machine` itself (Settings' machine settings, and the setup console's root steps; `src/machine.ts`). Under that flag sudo refuses to run, so these will likely fail under systemd with "no new privileges" until that call moves to the coordinator or the flag is dropped for that unit. It hasn't been tried on the machine.
+## The Board
+
+The home page (`/`, `g b`) shows every task in flight, one column per stage: **Planning** (ready, claimed, a plan or research run), **Building**, **Verifying** (the coordinator's checks and the evaluator; in PR mode, a PR whose checks are running or being fixed), **Waiting on you** (the holds only the owner ends, as on the Waiting page: a decision, a held plan, a PR left to you, a CI fix that gave up, a block, a failed landing) and **Landing** (queued to land, or a PR the merge rules are merging). On a hub it shows every instance you have a role on, with a filter to pick one; an instance's own dashboard shows its own. It follows each instance's live stream.
+
+Each card is built by the instance's own server (`GET /api/board`, `src/board.ts`) from what the coordinator already recorded: the instance and issue (and PR) numbers, the title, diff +/− (the PR's as the watch last read it, `pr.stats`, else the last proposed change), the PR's comment count, how long since the task started, its checks (failing, pending or passing; click for each), and, while an agent runs, its memory, CPU time and processes (its process group, read from `/proc` on Linux; not measured elsewhere). Nothing is fetched from GitHub per card.
+
+The actions on a card follow your role there, and each is refused again by the route it uses:
+
+| | viewer | writer | owner |
+| --- | --- | --- | --- |
+| Watch a running agent (the live feed) | – (403) | yes | yes |
+| Steer (a console message, held until the turn ends) | – (403) | yes | yes |
+| Answer the open decision | – | where the decision rules allow (not plans) | yes |
+| Approve a high-risk landing, or Merge a high-risk PR left to you on GitHub | – | – (403) | yes |
+
+A viewer's board leaves out everything about runs and agents (the run, its resource use, the diff, comments and checks): the card is an allowlist of fields (`VIEWER_CARD_FIELDS` in `src/board.ts`), so a field added later stays hidden from viewers until someone puts it there. A steer message is the one console action writers have: the dashboard (`console.ts`) and the coordinator apply the same rule (`mayRequest`), and stopping a run, asks, root steps and the terminal stay the owner's. Every answer and message is recorded in the audit under its sender's login and role.
+
+## The Machine page
+
+Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
 ## Pull requests
 

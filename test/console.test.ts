@@ -129,6 +129,14 @@ test('console: only the owner may message, stop, or read a live feed', () => {
   assert.deepEqual(takeRequests(s), [], 'nothing was requested');
 });
 
+test('console: a writer may message (steer) a run, saying so in the request; a writer may not stop it', () => {
+  const s = state();
+  live(s);
+  sendMessage({ stateDir: s, cfg, run: 'run-1', text: 'try the other file', by: 'wendy', owner: false, writer: true });
+  assert.throws(() => stopRun({ stateDir: s, cfg, run: 'run-1', by: 'wendy', owner: false }), /only the owner/);
+  assert.deepEqual(takeRequests(s).map((r) => [r.kind, r.by, r.owner ?? null, r.writer ?? null]), [['message', 'wendy', null, true]]);
+});
+
 test('console: a message is checked (live run, not empty, bounded) and handed to the coordinator as a request', () => {
   const s = state();
   live(s);

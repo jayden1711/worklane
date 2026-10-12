@@ -293,7 +293,9 @@ if (hubMod && stateDir) {
 }
 
 const pages = [
-  ['overview', '/'],
+  ['board', '/'],
+  ['overview', '/overview'],
+  ['machine', '/machine'],
   ['inbox', '/inbox'],
   ['decisions', '/decisions'],
   ['issues', '/issues'],
@@ -315,7 +317,7 @@ const pages = [
 ];
 const shots = [
   ...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })),
-  ...(hub ? [{ name: 'hub-overview', url: `${hub.base}/`, token: hub.token }] : []),
+  ...(hub ? [{ name: 'hub-board', url: `${hub.base}/`, token: hub.token }, { name: 'hub-machine', url: `${hub.base}/machine`, token: hub.token }] : []),
   ...(hub && chatId ? [{ name: 'hub-chat', url: `${hub.base}/?chat=${chatId}`, token: hub.token }] : []),
   ...(inst ? [{ name: 'instance-settings', url: `${inst.base}/settings`, token: inst.token }, { name: 'instance-activity', url: `${inst.base}/activity`, token: inst.token }] : []),
 ];

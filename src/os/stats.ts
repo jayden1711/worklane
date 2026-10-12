@@ -5,7 +5,7 @@
 // disk comes from statfs on every platform. Nothing here throws: whatever can't
 // be read is null, with the reason in `unavailable`.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statfsSync } from 'node:fs';
+import { readdirSync, readFileSync, statfsSync } from 'node:fs';
 
 export interface MemoryStats {
   totalBytes: number;
@@ -138,4 +138,63 @@ export function machineStats(o: { units?: string[]; paths?: string[] } = {}, d: 
     }
   });
   return { at: (d.now ?? (() => new Date()))().toISOString(), platform, memory, load, units, disks, unavailable };
+}
+
+/** What one agent run's processes (its process group) use right now: resident memory, CPU time so far, how many. */
+export interface ProcessGroupUsage {
+  rssBytes: number;
+  cpuSeconds: number;
+  processes: number;
+}
+
+/** USER_HZ (the unit of utime and stime in /proc/<pid>/stat) and the page size: the values mainstream Linux uses. */
+const CLOCK_TICKS = 100;
+const PAGE_BYTES = 4096;
+
+/**
+ * One /proc/<pid>/stat line: its process group, CPU ticks (user + system) and resident pages. The command name
+ * (field 2) may hold spaces and parentheses, so the fields are counted from the last ')'. Null if malformed.
+ */
+export function parseProcStat(text: string): { pgrp: number; ticks: number; rssPages: number } | null {
+  const close = text.lastIndexOf(')');
+  if (close < 0) return null;
+  // From field 3 (state) on: pgrp is field 5, utime 14, stime 15, rss 24.
+  const f = text.slice(close + 1).trim().split(/\s+/);
+  const pgrp = Number(f[2]);
+  const ticks = Number(f[11]) + Number(f[12]);
+  const rssPages = Number(f[21]);
+  return Number.isInteger(pgrp) && pgrp > 0 && Number.isFinite(ticks) && Number.isFinite(rssPages) ? { pgrp, ticks, rssPages } : null;
+}
+
+/**
+ * What each of these process groups uses now, from one pass over /proc (Linux; elsewhere, and for a group with no
+ * readable process, nothing: not measured). An agent run starts in a process group of its own (run.started's pgid),
+ * so a group is one run with everything it spawned. Never throws.
+ */
+export function processGroupUsage(pgids: number[], d: Pick<StatsDeps, 'platform' | 'readFile'> & { list?: () => string[] } = {}): Map<number, ProcessGroupUsage> {
+  const out = new Map<number, ProcessGroupUsage>();
+  const want = new Set(pgids.filter((p) => Number.isInteger(p) && p > 0));
+  if ((d.platform ?? process.platform) !== 'linux' || !want.size) return out;
+  const read = d.readFile ?? ((p: string) => readFileSync(p, 'utf8'));
+  let pids: string[];
+  try {
+    pids = (d.list ?? (() => readdirSync('/proc')))().filter((x) => /^\d+$/.test(x));
+  } catch {
+    return out;
+  }
+  for (const pid of pids) {
+    let s: ReturnType<typeof parseProcStat>;
+    try {
+      s = parseProcStat(read(`/proc/${pid}/stat`));
+    } catch {
+      continue; // gone, or not readable as this user
+    }
+    if (!s || !want.has(s.pgrp)) continue;
+    const u = out.get(s.pgrp) ?? { rssBytes: 0, cpuSeconds: 0, processes: 0 };
+    u.rssBytes += s.rssPages * PAGE_BYTES;
+    u.cpuSeconds += s.ticks / CLOCK_TICKS;
+    u.processes++;
+    out.set(s.pgrp, u);
+  }
+  return out;
 }

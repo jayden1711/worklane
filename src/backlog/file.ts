@@ -23,6 +23,8 @@ interface FilePr {
   reviews?: PrReview[];
   /** Who closed it (tests set it). */
   closedBy?: string;
+  /** Lines added and removed, and files (tests set them); with them, the PR reports stats, its comments counted. */
+  stats?: { additions: number; deletions: number; files: number };
 }
 
 interface FileState {
@@ -144,7 +146,8 @@ export class FileBacklog implements Backlog {
     const i = this.load().issues.find((x) => x.number === n && x.pr);
     if (!i) throw new Error(`pull request #${n} not found`);
     const state = i.pr!.mergeableState ?? 'clean';
-    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state };
+    const stats = i.pr!.stats ? { stats: { ...i.pr!.stats, comments: i.comments.length } } : {};
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
   }
   /** Test hook: how a merge happens (e.g. a real merge commit on a test remote); returns the merge commit. */
   mergeWith?: (pr: { number: number; head: string; headSha: string; base: string }) => string;
@@ -192,7 +195,7 @@ export class FileBacklog implements Backlog {
       .map((i) => ({ number: i.number, title: i.title, body: i.body, labels: i.labels, state: i.state, comments: i.comments, ...i.pr! }));
   }
   /** Test helper: change a pull request as GitHub would (a push moves headSha; a merge or close ends it). */
-  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged' | 'mergeableState' | 'closedBy'>> & { state?: 'open' | 'closed' }) {
+  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged' | 'mergeableState' | 'closedBy' | 'stats'>> & { state?: 'open' | 'closed' }) {
     this.edit(n, (i) => {
       const { state, ...rest } = patch;
       Object.assign(i.pr!, rest);

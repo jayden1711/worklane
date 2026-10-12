@@ -85,6 +85,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!last || last.head !== pr.headSha || last.ready !== r.ready || JSON.stringify(last.checks) !== JSON.stringify(checks)) {
       this.emit('pr.status', { issue: n, number, head: pr.headSha, ready: r.ready, reasons: r.reasons, checks });
     }
+    this.notePrStats(n, pr);
     const marked = this.d.log
       .read(0, ['pr.ready', 'pr.unready'])
       .filter((e) => (e.payload as { number: number }).number === number)
@@ -101,6 +102,14 @@ export abstract class MergeFlow extends FixRuns {
     }
     if (!r.ready && r.failed.length) await this.maybeFix(w, pr, r);
     if (r.ready) await this.mergeOrWait(w, pr);
+  }
+
+  /** The PR's size and comment count as the tracker reports them, recorded only when they change (the dashboard's board reads them). */
+  private notePrStats(n: number, pr: PullRequest) {
+    if (!pr.stats) return;
+    const next = { issue: n, number: pr.number, head: pr.headSha, additions: pr.stats.additions, deletions: pr.stats.deletions, files: pr.stats.files, comments: pr.stats.comments };
+    const last = this.d.log.read(0, ['pr.stats']).map((e) => e.payload as EventPayload<'pr.stats'>).filter((p) => p.number === pr.number).at(-1);
+    if (!last || JSON.stringify(last) !== JSON.stringify(next)) this.emit('pr.stats', next);
   }
 
   // ---------------------------------------------------------------- merge policy
