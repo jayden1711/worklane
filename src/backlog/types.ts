@@ -68,6 +68,8 @@ export interface PullRequest {
   mergeable: boolean | null;
   /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */
   mergeableState: string;
+  /** Its size and conversation as the tracker reports them (lines added and removed, files, comments and review comments); absent when it doesn't. */
+  stats?: { additions: number; deletions: number; files: number; comments: number };
 }
 
 /** A submitted review on a pull request. `state`: APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED. */

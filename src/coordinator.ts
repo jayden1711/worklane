@@ -918,9 +918,10 @@ export class Coordinator extends Gardener {
       if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${f.path}`);
       if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${f.path}`);
     }
-    const lines = files.reduce((s, f) => s + f.added + f.removed, 0);
+    const added = files.reduce((s, f) => s + f.added, 0);
+    const removed = files.reduce((s, f) => s + f.removed, 0);
     const patchHash = createHash('sha256').update(this.git(path, 'diff', `${base}..${head}`)).digest('hex');
-    this.emit('change.proposed', { issue: n, branch: this.paths(n).branch, base, head, files: names, lines, patch_hash: patchHash });
+    this.emit('change.proposed', { issue: n, branch: this.paths(n).branch, base, head, files: names, lines: added + removed, added, removed, patch_hash: patchHash });
     return { files, tampered, patchHash };
   }
 

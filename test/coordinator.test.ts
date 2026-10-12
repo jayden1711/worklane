@@ -1251,6 +1251,32 @@ test('PR watch: a draft until the required checks pass on the evaluated commit, 
   assert.deepEqual(c.watchedPrs(), [], 'no longer watched');
 });
 
+test("the board's numbers are recorded: a change's lines added and removed, and a PR's size and comments each time they change", { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0 });
+  await c.tick();
+  await c.idle();
+  const change = f.log.read(0, ['change.proposed']).at(-1)!.payload as { lines: number; added?: number; removed?: number };
+  assert.ok(typeof change.added === 'number' && typeof change.removed === 'number', 'added and removed are recorded');
+  assert.equal(change.added! + change.removed!, change.lines);
+  await c.tick(); // opens the PR and polls it
+  const opened = f.log.read(0, ['pr.opened']).at(-1)!.payload as { number: number; head: string };
+  const stats = () => f.log.read(0, ['pr.stats']).map((e) => e.payload as { number: number; head: string; additions: number; deletions: number; files: number; comments: number });
+  assert.deepEqual(stats(), [], 'a tracker that reports no stats: nothing recorded');
+  f.backlog.setPr(opened.number, { stats: { additions: 30, deletions: 4, files: 2 } });
+  await c.tick();
+  const comments = f.backlog.prs().find((p) => p.number === opened.number)!.comments.length;
+  assert.deepEqual(stats(), [{ issue: 1, number: opened.number, head: opened.head, additions: 30, deletions: 4, files: 2, comments }]);
+  await c.tick();
+  assert.equal(stats().length, 1, 'unchanged: not recorded again');
+  await f.backlog.comment(opened.number, 'looks good');
+  await c.tick();
+  assert.equal(stats().at(-1)!.comments, comments + 1, 'a new comment is recorded');
+});
+
 test('PR watch: with no required checks configured, a PR is never marked ready, whatever passes', { skip }, async () => {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';

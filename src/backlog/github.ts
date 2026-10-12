@@ -158,6 +158,9 @@ export class GitHubBacklog implements Backlog {
       title: p.title ?? '',
       mergeable: p.mergeable ?? null,
       mergeableState: p.mergeable_state ?? 'unknown',
+      ...(typeof p.additions === 'number' && typeof p.deletions === 'number'
+        ? { stats: { additions: p.additions, deletions: p.deletions, files: p.changed_files ?? 0, comments: (p.comments ?? 0) + (p.review_comments ?? 0) } }
+        : {}),
     };
   }
 
@@ -259,4 +262,10 @@ interface GhPull {
   title?: string;
   mergeable?: boolean | null;
   mergeable_state?: string;
+  // The single-PR endpoint's counts (absent from list endpoints).
+  additions?: number;
+  deletions?: number;
+  changed_files?: number;
+  comments?: number;
+  review_comments?: number;
 }
