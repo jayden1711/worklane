@@ -18,7 +18,7 @@ import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, outsidePlanReasons, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
-import { mayMerge, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
+import { mayMerge, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
@@ -54,6 +54,15 @@ export abstract class MergeFlow extends FixRuns {
       ownerOf: (issue) => this.ownerOf(issue),
       // The merge policy decides it on the PR watch's next pass, as for any ready PR.
       tested: (e) => this.prPolled.delete(e.number),
+      // High-risk, money-path, or anything else the policy leaves to the owner: batched alone.
+      waitsForOwner: (e, pr) => {
+        try {
+          const d = this.mergeDecisionFor(e.issue, e.number, pr);
+          return d.auto ? null : d.reasons.join('; ') || 'waits for the owner';
+        } catch (err) {
+          return `the merge policy could not decide: ${(err as Error).message.slice(0, 200)}`;
+        }
+      },
     });
     return this.batcher;
   }
@@ -239,7 +248,11 @@ export abstract class MergeFlow extends FixRuns {
       .map((e) => e.payload as EventPayload<'merge.decided'>)
       .filter((p) => p.number === number && p.head === pr.headSha)
       .at(-1);
-    if (prior && !prior.auto) return; // already waiting for the owner
+    if (prior && !prior.auto) {
+      // Batching: the owner's approval (a review) merges it, on exactly the main its batch tested.
+      if (this.prBatching() && !this.emergencyInForce() && (await this.ownerApproved(w, pr))) await this.mergeTested(w, pr, 'approved');
+      return; // otherwise already waiting for the owner
+    }
     const d = this.mergeDecisionFor(n, number, pr);
     if (d.auto) {
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
@@ -257,7 +270,8 @@ export abstract class MergeFlow extends FixRuns {
       // The default branch moved under the PR in a way that could matter: check the combination (fast tier only,
       // off the PR) before merging. Not decided until that check has a result.
       if (d.auto) {
-        const gate = this.prBatching() && this.batchCoversTip(number, pr.headSha) ? 'merge' : await this.combinedGate(w, pr);
+        // Batching: the combination is what the batch tested; mergeTested checks main is still exactly that.
+        const gate = this.prBatching() ? 'merge' : await this.combinedGate(w, pr);
         if (gate === 'pending') return;
         // The combined check found a conflict GitHub doesn't report: wait for GitHub to catch up, up to a cap.
         if (gate === 'conflict') {
@@ -277,14 +291,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
-    // Batching: never untested. Both checks on this exact head, right before the merge.
-    if (this.prBatching()) {
-      const ok = mayMerge({ events: this.d.log.read(0, [...PR_BATCH_EVENTS]), number, head: pr.headSha, checks: await this.d.backlog.checks(pr.headSha), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
-      if (!ok.ok) {
-        this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: `not merged untested: ${ok.why}`.slice(0, 500) });
-        return;
-      }
-    }
+    if (this.prBatching()) return this.mergeTested(w, pr, 'auto');
     const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
@@ -295,11 +302,60 @@ export abstract class MergeFlow extends FixRuns {
     await this.d.backlog.comment(number, `[${BRAND.cli}] Auto-merged as \`${m.sha.slice(0, 8)}\` (a merge commit of the evaluated head \`${pr.headSha.slice(0, 8)}\`): every required check passed on it and nothing in it needs a human under this instance's merge policy.`);
   }
 
+  /**
+   * Batching: merge a PR only as tested. Both checks on this exact head (mayMerge), and main exactly what its green
+   * batch tested it on, in batch order (mergeTurn); a main that moved otherwise sends it, and the PRs after it, back to
+   * be tested again. Merged with a merge commit (merge_method: merge, pinned to the head), whose tree is the tested one.
+   */
+  private async mergeTested(w: EventPayload<'pr.opened'>, pr: PullRequest, how: 'auto' | 'approved') {
+    const { issue: n, number } = w;
+    const events = () => this.d.log.read(0, [...PR_BATCH_EVENTS, 'merge.done', 'merge.decided', 'pr.status', 'pr.opened']);
+    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.d.backlog.checks(pr.headSha), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
+    if (!ok.ok) {
+      this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: `not merged untested: ${ok.why}`.slice(0, 500) });
+      return;
+    }
+    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+    const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+    const turn = mergeTurn({ events: events(), number, head: pr.headSha, tip, treeOf: (sha) => this.gitOrNull(this.d.repo, 'rev-parse', `${sha}^{tree}`) });
+    if (turn.act === 'wait') return;
+    if (turn.act === 'stale') {
+      this.prBatch.stale(turn.batch, turn.prs, turn.why);
+      if (how === 'approved') await this.d.backlog.comment(number, `[${BRAND.cli}] Approved, but not merged yet: ${turn.why}. It is tested again on the current ${this.branch} first, and merges once that passes.`);
+      return;
+    }
+    const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
+    if (!m.ok) {
+      this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
+      return;
+    }
+    this.emit('merge.done', { issue: n, number, head: pr.headSha, sha: m.sha, url: pr.url, title: pr.title });
+    this.prPolled.clear(); // the next PR in the batch, and the other open PRs, on the next pass
+    const what = how === 'approved' ? `Merged on your approval as \`${m.sha.slice(0, 8)}\`` : `Auto-merged as \`${m.sha.slice(0, 8)}\``;
+    await this.d.backlog.comment(number, `[${BRAND.cli}] ${what} (a merge commit of \`${pr.headSha.slice(0, 8)}\` onto exactly the ${this.branch} its batch ${turn.batch} tested, full run included).`);
+  }
+
+  /** The owner's latest review on the PR approves it, given since this head was queued for a batch. */
+  private async ownerApproved(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<boolean> {
+    if (!this.prBatch.testedIn(w.number, pr.headSha) && !this.prBatch.state().queue.some((q) => q.number === w.number && q.head === pr.headSha)) return false;
+    const queued = this.d.log
+      .read(0, ['pr_batch.queued'])
+      .filter((e) => (e.payload as EventPayload<'pr_batch.queued'>).number === w.number && (e.payload as EventPayload<'pr_batch.queued'>).head === pr.headSha)
+      .at(0);
+    if (!queued) return false;
+    const owner = this.ownerOf(w.issue);
+    const last = (await this.d.backlog.reviews(w.number)).filter((r) => r.author === owner && r.state !== 'COMMENTED').sort((a, b) => a.at.localeCompare(b.at)).at(-1);
+    return last?.state === 'APPROVED' && Date.parse(last.at) >= Date.parse(queued.ts);
+  }
+
   /** A PR that waits for the owner: the needs-owner label, one comment with every reason, a review request. */
   private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[]) {
     const owner = this.ownerOf(w.issue);
     await this.d.backlog.addLabels(w.number, ['needs-owner']);
-    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and waits for you to review and merge (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}`);
+    const ask = this.prBatching()
+      ? `waits for your review: approve it and ${BRAND.name} merges it onto exactly the ${this.branch} its full run tested (testing it again first if ${this.branch} moved). Merging it by hand skips that`
+      : 'waits for you to review and merge';
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}`);
     try {
       await this.d.backlog.requestReview(w.number, [owner]);
     } catch (e) {
@@ -436,25 +492,5 @@ export abstract class MergeFlow extends FixRuns {
   prReadiness(n: number, head: string, checks: CommitCheck[], except: string[] = []): Readiness {
     const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
     return readiness({ required: this.d.cfg.project.required_checks.filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: v.head, approved: v.patch_correct } : null });
-  }
-
-  /**
-   * Whether the default branch is still what this PR's green batch tested: its tip is the batch's base, or every commit
-   * on it since is the merge of a PR from that same batch. Then the combination is tested, and no combined check is due.
-   */
-  private batchCoversTip(number: number, head: string): boolean {
-    const st = this.prBatch.state();
-    const id = st.posted.get(`${number}@${head}`);
-    const b = id ? st.batches.get(id) : undefined;
-    if (!b?.base) return false;
-    this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
-    const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-    if (tip === b.base) return true;
-    const inBatch = new Set(b.prs.map((p) => p.number));
-    const merged = new Set(this.d.log.read(0, ['merge.done']).map((e) => e.payload as EventPayload<'merge.done'>).filter((m) => inBatch.has(m.number)).map((m) => m.sha));
-    const since = this.gitOrNull(this.d.repo, 'rev-list', '--first-parent', `${b.base}..${tip}`);
-    if (since === null) return false;
-    const commits = since.split('\n').filter(Boolean);
-    return commits.length > 0 && commits.every((c) => merged.has(c));
   }
 }

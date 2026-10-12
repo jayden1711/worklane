@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import type { PullRequest } from '../src/backlog/types.js';
-import { batchSize, batchState, mayMerge, passRate, PrBatcher, PR_BATCH_EVENTS, runsPerPr, type BatchEntry, type PrBatchConfig, type TestRunRequest, type TestRunResult, type TestRuns } from '../src/coordinator/pr-batch.js';
+import { batchSize, batchState, mayMerge, mergeTurn, passRate, PrBatcher, PR_BATCH_EVENTS, runsPerPr, type BatchEntry, type PrBatchConfig, type TestRunRequest, type TestRunResult, type TestRuns } from '../src/coordinator/pr-batch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ID = ['-c', 'user.email=t@example.com', '-c', 'user.name=T', '-c', 'commit.gpgsign=false'];
@@ -72,7 +72,7 @@ function fakeRuns(w: World, o: { culprits?: number[]; red?: (sha: string) => boo
 
 const CFG: PrBatchConfig = { enabled: true, max: 8, shards: 1, fast_checks: ['fast'], full_checks: ['full'] };
 
-function batcher(w: World, testRuns: TestRuns | null, cfg: Partial<PrBatchConfig> = {}) {
+function batcher(w: World, testRuns: TestRuns | null, cfg: Partial<PrBatchConfig> = {}, waitsForOwner?: (e: BatchEntry) => string | null) {
   const tested: number[] = [];
   const comments: { n: number; body: string }[] = [];
   const labels = new Map<number, Set<string>>();
@@ -91,6 +91,7 @@ function batcher(w: World, testRuns: TestRuns | null, cfg: Partial<PrBatchConfig
     removeLabel: async (n, l) => void labels.get(n)?.delete(l),
     ownerOf: () => 'example-owner',
     tested: (e) => void tested.push(e.number),
+    ...(waitsForOwner ? { waitsForOwner } : {}),
   });
   return { b, tested, comments, labels };
 }
@@ -292,4 +293,97 @@ test('batch size: the fewest full runs per PR at the recent pass rate, capped by
   const posted = new Map(Array.from({ length: 30 }, (_, i) => [`${i}@a`, 'b'] as [string, string]));
   const returned = new Map(Array.from({ length: 10 }, (_, i) => [`${i}@c`, { step: 'culprit' }] as [string, EventPayload<'pr_batch.step'>]));
   assert.equal(passRate({ posted, returned }), (30 + 9) / 50);
+});
+
+test('a PR the policy leaves to the owner (high-risk, money-path) never shares a batch: it gets a batch of one, in its turn', async () => {
+  const w = world(3);
+  const f = fakeRuns(w);
+  const { b, tested } = batcher(w, f.t, {}, (e) => (e.number === 2 ? 'high-risk: pricing (src/price.js)' : null));
+  for (const n of [1, 2, 3]) b.enqueue(entry(w, n));
+  await pass(b);
+  assert.deepEqual(f.runs.map((r) => r.prs), [[1, 3]], 'the high-risk PR is split out');
+  await pass(b);
+  assert.deepEqual(f.runs.map((r) => r.prs), [[1, 3], [2]], 'then alone');
+  assert.equal(stepsOf(w, 'built')[1]!.detail, 'alone: high-risk: pricing (src/price.js)');
+  assert.deepEqual(tested, [1, 3, 2]);
+});
+
+/** Merge a PR head into main on the remote as GitHub's merge button would (a --no-ff merge commit); its sha. */
+function ghMerge(w: World, n: number): string {
+  git(w.seed, 'checkout', '-q', 'main');
+  git(w.seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+  git(w.seed, ...ID, 'merge', '-q', '--no-ff', '-m', `Merge pull request #${n}`, w.prs.get(n)!.headSha);
+  git(w.seed, 'push', '-q', 'origin', 'main');
+  git(w.repo, 'fetch', '-q', 'origin', 'main');
+  return git(w.seed, 'rev-parse', 'HEAD');
+}
+
+/** Someone lands a commit on main by hand; its sha. */
+function foreignCommit(w: World): string {
+  git(w.seed, 'checkout', '-q', 'main');
+  git(w.seed, 'pull', '-q', '--ff-only', 'origin', 'main');
+  writeFileSync(join(w.seed, 'other.txt'), 'someone else\n');
+  git(w.seed, 'add', 'other.txt');
+  git(w.seed, ...ID, 'commit', '-q', '-m', 'landed by hand');
+  git(w.seed, 'push', '-q', 'origin', 'main');
+  git(w.repo, 'fetch', '-q', 'origin', 'main');
+  return git(w.seed, 'rev-parse', 'HEAD');
+}
+
+const treeIn = (w: World) => (sha: string) => {
+  try {
+    return git(w.repo, 'rev-parse', `${sha}^{tree}`);
+  } catch {
+    return null;
+  }
+};
+
+test('a green batch merges strictly in order, each onto exactly the main it was tested on; a foreign commit mid-merge stops it, and the rest is tested again', async () => {
+  const w = world(3);
+  const f = fakeRuns(w);
+  const { b } = batcher(w, f.t);
+  for (const n of [1, 2, 3]) b.enqueue(entry(w, n));
+  await pass(b);
+  const base = stepsOf(w, 'built')[0]!.base!;
+  const turn = (n: number, tip: string) => mergeTurn({ events: w.log.read(), number: n, head: w.prs.get(n)!.headSha, tip, treeOf: treeIn(w) });
+  assert.deepEqual(turn(1, base), { act: 'merge', batch: 'batch-1' });
+  assert.equal(turn(2, base).act, 'wait', '#1 merges first');
+  assert.equal(turn(1, 'e'.repeat(40)).act, 'stale', 'main moved before the first merge');
+  const m1 = ghMerge(w, 1);
+  w.log.append('merge.done', { issue: 101, number: 1, head: w.prs.get(1)!.headSha, sha: m1, url: 'u/1', title: 'PR 1' }, 'c');
+  w.prs.get(1)!.state = 'merged';
+  assert.deepEqual(turn(2, m1), { act: 'merge', batch: 'batch-1' }, 'onto the merge of #1, whose tree is the one the batch tested');
+  // Someone lands a commit by hand before #2 merges: #2 and #3 are stale, and go back to be tested on the new main.
+  const other = foreignCommit(w);
+  const t2 = turn(2, other);
+  assert.ok(t2.act === 'stale' && /something else landed/.test(t2.why), JSON.stringify(t2));
+  assert.deepEqual(t2.prs.map((p) => p.number), [2, 3]);
+  b.stale(t2.batch, t2.prs, t2.why);
+  assert.equal(b.testedIn(2, w.prs.get(2)!.headSha), null, 'no longer counts as tested');
+  assert.deepEqual(b.state().queue.map((q) => q.number), [2, 3], 'back in the queue, in order');
+  await pass(b);
+  assert.deepEqual(f.runs.at(-1)!.prs, [2, 3], 'tested again');
+  assert.equal(stepsOf(w, 'built').at(-1)!.base, other, 'on the new main');
+  assert.deepEqual(turn(2, other), { act: 'merge', batch: 'batch-2' });
+});
+
+test("a merge whose tree isn't the one the batch tested, or a PR ahead that left the batch, stops the rest", async () => {
+  const w = world(3);
+  const f = fakeRuns(w);
+  const { b } = batcher(w, f.t);
+  for (const n of [1, 2, 3]) b.enqueue(entry(w, n));
+  await pass(b);
+  const other = foreignCommit(w);
+  // #1 "merged" as a commit with another tree.
+  w.log.append('merge.done', { issue: 101, number: 1, head: w.prs.get(1)!.headSha, sha: other, url: 'u/1', title: 'PR 1' }, 'c');
+  const t = mergeTurn({ events: w.log.read(), number: 2, head: w.prs.get(2)!.headSha, tip: other, treeOf: treeIn(w) });
+  assert.ok(t.act === 'stale' && /not the one the batch tested/.test(t.why), JSON.stringify(t));
+  // Another batch: #1 closed without merging, so #2 after it is stale.
+  const v = world(2);
+  const g = batcher(v, fakeRuns(v).t);
+  for (const n of [1, 2]) g.b.enqueue(entry(v, n));
+  await pass(g.b);
+  v.log.append('pr.closed', { issue: 101, number: 1, merged: false }, 'c');
+  const t3 = mergeTurn({ events: v.log.read(), number: 2, head: v.prs.get(2)!.headSha, tip: stepsOf(v, 'built')[0]!.base!, treeOf: treeIn(v) });
+  assert.ok(t3.act === 'stale' && /left the batch/.test(t3.why), JSON.stringify(t3));
 });

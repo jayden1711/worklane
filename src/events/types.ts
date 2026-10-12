@@ -350,11 +350,13 @@ export const EventSchemas = {
    * found, returned with the failing `tier`; dropped: a PR whose head changed (or that closed) left the batch; conflict:
    * it does not merge onto the base; requeued: back in the queue for the next batch; abandoned: cut off by a restart
    * before its run ended; resumed: a green batch's checks finished after a restart; error: the batch could not be
-   * built or run; finished: nothing more to do. `parent`: the batch a bisection step tests a prefix of.
+   * built or run; finished: nothing more to do; stale: after the batch passed, main is no longer what it tested for
+   * these PRs (something else landed, a PR ahead of them didn't merge, or merged as another tree), so they are tested
+   * again. `parent`: the batch a bisection step tests a prefix of. `trees` (built): the tree after each PR's merge.
    */
   'pr_batch.step': z.strictObject({
     id: z.string(),
-    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished']),
+    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale']),
     prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha })),
     sha: sha.nullable(),
     base: sha.nullable(),
@@ -368,6 +370,7 @@ export const EventSchemas = {
       })
       .nullable(),
     detail: z.string(),
+    trees: z.array(sha).optional(),
   }),
   /** `issue`: the issue whose landing triggered it (absent on older events and manual deploys). */
   'deploy.requested': z.strictObject({ env: z.string(), sha, issue: issue.optional() }),
