@@ -10,6 +10,7 @@ import {
   acceptResearch,
   blockedHost,
   RESEARCH_DEFAULT_CAPS,
+  RESEARCH_PROMPT,
   RESEARCH_SCHEMA,
   RESEARCH_TOOLS,
   ResearchMeter,
@@ -323,4 +324,13 @@ test("the research bundle: issue text, questions and blocklist, redacted, readab
   assert.equal(statSync(dir).mode & 0o777, 0o750);
   assert.ok(existsSync(join(dir, 'questions.md')));
   assert.throws(() => writeResearchBundle({ instanceRoot: root, gid: process.getgid!(), run: '../escape', issue: null, questions: ['q'], blocklist: [] }), /not a plain name/);
+});
+
+test('the researcher prompt is a role like the others: in src/roles.ts, with eval cases that ship with the engine', async () => {
+  const { defaultRolePrompt } = await import('../src/roles.js');
+  const { engineRoleCases, parseCases } = await import('../src/skilleval.js');
+  assert.equal(RESEARCH_PROMPT, defaultRolePrompt('researcher'));
+  assert.match(RESEARCH_PROMPT, /^Own: /m);
+  const cases = parseCases(engineRoleCases('researcher') ?? '');
+  assert.ok(cases.length >= 5 && cases.every((c) => c.correct.length && c.wrong.length), `${cases.length} cases`);
 });
