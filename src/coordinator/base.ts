@@ -21,6 +21,8 @@ import { emergencyStop } from '../slots.js';
 import { removeWorktree, type WorktreeOptions } from '../worktrees.js';
 import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
+import { stuckMode } from '../settings.js';
+import { stuckOption } from './stuck-guard.js';
 import { type CoordinatorDeps, COMMAND_TIMEOUT_MS, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted } from './shared.js';
 
 export abstract class CoordinatorBase {
@@ -103,6 +105,8 @@ export abstract class CoordinatorBase {
             r = await runner.run({
               ...req,
               ...(once.length ? { allowOnce: [...new Set([...(req.allowOnce ?? []), ...once])] } : {}),
+              // The stuck-run guard on the worker and evaluators, in the instance's mode (dry-run unless the owner turned it on).
+              ...stuckOption(req, stuckMode(this.d.settings?.().settings ?? {}), who, () => live.run, (p) => this.emit('run.stuck', p)),
               signal: req.signal ?? this.halt.signal,
               onLockWait: (ms) => {
                 if (ms >= LOCK_WAIT_RECORDED_MS) this.emit('run.lock_waited', { ...who, wait_ms: Math.round(ms) });

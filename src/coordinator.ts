@@ -40,6 +40,7 @@ import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { stuckFeedback } from './coordinator/stuck-guard.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -487,6 +488,11 @@ export class Coordinator extends MergeFlow {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
+        // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
+        if (out.stuck) {
+          feedback = stuckFeedback(out.stuck);
+          continue;
+        }
         removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
         // A finding of "no change" counts only for a branch with nothing on it: work an earlier attempt committed is
@@ -650,7 +656,7 @@ export class Coordinator extends MergeFlow {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null) {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null): Promise<{ stop: true } | { stop: false; stuck?: string; noChange?: string; raise?: Level }> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
     const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
@@ -706,6 +712,7 @@ export class Coordinator extends MergeFlow {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, true, r.reason === 'rate_limited' ? retryAfter('rate_limit') : r.reason === 'budget_exhausted' ? retryAfter('budget') : undefined);
       return { stop: true as const };
     }
+    if (r.reason === 'stuck') return { stop: false as const, stuck: r.detail };
     // A run that failed almost at once and committed nothing never got to work: another attempt would fail the
     // same way, so say what claude reported instead of spending the attempts on "no passing change".
     const secs = Math.round((Date.now() - started) / 1000);

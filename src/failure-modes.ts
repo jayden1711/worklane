@@ -16,6 +16,7 @@ export type Outcome =
   | 'evaluator rejected'
   | 'push refused'
   | 'timed out'
+  | 'stuck'
   | 'rate limited'
   | 'budget reached'
   | 'auth problem'
@@ -163,6 +164,7 @@ export function classifyRuns(events: StoredEvent[], since: Date, until: Date, re
       else if (reason === 'budget_exhausted') [outcome, cause] = ['budget reached', 'per-run budget reached'];
       else if (reason === 'auth_mismatch') [outcome, cause] = ['auth problem', normalizeCause(detail)];
       else if (reason === 'canceled_by_reconciliation') [outcome, cause] = ['canceled', 'stopped by the coordinator'];
+      else if (reason === 'stuck') [outcome, cause] = ['stuck', normalizeCause(detail)];
       else if (reason === 'failed' && !committed && (startupEvent || seconds < STARTUP_SECS)) [outcome, cause] = ['startup failure', normalizeCause(detail)];
       // Reported as a success but ended at once with nothing done: the same failure, seen from the other side.
       else if (reason === 'succeeded' && role === 'worker' && !committed && nothing && seconds < STARTUP_SECS && (nTurns ?? 0) <= 1) [outcome, cause] = ['startup failure', `ended after ${nTurns ?? 0} turn(s) with nothing done: ${normalizeCause(detail)}`];

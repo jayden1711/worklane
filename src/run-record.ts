@@ -57,6 +57,8 @@ export interface RunRecord {
   final: string;
   /** Some steps were dropped to keep the record bounded. */
   truncated: boolean;
+  /** The longest run of byte-identical tool calls the stuck-run guard saw (absent: the guard was off, or no call repeated). */
+  stuck?: { repeats: number; failures: number; tool: string; input: string };
 }
 
 export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'startedAt' | 'endedAt' | 'reason' | 'costUsd' | 'turns' | 'files' | 'truncated'> & { commands: number; failedCommands: number };
@@ -175,9 +177,10 @@ export class RunRecorder {
   }
 
   /** Write the record when the run ends; keeps only the newest KEEP_RUNS. Never throws. */
-  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string }, now = new Date()): string | null {
+  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string; stuck?: RunRecord['stuck'] }, now = new Date()): string | null {
     try {
       Object.assign(this.rec, { endedAt: now.toISOString(), reason: end.reason, costUsd: end.costUsd, turns: end.turns, model: end.model });
+      if (end.stuck && end.stuck.repeats > 1) this.rec.stuck = { ...end.stuck };
       // The session's own result text is its final message; else the last thing it said.
       if (end.final?.trim()) this.rec.final = clip(end.final, MAX_FINAL);
       const dir = join(this.stateDir, RUNS_DIR);
