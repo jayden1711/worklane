@@ -20,6 +20,7 @@ import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, role
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { type RunResult } from './runner.js';
 import { MAX_MESSAGE, takeRequests } from './console.js';
+import { runMachineRequests } from './coordinator/machine-requests.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
@@ -79,6 +80,8 @@ export class Coordinator extends Gardener {
     this.checkConsole();
     void this.checkChat();
     await step('settings', () => this.refreshSettings(), undefined);
+    // Machine changes the dashboard recorded (it can't sudo; this unit can): src/coordinator/machine-requests.ts.
+    await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);

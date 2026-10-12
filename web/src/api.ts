@@ -492,6 +492,8 @@ export type Ask = {
   cancelled: { by: string; why: string; at: string } | null;
   /** Whether this person may answer it (the server checks again). */
   canAnswer: boolean;
+  /** A root step's machine request, once asked for: the coordinator runs it (pending, running, done, failed, refused, interrupted). */
+  request?: { status: string; detail: string } | null;
 } & (
   | { kind: 'paste_secret'; credential: string; where: string }
   | { kind: 'approve_link'; url: string }

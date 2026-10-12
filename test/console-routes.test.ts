@@ -10,6 +10,7 @@ import { asks } from '../src/console/asks.js';
 import { secretsDir } from '../src/console/secrets.js';
 import type { Role } from '../src/console/asks.js';
 import { MACHINE_HELPER } from '../src/machine.js';
+import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { exampleProject } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -37,7 +38,7 @@ async function site(roles: Record<string, Role> = { olive: 'owner', wendy: 'writ
     webDir: join(dir, 'web'),
     slotsDir: join(dir, 'slots'),
     secretsHome: home,
-    machine: { exec },
+    machine: {},
     session: (req) => {
       const login = String(req.headers['x-login'] ?? '');
       return login ? { login, role: roles[login] ?? null, authenticatedAt: null, csrfOk: true } : null;
@@ -51,7 +52,7 @@ async function site(roles: Record<string, Role> = { olive: 'owner', wendy: 'writ
     bodies.push(text);
     return { status: r.status, json: JSON.parse(text) as Record<string, unknown> };
   };
-  return { d, db, dir, log, home, calls, call, bodies, a: asks(log) };
+  return { d, db, dir, log, home, calls, exec, call, bodies, a: asks(log) };
 }
 
 /** Everything written to stdout and stderr while `fn` runs. */
@@ -128,7 +129,7 @@ test('a pasted secret lands in the credential store, 0400 and this user only, an
   }
 });
 
-test("a root step off the helper's allowlist is refused and never reaches sudo; an allowed one runs exactly the helper", async () => {
+test("a root step off the helper's allowlist is refused and never reaches sudo; an allowed one is run by the coordinator, exactly the helper, once", async () => {
   const s = await site();
   try {
     const bad = s.a.create({ instance: 'demo', kind: 'root_step', title: 'Install a package', detail: 'x', command: 'apt-get', args: ['install', 'x'] });
@@ -143,11 +144,20 @@ test("a root step off the helper's allowlist is refused and never reaches sudo; 
     const ok = s.a.create({ instance: 'demo', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
     assert.equal((await s.call(`/api/asks/${ok.id}/run`, 'wendy', '{}')).status, 403, 'a writer may not run it');
     assert.deepEqual(s.calls, []);
+    // The dashboard only records the request; the coordinator runs it (src/machine-requests.ts).
     const ran = await s.call(`/api/asks/${ok.id}/run`, 'olive', '{}');
     assert.equal(ran.status, 200, JSON.stringify(ran.json));
+    assert.deepEqual(s.calls, [], 'the dashboard never runs sudo');
+    assert.equal(s.a.get(ok.id)!.status, 'open', 'open until the coordinator has run it');
+    assert.equal((await s.call(`/api/asks/${ok.id}/run`, 'olive', '{}')).status, 409, 'one request at a time');
+    const listed = (await s.call('/api/asks', 'olive')).json.asks as { id: string; request: { status: string } | null }[];
+    assert.equal(listed.find((x) => x.id === ok.id)!.request!.status, 'pending');
+    runMachineRequests({ log: s.log, instance: 'demo', exec: s.exec });
     assert.deepEqual(s.calls, [['sudo', '-n', MACHINE_HELPER, 'set-slots', '4']]);
     assert.equal(s.a.get(ok.id)!.answer!.answer, 'ran');
+    assert.equal(s.a.get(ok.id)!.answer!.by, 'olive');
     assert.equal((await s.call(`/api/asks/${ok.id}/run`, 'olive', '{}')).status, 409, 'once');
+    runMachineRequests({ log: s.log, instance: 'demo', exec: s.exec });
     assert.equal(s.calls.length, 1);
   } finally {
     s.log.close();

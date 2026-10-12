@@ -31,7 +31,8 @@ import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
-import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
+import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN } from './machine.js';
+import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
@@ -112,8 +113,8 @@ export interface DashboardOptions {
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
-  /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
-  machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
 }
@@ -238,7 +239,7 @@ export function healthStats(o: { serviceUnit: string | null; root: string; state
  * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
  * the helper's change log and the updater's log, newest first.
  */
-export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'> & { role?: Role | null }) {
+export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'> & { role?: Role | null; requests?: MachineRequest[] }) {
   const owner = o.cfg.project.owners.default;
   const slots = slotStatus(o.slotsDir);
   const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
@@ -251,6 +252,8 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
+    /** Changes asked for here, for the coordinator to run: pending, running, then done, failed, refused or interrupted. Newest first. */
+    requests: (o.requests ?? []).filter((r) => r.via === 'settings').slice(-20).reverse(),
   };
 }
 
@@ -697,7 +700,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
         }
         // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
-        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machine?.exec ? { exec: opts.machine.exec } : {}) })) return;
+        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}) })) return;
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
@@ -907,9 +910,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
-        // Machine-wide settings (the slot cap, engine updates) and their history. A change goes through the
-        // machine helper (sudo, src/machine.ts) as this server's user, the instance's coordinator; only the owner may ask.
-        const machine = () => machineView({ ...opts, user: who.login, role: who.role });
+        // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
+        // owner may ask for a change; it's recorded for the coordinator, which runs the machine helper
+        // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
+        const machine = () => machineView({ ...opts, user: who.login, role: who.role, requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
         if (url.pathname === '/api/machine' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
           return json(res, 200, machine());
@@ -917,16 +921,20 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/machine' && req.method === 'POST') {
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may change machine settings; @${who.login} is a ${who.role}` });
           const body = (await readBody(req)) as { what?: string; value?: unknown };
-          const exec = opts.machine?.exec;
-          let r;
-          if (body.what === 'slots') r = setSlotCap(Number(body.value), ...(exec ? [exec] : []));
-          else if (body.what === 'updates') {
-            if (typeof body.value !== 'boolean') return json(res, 400, { error: 'updates is on (true) or off (false)' });
-            r = setUpdates(body.value, ...(exec ? [exec] : []));
-          } else return json(res, 400, { error: 'what is slots or updates' });
-          if (!r.ok) return json(res, 400, { error: r.error });
-          audit(who, 'machine.changed', { what: body.what, value: body.value });
-          return json(res, 200, { ok: true, output: r.output, machine: machine() });
+          const args = settingArgs(body.what, body.value);
+          if ('error' in args) return json(res, 400, { error: args.error });
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestMachineChange(log, { args, by: who.login, via: 'settings' });
+          } catch (e) {
+            if (e instanceof MachineRequestError) return json(res, e.status, { error: e.message });
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.changed', { what: body.what, value: body.value, request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
