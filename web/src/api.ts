@@ -126,6 +126,19 @@ export interface HealthView {
     days: { day: string; runs: number; estimatedUsd: number; turns: number; rateLimited: number; authProblems: number; retries: Record<string, number>; retryWaitMs: number; lockWaits: number; lockWaitMs: number }[];
     quotaNote: string;
   };
+  /** The off-machine backup (src/offsite-backup.ts): null when it was never set up (no attempt recorded). */
+  offsiteBackup: {
+    destination: string;
+    lastOkAt: string | null;
+    lastOkKey: string | null;
+    lastAttemptAt: string;
+    lastError: string | null;
+    ageHours: number | null;
+    /** No verified copy, or the last one is over a day old. */
+    stale: boolean;
+  } | null;
+  /** Links to the engine's docs; null when the package names no repository. */
+  docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
   merge?: {
     since: string;
@@ -168,6 +181,10 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Whether this viewer may read the throughput panel (the owner or a writer); absent from an older server: yes. */
+  canReadThroughput?: boolean;
+  /** Whether this viewer may read agent runs (the owner or a writer); absent from an older server: yes. */
+  canReadRuns?: boolean;
   project: { name: string; repo: string; landMode: string };
   user: string;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
@@ -316,7 +333,7 @@ export function selectInstance(name: string) {
 }
 
 /** An API path as this page reaches it: on a hub, through the selected instance's own server. */
-async function apiPath(path: string): Promise<string> {
+export async function apiPath(path: string): Promise<string> {
   const inst = await hubInstance;
   return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
 }
@@ -414,3 +431,14 @@ export const askChat = (instance: string | null, question: string, key: string) 
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
 export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });
+
+/** Throughput (GET /api/throughput, src/throughput.ts): merges, cost per merged PR by stage, waits, the top costs. */
+export type ThroughputStage = 'worker' | 'evaluator' | 'plan' | 'research' | 'intake' | 'gardener' | 'chat' | 'retries' | 'other';
+export interface Throughput {
+  since: string;
+  until: string;
+  merged: { total: number; perDay: { day: string; merged: number }[]; perWeek: { week: string; merged: number }[] };
+  cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; evaluatorOnL0Usd: number };
+  waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
+  top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
+}

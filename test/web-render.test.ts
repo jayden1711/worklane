@@ -20,9 +20,18 @@ interface Render {
   renderIssue(state: State, issue: number): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
+  renderThroughput(t: unknown): string;
+  renderThroughputPanel(state: unknown): string;
+  renderRunsRefused(message: string): string;
+  runsRefused(message: string): string | null;
+  runsRefusal(state: unknown): string | null;
+  renderRunResearch(data: unknown): string;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
+  renderLiveFeed(items: unknown[], ended: boolean): string;
+  renderConsole(data: unknown): string;
+  renderAgents(state: State, live: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
   renderMachine(data: unknown): string;
   renderInstanceSettings(data: unknown): string;
@@ -253,6 +262,41 @@ test('the health panel: suggestions, machine figures, services, check times with
   assert.doesNotMatch(bare, /data-testid="health-instances"/, 'no hub: no instances table');
 });
 
+test('the off-machine backup on the health panel: not set up with the docs link; the last verified copy; stale in red with the latest error; per instance on a hub', () => {
+  const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, suggestions: ['Nothing to suggest.'] };
+  const docs = { backups: 'https://example.org/acme/engine/blob/main/docs/backups.md' };
+  const none = r.renderHealth({ ...base, offsiteBackup: null, docs });
+  assert.match(none, /data-testid="health-offsite"[\s\S]*not set up/);
+  assert.match(none, /data-testid="health-offsite-none"[\s\S]*Nothing is copied off this machine[\s\S]*offsite-backup\.yaml/);
+  assert.match(none, /href="https:\/\/example\.org\/acme\/engine\/blob\/main\/docs\/backups\.md"[^>]*data-testid="health-offsite-docs"/);
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null }), /<code[^>]*>docs\/backups\.md<\/code>/, 'no repository: the doc is named, not linked');
+  const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
+  const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
+  const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });
+  assert.match(ok, /verified 3 h ago/);
+  assert.match(ok, new RegExp(`data-testid="health-offsite-last"[^>]*>3h ago \\(${at.slice(0, 10)} ${at.slice(11, 16)} UTC\\)`));
+  assert.match(ok, /data-testid="health-offsite-destination"[^>]*>rclone remote, backups bucket</);
+  assert.match(ok, /data-testid="health-offsite-key"[^>]*>events-41\.db\.age</);
+  assert.doesNotMatch(ok, /data-testid="health-offsite-stale"/);
+  const old = new Date(Date.now() - 30 * 3_600_000).toISOString();
+  const stale = r.renderHealth({ ...base, offsiteBackup: { ...fresh, lastOkAt: old, ageHours: 30, lastAttemptAt: new Date().toISOString(), lastError: 'put exited 1: remote unreachable', stale: true }, docs });
+  assert.match(stale, />stale</);
+  assert.match(stale, /role="alert"[^>]*data-testid="health-offsite-stale"[\s\S]*text-red[^>]*>The last verified copy is 30 h old\./);
+  assert.match(stale, /data-testid="health-offsite-error"[^>]*>put exited 1: remote unreachable</);
+  const never = r.renderHealth({ ...base, offsiteBackup: { ...fresh, lastOkAt: null, lastOkKey: null, ageHours: null, lastError: 'encrypt left the snapshot readable', stale: true }, docs });
+  assert.match(never, /No copy has been verified yet\./);
+  assert.match(never, /data-testid="health-offsite-last"[^>]*>never</);
+  assert.doesNotMatch(never, /data-testid="health-offsite-key"/);
+  // On a hub, each instance's backup in the side-by-side table.
+  const hubHtml = r.renderHealth({ ...base, offsiteBackup: fresh }, [
+    { name: 'shop', view: { ...base, offsiteBackup: fresh }, error: null },
+    { name: 'site', view: { ...base, offsiteBackup: null }, error: null },
+    { name: 'code', view: { ...base, offsiteBackup: { ...fresh, lastOkAt: null, ageHours: null, stale: true } }, error: null },
+  ]);
+  const cells = [...hubHtml.matchAll(/data-testid="health-instance-offsite">([\s\S]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ''));
+  assert.deepEqual(cells, ['3 h ago', 'not set up', 'never verified']);
+});
+
 test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
   const data = {
     owner: 'example-owner',
@@ -410,6 +454,46 @@ test('merge flow on the PR page and in the health panel: conflict fixes, light c
   assert.match(h, /data-testid="health-suggestion"[^>]*>Consider listing src\/totals\.js as hotspots/);
 });
 
+test('the live run: text, thinking, tool calls with their results, diffs, messages, the end; the owner\'s console; agents link to it', () => {
+  const at = new Date().toISOString();
+  const items = [
+    { seq: 0, at, kind: 'start', run: 'r', issue: 7, role: 'worker', model: 'sonnet' },
+    { seq: 1, at, kind: 'thinking', text: 'the total rounds down' },
+    { seq: 2, at, kind: 'text', text: 'Looking at the totals.' },
+    { seq: 3, at, kind: 'tool', id: 't1', tool: 'Bash', input: '{"command":"npm test"}' },
+    { seq: 4, at, kind: 'tool_result', id: 't1', status: 'error', output: 'not ok 3 - rounds to the cent' },
+    { seq: 5, at, kind: 'tool', id: 't2', tool: 'Edit', input: '{"file_path":"src/totals.js"}' },
+    { seq: 6, at, kind: 'diff', id: 't2', tool: 'Edit', file: 'src/totals.js', diff: '-Math.floor(x)\n+Math.round(x)' },
+    { seq: 7, at, kind: 'message', id: 'm1', state: 'queued', text: 'also update the README' },
+  ];
+  const running = r.renderLiveFeed(items, false);
+  assert.match(running, /data-testid="live-thinking"[\s\S]*Thinking[\s\S]*the total rounds down/);
+  assert.match(running, /data-testid="live-text"[^>]*>Looking at the totals\.</);
+  assert.match(running, /data-tool="Bash"[\s\S]*?npm test[\s\S]*?>error</, 'a tool call with its input and how it ended');
+  assert.match(running, /data-tool="Edit"[\s\S]*?src\/totals\.js[\s\S]*?running/, 'a write still running');
+  assert.match(running, /data-testid="live-diff"[\s\S]*?src\/totals\.js[\s\S]*?bg-red-tint[^>]*>-Math\.floor\(x\)[\s\S]*?bg-green-tint[^>]*>\+Math\.round\(x\)/);
+  assert.match(running, /data-testid="live-message" data-state="queued"[\s\S]*also update the README[\s\S]*held until the current turn ends/);
+  assert.match(running, /data-testid="live-working"/);
+  const done = r.renderLiveFeed([...items, { seq: 8, at, kind: 'truncated', why: 'lines' }, { seq: 9, at, kind: 'end', reason: 'succeeded', costUsd: 0.3, turns: 4 }], true);
+  assert.match(done, /data-testid="live-truncated"[^>]*>The feed reached its line cap/);
+  assert.match(done, /data-testid="live-end"[\s\S]*Run ended: succeeded[\s\S]*4 turn\(s\)[\s\S]*~\$0\.30/);
+  assert.doesNotMatch(done, /data-testid="live-working"/);
+
+  const con = { owner: 'example-owner', canControl: true, live: true, pending: [{ id: 'm1', text: 'also update the README', by: 'example-owner', at }], held: [], events: [] };
+  const panel = r.renderConsole(con);
+  for (const id of ['console-panel', 'console-input', 'console-send', 'console-stop', 'console-pending', 'console-pending-item']) assert.match(panel, new RegExp(`data-testid="${id}"`), id);
+  assert.match(panel, /data-testid="console-pending-item"[\s\S]*held[\s\S]*also update the README/);
+  assert.doesNotMatch(panel, /data-testid="console-stop-confirm"/, 'stop needs a second click');
+  assert.match(r.renderConsole({ ...con, canControl: false }), /data-testid="console-read-only"[^>]*>Only the owner, @example-owner, can message or stop this run\./);
+  assert.equal(r.renderConsole({ ...con, live: false }), '', 'nothing to control once the run has ended');
+
+  const run = { issue: asOwner.tasks[0]!.issue, role: 'worker', model: 'sonnet', pid: 1, attempt: 1, startedAt: at, lastHeartbeat: null, note: null, finishedAt: null, reason: null, costUsd: 0 };
+  const state = { ...asOwner, runs: { active: [run], recent: [] } } as unknown as State;
+  const agents = r.renderAgents(state, { canControl: true, runs: [{ run: 'run-1', issue: run.issue, role: 'worker', model: 'sonnet', startedAt: at, pending: [] }] });
+  assert.match(agents, /data-testid="agent-live-link" data-run="run-1"[\s\S]*live view/);
+  assert.doesNotMatch(r.renderAgents(state, { canControl: true, runs: [] }), /agent-live-link/, 'no live view listed: no link');
+});
+
 test('checks render as a table with failures tinted and their output; instances as sidebar rows; the stop banner', () => {
   const checks = r.renderChecks([{ id: 1, at: new Date().toISOString(), stage: 'verify', head: 'c'.repeat(40), checks: [{ check: 'npm test', status: 'fail', exitCode: 1, tail: 'AssertionError: 2 !== 3' }, { check: 'npm run full', status: 'skipped', exitCode: null, tail: null }] }]);
   assert.match(checks, /<table/);
@@ -519,4 +603,80 @@ test('a chat proposal lands in its confirm flow: the setting filled in for revie
     loc.search = '';
     loc.hash = '';
   }
+});
+
+test('the throughput panel: merges, cost per merged PR by stage (zeros shown), the top costs with their tunings, and where PRs waited for the owner; refused to anyone else without asking', () => {
+  const stages = ['worker', 'evaluator', 'plan', 'research', 'intake', 'gardener', 'chat', 'retries', 'other'];
+  const usd: Record<string, number> = { worker: 2, evaluator: 2, plan: 0.5, research: 0.25, intake: 0.5, gardener: 0, chat: 0.75, retries: 4, other: 0 };
+  const t = {
+    since: '2026-10-08T12:00:00.000Z',
+    until: '2026-10-15T12:00:00.000Z',
+    merged: { total: 3, perDay: Array.from({ length: 14 }, (_, i) => ({ day: `2026-10-${String(2 + i).padStart(2, '0')}`, merged: i === 10 ? 2 : i === 12 ? 1 : 0 })), perWeek: [{ week: '2026-10-05', merged: 2 }, { week: '2026-10-12', merged: 2 }] },
+    cost: { totalUsd: 10, perMergedPrUsd: 3.33, byStage: stages.map((stage) => ({ stage, usd: usd[stage], perMergedPrUsd: Math.round((usd[stage]! / 3) * 100) / 100, share: usd[stage]! / 10 })), evaluatorOnL0Usd: 1.5 },
+    waits: [
+      { kind: 'merge', label: 'merging a PR the harness left to you', owner: true, count: 1, open: 0, medianHours: 10, totalHours: 10, reasons: [{ reason: 'touches a high-risk area', count: 1 }] },
+      { kind: 'decision:land', label: 'approving a change to land', owner: true, count: 1, open: 1, medianHours: 10, totalHours: 10, reasons: [] },
+      { kind: 'hotspot', label: 'held behind another task changing the same files (ends on its own)', owner: false, count: 1, open: 0, medianHours: 2, totalHours: 2, reasons: [] },
+    ],
+    top: [
+      { stage: 'retries', usd: 4, share: 0.4, suggestion: 'Retries are 40% of the spend: look at why first attempts fail.' },
+      { stage: 'worker', usd: 2, share: 0.2, suggestion: 'Worker runs cost $0.67 per merged PR: split size:L issues.' },
+      { stage: 'evaluator', usd: 2, share: 0.2, suggestion: '75% of evaluator spend is on L0 PRs: tiered evaluation.' },
+    ],
+  };
+  const html = r.renderThroughput(t);
+  assert.match(html, /data-testid="throughput-merged"[\s\S]*?>3</);
+  assert.match(html, /data-testid="throughput-per-pr"[\s\S]*?~\$3\.33[\s\S]*?~\$10 in all/);
+  assert.equal((html.match(/data-testid="throughput-day"/g) ?? []).length, 14);
+  assert.match(html, /title="2026-10-12: 2 merged"/, 'each day\'s bar says its count on hover');
+  assert.equal((html.match(/data-testid="throughput-week"/g) ?? []).length, 2);
+  assert.equal((html.match(/data-testid="throughput-stage"/g) ?? []).length, 9, 'every stage, gardener at zero included');
+  assert.match(html, /data-stage="gardener"[\s\S]*?~\$0\.00/);
+  assert.match(html, /data-stage="retries"[\s\S]*?Retries and fixes[\s\S]*?~\$1\.33[\s\S]*?~\$4\.00[\s\S]*?40%/);
+  assert.equal((html.match(/data-testid="throughput-suggestion"/g) ?? []).length, 3);
+  assert.match(html, /data-stage="retries"[^>]*>[\s\S]*?1\. Retries and fixes · ~\$4\.00 \(40%\)[\s\S]*?look at why first attempts fail/);
+  assert.equal((html.match(/data-testid="throughput-wait"/g) ?? []).length, 2, 'the owner\'s waits in the table');
+  assert.match(html, /data-kind="decision:land"[\s\S]*?1 waiting now/);
+  assert.match(html, /data-kind="merge"[\s\S]*?touches a high-risk area/);
+  assert.match(html, /data-testid="throughput-other-wait"[^>]*>Also: 1 task\(s\) held behind another task/);
+  assert.match(r.renderThroughput({ ...t, waits: [] }), /data-testid="throughput-no-waits"/);
+  assert.match(r.renderThroughputPanel(asOther), /data-testid="throughput-refused"[^>]*>Throughput is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.doesNotMatch(r.renderThroughputPanel(asOwner), /throughput-refused/);
+});
+
+test('agent runs refused: the runs card and a run page say whose they are, not an empty list or "No such run"', () => {
+  const msg = "agent runs are for the owner (@example-owner) and the project's writers; @someone-else isn't one";
+  assert.equal(r.runsRefused(msg), msg, 'the server\'s refusal is recognised');
+  assert.equal(r.runsRefused('no such run'), null, 'a missing run is not a refusal');
+  assert.match(r.renderRunsRefused(msg), /data-testid="runs-refused"[^>]*>Agent runs are for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\.</);
+  // From the state, before asking: the demo's dashboard for someone who is neither the owner nor a writer.
+  assert.equal((asOther as unknown as { canReadRuns: boolean }).canReadRuns, false);
+  assert.equal((asOwner as unknown as { canReadRuns: boolean }).canReadRuns, true);
+  assert.equal(r.runsRefusal(asOther), msg, 'the same words the server would send');
+  assert.equal(r.runsRefusal(asOwner), null);
+  assert.equal(r.runsRefusal({ ...asOwner, canReadRuns: undefined }), null, 'an older server without the flag: asked as before');
+  const issue = asOther.tasks[0]!.issue;
+  assert.match(r.renderIssue(asOther, issue), /data-testid="runs-card"[\s\S]*?data-testid="runs-refused"/, 'the issue page says so instead of asking');
+  assert.doesNotMatch(r.renderIssue(asOwner, issue), /data-testid="runs-refused"/);
+});
+
+test('a research run on its page: each search, each page fetched or refused (linked only when fetched, rel=noopener), a cap it stopped at', () => {
+  const html = r.renderRunResearch({
+    searches: ['sqlite vacuum into durability', 'litestream restore'],
+    fetches: [
+      { url: 'https://sqlite.org/lang_vacuum.html', host: 'sqlite.org', refused: null },
+      { url: 'https://tracker.example.net/x', host: 'tracker.example.net', refused: 'not on the allowed hosts' },
+      { url: 'javascript:alert(1)', host: '', refused: null },
+    ],
+    capped: ['searches: 20 of 20 today'],
+  });
+  assert.match(html, /2 search\(es\), 2 page\(s\) fetched, 1 refused/);
+  assert.equal((html.match(/data-testid="run-research-search"/g) ?? []).length, 2);
+  assert.match(html, /data-testid="run-research-search"[^>]*>sqlite vacuum into durability</);
+  assert.match(html, /<a href="https:\/\/sqlite\.org\/lang_vacuum\.html" target="_blank" rel="noopener noreferrer"/);
+  assert.match(html, /data-testid="run-research-fetch" data-refused=""[\s\S]*?>refused<[\s\S]*?tracker\.example\.net\/x[\s\S]*?not on the allowed hosts/);
+  assert.doesNotMatch(html, /href="https:\/\/tracker\.example\.net/, 'a refused page is not a link');
+  assert.doesNotMatch(html, /href="javascript:/, 'only http(s) becomes a link');
+  assert.match(html, /role="alert"[^>]*data-testid="run-research-capped"[\s\S]*?Stopped at a cap:[\s\S]*?searches: 20 of 20 today/);
+  assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
 });

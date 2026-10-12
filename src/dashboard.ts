@@ -23,14 +23,18 @@ import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { healthView } from './health.js';
+import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
+import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
 import { machineStats, type MachineStats } from './os/stats.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
+import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
+import { throughput } from './throughput.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -101,7 +105,39 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 
 export { mayAnswer };
 
+/** Who may read throughput (what runs cost, where PRs waited): the project's owner or one of its writers. */
+export function mayReadThroughput(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
+
+/**
+ * Who may read agent runs (every route under /api/runs: a run's record, its live feed, a research run's
+ * searches and pages): the project's owner or one of its writers. Writing to a run (a console message, a
+ * stop) stays the owner's alone, checked on those routes as well.
+ */
+export function mayReadRuns(user: string, owners: { default: string; writers: string[] }): boolean {
+  return mayAnswer(owners.default, user, owners);
+}
+
+/**
+ * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
+ * everything under /api/runs, and the list of live runs (/api/live).
+ */
+export const isRunsPath = (pathname: string) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live';
+
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
+
+/**
+ * A page of the engine's docs on its public repository, from package.json (docs aren't in the package);
+ * null when the package names no https repository.
+ */
+export function docsUrl(page: string, repository: unknown = enginePackage().repository): string | null {
+  const raw = typeof repository === 'string' ? repository : (repository as { url?: unknown } | undefined)?.url;
+  if (typeof raw !== 'string') return null;
+  const base = raw.replace(/^git\+/, '').replace(/\.git$/, '');
+  return /^https:\/\/[^/\s]+\/[^\s]+$/.test(base) ? `${base}/blob/main/docs/${page}.md` : null;
+}
+const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { repository?: unknown };
 
 /**
  * Which log and state a dashboard reads. A project checkout's own, or, with
@@ -158,6 +194,45 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
   };
+}
+
+/** The runs live now, for the Agents page; their held messages' text only for the owner, who may control them. */
+export function liveView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user'>) {
+  const owner = o.cfg.project.owners.default;
+  const canControl = !!o.user && o.user.toLowerCase() === owner.toLowerCase();
+  return { owner, canControl, runs: liveRuns(o.stateDir).map((r) => ({ ...r, pending: canControl ? r.pending : r.pending.map((m) => ({ id: m.id, by: m.by, at: m.at, text: '' })) })) };
+}
+
+/**
+ * A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error).
+ * Reading it is the runs gate's to allow (the owner and the writers), as for the rest of a run's record; only a
+ * message or a stop is the owner's alone (sendMessage, stopRun).
+ */
+function feedOrWait(o: Pick<DashboardOptions, 'stateDir'>, run: string, after: number): { items: FeedItem[]; ended: boolean } {
+  const f = readFeed(o.stateDir, run, after);
+  if (f) return f;
+  if (liveRuns(o.stateDir).some((r) => r.run === run)) return { items: [], ended: false };
+  throw new ConsoleError(`no feed for run ${run}`);
+}
+
+/**
+ * What the run page's console needs: whether the run is live, whether this user (the owner) may message or
+ * stop it, its messages held until the agent's turn ends, and the console's events for it (queued, delivered,
+ * dropped, stopped, refused), oldest first.
+ */
+export function consoleView(o: Pick<DashboardOptions, 'stateDir' | 'cfg' | 'user' | 'eventsDb'>, run: string) {
+  const owner = o.cfg.project.owners.default;
+  const canControl = !!o.user && o.user.toLowerCase() === owner.toLowerCase();
+  const live = liveRuns(o.stateDir).find((r) => r.run === run) ?? null;
+  const events = readEvents(o.eventsDb)
+    .filter((e) => e.type.startsWith('console.') && ((e.payload as { run?: string }).run === run))
+    .map((e) => {
+      const p = e.payload as Record<string, unknown>;
+      return { at: e.ts, type: e.type.slice('console.'.length), id: (p.id as string | undefined) ?? null, by: (p.by as string | undefined) ?? null, text: canControl ? ((p.text as string | undefined) ?? null) : null, why: (p.why as string | undefined) ?? null };
+    });
+  const settled = new Set(events.filter((e) => e.type === 'message_delivered' || e.type === 'message_dropped').map((e) => e.id));
+  const held = events.filter((e) => e.type === 'message_queued' && !settled.has(e.id));
+  return { owner, canControl, live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
 }
 
 /**
@@ -249,6 +324,12 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
     ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
     settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: settingSource(key, s, repo) })),
   };
+}
+
+/** A research run for its page: each search, each fetch (refused or not), and every cap it stopped at. */
+export function researchView(events: { type: string; payload: unknown }[], run: string) {
+  const capped = events.filter((e) => e.type === 'research.capped' && (e.payload as { run?: string | null }).run === run).map((e) => String((e.payload as { why?: string }).why ?? ''));
+  return { ...researchForRun(events, run), capped };
 }
 
 /** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
@@ -463,6 +544,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
       ...p,
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswer(d.owner, opts.user, opts.cfg.project.owners) })),
+      // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
+      canReadThroughput: mayReadThroughput(opts.user, opts.cfg.project.owners),
+      // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
+      canReadRuns: mayReadRuns(opts.user, opts.cfg.project.owners),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -493,6 +578,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/logs' && req.method === 'GET') {
           const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
           return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
+        }
+        // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
+        if (isRunsPath(url.pathname) && !mayReadRuns(opts.user, opts.cfg.project.owners)) {
+          return json(res, 403, { error: `agent runs are for the owner (@${opts.cfg.project.owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
         }
         // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
         if (url.pathname === '/api/runs' && req.method === 'GET') {
@@ -549,6 +638,78 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true, number });
           }
         }
+        // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
+        // is the runs gate's to say (the owner and the writers), as for the rest of the run.
+        const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
+        if (research && req.method === 'GET') return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
+        // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
+        if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView(opts));
+        const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
+        if (con) {
+          const [, run, what] = con as unknown as [string, string, string];
+          const consoleError = (e: unknown) => {
+            if (!(e instanceof ConsoleError)) throw e;
+            return json(res, /only the owner/.test(e.message) ? 403 : /isn't live|no feed/.test(e.message) ? 404 : 400, { error: e.message });
+          };
+          if (what === 'console' && req.method === 'GET') return json(res, 200, consoleView(opts, run));
+          if (what === 'feed' && req.method === 'GET') {
+            try {
+              return json(res, 200, feedOrWait(opts, run, Number(url.searchParams.get('after') ?? -1)));
+            } catch (e) {
+              return consoleError(e);
+            }
+          }
+          if (what === 'live' && req.method === 'GET') {
+            let after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? -1);
+            if (!Number.isInteger(after)) after = -1;
+            try {
+              feedOrWait(opts, run, after); // the run must have a feed or be live
+            } catch (e) {
+              return consoleError(e);
+            }
+            res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+            res.write('retry: 2000\nevent: hello\ndata: {}\n\n');
+            let done = false;
+            const tick = () => {
+              if (done) return;
+              let f: { items: FeedItem[]; ended: boolean };
+              try {
+                f = feedOrWait(opts, run, after);
+              } catch {
+                return;
+              }
+              for (const it of f.items) {
+                res.write(`id: ${it.seq}\nevent: item\ndata: ${JSON.stringify(it)}\n\n`);
+                after = it.seq;
+              }
+              if (f.ended) {
+                done = true;
+                clearInterval(poll);
+                clearInterval(keep);
+                res.write('event: end\ndata: {}\n\n');
+                res.end();
+              }
+            };
+            const poll = setInterval(tick, opts.pollMs ?? 500);
+            const keep = setInterval(() => !done && res.write(': ping\n\n'), 25_000);
+            req.on('close', () => {
+              done = true;
+              clearInterval(poll);
+              clearInterval(keep);
+            });
+            tick();
+            return;
+          }
+          if ((what === 'message' || what === 'stop') && req.method === 'POST') {
+            const body = (await readBody(req)) as { text?: string };
+            try {
+              const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: opts.user }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: opts.user });
+              return json(res, 200, { ok: true, ...r });
+            } catch (e) {
+              return consoleError(e);
+            }
+          }
+        }
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
           return run ? json(res, 200, run) : json(res, 404, { error: 'no such run' });
@@ -558,6 +719,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
+        // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
+        // tuning each. The owner's and the writers' to read, like the runs it is made of.
+        if (url.pathname === '/api/throughput' && req.method === 'GET') {
+          const owners = opts.cfg.project.owners;
+          if (!mayReadThroughput(opts.user, owners)) return json(res, 403, { error: `throughput is for the owner (@${owners.default}) and the project's writers; @${opts.user || 'unknown'} isn't one` });
+          return json(res, 200, throughput(readEvents(opts.eventsDb)));
+        }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;
           try {
@@ -565,7 +733,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          return json(res, 200, healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }));
+          return json(res, 200, { ...healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } }), docs: { backups: docsUrl('backups') } });
         }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView(opts));

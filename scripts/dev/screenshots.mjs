@@ -143,6 +143,12 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('hotspot.released', { issue: 10, waited_ms: 180_000, files: ['src/discounts.js'], started: true });
   } catch (e) {
     console.error(`no PR events in this engine (${e.message.split('\n')[0]}); the PR page stays empty`);
+  }
+  // An off-machine copy, verified, for the health panel's backup card (engines that make them).
+  try {
+    add('backup.offsite', { ok: true, destination: 'rclone remote, backups bucket', key: 'events-112.db.age', last_id: 1 });
+  } catch (e) {
+    console.error(`no off-machine backups in this engine (${e.message.split('\n')[0]}); the health panel says not set up`);
   } finally {
     log.close();
   }
@@ -171,6 +177,28 @@ if (record?.RunRecorder && stateDir) {
   got([{ type: 'tool_result', tool_use_id: 'c', content: 'ok 1 - cart\nok 2 - discounts\nok 3 - totals round to the cent' }]);
   r.finish({ reason: 'succeeded', costUsd: 0.42, turns: 6, model: 'sonnet', final: 'Totals now round half-up to the cent; the failing test passes.' });
   runId = r.id;
+}
+
+// A research run with its searches and pages (one refused) and a cap it stopped at, for its run page.
+let researchRunId = null;
+if (record?.RunRecorder && stateDir && eventsMod?.EventLog) {
+  const r = new record.RunRecorder(stateDir, { role: 'researcher', model: 'sonnet', cwd: join(stateDir, 'research'), issue });
+  r.finish({ reason: 'succeeded', costUsd: 0.18, turns: 9, model: 'sonnet', final: 'Rounding half-up to the cent is what the payment provider expects; sources below.' });
+  const log = new eventsMod.EventLog(join(stateDir, 'events.db'));
+  try {
+    const add = (type, payload) => log.append(type, { issue, run: r.id, ...payload }, 'screenshots');
+    add('research.searched', { query: 'payment totals rounding half-up or banker\'s rounding' });
+    add('research.fetched', { url: 'https://en.wikipedia.org/wiki/Rounding', host: 'en.wikipedia.org', refused: null });
+    add('research.searched', { query: 'currency minor units ISO 4217' });
+    add('research.fetched', { url: 'https://www.iso.org/iso-4217-currency-codes.html', host: 'www.iso.org', refused: null });
+    add('research.fetched', { url: 'https://paste.example.net/raw/abc', host: 'paste.example.net', refused: 'not on the allowed hosts' });
+    add('research.capped', { why: 'searches: 2 of 2 today' });
+    researchRunId = r.id;
+  } catch (e) {
+    console.error(`no research events in this engine (${e.message.split('\n')[0]}); the research run shot is skipped`);
+  } finally {
+    log.close();
+  }
 }
 
 // The demo as an instance too, for what only an instance has (its settings): an instance of the
@@ -224,6 +252,23 @@ if (chat?.writeChatAnswer && stateDir) {
   });
 }
 
+// A run that's live right now, for the live run page: listed by the console, with its feed so far
+// (thinking, text, a failing test, an edit's diff) and a message held for the next turn.
+let liveId = null;
+const consoleMod = await optional('console.js');
+const feedMod = await optional('run-feed.js');
+if (consoleMod?.writeLive && feedMod?.RunFeed && stateDir) {
+  liveId = `${new Date().toISOString().replace(/[:.]/g, '-')}-worker-live01`;
+  const wt = join(root, '.claude', 'worktrees', `issue-${issue}`);
+  consoleMod.writeLive(stateDir, [{ run: liveId, issue, role: 'worker', model: 'sonnet', startedAt: new Date().toISOString(), pending: [{ id: 'm1', text: 'Also add a test for negative quantities.', by: 'example-owner', at: new Date().toISOString() }] }]);
+  const f = new feedMod.RunFeed(stateDir, { run: liveId, issue, role: 'worker', model: 'sonnet', cwd: wt });
+  f.line({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'The total is floored before the discount is applied, so 10.009999 shows as 10.00.' }, { type: 'text', text: "I'll reproduce the rounding failure first." }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }] } });
+  f.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'not ok 3 - totals round to the cent\n  expected 10.01, got 10.009999' }] } });
+  f.line({ type: 'assistant', message: { content: [{ type: 'text', text: 'Rounding at the end instead.' }, { type: 'tool_use', id: 't2', name: 'Edit', input: { file_path: join(wt, 'src', 'totals.js'), old_string: 'return Math.floor(total * 100) / 100;', new_string: 'return Math.round(total * 100) / 100;' } }] } });
+  f.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'edited' }] } });
+  f.message('m1', 'queued', 'Also add a test for negative quantities.');
+}
+
 let hub = null;
 if (hubMod && stateDir) {
   hub = await serve(['--hub', `shop=${stateDir}`, '--port', String(port + 1)]);
@@ -245,7 +290,9 @@ const pages = [
   ['logs', '/logs'],
   ['settings', '/settings'],
   ...(runId ? [['run-detail', `/runs/${runId}`]] : []),
+  ...(researchRunId ? [['run-research', `/runs/${researchRunId}`]] : []),
   ...(chatId ? [['chat', `/issues?chat=${chatId}`]] : []),
+  ...(liveId ? [['live-run', `/runs/${liveId}`]] : []),
 ];
 const shots = [
   ...pages.map(([name, path]) => ({ name, url: `${base}${path}`, token })),

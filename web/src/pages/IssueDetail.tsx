@@ -6,7 +6,7 @@ import { DotPill, Meter, RecordsTable } from '../components/patterns';
 import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { DecisionCard } from './Decisions';
 import { Header } from './Overview';
-import { RunList } from './RunDetail';
+import { RunList, runsRefusal } from './RunDetail';
 import { areaOf } from './Issues';
 
 interface RawEvent { id: number; ts: string; type: string; actor: string; payload: Record<string, unknown> }
@@ -155,7 +155,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
             </Card>
           )}
           <Checks runs={checks} />
-          <RunList issue={t.issue} lastId={state.lastId} />
+          <RunList issue={t.issue} lastId={state.lastId} refused={runsRefusal(state)} />
           <Card className="overflow-hidden">
             <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Timeline</div>
             {events.length ? (
