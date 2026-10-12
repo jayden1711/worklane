@@ -125,6 +125,14 @@ const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Coul
 const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 /** A wait on the Claude login shorter than this isn't worth an event. */
 const LOCK_WAIT_RECORDED_MS = 1_000;
+/** How many times an issue blocked on a rate limit or budget is requeued on its own before it waits for a person. */
+const RETRY_CAP = 3;
+/** When a rate-limit or budget block may retry: a rate limit after its window (5 h), a budget at the next UTC midnight. */
+function retryAfter(kind: 'rate_limit' | 'budget', now = Date.now()): { kind: 'rate_limit' | 'budget'; after: Date } {
+  if (kind === 'rate_limit') return { kind, after: new Date(now + 5 * 3600_000) };
+  const d = new Date(now);
+  return { kind, after: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)) };
+}
 
 /**
  * Run a project command without blocking the event loop: with several agents
@@ -333,6 +341,7 @@ export class Coordinator {
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
+    await step('retry', () => this.retryBlocked(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
@@ -1141,11 +1150,14 @@ export class Coordinator {
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
       const said = r.detail.slice(0, 1500).replace(/`{3,}/g, "'''");
-      await this.block(n, owner, `claude kept failing to start on an auth or transient error (token refresh, rate limit, overload or network), not on this change, so no attempt was counted. Check the agent user's Claude login (\`claude auth status\`) and label it \`ready\` again. claude reported:\n\n\`\`\`\n${said}\n\`\`\``, r.reason !== 'rate_limited');
+      // The claim is released, so relabelling `ready` requeues it; a rate limit also retries on its own.
+      await this.block(n, owner, `claude kept failing to start on an auth or transient error (token refresh, rate limit, overload or network), not on this change, so no attempt was counted. Check the agent user's Claude login (\`claude auth status\`) and label it \`ready\` again. claude reported:\n\n\`\`\`\n${said}\n\`\`\``, true, r.reason === 'rate_limited' ? retryAfter('rate_limit') : undefined);
       return { stop: true as const };
     }
     if (r.reason === 'rate_limited' || r.reason === 'budget_exhausted' || r.reason === 'auth_mismatch') {
-      await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, false);
+      // Released, so relabelling `ready` requeues it. Rate limits and budgets also retry once their window resets;
+      // an auth problem waits for the owner.
+      await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, true, r.reason === 'rate_limited' ? retryAfter('rate_limit') : r.reason === 'budget_exhausted' ? retryAfter('budget') : undefined);
       return { stop: true as const };
     }
     // A run that failed almost at once and committed nothing never got to work: another attempt would fail the
@@ -1445,12 +1457,38 @@ export class Coordinator {
     return id;
   }
 
-  private async block(issue: number, owner: string, why: string, release_ = true) {
-    this.emit('issue.blocked', { issue, owner, why: why.slice(0, 1000) });
+  /** `retry`: a rate-limit or budget block that retries on its own after `after` (up to RETRY_CAP times). */
+  private async block(issue: number, owner: string, why: string, release_ = true, retry?: { kind: 'rate_limit' | 'budget'; after: Date }) {
+    this.emit('issue.blocked', { issue, owner, why: why.slice(0, 1000), ...(retry ? { retry_after: retry.after.toISOString(), retry_kind: retry.kind } : {}) });
     await this.d.backlog.addLabels(issue, ['blocked']);
     await this.d.backlog.removeLabel(issue, 'agent:working');
-    await this.d.backlog.comment(issue, `[${BRAND.cli}] @${owner} blocked: ${why}`);
+    const when = retry ? ` It retries on its own after ${retry.after.toISOString()} (at most ${RETRY_CAP} times), or label it \`ready\` again sooner.` : '';
+    await this.d.backlog.comment(issue, `[${BRAND.cli}] @${owner} blocked: ${why}${when}`);
     if (release_) this.releaseClaim(issue, why);
+  }
+
+  /**
+   * Rate-limit and budget blocks whose window has passed: relabelled `ready` (so the next dispatch takes them)
+   * up to RETRY_CAP times per issue, then left blocked with a comment. Auth blocks never retry on their own.
+   */
+  private async retryBlocked(now = Date.now()) {
+    const latest = new Map<number, StoredEvent>();
+    for (const e of this.d.log.read(0, ['issue.blocked', 'issue.claimed', 'issue.retry'])) latest.set((e.payload as { issue: number }).issue, e);
+    for (const [n, e] of latest) {
+      if (e.type !== 'issue.blocked') continue;
+      const b = e.payload as EventPayload<'issue.blocked'>;
+      if (!b.retry_after || !b.retry_kind || Date.parse(b.retry_after) > now) continue;
+      const used = this.d.log.read(0, ['issue.retry']).filter((r) => (r.payload as EventPayload<'issue.retry'>).issue === n && !(r.payload as EventPayload<'issue.retry'>).gave_up).length;
+      if (used >= RETRY_CAP) {
+        this.emit('issue.retry', { issue: n, attempt: used, kind: b.retry_kind, gave_up: true });
+        await this.d.backlog.comment(n, `[${BRAND.cli}] @${b.owner} still blocked after ${used} automatic retries (${b.retry_kind === 'rate_limit' ? 'rate limit' : 'budget'}); label it \`ready\` again when it should run.`);
+        continue;
+      }
+      this.emit('issue.retry', { issue: n, attempt: used + 1, kind: b.retry_kind, gave_up: false });
+      await this.d.backlog.removeLabel(n, 'blocked');
+      await this.d.backlog.addLabels(n, ['ready']);
+      await this.d.backlog.comment(n, `[${BRAND.cli}] The ${b.retry_kind === 'rate_limit' ? 'rate-limit' : 'budget'} window has passed: requeued (automatic retry ${used + 1} of ${RETRY_CAP}).`);
+    }
   }
 
   private releaseClaim(issue: number, why: string) {
