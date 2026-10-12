@@ -125,6 +125,27 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.
 
+## The Board
+
+The home page (`/`, `g b`) shows every task in flight, one column per stage: **Planning** (ready, claimed, a plan or research run), **Building**, **Verifying** (the coordinator's checks and the evaluator; in PR mode, a PR whose checks are running or being fixed), **Waiting on you** (the holds only the owner ends, as on the Waiting page: a decision, a held plan, a PR left to you, a CI fix that gave up, a block, a failed landing) and **Landing** (queued to land, or a PR the merge rules are merging). On a hub it shows every instance you have a role on, with a filter to pick one; an instance's own dashboard shows its own. It follows each instance's live stream.
+
+Each card is built by the instance's own server (`GET /api/board`, `src/board.ts`) from what the coordinator already recorded: the instance and issue (and PR) numbers, the title, diff +/− (the PR's as the watch last read it, `pr.stats`, else the last proposed change), the PR's comment count, how long since the task started, its checks (failing, pending or passing; click for each), and, while an agent runs, its memory, CPU time and processes (its process group, read from `/proc` on Linux; not measured elsewhere). Nothing is fetched from GitHub per card.
+
+The actions on a card follow your role there, and each is refused again by the route it uses:
+
+| | viewer | writer | owner |
+| --- | --- | --- | --- |
+| Watch a running agent | an outline (each step's kind and tool, no content) | the live feed | the live feed |
+| Steer (a console message, held until the turn ends) | – | – | yes |
+| Answer the open decision | – | where the decision rules allow (not plans) | yes |
+| Approve a high-risk landing, or Merge a high-risk PR left to you on GitHub | – | – | yes |
+
+Steer and Approve are the console's and the decision rules' own: messaging a run and high-risk merges are the owner's. Every answer and message is recorded in the audit, as from the pages they come from.
+
+## The Machine page
+
+Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
+
 ## Pull requests
 
 In PR mode, the **Pull requests** page (`g p`) shows every PR the harness opened, from its own events:

@@ -562,3 +562,47 @@ export interface Waiting {
   /** The daily digest as posted to GitHub. */
   markdown: string;
 }
+
+/** The Board (GET /api/board, src/board.ts): one instance's tasks in flight by stage, with what this person may do on each. */
+export type BoardColumn = 'planning' | 'building' | 'verifying' | 'waiting' | 'landing';
+export interface BoardCard {
+  instance: string;
+  issue: number;
+  title: string;
+  column: BoardColumn;
+  status: TaskStatus;
+  pr: { number: number; url: string; phase: PrView['phase'] } | null;
+  diff: { added: number | null; removed: number | null; lines: number; files: number; source: 'pr' | 'change' } | null;
+  comments: number | null;
+  startedAt: string;
+  since: string;
+  checks: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
+  run: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
+  waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
+  decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
+  level: string | null;
+  highRisk: boolean;
+  actions: { watch: 'feed' | 'outline' | null; steer: boolean; answer: boolean; approve: { decision: string; options: string[] } | { merge: string } | null };
+}
+export interface BoardData {
+  instance: string;
+  role: Role;
+  at: string;
+  columns: { id: BoardColumn; label: string }[];
+  cards: BoardCard[];
+  slots: { cap: number; running: number };
+}
+/** A run's feed as an outline (GET /api/board/watch/:run): for viewers, the steps without their content. */
+export interface OutlineItem {
+  seq: number;
+  at: string;
+  kind: string;
+  tool?: string;
+  status?: 'ok' | 'error';
+  reason?: string;
+}
+
+/** A call to one instance: through the hub to the named one (`/api/i/<name>/...`), or this page's own server (null). */
+export const onInstance = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
+/** A stream's URL on one instance: through the hub to the named one, or this page's own server (null). */
+export const instanceStream = async (instance: string | null, path: string) => streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));

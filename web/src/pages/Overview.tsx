@@ -1,6 +1,5 @@
 import type { State } from '../api';
 import { navigate } from '../App';
-import { HealthPanel } from '../components/HealthPanel';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
@@ -17,6 +16,29 @@ export function Header({ title, children, sub }: { title: string; sub?: string; 
 
 /** A headline figure, as an insight card (Beautiful UI). */
 const Stat = InsightCard;
+
+/** The machine in a line: slots in use, the governor's last reading, and the way to its page (health moved there). */
+export function MachineSummary({ state }: { state: State }) {
+  const g = state.governor;
+  return (
+    <Card className="primitive-card-pad flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px]" data-testid="overview-machine">
+      <span className="text-[13px] font-medium text-ink">Machine</span>
+      <span className="tabular-nums text-ink-2">
+        {state.slots.running} of {state.slots.cap} agent slots in use
+      </span>
+      {g && (
+        <span className={cx('tabular-nums', g.held ? 'text-orange' : 'text-ink-2')}>
+          {g.held ? `dispatch held: ${g.reason}` : 'dispatch running'}
+          {g.load !== null ? ` · load ${g.load.toFixed(1)}` : ''}
+          {g.freeDiskPct !== null ? ` · ${Math.round(g.freeDiskPct)}% disk free` : ''}
+        </span>
+      )}
+      <button className="ml-auto text-blue-ink hover:underline" onClick={() => navigate('/machine')} data-testid="overview-machine-link">
+        Memory, load, disk, backups and settings on the Machine page
+      </button>
+    </Card>
+  );
+}
 
 const ACTIVE = new Set(['claimed', 'reproducing', 'building', 'verifying', 'evaluating']);
 
@@ -110,7 +132,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
           </Card>
         </div>
 
-        <HealthPanel />
+        <MachineSummary state={state} />
         <IntakeHealthPanel state={state} />
 
         <Card className="overflow-hidden">
