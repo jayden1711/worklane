@@ -172,6 +172,14 @@ test('the installer downloads only what is pinned, checks it before importing, a
   assert.doesNotMatch(installPs1 + lib, /Invoke-Expression|\biex\b|\birm\b|curl[^\n]*\|\s*(ba)?sh|DownloadString/i);
 });
 
+test('the PowerShell scripts have no "$name:" in strings, which PowerShell reads as a drive-qualified variable', () => {
+  for (const f of ['lib.ps1', 'install.ps1', 'doctor.ps1']) {
+    const text = readFileSync(join(win, f), 'utf8');
+    const bad = [...text.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*):/g)].filter((m) => !/^(script|env|global|using|local|private)$/i.test(m[1]!));
+    assert.deepEqual(bad.map((m) => m[0]), [], `${f}: write \${name}: instead`);
+  }
+});
+
 // ------------------------------------------------------------------------------------- PowerShell itself
 
 const shell = process.platform === 'win32' ? 'powershell.exe' : which('pwsh') ? 'pwsh' : null;

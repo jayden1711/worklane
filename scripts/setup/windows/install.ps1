@@ -84,7 +84,7 @@ if ($AfterCredentials) {
   Invoke-InDistro "bash $SetupDir/scripts/bootstrap.sh --hardened --after-credentials$yes $Instance $Repo"
   Write-Step 'the dashboard, from Windows'
   Write-Output "   start it in a terminal: wsl -d $DistroName -u root -- bash $SetupDir/scripts/setup/dashboard.sh $Instance [<your GitHub login>]"
-  Write-Output "   it listens on the distro's 127.0.0.1:$Port, which WSL forwards to Windows' 127.0.0.1:$Port: open the URL it prints (with its token) in a Windows browser"
+  Write-Output "   it listens on the distro's 127.0.0.1:$Port, which WSL forwards to Windows' 127.0.0.1:${Port}: open the URL it prints (with its token) in a Windows browser"
   Write-Output "   then: .\scripts\setup\windows\doctor.ps1 -Instance $Instance -Repo $Repo"
   exit 0
 }
