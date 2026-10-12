@@ -119,6 +119,21 @@ test('bootstrap under WSL refuses a repo under /mnt', { skip: process.platform =
   assert.match(r.stderr, /under \/mnt, where WSL mounts Windows drives: clone the repo on WSL's own filesystem/);
 });
 
+test('setup scripts under WSL: the checkouts root (machine.json, --checkouts) never under /mnt or on a Windows drive', { skip: process.platform === 'win32' && 'bash script' }, () => {
+  const mounts = join(mkdtempSync(join(tmpdir(), 'mounts-')), 'mounts');
+  writeFileSync(mounts, [ROOT, DRIVE_C, 'D:\\134 /data 9p rw,aname=drvfs;path=D:\\ 0 0'].join('\n'));
+  const lib = join(repoRoot, 'scripts', 'setup', 'lib.sh');
+  const check = (path: string, wsl: boolean) => spawnSync('bash', ['-c', `source "$1"; refuse_windows_fs "$2"`, 'x', lib, path], { encoding: 'utf8', env: { ...process.env, MOUNTS: mounts, WSL_DISTRO_NAME: wsl ? 'Worklane' : '' } });
+  assert.match(check('/mnt/c/worklane', true).stderr, /under \/mnt, where WSL mounts Windows drives/);
+  assert.match(check('/data/worklane', true).stderr, /on the Windows drive mounted at \/data/);
+  assert.equal(check('/srv/worklane', true).status, 0);
+  assert.equal(check('/database/worklane', true).status, 0, 'a prefix of a mount point is not inside it');
+  if (process.platform !== 'linux') assert.equal(check('/mnt/c/worklane', false).status, 0, 'only inside WSL');
+  const setup = join(repoRoot, 'scripts', 'setup');
+  assert.match(readFileSync(join(setup, 'machine.sh'), 'utf8'), /refuse_windows_fs "\$checkouts" \|\| exit 2/);
+  assert.match(readFileSync(join(setup, 'checkout.sh'), 'utf8'), /dest="\$\(checkouts_root\)[^\n]*\nrefuse_windows_fs "\$dest" \|\| exit 1/);
+});
+
 test('the WSL isolation probe: passes on a hardened distro, names each thing open otherwise', { skip: process.platform === 'win32' && 'bash script' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'iso-'));
   const files = (name: string, f: WslFacts, interop: boolean) => {
@@ -184,6 +199,8 @@ test('PowerShell: the dashboard port matches the engine\'s; .wslconfig keeps wha
   assert.deepEqual(gaps.stdout.trim().split(/\r?\n/).map(Number), [0, 5]);
   const list = ps(`. ${q(join(win, 'lib.ps1'))}; ConvertFrom-WslList "  NAME      STATE           VERSION\`n* Ubuntu    Running         2\`n  Worklane  Stopped         2\`n" | ForEach-Object { "$($_.Name) $($_.State) $($_.Version) $($_.Default)" }`);
   assert.deepEqual(list.stdout.trim().split(/\r?\n/), ['Ubuntu Running 2 True', 'Worklane Stopped 2 False']);
+  const roots = ps(`. ${q(join(win, 'lib.ps1'))}; Get-CheckoutsRoot '{"max_cap":16,"checkouts":"/data/worklane"}'; Get-CheckoutsRoot ''; Get-CheckoutsRoot '{"checkouts":"relative"}'`);
+  assert.deepEqual(roots.stdout.trim().split(/\r?\n/), ['/data/worklane', '/srv/worklane', '/srv/worklane']);
 });
 
 test('PowerShell: the installer\'s dry run shows the whole plan and changes nothing', { skip: skipPs }, () => {

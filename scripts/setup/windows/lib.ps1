@@ -149,5 +149,13 @@ function Get-KeepAliveSpec([string]$User) {
   }
 }
 
+# The instances' checkout root, from the distro's /etc/worklane/machine.json (scripts/setup/machine.sh); the default
+# when it's missing or unreadable, like lib.sh's checkouts_root.
+function Get-CheckoutsRoot([string]$MachineJson) {
+  try { $c = ($MachineJson | ConvertFrom-Json).checkouts } catch { $c = $null }
+  if ($c -is [string] -and $c -match '^/[A-Za-z0-9._/-]+$') { return $c }
+  return '/srv/worklane'
+}
+
 # One line of the plan, or of the doctor's report.
 function Write-Step([string]$What) { Write-Output ''; Write-Output "== $What" }

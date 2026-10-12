@@ -18,7 +18,16 @@ Two more settings go in the same file: `[boot] systemd=true` for the services, a
 
 The Windows account that owns the distro is trusted. It can always enter the distro as root (`wsl -d Worklane -u root`), just as a Linux machine's admin can. Run the installer from your own account.
 
-Repos live on WSL's own filesystem, never under `/mnt`. Instance checkouts go to `/srv/worklane/<name>/`. Both `worklane install` and `bootstrap.sh` refuse a checkout under `/mnt` or on a Windows drive, and doctor fails on one.
+Repos live on WSL's own filesystem, never under `/mnt`. Instance checkouts go under the machine's checkouts root: `/etc/worklane/machine.json`'s `checkouts`, set with `machine.sh --checkouts`, default `/srv/worklane`.
+
+Each of these refuses a path under `/mnt` or on a Windows drive:
+
+- `machine.sh --checkouts`
+- `checkout.sh`
+- `worklane install`
+- `bootstrap.sh`
+
+`worklane doctor` fails a checkout that's on one.
 
 ## What you run
 

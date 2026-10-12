@@ -77,7 +77,10 @@ if ($Instance) {
   else { Report 'fail' 'dashboard' "the dashboard listens in $DistroName on $port but Windows' 127.0.0.1:$port doesn't reach it: check [wsl2] localhostForwarding in $wslconfig, then wsl --shutdown" }
   if ($Repo) {
     if (-not (Test-RepoSlug $Repo)) { Report 'fail' 'instance' "bad repo '$Repo'"; Finish }
-    $root = "/srv/worklane/$Instance/$(($Repo -split '/')[1])"
+    # Where the setup put the checkouts: machine.json's `checkouts` (machine.sh --checkouts), else the default.
+    $machine = ((& wsl.exe -d $DistroName -u root -- cat /etc/worklane/machine.json 2>$null) -join "`n")
+    $checkouts = Get-CheckoutsRoot $machine
+    $root = "$checkouts/$Instance/$(($Repo -split '/')[1])"
     Write-Output ''
     Write-Output "-- the engine's doctor, inside $DistroName, as wl-$Instance --"
     & wsl.exe -d $DistroName -u "wl-$Instance" -- worklane doctor --root $root --instance $Instance

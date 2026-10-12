@@ -23,6 +23,7 @@ done
 [[ "$max" =~ ^[1-9][0-9]?$ ]] || { echo "--max-cap: a whole number from 1 to 99" >&2; exit 2; }
 [[ "$cap" =~ ^[1-9][0-9]?$ ]] && [ "$cap" -le "$max" ] || { echo "--cap: a whole number from 1 to the max cap ($max)" >&2; exit 2; }
 [[ "$checkouts" =~ ^/[A-Za-z0-9._/-]+$ && "$checkouts" != */ ]] || { echo "--checkouts: an absolute path of letters, digits, . _ - and /, with no trailing /" >&2; exit 2; }
+refuse_windows_fs "$checkouts" || exit 2
 
 say "roots"
 install -d -o root -g root -m 0755 "$checkouts" /var/lib/worklane /etc/worklane

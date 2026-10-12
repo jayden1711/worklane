@@ -34,6 +34,16 @@ machine_conf() {
   printf '%s\n' "${v:-$2}"
 }
 checkouts_root() { machine_conf checkouts /srv/worklane "$@"; }
+# Inside WSL (Windows' Linux VM), checkouts live on WSL's own filesystem: never under /mnt, where Windows drives mount,
+# and never on a Windows drive mounted elsewhere. Linux permissions and the sandbox don't hold there.
+# (MOUNTS and WSL_DISTRO_NAME can be set to test it.)
+refuse_windows_fs() {
+  [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null || return 0
+  case "$1/" in /mnt/*) echo "$1 is under /mnt, where WSL mounts Windows drives: use a directory on WSL's own filesystem (e.g. /srv/worklane)" >&2; return 1 ;; esac
+  local m
+  m="$(awk -v p="$1/" '($3 == "drvfs" || ($3 ~ /^(9p|virtiofs)$/ && ($4 ~ /aname=drvfs/ || $1 ~ /^[A-Za-z]:\\/))) && index(p, $2 "/") == 1 { print $2 }' "${MOUNTS:-/proc/mounts}" 2>/dev/null | head -n1)"
+  [ -z "$m" ] || { echo "$1 is on the Windows drive mounted at $m: use a directory on WSL's own filesystem (e.g. /srv/worklane)" >&2; return 1; }
+}
 # The default ceiling; src/machine.ts and the helper (scripts/machine/worklane-machine.cjs) use the same one.
 DEFAULT_MAX_CAP=16
 max_cap() { machine_conf max_cap "$DEFAULT_MAX_CAP" "$@"; }
