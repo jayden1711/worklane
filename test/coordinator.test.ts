@@ -18,6 +18,8 @@ import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { CliRunner, DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
+import { findChrome, freePort, portInUse } from '../src/browser/cdp.js';
+import { AppConfig } from '../src/config/schema.js';
 import { repoRoot, STDIN_LINE } from './helpers.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
@@ -2513,15 +2515,115 @@ test('verify: a done_when item of a kind it has no branch for fails the attempt 
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   const head = git(f.repo, 'rev-parse', 'HEAD');
-  // A kind the DoneWhen type doesn't have yet (one a future track adds), cast past the type as bad data would be.
-  const doneWhen = [{ manual: 'looks right on a phone' }, { browser: 'checkout page' }] as unknown as DoneWhenList;
+  // A kind the DoneWhen type doesn't have (one a future track adds), cast past the type as bad data would be.
+  const doneWhen = [{ manual: 'looks right on a phone' }, { lighthouse: 'checkout page' }] as unknown as DoneWhenList;
   const verify = (c as unknown as { verify: (n: number, path: string, head: string, d: DoneWhenList, r: null) => Promise<{ check: string; status: string; tail: string }[]> }).verify.bind(c);
   const checks = await verify(n, f.repo, head, doneWhen, null);
   const bad = checks.find((x) => /unknown done_when kind/.test(x.tail));
   assert.ok(bad, `a failed check names the unknown kind: ${JSON.stringify(checks)}`);
   assert.equal(bad.status, 'fail');
-  assert.match(bad.check, /browser/);
+  assert.match(bad.check, /lighthouse/);
   assert.ok(!checks.some((x) => /phone/.test(x.check)), 'a manual item is not run (it is NOT CHECKED in the receipts)');
   const recorded = (lastOf(f.log, 'check.result') as { checks: { status: string }[] }).checks;
   assert.ok(recorded.some((x) => x.status === 'fail'), 'recorded as a failure');
+});
+
+test('a browser: check the coordinator cannot run (no app declared) fails the attempt; it is never counted as passed', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open({ title: 'Totals count negative quantities', body: 'Totals.\n\n```done_when\n- test: test/price.test.js\n- browser: checkout\n```\n', author: 'example-owner', labels: ['ready'] });
+  const runner = agents();
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 2 });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string; kind?: string }[] }).filter((p) => p.stage === 'verify');
+  assert.ok(verify.length >= 1);
+  for (const v of verify) {
+    const b = v.checks.find((x) => x.check === 'browser checkout');
+    assert.deepEqual([b?.status, b?.kind], ['unavailable', 'browser'], JSON.stringify(v.checks));
+  }
+  const retry = runner.calls.filter((r) => r.role === 'worker')[1]!;
+  assert.match(retry.prompt, /browser checkout: unavailable\n.*no app is declared/);
+  assert.ok(!f.log.read(0, ['land.result']).some((e) => (e.payload as { outcome: string }).outcome === 'landed'), 'nothing landed');
+});
+
+const chrome = findChrome(process.env.CHROME);
+
+test('a change touching the app\'s UI runs its flows in a real browser: VERIFIED lists them, the PR gets a BROWSER CHECKS section, and a browser claim is backed', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: 180_000 }, async () => {
+  const server = `"${process.execPath}" -e "require('http').createServer((q, s) => s.end('<p data-testid=ok>ok</p>')).listen(Number(process.env.PORT), '127.0.0.1')"`;
+  const port = await freePort();
+  const t = await openPr({ worker: workerSaying('Guarded totals against non-positive quantities. Checked the totals page in the browser.') }, {
+    edit: (cfg) => {
+      cfg.app = AppConfig.parse({ version: 1, start: { command: server, port, ready: { timeout_s: 30 } }, ui_paths: ['src/**'], thresholds: { max_long_task_ms: 10_000 }, flows: { home: [{ goto: '/' }, { expect_text: { target: 'testid:ok', text: 'ok' } }] } });
+    },
+  });
+  const body = t.pr().body;
+  const section = (name: string) => body.split(`### ${name}\n`)[1]!.split('\n\n')[0]!;
+  assert.match(section('VERIFIED'), /^- `browser home`: pass/m, body);
+  assert.match(section('BROWSER CHECKS'), /- Why: the change touches 1 file\(s\) under ui_paths, so every flow runs/);
+  assert.match(section('BROWSER CHECKS'), /- UI files touched: `src\/price\.js`/);
+  assert.match(section('BROWSER CHECKS'), /- `browser home`: pass\n {2}- before the change \(base `[0-9a-f]{12}`\): 2\/2 steps held, 0 console error\(s\)[^\n]*\n {2}- after the change: 2\/2 steps held, 0 console error\(s\)/);
+  assert.equal(section('NOT VERIFIED').trim(), "- nothing: every claim in the worker's summary is backed by a recorded command or check", 'the passing browser check backs the browser claim');
+  assert.equal(await portInUse(port), false, 'the app was stopped');
+});
+
+/**
+ * A project whose app already logs an error on main ("legacy warning"); it logs "cart broke" too once
+ * src/new-error.js exists, and (with `needsReady`) only starts at all once src/serve-ok.js exists. The issue asks
+ * for the `home` flow; the worker makes the usual fix plus whatever `extra` files it's given.
+ */
+async function browserBaselineRun(o: { extra: string[]; needsReady?: boolean }) {
+  const f = fixture();
+  writeFileSync(
+    join(f.repo, 'server.mjs'),
+    `import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
+${o.needsReady ? "if (!existsSync('src/serve-ok.js')) process.exit(1);\n" : ''}const extra = existsSync('src/new-error.js') ? "console.error('cart broke');" : '';
+const page = '<!doctype html><title>t</title><p data-testid="ok">ok</p><script>console.error("legacy warning");' + extra + '</script>';
+createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end(page); }).listen(Number(process.env.PORT), '127.0.0.1');
+`,
+  );
+  git(f.repo, 'add', 'server.mjs');
+  git(f.repo, 'commit', '-q', '-m', 'app');
+  git(f.repo, 'push', '-q', 'origin', 'main');
+  const port = await freePort();
+  f.cfg.app = AppConfig.parse({ version: 1, start: { command: `"${process.execPath}" server.mjs`, port, ready: { timeout_s: 5 } }, ui_paths: ['web/**'], thresholds: { max_long_task_ms: 10_000 }, flows: { home: [{ goto: '/' }, { expect_text: { target: 'testid:ok', text: 'ok' } }] } });
+  f.backlog.open({ title: 'Totals count negative quantities', body: 'Totals.\n\n```done_when\n- test: test/price.test.js\n- browser: home\n```\n', author: 'example-owner', labels: ['ready'] });
+  const worker = (req: RunRequest) => {
+    for (const x of o.extra) writeFileSync(join(req.cwd, 'src', x), 'export {};\n');
+    return workerSaying('fixed')(req);
+  };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents({ worker }), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 1 });
+  await c.tick();
+  await c.idle();
+  const verify = f.log.read(0, ['check.result']).map((e) => e.payload as { stage: string; checks: { check: string; status: string; tail?: string }[] }).filter((p) => p.stage === 'verify').at(-1)!;
+  const lines = (lastOf(f.log, 'browser.evidence') as { lines: string[] }).lines;
+  const worktrees = git(f.repo, 'worktree', 'list');
+  return { check: verify.checks.find((x) => x.check === 'browser home')!, lines, worktrees, port };
+}
+
+test('the browser baseline: an error the base already logs is not new, so the flow passes; the base worktree is gone afterwards', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: 180_000 }, async () => {
+  const r = await browserBaselineRun({ extra: [] });
+  assert.equal(r.check.status, 'pass', `${r.check.tail}\n${r.lines.join('\n')}`);
+  assert.ok(r.lines.some((l) => /^ {2}- before the change \(base `[0-9a-f]{12}`\): 2\/2 steps held, 1 console error\(s\)/.test(l)), r.lines.join('\n'));
+  assert.ok(r.lines.some((l) => /^ {2}- after the change: 2\/2 steps held, 1 console error\(s\)/.test(l)));
+  assert.doesNotMatch(r.worktrees, /browser-base/, 'the base worktree was removed');
+  assert.equal(await portInUse(r.port), false);
+});
+
+test('the browser baseline: an error the change adds fails the flow, naming only the new one', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: 180_000 }, async () => {
+  const r = await browserBaselineRun({ extra: ['new-error.js'] });
+  assert.equal(r.check.status, 'fail');
+  assert.match(r.check.tail ?? '', /new console error: cart broke/);
+  assert.doesNotMatch(r.check.tail ?? '', /legacy warning/, 'the error main already has is not counted');
+  assert.doesNotMatch(r.worktrees, /browser-base/);
+});
+
+test("the browser baseline: an app that won't start at base is said, and the flow is judged with none (every error counts)", { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: 180_000 }, async () => {
+  const r = await browserBaselineRun({ extra: ['serve-ok.js'], needsReady: true });
+  assert.equal(r.check.status, 'fail', 'no silent pass for want of a baseline');
+  assert.match(r.check.tail ?? '', /new console error: legacy warning/);
+  assert.match(r.check.tail ?? '', /no baseline at base [0-9a-f]{12} \(the app couldn't be run at base: .*\), so every error was counted as new/);
+  assert.ok(r.lines.some((l) => /^ {2}- no baseline \(base `[0-9a-f]{12}`\): `the app couldn't be run at base/.test(l)), r.lines.join('\n'));
+  assert.doesNotMatch(r.worktrees, /browser-base/);
 });

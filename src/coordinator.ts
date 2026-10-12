@@ -40,6 +40,7 @@ import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
+import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
@@ -912,9 +913,12 @@ export class Coordinator extends MergeFlow {
     return { files, tampered, patchHash };
   }
 
+  /** Browser baselines per (base, flow), kept across a task's attempts (src/coordinator/browser.ts). */
+  private readonly browserBaselines = new Map<string, BaselineRun>();
+
   /** The coordinator's own run of the contract: it never trusts the agent's word. */
   protected async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
-    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number }[] = [];
+    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number; kind?: 'browser' }[] = [];
     // Each check's wall time, so a project's test times can be followed over time.
     const timed = async (command: string) => {
       const t0 = Date.now();
@@ -943,6 +947,8 @@ export class Coordinator extends MergeFlow {
       else if ('manual' in d) continue;
       // The frozen reproduction test, run below from `repro`.
       else if ('repro' in d) continue;
+      // Run below with the UI-paths gate, which may add flows of its own (src/coordinator/browser.ts).
+      else if ('browser' in d) continue;
       else {
         // A done_when kind without a branch here must not pass by being skipped: typecheck fails on a new kind
         // (d is never), and anything that reaches this at run time fails the attempt.
@@ -950,6 +956,15 @@ export class Coordinator extends MergeFlow {
         checks.push({ check: `done_when ${JSON.stringify(unknown).slice(0, 200)}`, status: 'fail', exitCode: null, tail: 'unknown done_when kind: the coordinator has no way to check it' });
       }
     }
+    // Browser checks (src/coordinator/browser.ts), each flow judged against its run at the change's base.
+    const change = changeAt(this.events(n), head);
+    const out = join(this.d.stateDir, 'browser', `issue-${n}`);
+    const runAs = this.d.commandsAs ? { runAs: this.d.commandsAs } : {};
+    const app = this.d.cfg.app;
+    const baseline = change && app ? (chrome: string) => worktreeBaseline({ wt: this.wt, name: `issue-${n}-browser-base`, base: change.base, app, cache: this.browserBaselines, outDir: join(out, `base-${change.base.slice(0, 12)}`), chrome, ...runAs }) : undefined;
+    const browser = await browserChecks({ app, doneWhen, changed: change?.files ?? [], cwd: path, outDir: join(out, head.slice(0, 12)), ...(baseline ? { baseline } : {}), ...runAs });
+    checks.push(...browser.checks);
+    if (browser.lines.length) this.emit('browser.evidence', { issue: n, head, lines: browser.lines });
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
     // The project's checks can be long (a full suite): once the issue's own checks have failed the attempt
     // is rejected anyway, so they're recorded as skipped instead of run.

@@ -4,16 +4,13 @@
 // thresholds. Slow and blocked requests are reported, never judged. A check that couldn't run (no browser on
 // the machine, no app declared) is unavailable, never passed.
 //
-// The coordinator's DoneWhen doesn't accept `browser:` yet: its verify() would pass over a kind it doesn't run.
-// The wiring adds BrowserDoneWhenItem to DoneWhen and calls runBrowserCheck from verify(), together.
-import { z } from 'zod';
+// The done_when item itself lives in the contract (src/contract.ts), beside the other kinds.
 import { BRAND } from '../brand.js';
 import type { AppConfig } from '../config/schema.js';
+import { BrowserDoneWhenItem } from '../contract.js';
 import { runFlow, type FlowEvidence, type FlowRun } from './run.js';
 
-/** A done_when item: `- browser: checkout` runs the app's `checkout` flow. */
-export const BrowserDoneWhenItem = z.strictObject({ browser: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'a flow name from app.yaml') });
-export type BrowserDoneWhenItem = z.infer<typeof BrowserDoneWhenItem>;
+export { BrowserDoneWhenItem };
 
 export interface BrowserVerdict {
   pass: boolean;
@@ -57,6 +54,7 @@ export function judgeFlow(ev: FlowEvidence, thresholds: AppConfig['thresholds'],
   } else notes.push('no performance trace was recorded');
   if (ev.slowRequests.length) notes.push(`${ev.slowRequests.length} slow request(s), slowest ${Math.max(...ev.slowRequests.map((r) => r.ms))} ms`);
   if (ev.blockedRequests.length) notes.push(`${ev.blockedRequests.length} request(s) to other hosts refused`);
+  for (const n of ev.notes ?? []) notes.push(`cleanup: ${n}`);
   return { pass: reasons.length === 0, reasons, notes };
 }
 
