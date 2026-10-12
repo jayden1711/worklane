@@ -26,6 +26,8 @@ export interface MachineData {
   canChange: boolean;
   helper: string;
   slots: { cap: number; running: number; min: number; max: number };
+  /** The machine's test-run slot cap; absent from older servers. */
+  testSlots?: { cap: number; running: number; min: number; max: number };
   updates: { configured: true; enabled: boolean; branch: string; requiredChecks: string[] } | { configured: false; enabled: null };
   changes: { at: string; by: string; what: string; from: unknown; to: unknown }[];
   history: { at: string; event: string; from?: string | null; to?: string | null; reason?: string; units?: string[]; failed?: string[]; back?: string }[];
@@ -114,9 +116,13 @@ function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm
 export function MachineSettingsView({ data, onChanged = () => {} }: { data: MachineData; onChanged?: (d: MachineData) => void }) {
   const [slots, setSlots] = useState(String(data.slots.cap));
   const [updates, setUpdates] = useState(data.updates.enabled === true ? 'on' : 'off');
+  const [testSlots, setTestSlots] = useState(String(data.testSlots?.cap ?? ''));
+  const tn = Number(testSlots);
+  const ts = data.testSlots;
+  const testSlotsProposed = !ts ? null : !testSlots.trim() || !Number.isInteger(tn) ? { error: 'a whole number' } : tn < ts.min || tn > ts.max ? { error: `${ts.min} to ${ts.max}` } : { value: tn, text: String(tn) };
   const n = Number(slots);
   const slotsProposed = !slots.trim() || !Number.isInteger(n) ? { error: 'a whole number' } : n < data.slots.min || n > data.slots.max ? { error: `${data.slots.min} to ${data.slots.max}` } : { value: n, text: String(n) };
-  const send = (what: 'slots' | 'updates') => async (value: unknown) => {
+  const send = (what: 'slots' | 'updates' | 'testSlots') => async (value: unknown) => {
     const r = await api<{ machine: MachineData }>('/api/machine', { method: 'POST', body: JSON.stringify({ what, value }) });
     onChanged(r.machine);
   };
@@ -153,6 +159,18 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
               onConfirm={send('slots')}
               input={<input value={slots} onChange={(e) => setSlots(e.target.value)} aria-label="slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="machine-setting-input" />}
             />
+            {ts ? (
+              <ChangeRow
+                label="Test-run slots (machine-wide)"
+                testKey="testSlots"
+                current={String(ts.cap)}
+                bounds={`${ts.min}–${ts.max}; ${ts.running} running now; the recommendation for this machine is in docs/test-runs.md`}
+                disabled={!data.canChange}
+                proposed={testSlotsProposed}
+                onConfirm={send('testSlots')}
+                input={<input value={testSlots} onChange={(e) => setTestSlots(e.target.value)} aria-label="test-run slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="machine-setting-input" />}
+              />
+            ) : null}
             <ChangeRow
               label="Engine updates"
               testKey="updates"

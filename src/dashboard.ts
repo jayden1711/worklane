@@ -26,13 +26,16 @@ import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } fr
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
+import { testRunsView } from './testrun/status.js';
+import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
+import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { cpuCount } from './os/index.js';
+import { cpuCount, flockHolders } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
-import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN } from './machine.js';
+import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
@@ -106,6 +109,8 @@ export interface DashboardOptions {
   journalReader?: JournalReader;
   /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
   slotsDir?: string;
+  /** The full-run lock whose holders the test-runs view shows (tests). */
+  testRunLock?: string;
   /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
   policyFile?: string | null;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
@@ -252,6 +257,7 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     canChange: isOwner(o.role),
     helper: MACHINE_HELPER,
     slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
+    testSlots: { cap: testSlotCap(o.slotsDir), running: testSlotsHeld(o.slotsDir).length, min: TEST_SLOTS_MIN, max: TEST_SLOTS_MAX },
     updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
@@ -704,6 +710,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const slots = slotStatus(opts.slotsDir);
           const board = boardView({ events: readEvents(opts.eventsDb), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) });
           return json(res, 200, who.role === 'owner' || who.role === 'writer' ? board : boardForViewer(board));
+        }
+        // The test runs (src/testrun/): everyone with a role reads them; a viewer gets tier pass or fail only.
+        if (url.pathname === '/api/test-runs' && req.method === 'GET') {
+          const held = testSlotsHeld(opts.slotsDir);
+          return json(res, 200, testRunsView({ events: readEvents(opts.eventsDb), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => ({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
         }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
