@@ -20,8 +20,8 @@ export const privateDir = ownerOnlyDir;
 const writePrivate = writeOwnerOnly;
 
 /**
- * How long a report's id is remembered after it is first seen: far longer than the raw text is kept, the relay holds
- * an unacknowledged message (3 days), or a chat gateway replays on resume, so a redelivery is never taken as new.
+ * How long a report's id is remembered after it is first seen: far longer than the raw text is kept or a chat gateway
+ * replays on resume, so a redelivery is never taken as new.
  */
 export const SEEN_DAYS = 365;
 

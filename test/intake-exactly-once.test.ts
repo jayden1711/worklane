@@ -6,7 +6,6 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { FileBacklog } from '../src/backlog/file.js';
 import { askChat, chatAnswer, takeChatRequests } from '../src/chat.js';
 import { loadConfig } from '../src/config/load.js';
@@ -16,7 +15,6 @@ import { EventLog } from '../src/events/log.js';
 import { BugStoreIntake, pullBugReports, readCursor } from '../src/intake/bug-store.js';
 import { DiscordIntake, type Socket } from '../src/intake/discord.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
-import { relaySignature, SmsIntake } from '../src/intake/sms.js';
 import { purgeRaw, reportId, storeRaw } from '../src/intake/store.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { repoRoot } from './helpers.js';
@@ -25,7 +23,7 @@ const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encod
 const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 const OWNER_ID = '123456789012';
 const STRANGER_ID = '987654321098';
-const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID], sms: ['+15550001111'] }, discord: { enabled: true }, sms: { enabled: true }, 'bug-store': { enabled: true } });
+const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'] }, 'bug-store': { enabled: true } });
 
 let seq = 0;
 function report(o: { from?: string; text?: string; sourceId?: string; thread?: string; at?: string } = {}): IncomingReport {
@@ -35,12 +33,12 @@ function report(o: { from?: string; text?: string; sourceId?: string; thread?: s
     sender: { source: 'discord', id: o.from ?? OWNER_ID },
     text: o.text ?? 'bug: the checkout total ignores my discount code',
     receivedAt: o.at ?? '2026-10-01T10:00:00.000Z',
-    thread: { kind: 'dm', id: o.thread ?? 'thread-1' },
+    thread: { kind: 'channel', id: o.thread ?? 'thread-1' },
   };
 }
 
 /** A source that hands out one batch per pull and records every reply and ack. */
-function fakeSource(name: 'discord' | 'sms', batches: IncomingReport[][], reply?: () => Promise<boolean>) {
+function fakeSource(name: 'discord' | 'bug-store', batches: IncomingReport[][], reply?: () => Promise<boolean>) {
   const replies: { thread: string; text: string }[] = [];
   const acked: string[][] = [];
   const src: IntakeSource & { replies: typeof replies; acked: string[][] } = {
@@ -97,59 +95,7 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 // ---------- (1) deduped by the provider's message id ----------
 
-const relayUrl = pathToFileURL(join(repoRoot, 'relay', 'worker.mjs')).href;
-type Relay = { default: { fetch(req: Request, env: object): Promise<Response> }; twilioSignature(token: string, url: string, params: Record<string, string>): Promise<string> };
-function fakeKv() {
-  const m = new Map<string, string>();
-  return {
-    m,
-    put: async (k: string, v: string) => void m.set(k, v),
-    get: async (k: string) => m.get(k) ?? null,
-    delete: async (k: string) => void m.delete(k),
-    list: async ({ prefix }: { prefix: string }) => ({ keys: [...m.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name })) }),
-  };
-}
-async function relayWith() {
-  const relay = (await import(relayUrl)) as Relay;
-  const kv = fakeKv();
-  const env = { INTAKE: kv, TWILIO_AUTH_TOKEN: 'tw-token', RELAY_SECRET: 'rs', PREFIXES: '["bug:"]' };
-  const hook = 'https://relay.example.invalid/twilio';
-  const post = async (params: Record<string, string>) =>
-    relay.default.fetch(new Request(hook, { method: 'POST', headers: { 'x-twilio-signature': await relay.twilioSignature('tw-token', hook, params), 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params).toString() }), env);
-  const pull = async () => {
-    const ts = String(Math.floor(Date.now() / 1000));
-    const r = await relay.default.fetch(new Request('https://relay.example.invalid/pull', { method: 'GET', headers: { 'x-relay-ts': ts, 'x-relay-sig': relaySignature('rs', ts, 'GET', '/pull') } }), env);
-    return ((await r.json()) as { messages: { id: string; received_at: string }[] }).messages;
-  };
-  return { kv, post, pull };
-}
-
-test('relay: the same webhook delivered twice is one stored message, pulled once, keeping its first arrival time', async () => {
-  const r = await relayWith();
-  const msg = { MessageSid: 'SMaaaaaaaaaa1', From: '+15550001111', Body: 'total wrong' };
-  assert.equal((await r.post(msg)).status, 200);
-  const first = JSON.parse(r.kv.m.get('msg:SMaaaaaaaaaa1')!).received_at as string;
-  await new Promise((res) => setTimeout(res, 5));
-  assert.equal((await r.post(msg)).status, 200, 'the retry is answered as usual');
-  assert.equal(r.kv.m.size, 1);
-  const pulled = await r.pull();
-  assert.deepEqual(pulled.map((m) => m.id), ['SMaaaaaaaaaa1']);
-  assert.equal(pulled[0]!.received_at, first, 'a retry does not move it in the order');
-});
-
-test('relay and adapters: two texts in one thread delivered in reverse id order are handed over in arrival order', async () => {
-  const r = await relayWith();
-  await r.post({ MessageSid: 'SMzzzzzzzzzz9', From: '+15550001111', Body: 'first: the total is wrong' });
-  await new Promise((res) => setTimeout(res, 5));
-  await r.post({ MessageSid: 'SMaaaaaaaaaa1', From: '+15550001111', Body: 'second: and the discount too' });
-  assert.deepEqual((await r.pull()).map((m) => m.id), ['SMzzzzzzzzzz9', 'SMaaaaaaaaaa1'], 'the store lists by key; the relay sorts by arrival');
-  // The adapter sorts again (a relay can't reorder what the coordinator takes), as does the bug-store pull.
-  const messages = [
-    { id: 'SMaaaaaaaaaa1', from: '+15550001111', body: 'second', received_at: '2026-10-01T10:00:02.000Z' },
-    { id: 'SMzzzzzzzzzz9', from: '+15550001111', body: 'first', received_at: '2026-10-01T10:00:01.000Z' },
-  ];
-  const sms = new SmsIntake({ relayUrl: 'https://relay.example.invalid', secret: 's', prefixes: ['bug:'], accountSid: 'AC1', authToken: 't', number: '+15559990000', fetch: (async () => ({ ok: true, json: async () => ({ messages }) })) as unknown as typeof fetch });
-  assert.deepEqual((await sms.pull()).map((m) => m.text), ['first', 'second']);
+test('in-product reports: rows delivered in reverse id order are handed over in arrival order', () => {
   const dir = mkdtempSync(join(tmpdir(), 'bugstore-'));
   const rows = [
     { id: 10, reporter: 'u1', text: 'later', created_at: '2026-10-01T10:00:02.000Z' },
@@ -160,7 +106,7 @@ test('relay and adapters: two texts in one thread delivered in reverse id order 
 
 test('intake: a message redelivered after its raw text was purged is still deduped', () => {
   const dir = mkdtempSync(join(tmpdir(), 'seen-'));
-  const r = report({ sourceId: 'SMaaaaaaaaaa1' });
+  const r = report({ sourceId: 'm-purged-1' });
   assert.equal(storeRaw(dir, r), true);
   const old = (Date.now() - 30 * 86_400_000) / 1000;
   utimesSync(join(dir, 'intake', 'raw', `${reportId(r)}.json`), old, old);
@@ -182,44 +128,34 @@ class FakeSocket implements Socket {
   }
 }
 
-test('end to end: the relay returns a message on two pulls and the gateway sends one twice: one run, one issue, one reply each; SMS acked once recorded', async () => {
+test('end to end: the gateway sends one message twice, and again after it was handled: one run, one issue, one reply', async () => {
   const i = instance();
   const posts: string[] = [];
   const net = (async (url: URL | string, init?: RequestInit) => {
-    const u = String(url);
-    if (u.endsWith('/pull')) return { ok: true, json: async () => ({ messages: [{ id: 'SMaaaaaaaaaa1', from: '+15550001111', body: 'bug: the checkout total ignores my discount', received_at: '2026-10-01T10:00:00.000Z' }] }) };
-    posts.push(`${u} ${String(init?.body ?? '')}`);
+    posts.push(`${String(url)} ${String(init?.body ?? '')}`);
     return { ok: true, json: async () => ({}) };
   }) as unknown as typeof fetch;
-  const sms = new SmsIntake({ relayUrl: 'https://relay.example.invalid', secret: 's', prefixes: ['bug:'], accountSid: 'AC1', authToken: 't', number: '+15559990000', fetch: net });
   const sock = new FakeSocket();
-  const discord = new DiscordIntake({ token: 'tok', channels: [], dms: true, prefixes: ['bug:'], connect: () => sock, fetch: net, setInterval: () => 1, clearInterval: () => {} });
+  const discord = new DiscordIntake({ token: 'tok', guild: '555555', channels: ['111111'], prefixes: ['bug:'], connect: () => sock, fetch: net, setInterval: () => 1, clearInterval: () => {} });
   discord.start();
   sock.frame({ op: 0, s: 1, t: 'READY', d: { user: { id: '999999' } } });
-  const create = () => sock.frame({ op: 0, s: 2, t: 'MESSAGE_CREATE', d: { id: 'm-dup', channel_id: 'dm1', content: 'the export button does nothing', author: { id: OWNER_ID, username: 'sam' } } });
+  const create = () => sock.frame({ op: 0, s: 2, t: 'MESSAGE_CREATE', d: { id: 'm-dup', channel_id: '111111', guild_id: '555555', content: 'bug: the export button does nothing', author: { id: OWNER_ID, username: 'sam' } } });
   create();
   create();
-  const sources: IntakeSource[] = [
-    { name: 'discord', take: async () => discord.take(), reply: (t, x) => discord.reply(t.id, x) },
-    { name: 'sms', take: () => sms.pull(), reply: (t, x) => sms.reply(t as { kind: 'sms' | 'group'; id: string }, x), ack: (ids) => sms.ack(ids) },
-  ];
+  const sources: IntakeSource[] = [{ name: 'discord', take: async () => discord.take(), reply: (t, x) => discord.reply(t.id, x) }];
   const { c, runner } = coordinator(i, { sources });
   await c.checkIntake();
   create();
   await c.checkIntake();
-  assert.equal(runner.calls.length, 2, 'one triage run per message, however often it came');
-  assert.equal((await i.backlog.list('ready')).length, 2, 'one issue each');
-  assert.equal(payloads(i.log, 'intake.replied').length, 2, 'one reply each');
-  assert.equal(posts.filter((p) => /\/channels\/dm1\/messages/.test(p)).length, 1);
-  assert.equal(posts.filter((p) => /Messages\.json/.test(p)).length, 1);
-  const acks = posts.filter((p) => p.includes('/ack'));
-  assert.equal(acks.length, 2, 'acked after each pull: once recorded, and again when redelivered (already seen)');
-  assert.ok(acks.every((a) => a.includes('"ids":["SMaaaaaaaaaa1"]')));
+  assert.equal(runner.calls.length, 1, 'one triage run, however often the message came');
+  assert.equal((await i.backlog.list('ready')).length, 1, 'one issue');
+  assert.equal(payloads(i.log, 'intake.replied').length, 1, 'one reply');
+  assert.equal(posts.filter((p) => /\/channels\/111111\/messages/.test(p)).length, 1);
 });
 
-test('intake: an SMS is acknowledged only after it is recorded: a crash before that redelivers it', async () => {
+test('intake: a source is acknowledged only after the report is recorded: a crash before that redelivers it', async () => {
   const i = instance();
-  const src = fakeSource('sms', [[{ ...report({ sourceId: 'SMaaaaaaaaaa1' }), source: 'sms', sender: { source: 'sms', id: '+15550001111' } }]]);
+  const src = fakeSource('discord', [[report({ sourceId: 'm-ack-1' })]]);
   let release!: () => void;
   const runner = new FakeRunner(() => new Promise((r) => (release = () => r({ structured: { kind: 'bug', draft: DRAFT } }))));
   const { c } = coordinator(i, { sources: [src], runner });
@@ -229,7 +165,7 @@ test('intake: an SMS is acknowledged only after it is recorded: a crash before t
   assert.deepEqual(src.acked, [], 'not acknowledged while it is being handled');
   release();
   await c.checkIntake();
-  assert.deepEqual(src.acked, [['SMaaaaaaaaaa1']]);
+  assert.deepEqual(src.acked, [['m-ack-1']]);
 });
 
 test('bug store: a crash between the pull and the record pulls the rows again after a restart, and each is processed once', async () => {
