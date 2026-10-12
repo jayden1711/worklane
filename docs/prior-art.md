@@ -204,8 +204,8 @@ Live transport: **SSE**, one multiplexed stream that resumes from `Last-Event-ID
 
 | Need | Choice | License | Why |
 |---|---|---|---|
-| Agent runtime | `@anthropic-ai/claude-agent-sdk` | Anthropic terms (not OSS) | npm dependency, never vendored. `settingSources:['project']` keeps user plugins out; Stop hook `decision:block`; `maxBudgetUsd`; `modelUsage` for cost; sandbox on macOS, Linux and WSL2 only |
-| Event log | `node:sqlite` (Node ≥ 24) | built-in | no native build; better-sqlite3 (MIT) as fallback behind the data-access layer |
+| Agent runtime | `@anthropic-ai/claude-agent-sdk` | Anthropic terms (not OSS) | Considered, not a dependency: agents run through the installed `claude -p` CLI, with the same settings. `settingSources:['project']` keeps user plugins out; Stop hook `decision:block`; `maxBudgetUsd`; `modelUsage` for cost; sandbox on macOS, Linux and WSL2 only |
+| Event log | `node:sqlite` (no flag from Node 22.13) | built-in | no native build; better-sqlite3 (MIT) as fallback behind the data-access layer |
 | Config | `yaml` + `zod` 4 | ISC / MIT | `z.toJSONSchema()` for editor support |
 | Locks | `open(wx)` + pid liveness; SQLite leases | built-in | proper-lockfile is unmaintained since 2022 |
 | Services | generated launchd plist, systemd user unit, schtasks | built-in | node-windows, node-mac and node-linux are all dead |
