@@ -113,6 +113,14 @@ senders. There are two sources: the Discord bot and in-product reports.
 10. **Reply** on the same channel: when the issue is filed, when its fix merges, and when it's deployed.
     Untrusted senders get a short status ("we've logged this", "a fix is merged", "the fix is live") with no
     internal links; trusted senders also get the issue link.
+    - **Casual replies** (off by default; `casual_replies: true` in `intake.yaml`): the `intake-replier` role
+      words the reply in plain friendly language instead. Its only inputs are the redacted message and the
+      engine's facts (the stage, the issue number when the sender may see it, trusted or not); it has no tools
+      at all, and each reply is one short run counted against intake's daily spend cap. Code checks every reply
+      before it is sent: at most 500 characters; no link but the issue link the engine supplies; no mentions;
+      no more than a short quote of the message; no promise of a date, a fix or money; nothing the facts
+      contradict (such as "fixed" before the merge). Any failure sends the fixed reply instead, and the reason
+      is recorded (`intake.reply_checked`).
 
 ## 4. The intake agent
 

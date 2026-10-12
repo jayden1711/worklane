@@ -85,6 +85,11 @@ export const IntakeConfig = z.strictObject({
       query: z.string().min(1).optional(),
     })
     .prefault({}),
+  /**
+   * Replies worded by the casual replier role from the redacted message and the engine's facts, each checked in
+   * code before it is sent (src/intake/replier.ts). Off: the engine's fixed replies.
+   */
+  casual_replies: z.boolean().default(false),
   /** Days the raw (unredacted) text is kept in the coordinator's private state. */
   raw_retention_days: z.number().int().min(1).max(90).default(14),
   /** Extra redaction: names and labelled patterns specific to this project (e.g. account or bet ids). */
