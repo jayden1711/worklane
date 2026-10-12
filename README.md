@@ -18,14 +18,18 @@ Open-source harness for running a crew of Claude agents on a real codebase: para
 
 See [docs/design.md](docs/design.md) for the architecture and [docs/prior-art.md](docs/prior-art.md) for what we borrowed and from where.
 
-## Quick start (planned)
+## Quick start
+
+On a Mac (with Homebrew) or Linux, from a checkout of this repo:
 
 ```sh
-npm install --save-dev github:jayden1711/worklane#v0.1.0
-npx worklane install   # scaffolds .worklane/, hooks and settings
-npx worklane doctor    # verifies the install
-npx worklane up        # starts the coordinator and dashboard
+bash scripts/bootstrap.sh ~/code/your-repo   # Node.js (22.13+, or installs 24 LTS), gitleaks, Claude Code and the engine (pinned, checked),
+                                             # then `worklane install` in your repo and `worklane doctor`
+worklane up --root ~/code/your-repo          # the coordinator, as a service for your user
+worklane dashboard --root ~/code/your-repo   # the dashboard
 ```
+
+Docker, a shared hardened server, your first issue and where to look: [docs/quickstart.md](docs/quickstart.md). To try it without a repo: `worklane demo /tmp/worklane-demo`.
 
 ## Secret scanning
 
