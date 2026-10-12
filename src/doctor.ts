@@ -8,8 +8,9 @@ import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
-import { GIT_HOOK_MARKER, HOOK_MARKER } from './install.js';
-import { policiesForRepo, policyViolations, readPolicy } from './instance.js';
+import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
+import { GIT_HOOK_MARKER } from './install.js';
+import { instancesDir, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 
@@ -26,7 +27,7 @@ function nodeMajor(): number {
   return Number(process.versions.node.split('.')[0]);
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -61,23 +62,43 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (canRunAgents(os)) add('os', 'ok', os);
   else add('os', 'warn', wslAvailable() ? 'native Windows: run agents inside WSL2' : 'native Windows without WSL2: dashboard and Issues only; agents run on another machine');
 
-  // Settings and hook wiring
-  const settingsPath = join(root, '.claude', 'settings.json');
-  if (!existsSync(settingsPath)) add('hooks', 'fail', `.claude/settings.json missing; run \`${BRAND.cli} install\``);
-  else {
+  // Hook wiring. An instance's agents get their hooks and rules from its agent settings, for agent runs only
+  // (agent-settings.ts). The checkout's .claude/settings.json is for local runs without an instance, and is where
+  // instances installed before agent settings still find them.
+  const instances = [...new Set([...(opts.instance ? [opts.instance] : []), ...(cfg ? policiesForRepo(cfg.project.project.repo).map((p) => p.name) : [])])];
+  for (const name of instances) {
+    const file = agentSettingsPath(join(instancesDir(), name));
+    if (!existsSync(file)) {
+      // Hooks in the checkout's own .claude/settings.json (an install from before agent settings) don't count: the
+      // runner never falls back to them.
+      const old = legacyProjectHooks(root) ? ` The hooks in this checkout's .claude/settings.json are no longer used for agent runs.` : '';
+      add(`agent hooks ${name}`, 'fail', `${file} missing: ${name}'s agent runs and its coordinator won't start.${old} As its coordinator user, run \`${installCommand(name, root)}\``);
+      continue;
+    }
+    let s: Settings;
     try {
-      const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as { hooks?: Record<string, { hooks?: { command: string }[] }[]> };
-      for (const event of ['PreToolUse', 'SessionStart', 'SessionEnd']) {
-        const cmds = (s.hooks?.[event] ?? []).flatMap((e) => e.hooks ?? []).map((h) => h.command).filter((c) => c.includes(HOOK_MARKER));
-        if (cmds.length !== 1) {
-          add(`hook ${event}`, 'fail', cmds.length ? `${cmds.length} ${BRAND.cli} entries (expected 1)` : 'not installed');
-          continue;
-        }
-        const cmd = cmds[0]!;
-        const path = cmd.match(/E="([^"]+)"/)?.[1]?.replace('$CLAUDE_PROJECT_DIR', root);
-        if (!cmd.includes('|| exit 2') || !/_AGENT" = 1 \]; then [^;]*>&2; exit 2/.test(cmd)) add(`hook ${event}`, 'fail', 'does not fail closed for agents');
-        else if (!path || !existsSync(path)) add(`hook ${event}`, 'fail', `engine not found at ${path ?? '(unparsed)'}`);
-        else add(`hook ${event}`, 'ok', 'installed, fails closed');
+      s = JSON.parse(readFileSync(file, 'utf8')) as Settings;
+    } catch (e) {
+      add(`agent hooks ${name}`, 'fail', `${file} unreadable: ${(e as Error).message}`);
+      continue;
+    }
+    for (const c of hookChecks(s)) add(`agent hook ${name} ${c.event}`, c.ok ? 'ok' : 'fail', c.ok ? `${c.detail}, for agent runs only (${file})` : c.detail);
+    if (s.disableAllHooks !== false) add(`agent hooks ${name}`, 'fail', 'disableAllHooks is not pinned to false: a project file could turn the hooks off');
+    const refusal = projectSettingsRefusal(root, s);
+    if (refusal) add(`project settings`, 'fail', `${name}'s agent runs won't start: ${refusal}`);
+  }
+  const settingsPath = join(root, '.claude', 'settings.json');
+  const where = instances.length ? ` (for people's sessions and local runs; ${instances.join(', ')}'s agents get theirs from their agent settings)` : '';
+  if (!existsSync(settingsPath)) {
+    if (instances.length) add('hooks', 'ok', `no .claude/settings.json in the repo, and none needed: ${instances.join(', ')}'s agents get their hooks from their agent settings`);
+    else add('hooks', 'warn', `no .claude/settings.json: an instance's agents get their hooks from \`${BRAND.cli} install --instance <name>\` (run by its coordinator); for local runs without an instance, run \`${BRAND.cli} install\``);
+  } else {
+    try {
+      const s = JSON.parse(readFileSync(settingsPath, 'utf8')) as Settings;
+      for (const c of hookChecks(s, (p) => p.replace('$CLAUDE_PROJECT_DIR', root))) {
+        // Without an instance, these are the hooks local runs rely on; with one, they're only for people's sessions.
+        if (!c.ok && c.detail === 'not installed' && instances.length) continue;
+        add(`hook ${c.event}`, c.ok ? 'ok' : 'fail', `${c.detail}${where}`);
       }
     } catch (e) {
       add('hooks', 'fail', `.claude/settings.json unreadable: ${(e as Error).message}`);

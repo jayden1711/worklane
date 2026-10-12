@@ -23,6 +23,7 @@ import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
+import { guardrailSettings } from './agent-settings.js';
 import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
 import { instanceProblems, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
@@ -99,6 +100,13 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     console.error(`instance ${name} not started:\n${missing.map((m) => `  ${m}`).join('\n')}`);
     return 1;
   }
+  // Agents' guardrails: checked here so a missing install stops the instance at start, and again for every run.
+  try {
+    guardrailSettings(i.home, i.name, i.repo.path);
+  } catch (e) {
+    console.error(`instance ${name} not started: ${(e as Error).message}`);
+    return 1;
+  }
   const env = instanceEnv(i);
   // The GitHub credential must reach this instance's repo and nothing else.
   const tokens = instanceTokens(i, env);
@@ -133,7 +141,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path)), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
