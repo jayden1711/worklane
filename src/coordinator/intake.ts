@@ -15,7 +15,7 @@ import { acceptTriage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
-import { Channel } from './channel.js';
+import { Conversation } from './conversation.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';
 
@@ -27,10 +27,8 @@ const INTAKE_KIND_LABEL: Record<string, string> = { bug: 'bug', feature: 'enhanc
 const INTAKE_OUTCOMES = ['intake.filed', 'intake.awaiting', 'intake.commented', 'intake.grouped', 'intake.asked', 'intake.dropped'] as const;
 /** What a sender is told when a restart cut off their report. */
 const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Could you send it again?";
-/** The marker in an intake issue's body that ties it to its report, so it is never filed twice. */
-const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 
-export abstract class Intake extends Channel {
+export abstract class Intake extends Conversation {
   // ---------------------------------------------------------------- intake
 
   /**
@@ -233,25 +231,6 @@ export abstract class Intake extends Channel {
         this.emit('intake.dropped', { id, reason: a.reason.slice(0, 500) });
         return;
     }
-  }
-
-  /**
-   * File a report's issue at most once: its body carries `<!-- intake:<id> -->`, and an open issue with that marker
-   * (filed before a crash, its event never written) is reused instead of filing a second one.
-   */
-  private async intakeFileOnce(id: string, title: string, body: string, labels: string[]): Promise<number> {
-    const found = await this.intakeIssueFor(id, labels);
-    if (found !== null) return found;
-    return this.d.backlog.createIssue(title, `${body}\n\n${intakeMarker(id)}`, labels);
-  }
-
-  /** The open issue filed for this report, if any, among issues with these labels. */
-  private async intakeIssueFor(id: string, labels: string[]): Promise<number | null> {
-    for (const label of labels) {
-      const hit = (await this.d.backlog.list(label)).find((i) => i.body.includes(intakeMarker(id)));
-      if (hit) return hit.number;
-    }
-    return null;
   }
 
   /**

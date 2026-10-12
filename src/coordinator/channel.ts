@@ -22,7 +22,10 @@ import { intakeCaps } from '../settings.js';
 import { excerpt } from '../intake/decide.js';
 import { ResearchOnDemand } from './research-on-demand.js';
 
-/** What a thread is for: `decision:<id>` or `ask:<id>` (the key of the post that opened it). */
+/** The marker in an intake issue's body that ties it to its report, so it is never filed twice. */
+const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
+
+/** What a thread is for: `decision:<id>`, `ask:<id>` or `idea:<id>` (the key of the post that opened it). */
 type Target = string;
 
 export abstract class Channel extends ResearchOnDemand {
@@ -30,6 +33,25 @@ export abstract class Channel extends ResearchOnDemand {
   protected chatSource(): IntakeSource | null {
     const s = this.d.intake?.sources.find((x) => x.name === 'discord');
     return s?.openThread && s.watch ? s : null;
+  }
+
+  /**
+   * File a report's issue at most once: its body carries `<!-- intake:<id> -->`, and an open issue with that marker
+   * (filed before a crash, its event never written) is reused instead of filing a second one.
+   */
+  protected async intakeFileOnce(id: string, title: string, body: string, labels: string[]): Promise<number> {
+    const found = await this.intakeIssueFor(id, labels);
+    if (found !== null) return found;
+    return this.d.backlog.createIssue(title, `${body}\n\n${intakeMarker(id)}`, labels);
+  }
+
+  /** The open issue filed for this report, if any, among issues with these labels. */
+  protected async intakeIssueFor(id: string, labels: string[]): Promise<number | null> {
+    for (const label of labels) {
+      const hit = (await this.d.backlog.list(label)).find((i) => i.body.includes(intakeMarker(id)));
+      if (hit) return hit.number;
+    }
+    return null;
   }
 
   /** Is the channel on: Discord enabled, someone mapped. Off, the intake goes on as before. */
@@ -55,7 +77,7 @@ export abstract class Channel extends ResearchOnDemand {
   }
 
   /** Keys posted (or being posted) already: each is sent at most once. */
-  private postedKeys(): Set<string> {
+  protected postedKeys(): Set<string> {
     return new Set(this.d.log.read(0, ['discord.posting']).map((e) => (e.payload as { key: string }).key));
   }
 
@@ -65,15 +87,15 @@ export abstract class Channel extends ResearchOnDemand {
     for (const k of this.postedKeys()) if (!done.has(k)) this.emit('discord.posted', { key: k, thread: null, ok: false, unknown: true });
   }
 
-  /** Send one post, once per key. A thread post returns the thread's id. */
-  private async channelSend(src: IntakeSource, key: string, where: { channel: string } | { thread: string }, post: ChannelPost): Promise<string | null> {
+  /** Send one post, once per key. A thread post returns the thread's id (opened on the message `from` when given). */
+  protected async channelSend(src: IntakeSource, key: string, where: { channel: string; from?: string } | { thread: string }, post: ChannelPost): Promise<string | null> {
     if (this.postedKeys().has(key)) return null;
     this.emit('discord.posting', { key });
     let thread: string | null = null;
     let ok = false;
     try {
       if (post.kind === 'thread' && 'channel' in where) {
-        thread = await src.openThread!(where.channel, post.text, post.name);
+        thread = await src.openThread!(where.channel, post.text, post.name, where.from);
         ok = thread !== null;
       } else {
         ok = await src.reply('thread' in where ? { kind: 'thread', id: where.thread } : { kind: 'channel', id: where.channel }, post.text);
@@ -87,7 +109,7 @@ export abstract class Channel extends ResearchOnDemand {
   }
 
   /** Say something in a thread, once per key. */
-  private say(src: IntakeSource, thread: string, key: string, text: string) {
+  protected say(src: IntakeSource, thread: string, key: string, text: string) {
     return this.channelSend(src, key, { thread }, { kind: 'notice', text });
   }
 
