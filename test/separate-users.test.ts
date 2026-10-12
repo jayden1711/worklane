@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
 import { initInstance, laneRuns, loadInstance } from '../src/instance.js';
-import { asUser, projectCommand } from '../src/os/index.js';
+import { asUser, defaultAgentPath, projectCommand } from '../src/os/index.js';
 import { agentEnv, cliArgs, CliRunner, runAsEnv } from '../src/runner.js';
 import { sandboxSettings } from '../src/sandbox.js';
 import { instanceEnv } from '../src/service.js';
@@ -33,7 +33,7 @@ test('safe default: an instance without a separate agent user is refused unless 
   writeFileSync(join(allowed.home, 'credentials.yaml'), `version: 1\ngithub: { kind: gh-config-dir, path: ${join(allowed.home, 'gh')} }\nclaude: { config_dir: ${join(allowed.home, 'claude')} }\n`);
   assert.equal(loadInstance('shop', allowed.dir).runAs, null);
   const separate = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n');
-  assert.deepEqual(loadInstance('shop', separate.dir).runAs, { user: 'shop-agent', home: '/home/shop-agent' });
+  assert.deepEqual(loadInstance('shop', separate.dir).runAs, { user: 'shop-agent', home: '/home/shop-agent', path: defaultAgentPath() });
 });
 
 test('an agent run as its own user gets its home and login, git trusts its worktrees, and no tokens', () => {

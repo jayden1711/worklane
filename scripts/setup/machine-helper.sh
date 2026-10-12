@@ -5,9 +5,10 @@
 #   bash scripts/setup/machine-helper.sh <name> [<name>...]     every instance on this machine
 #
 #   - Installs the helper as /usr/local/libexec/worklane-machine (root:root 0755). It accepts
-#     exactly `set-slots <1..16>` and `set-updates on|off`, writes atomically, and logs each
-#     change to /var/lib/worklane/machine-changes.jsonl and the journal.
-#   - Lets each coordinator user wl-<name> run exactly those 18 commands as root (sudoers,
+#     exactly `set-slots <1..max_cap>` and `set-updates on|off`, writes atomically, and logs each
+#     change to /var/lib/worklane/machine-changes.jsonl and the journal. max_cap is the one
+#     machine.sh records in /etc/worklane/machine.json (--max-cap; default 16).
+#   - Lets each coordinator user wl-<name> run exactly those commands as root (sudoers,
 #     listed one by one). The dashboard viewer wl-dash gets nothing.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
@@ -48,13 +49,14 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 18 commands"
+cap="$(max_cap)"
+say "sudoers: ${users[*]} may run exactly the helper's $((cap + 2)) commands (set-slots 1..$cap, set-updates on|off)"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 
 say "check"
 for u in "${users[@]}"; do
   sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots 1 >/dev/null || { echo "FAIL: $u can't run set-slots 1" >&2; exit 1; }
-  if sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots 17 >/dev/null 2>&1; then echo "FAIL: $u may run set-slots 17" >&2; exit 1; fi
+  if sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots "$((cap + 1))" >/dev/null 2>&1; then echo "FAIL: $u may run set-slots $((cap + 1))" >&2; exit 1; fi
 done
 if id -u wl-dash >/dev/null 2>&1 && sudo -n -l -U wl-dash "$MACHINE_HELPER" set-slots 1 >/dev/null 2>&1; then echo "FAIL: wl-dash may run the helper" >&2; exit 1; fi
 echo "OK: each coordinator may run the helper's exact commands; nothing else, and not wl-dash"

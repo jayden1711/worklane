@@ -23,11 +23,11 @@ login="${1:?usage: dashboards.sh <your GitHub login> <name> [<name>...]}"
 shift
 [ "$#" -ge 1 ] || { echo "usage: dashboards.sh <your GitHub login> <name> [<name>...]" >&2; exit 2; }
 [[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || { echo "GitHub login: letters, digits and dashes" >&2; exit 2; }
-command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
+command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package, then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
 
-state_of() { local coord="wl-$1"; echo "/home/$coord/.local/state/worklane/instances/$1/state"; }
+state_of() { local coord="wl-$1"; echo "$(home_of "$coord")/.local/state/worklane/instances/$1/state"; }
 for name in "$@"; do
   [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
@@ -80,7 +80,7 @@ RestartSec=10
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/$viewer
+ReadWritePaths=$(home_of "$viewer")
 PrivateTmp=yes
 
 [Install]
@@ -121,7 +121,7 @@ for name in "$@"; do
   d="$state"
   while :; do
     setfacl -m "g:$viewer:--x" "$d"
-    [ "$d" = "/home/$coord" ] && break
+    [ "$d" = "$(home_of "$coord")" ] && break
     d="$(dirname "$d")"
   done
   setfacl -m "g:$viewer:r--" "$state/dashboard-token"
@@ -133,7 +133,7 @@ put worklane-dashboard-hub.service hub_unit "$@"
 systemctl daemon-reload
 systemctl enable --now worklane-dashboard-hub.service
 systemctl restart worklane-dashboard-hub.service
-hub_token_file="/home/$viewer/.local/state/worklane/dashboard-hub/dashboard-token"
+hub_token_file="$(home_of "$viewer")/.local/state/worklane/dashboard-hub/dashboard-token"
 wait_for "$hub_token_file" worklane-dashboard-hub.service
 
 say "check: $viewer reads each token and nothing else"

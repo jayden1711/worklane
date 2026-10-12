@@ -45,7 +45,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { maybePostDigest } from './coordinator/digest.js';
 import { Gardener } from './coordinator/gardener.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
-import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
@@ -623,7 +623,7 @@ export class Coordinator extends Gardener {
       jsonSchema: INVESTIGATION_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => this.emit('run.started', { issue: n, role: 'investigator', model, worktree: path, pid: p, pgid: p, attempt: 1 }),
     });
     this.cost(n, 'investigator', r);
@@ -670,7 +670,7 @@ export class Coordinator extends Gardener {
         maxBudgetUsd: role.budget_usd ?? 3,
         jsonSchema: REPRO_SCHEMA,
         stallMs: 15 * 60_000,
-        timeoutMs: COMMAND_TIMEOUT_MS,
+        timeoutMs: this.commandTimeoutMs,
       });
       this.cost(n, 'evaluator-repro', r);
       const s = r.structured as { test_path?: string; not_reproducible?: string } | undefined;
@@ -733,7 +733,7 @@ export class Coordinator extends Gardener {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
       onStart: (p) => {
         pid = p;
         this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt, ...(researched ? { resumed: 'research' as const } : {}) });
@@ -1029,7 +1029,7 @@ export class Coordinator extends Gardener {
             maxBudgetUsd: role.budget_usd ?? 5,
             jsonSchema: opts.schema ?? VERDICT_SCHEMA,
             stallMs: 15 * 60_000,
-            timeoutMs: COMMAND_TIMEOUT_MS,
+            timeoutMs: this.commandTimeoutMs,
             onControl: (c) => void (runId = c.runId),
           });
           this.cost(n, costRole, r);

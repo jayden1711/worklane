@@ -7,7 +7,7 @@ import { chatCorrections, CORRECTION_LABEL, correctionBrief, correctionMarker, c
 import type { EventPayload } from '../events/types.js';
 import { rolePrompt } from '../roles.js';
 import { MergeFlow } from './merge-flow.js';
-import { COMMAND_TIMEOUT_MS } from './shared.js';
+
 
 /** How often the harness's PRs are checked for reviews that request changes and for unmerged closes. */
 export const REVIEW_POLL_MS = 5 * 60_000;
@@ -124,7 +124,7 @@ export abstract class Corrections extends MergeFlow {
       maxBudgetUsd: Math.min(role.budget_usd ?? 3, Math.max(0.1, left)),
       jsonSchema: CORRECTIONS_SCHEMA,
       stallMs: 20 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs: this.commandTimeoutMs,
     });
     this.emit('run.cost', { issue: c.issue, role: 'corrections', model: r.model, usd: r.costUsd, turns: r.turns });
     if (r.reason !== 'succeeded') return void this.emit('correction.no_fix', { key: c.key, why: `the corrections run ended: ${r.reason} (${r.detail.slice(0, 300)})`, failed: true });

@@ -383,6 +383,8 @@ export const TestsConfig = z.strictObject({
     .prefault({}),
   /** Project lints run in the PR-gate tier (e.g. scripts in the config folder's checks/). Non-zero exit fails the gate. */
   checks: z.array(z.string()).default([]),
+  /** How long a project command (a check, a suite, a setup step) or an agent run may take before it's stopped. */
+  command_timeout_s: z.number().int().min(60).max(86_400).default(7200),
   tiers: z
     .array(
       z.strictObject({

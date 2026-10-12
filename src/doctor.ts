@@ -23,18 +23,14 @@ export interface DoctorCheck {
 
 const CLAUDE_MD_TOKEN_BUDGET = 2500;
 
-function nodeMajor(): number {
-  return Number(process.versions.node.split('.')[0]);
-}
-
 export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
 
   const [maj, min] = process.versions.node.split('.').map(Number) as [number, number];
-  if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; hooks need >= 22.13`);
-  else if (nodeMajor() < 24) add('node', 'warn', `Node ${process.versions.node}: hooks OK; the coordinator (step 2) needs >= 24`);
+  // The engine's requirement (package.json engines): every part, hooks and coordinator alike, runs on it.
+  if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
   else add('node', 'ok', `Node ${process.versions.node}`);
 
   let cfg: Config | null = null;

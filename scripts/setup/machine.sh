@@ -1,14 +1,39 @@
 #!/usr/bin/env bash
 # Once per machine: roots for checkouts and state, the shared agent slots
 # and their config, and Claude Code's sandbox dependencies.
-#   bash scripts/setup/machine.sh [--cap N]     (default cap 2)
+#   bash scripts/setup/machine.sh [--cap N] [--max-cap N] [--checkouts DIR]
+#     --cap        the agent slot cap to start with (default 2)
+#     --max-cap    the highest cap an instance may set from its dashboard (default 16)
+#     --checkouts  where the instances' checkouts live (default /srv/worklane)
+# --max-cap and --checkouts are recorded in /etc/worklane/machine.json (root-owned), which every
+# setup script and the machine helper read. A re-run without them keeps what is recorded.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 cap=2
-[ "${1:-}" = --cap ] && cap="${2:?--cap needs a number}"
+max="$(max_cap)"
+checkouts="$(checkouts_root)"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --cap) cap="${2:?--cap needs a number}"; shift 2 ;;
+    --max-cap) max="${2:?--max-cap needs a number}"; shift 2 ;;
+    --checkouts) checkouts="${2:?--checkouts needs a directory}"; shift 2 ;;
+    *) echo "unknown option $1 (--cap N, --max-cap N, --checkouts DIR)" >&2; exit 2 ;;
+  esac
+done
+[[ "$max" =~ ^[1-9][0-9]?$ ]] || { echo "--max-cap: a whole number from 1 to 99" >&2; exit 2; }
+[[ "$cap" =~ ^[1-9][0-9]?$ ]] && [ "$cap" -le "$max" ] || { echo "--cap: a whole number from 1 to the max cap ($max)" >&2; exit 2; }
+[[ "$checkouts" =~ ^/[A-Za-z0-9._/-]+$ && "$checkouts" != */ ]] || { echo "--checkouts: an absolute path of letters, digits, . _ - and /, with no trailing /" >&2; exit 2; }
 
 say "roots"
-install -d -o root -g root -m 0755 /srv/worklane /var/lib/worklane /etc/worklane
+install -d -o root -g root -m 0755 "$checkouts" /var/lib/worklane /etc/worklane
+
+say "machine settings (root-owned, readable by all)"
+tmp=/etc/worklane/.machine.json.tmp
+printf '{"max_cap":%s,"checkouts":"%s"}\n' "$max" "$checkouts" > "$tmp"
+chown root:root "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" /etc/worklane/machine.json
+cat /etc/worklane/machine.json
 
 say "shared agent slots (group agent-slots) and their config"
 ensure_group agent-slots
@@ -20,7 +45,7 @@ chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
 say "sandbox dependencies"
-apt-get install -y bubblewrap socat
+pkg_install bubblewrap socat
 
 say "AppArmor: let bubblewrap create user namespaces (the machine-wide restriction stays on)"
 if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then

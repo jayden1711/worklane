@@ -613,10 +613,10 @@ async function main(argv: string[]): Promise<number> {
         const repoPath = option(rest, '--repo');
         const gh = option(rest, '--github');
         if (!repoPath || !gh) {
-          console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>]');
+          console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>]');
           return 2;
         }
-        const home = initInstance(target, repoPath, gh, undefined, option(rest, '--agent-user'));
+        const home = initInstance(target, repoPath, gh, undefined, option(rest, '--agent-user'), option(rest, '--agent-home'));
         console.log(`created ${home}\n  edit policy.yaml, and point credentials.yaml at credentials made for this instance`);
         return 0;
       }
@@ -659,7 +659,7 @@ async function main(argv: string[]): Promise<number> {
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] | instance list | instance show <name>');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name>');
       return 2;
     }
 

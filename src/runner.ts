@@ -152,6 +152,8 @@ export interface RunAs {
   home: string;
   /** Defaults to <home>/.claude. */
   claudeConfigDir?: string;
+  /** PATH for project commands run as this user (instance.yaml run_as.path; default: defaultAgentPath()). */
+  path?: string;
 }
 
 /** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */

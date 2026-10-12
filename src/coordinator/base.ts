@@ -23,7 +23,7 @@ import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
-import { type CoordinatorDeps, COMMAND_TIMEOUT_MS, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted } from './shared.js';
+import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted } from './shared.js';
 
 export abstract class CoordinatorBase {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -169,7 +169,12 @@ export abstract class CoordinatorBase {
   /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
   protected project(command: string, cwd: string) {
     const share = this.coreShare();
-    return sh(withCores(command, share), cwd, COMMAND_TIMEOUT_MS, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share));
+    return sh(withCores(command, share), cwd, this.commandTimeoutMs, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share));
+  }
+
+  /** How long a project command or an agent run may take (tests.yaml command_timeout_s). */
+  protected get commandTimeoutMs(): number {
+    return this.d.cfg.tests.command_timeout_s * 1000;
   }
 
   protected get branch() {
