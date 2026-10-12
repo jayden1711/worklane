@@ -40,6 +40,26 @@ install_sudoers() {
   echo "installed /etc/sudoers.d/$name"
 }
 
+# Remove a sudoers file installed by install_sudoers (absent: nothing to do).
+remove_sudoers() {
+  [[ "$1" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "remove_sudoers: bad name $1" >&2; return 1; }
+  rm -f "/etc/sudoers.d/$1"
+}
+
+# PASS when <user> can't read, write or (a directory) enter each existing path named, else FAIL; non-zero if
+# any FAIL. Each probe runs as that user and must itself answer "denied": a probe that can't run (sudo
+# refused, no such user) is a FAIL, never a pass.
+deny_check() {
+  local user="$1" p out fail=0
+  shift
+  for p in "$@"; do
+    [ -e "$p" ] || continue
+    out="$(cd / && sudo -n -u "$user" sh -c 'if [ -r "$1" ] || [ -w "$1" ] || { [ -d "$1" ] && [ -x "$1" ]; }; then echo open; else echo denied; fi' _ "$p" 2>/dev/null || true)"
+    if [ "$out" = denied ]; then echo "PASS $user can't read, write or enter $p"; else echo "FAIL $user can reach $p (${out:-the probe did not run})"; fail=1; fi
+  done
+  return "$fail"
+}
+
 # Everything under a directory that anyone outside its owner and group can read, write or enter.
 open_to_others() { find "$1" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print 2>/dev/null; }
 
