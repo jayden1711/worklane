@@ -195,7 +195,7 @@ test('an instance coordinator refuses to start without its own credentials', () 
   assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
 });
 
-test("regression: an instance coordinator refuses to start without its agents' guardrail settings, naming the install command", () => {
+test("regression: an instance coordinator refuses to start without its agents' guardrail settings, naming the install command", { skip: process.platform === 'win32' && 'agent users are POSIX users' }, () => {
   const { dir, made } = two();
   const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
   rmSync(join(made[0]!.home, 'agent-settings.json'));
