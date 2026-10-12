@@ -24,6 +24,7 @@ import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceTokens, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
+import { answerDecision, auditWrite } from './decide.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
@@ -634,7 +635,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const audit = (who: Who, action: string, detail: Record<string, unknown>) => {
     const log = new EventLog(opts.eventsDb);
     try {
-      log.append('dashboard.audit', { login: who.login, role: who.role, via: who.via, instance: opts.instance ?? null, action, detail }, who.login, 'human');
+      auditWrite(log, who, opts.instance ?? null, action, detail);
     } finally {
       log.close();
     }
@@ -985,16 +986,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const body = (await readBody(req)) as { id?: string; answer?: string };
           const log = new EventLog(opts.eventsDb);
           try {
-            const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === body.id)?.payload as { options: string[]; owner: string; kind: string } | undefined;
-            if (!q) return json(res, 404, { error: `no decision ${body.id}` });
-            if (!mayAnswerKind(q.kind, who.role)) return json(res, 403, { error: `@${who.login} can't answer this: a ${q.kind === 'plan' ? 'held plan' : 'high-risk merge'} is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
-            if (!body.answer || !q.options.includes(body.answer)) return json(res, 400, { error: `answer must be one of ${q.options.join(', ')}` });
-            const answered = log.read(0, ['decision.answered']).some((e) => (e.payload as { id: string }).id === body.id);
-            if (answered) return json(res, 409, { error: 'already answered' });
-            // With the role this server read, so the coordinator acts on a writer's answer (an intake approval) too.
-            const e = log.append('decision.answered', { id: body.id!, by: who.login, answer: body.answer, role: who.role === 'owner' ? 'owner' : 'writer' }, who.login, 'human');
-            audit(who, 'decision.answered', { id: body.id!, kind: q.kind, answer: body.answer });
-            return json(res, 200, { ok: true, event: e.id });
+            // The one decide path (src/decide.ts): a chat-thread answer goes through it too.
+            const r = answerDecision(log, { id: String(body.id ?? ''), answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo });
+            return r.ok ? json(res, 200, { ok: true, event: r.event }) : json(res, r.status, { error: r.error });
           } finally {
             log.close();
           }

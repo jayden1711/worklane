@@ -15,7 +15,7 @@ import { acceptTriage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
-import { ResearchOnDemand } from './research-on-demand.js';
+import { Channel } from './channel.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';
 
@@ -30,7 +30,7 @@ const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Coul
 /** The marker in an intake issue's body that ties it to its report, so it is never filed twice. */
 const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 
-export abstract class Intake extends ResearchOnDemand {
+export abstract class Intake extends Channel {
   // ---------------------------------------------------------------- intake
 
   /**
@@ -65,6 +65,9 @@ export abstract class Intake extends ResearchOnDemand {
   async recoverIntake(): Promise<void> {
     const it = this.d.intake;
     if (!it) return;
+    // The chat channel's posts cut off by a restart, and its threads, taken again.
+    this.channelRecover();
+    this.channelRewatch();
     const sent = new Set(this.d.log.read(0, ['intake.replied']).map((e) => `${(e.payload as { id: string }).id}\0${(e.payload as { stage: string }).stage}`));
     for (const e of this.d.log.read(0, ['intake.replying'])) {
       const p = e.payload as EventPayload<'intake.replying'>;
@@ -127,7 +130,9 @@ export abstract class Intake extends ResearchOnDemand {
         const meter = new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
         for (const _ of notAllowed) meter.countDrop('not_allowed');
       }
-      const batch = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      const sorted = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      // The chat channel first (src/coordinator/channel.ts): replies in its threads, and anyone unmapped ignored.
+      const { rest: batch, ignored } = src.name === 'discord' ? await this.channelInbound(cfg, sorted) : { rest: sorted, ignored: [] as IncomingReport[] };
       for (const r of batch) {
         if (this.halt.signal.aborted || this.stopped) break;
         try {
@@ -137,12 +142,14 @@ export abstract class Intake extends ResearchOnDemand {
         }
       }
       // Only what is recorded (its id in the seen ledger), or dropped by rule, is acknowledged; the rest comes again.
-      const recorded = [...batch.filter((r) => seen(this.d.stateDir, r)), ...notAllowed].map((r) => r.sourceId);
+      const recorded = [...sorted.filter((r) => seen(this.d.stateDir, r)), ...notAllowed, ...ignored].map((r) => r.sourceId);
       if (recorded.length && src.ack) await src.ack(recorded).catch((e: unknown) => error(`intake ${src.name} ack`, e));
       if (this.halt.signal.aborted || this.stopped) return;
     }
     await this.intakeDecisions(cfg);
     await this.intakeStatus(cfg);
+    this.channelRewatch();
+    await this.channelOutbound(cfg);
   }
 
   /** One new report, from its raw text to its action. A report already stored is never taken again. */

@@ -12,6 +12,7 @@ import type { InstanceSettings } from '../instance.js';
 import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
 import type { PrTestRuns } from './test-runs.js';
 import type { TestRuns } from './pr-batch.js';
+import type { RoleOf } from '../dashboard-auth.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -63,9 +64,10 @@ export interface CoordinatorDeps {
   machineExec?: (file: string, args: string[]) => string;
   /**
    * Work intake (docs/intake.md): the instance's intake config, read on every pass (null: intake is off), and its
-   * sources. `pullMs`: how often the sources are pulled (default 30 s).
+   * sources. `pullMs`: how often the sources are pulled (default 30 s). `roleOf`: a person's role on the instance's
+   * repo, read as the dashboard reads it (dashboard-auth.ts), for what a mapped chat sender may do (absent: nothing).
    */
-  intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number };
+  intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number; roleOf?: RoleOf };
   /** The fast test runs on every open PR (src/coordinator/test-runs.ts); absent: tests.yaml has no test_run, or no sandbox. */
   prTestRuns?: PrTestRuns;
   /**

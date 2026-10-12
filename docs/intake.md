@@ -63,6 +63,64 @@ senders. There are two sources: the Discord bot and in-product reports.
 - Heartbeats and resume follow the gateway protocol; a dropped connection reconnects with backoff. The
   adapter never stores the token anywhere but in memory.
 
+### 2.1.1 Discord as the owner's channel
+
+The same bot (one server, no DMs, the same allowed senders, redaction and exactly-once store) can carry what
+waits on people: decisions and setup-console asks are posted in one channel, one thread each, and a reply in
+the thread answers them. It is per instance and off by default: it is on only for an instance whose own
+`intake.yaml` enables Discord and maps at least one person (below), and posting also needs `asks_channel` and
+`dashboard_url`. An instance without them posts nothing to Discord and reads nothing from it as an answer. Each
+instance answers only in the threads it opened itself, from its own events, with its own mapping.
+
+**Who is who.** Every setting lives in the instance's `intake.yaml`, in the instance home
+(`<instances dir>/<instance>/intake.yaml`, beside `policy.yaml`), owned by the coordinator user, mode 0600: it
+is refused if its group or others can read or write it, and it is never in the repo. `discord.people` maps a
+Discord user id to the GitHub login it stands for:
+
+```yaml
+version: 1
+discord:
+  enabled: true
+  guild: "100000000000000001"          # the one server
+  channels: ["100000000000000002"]     # where ideas are posted
+  allowed_senders: ["100000000000000011", "100000000000000012", "100000000000000013"]
+  people:                              # Discord user id -> GitHub login
+    "100000000000000011": example-owner
+    "100000000000000012": example-cofounder
+    "100000000000000013": example-teammate
+  asks_channel: "100000000000000003"   # decisions and asks, one thread each
+  dashboard_url: https://dashboard.example.test
+```
+
+A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
+(admin: owner; maintain or write: writer; triage or read: viewer; none or an error: no access). Every mapped id
+must be an allowed sender (a config error otherwise). An allowed sender who isn't mapped is ignored entirely in
+threads and conversations: nothing of theirs is stored, answered or replied to, only counted (`unmapped`).
+
+**Answering.** A reply in a decision's or ask's thread answers through the dashboard's own decide path
+(`src/decide.ts`; for asks, `console/asks.ts`): the same role check (`mayAnswerKind`: an admin answers owner
+decisions, held plans; an admin or writer the rest), the same options, the same `decision.answered` record, and
+the same audit entry with `via: discord`. Who may answer from a thread is one function,
+`mayAnswerFromChat` in `src/intake/people.ts`.
+
+- A reply chooses an option only when its first word is that option and it names no other. Anything else
+  ("approve or reject?", "yes", "sounds good") answers nothing, and the bot asks back with the exact options.
+- A reply from someone who may not answer it (a writer on an owner decision, a viewer) is recorded as a comment
+  (`discord.reply` with the redacted excerpt, and on the issue when there is one), never as an answer.
+- The first recorded answer stands, wherever it came from. A later one is refused: "already decided by @login".
+  When something is decided elsewhere, its thread says who decided, once.
+
+**Never on Discord.**
+
+- A secret (`paste_secret`) or root-step ask posts only "A setup step needs you on the dashboard" and the
+  setup console's link: no title, detail, credential name or place.
+- A high-risk merge (`land`) posts only a notice with links to the issue on GitHub and the dashboard's land
+  queue. It gets no thread and no options, and no reply anywhere in Discord answers it; admins approve it on
+  GitHub or the dashboard as before.
+
+Every post is recorded before it is sent (`discord.posting`) and after (`discord.posted`); one cut off by a
+restart is marked unknown and never resent. Posts are at most 500 characters and ping nobody.
+
 ### 2.2 In-product bug reports
 
 - A read-only pull from the project's bug-report store through the existing production read path
@@ -189,6 +247,8 @@ test with an injection-style report.
    config. Only when the owner gives the go for that project.
 3. **Enable** each source per instance in `intake.yaml` (Discord also needs the server id), list the allowed
    senders (`discord.allowed_senders`) and, among them, the trusted ones, by Discord user id.
+4. **Discord as a channel** (2.1.1): map each person's Discord user id to their GitHub login
+   (`discord.people`), and set `discord.asks_channel` and `discord.dashboard_url`.
 
 ## 11. Build order
 

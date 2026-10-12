@@ -55,6 +55,8 @@ export class DiscordIntake {
    * gateway has no acknowledgement to hold them. A replay of a message already taken is deduped by its id.
    */
   private queue: IncomingReport[] = [];
+  /** The bot's own threads (decisions, asks, conversations) whose replies it takes. */
+  private threads = new Set<string>();
   /** Messages seen and dropped (not addressed, another server or channel, a DM, from a bot), counted only. */
   dropped = 0;
   /** The same drops by reason: `sender` (not an allowed sender), `bot`, `place` (another server or channel, a DM), `unaddressed`. */
@@ -122,9 +124,11 @@ export class DiscordIntake {
     // Only allowed senders, checked on the author id before anything of the message is read.
     if (!this.o.allowedSenders.includes(m.author.id)) return drop('sender');
     // A DM has no guild: dropped like any message outside the configured server.
-    if (m.guild_id !== this.o.guild || !this.o.channels.includes(m.channel_id)) return drop('place');
+    const inThread = this.threads.has(m.channel_id);
+    if (m.guild_id !== this.o.guild || (!inThread && !this.o.channels.includes(m.channel_id))) return drop('place');
     const mentions = this.botId ? [`<@${this.botId}>`, `<@!${this.botId}>`] : [];
-    const text = addressed(m.content, this.o.prefixes, mentions);
+    // In the bot's own thread every message is a reply to it; in a channel, only an addressed one counts.
+    const text = inThread ? m.content.trim() || null : addressed(m.content, this.o.prefixes, mentions);
     if (!text) return drop('unaddressed');
     this.queue.push({
       source: 'discord',
@@ -132,8 +136,37 @@ export class DiscordIntake {
       sender: { source: 'discord', id: m.author.id, ...(m.author.global_name || m.author.username ? { name: m.author.global_name ?? m.author.username! } : {}) },
       text,
       receivedAt: (this.o.now ?? (() => new Date()))().toISOString(),
-      thread: { kind: 'channel', id: m.channel_id },
+      thread: { kind: inThread ? 'thread' : 'channel', id: m.channel_id },
     });
+  }
+
+  /** Take replies in this thread of the bot's. */
+  watch(thread: string) {
+    this.threads.add(thread);
+  }
+
+  /**
+   * Post in `channel` (at most REPLY_CHARS, pinging nobody) and open a thread on the post, or on the message `from`
+   * when given (a person's idea). The thread is watched from then on. Returns its id, or null on any failure.
+   */
+  async openThread(channel: string, text: string, name: string, from?: string): Promise<string | null> {
+    const f = this.o.fetch ?? fetch;
+    const headers = { authorization: `Bot ${this.o.token}`, 'content-type': 'application/json' };
+    let on = from;
+    if (!on) {
+      const r = await f(`${API}/channels/${encodeURIComponent(channel)}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: text.slice(0, REPLY_CHARS), allowed_mentions: { parse: [] } }) });
+      if (!r.ok) return null;
+      on = String(((await r.json()) as { id?: unknown }).id ?? '');
+      if (!/^\d{5,25}$/.test(on)) return null;
+    }
+    const t = await f(`${API}/channels/${encodeURIComponent(channel)}/messages/${encodeURIComponent(on)}/threads`, { method: 'POST', headers, body: JSON.stringify({ name: name.slice(0, 100) || 'thread', auto_archive_duration: 10080 }) });
+    if (!t.ok) return null;
+    const id = String(((await t.json()) as { id?: unknown }).id ?? '');
+    if (!/^\d{5,25}$/.test(id)) return null;
+    this.watch(id);
+    // On a person's message, the text is the bot's first reply in the new thread.
+    if (from && !(await this.reply(id, text))) return null;
+    return id;
   }
 
   /** Reply in the same channel, at most REPLY_CHARS. */
