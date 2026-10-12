@@ -251,7 +251,7 @@ export function status(root: string): string {
       const n = (e.payload as { issue?: number }).issue;
       if (typeof n === 'number') byIssue.set(n, e.type);
     }
-    const open = [...byIssue].filter(([, t]) => !['issue.released', 'deploy.verified'].includes(t));
+    const open = [...byIssue].filter(([, t]) => !['issue.released', 'issue.closed', 'deploy.verified'].includes(t));
     const decisions = ev.filter((e) => e.type === 'decision.asked').filter((q) => !ev.some((a) => a.type === 'decision.answered' && (a.payload as { id: string }).id === (q.payload as { id: string }).id));
     const slots = slotStatus();
     const started = ev.filter((e) => e.type === 'coordinator.started').at(-1);

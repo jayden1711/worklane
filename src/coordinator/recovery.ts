@@ -4,10 +4,13 @@ import { BRAND } from '../brand.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { refuseInterruptedChats } from '../chat.js';
+import { ClosedIssueWatch } from './closed-issues.js';
 import { Intake } from './intake.js';
 import { RETRY_CAP } from './shared.js';
 
 export abstract class Recovery extends Intake {
+  private readonly closedWatch = new ClosedIssueWatch();
+
   /**
    * After a crash or restart: a task that was mid-pipeline (claimed, not yet
    * queued for landing or waiting on a decision) has no live run anymore, so
@@ -61,8 +64,14 @@ export abstract class Recovery extends Intake {
       const gh = await this.d.backlog.get(issue);
       if (gh.state === 'closed') {
         this.emit('issue.released', { issue, instance: this.d.instance, why: 'issue closed on GitHub' });
+        this.emit('issue.closed', { issue });
         n++;
       }
+    }
+    // Issues held for the owner with no claim to check (blocked and released, a decision, a held plan): one listing.
+    for (const issue of await this.closedWatch.check(this.d.log.read(), this.d.backlog)) {
+      this.emit('issue.closed', { issue });
+      n++;
     }
     return n;
   }
