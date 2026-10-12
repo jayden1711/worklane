@@ -312,3 +312,12 @@ test('injection: a report cannot attach itself to an issue it was not matched wi
 test('the intake doc exists where the setup steps point', () => {
   assert.ok(existsSync(join(repoRoot, 'docs', 'intake.md')));
 });
+
+test('the intake prompt is a role like the others: in src/roles.ts, with eval cases that ship with the engine', async () => {
+  const { defaultRolePrompt } = await import('../src/roles.js');
+  const { INTAKE_PROMPT } = await import('../src/intake/run.js');
+  const { engineRoleCases, parseCases } = await import('../src/skilleval.js');
+  assert.equal(INTAKE_PROMPT, defaultRolePrompt('intake'));
+  const cases = parseCases(engineRoleCases('intake') ?? '');
+  assert.ok(cases.length >= 5 && cases.every((c) => c.correct.length && c.wrong.length), `${cases.length} cases`);
+});
