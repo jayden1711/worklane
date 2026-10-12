@@ -18,7 +18,7 @@ import { repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const state = () => mkdtempSync(join(tmpdir(), 'intake-'));
-const DRAFT = { title: 'Totals ignore discounts', body: 'Totals are wrong when a discount applies.\n\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n' };
+const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 const report = (over: Partial<IncomingReport> = {}): IncomingReport => ({ source: 'sms', sourceId: 'SM1', sender: { source: 'sms', id: '+15550001111' }, text: 'checkout total is wrong', receivedAt: '2026-10-11T10:00:00.000Z', thread: { kind: 'sms', id: '+15550001111' }, ...over });
 
 // ---------- redaction ----------
@@ -252,10 +252,10 @@ test('in-product reports: the fixed query with only a validated cursor filled in
 
 test('drafts: the contract parser decides, and commands must be block scalars', () => {
   assert.deepEqual(checkDraft(DRAFT), { ok: true });
-  assert.match((checkDraft({ ...DRAFT, body: '```done_when\n- command: npm test\n```' }) as { why: string }).why, /block scalars/);
+  assert.match((checkDraft({ ...DRAFT, body: DRAFT.body.replace('command: |\n    npm test -- --grep "discount: applied"', 'command: npm test') }) as { why: string }).why, /block scalars/);
   assert.equal(checkDraft({ ...DRAFT, body: DRAFT.body.replace('command: |\n    npm', 'command: npm') }).ok, false, 'an inline command with a colon breaks the block: why block scalars are required');
   assert.equal(checkDraft({ ...DRAFT, body: 'no contract here' }).ok, false);
-  assert.equal(checkDraft({ ...DRAFT, body: '```done_when\n- command: |\n  x\n- bogus: 1\n```' }).ok, false);
+  assert.equal(checkDraft({ ...DRAFT, body: DRAFT.body.replace('```\n**Review', '- bogus: 1\n```\n**Review') }).ok, false);
 });
 
 test('dedupe: similar reports and issues rank first; redaction placeholders say nothing', () => {
@@ -291,8 +291,9 @@ test('decisions: trusted bugs are filed ready, everyone else\'s go to the Inbox;
 test('a draft that fails checkDraft is needs_info, whatever kind the agent chose: the polite request, never an issue (#107)', () => {
   const bad = [
     { title: 'Totals ignore discounts', body: 'No contract at all.' },
-    { title: 'Totals ignore discounts', body: '```done_when\n- command: npm test\n```\n' },
-    { title: 'Totals ignore discounts', body: '```done_when\n- command: |\n    npm test\n- bogus: 1\n```\n' },
+    { title: 'Totals ignore discounts', body: DRAFT.body.replace('command: |\n    npm test -- --grep "discount: applied"', 'command: npm test') },
+    { title: 'Totals ignore discounts', body: DRAFT.body.replace('```\n**Review', '- bogus: 1\n```\n**Review') },
+    { title: 'Totals ignore discounts', body: '```done_when\n- command: |\n    npm test\n```\n' },
   ];
   for (const draft of bad)
     for (const kind of ['bug', 'feature'] as const)

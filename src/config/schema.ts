@@ -139,6 +139,19 @@ export const AgentsConfig = z
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
     /**
+     * Tiered evaluation: which model judges a change, from its review level, decided in code. Changes at
+     * `cheap_levels` (docs-only, tests-only, comment-only: L0) are judged by `cheap_model`; every other level by
+     * the evaluator role's model. A failed or uncertain verdict from the cheap model is judged once more by the
+     * evaluator role's model before anything is rejected.
+     */
+    eval_routing: z
+      .strictObject({
+        cheap_model: model.default('sonnet'),
+        cheap_levels: z.array(z.enum(['L0', 'L1', 'L2', 'L3'])).default(['L0']),
+        escalate: z.boolean().default(true),
+      })
+      .prefault({}),
+    /**
      * A change to the agents' own instructions (a skill, AGENTS.md, a role prompt) is evaluated before it
      * lands: its eval cases at the base and at the head. A drop, a cap hit or no cases: the PR waits.
      */

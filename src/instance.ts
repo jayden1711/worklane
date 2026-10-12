@@ -63,6 +63,14 @@ export const InstanceSettings = z.strictObject({
       repo_access: z.boolean().optional(),
     })
     .optional(),
+  /** Tiered evaluation for this instance (agents.yaml eval_routing): the cheap model, its levels, escalation. */
+  eval_routing: z
+    .strictObject({
+      cheap_model: z.string().min(1).optional(),
+      cheap_levels: z.array(z.enum(['L0', 'L1', 'L2', 'L3'])).optional(),
+      escalate: z.boolean().optional(),
+    })
+    .optional(),
   /** Daily caps on work intake (reports per sender, drafts, estimated spend). Absent: the intake config's values. */
   intake: z
     .strictObject({
