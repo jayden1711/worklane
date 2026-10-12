@@ -1,12 +1,24 @@
 // The machine-wide settings on the Settings page: the agent slot cap and whether the engine
-// updates itself. They belong to the machine, not an instance: a change goes through this
-// instance's own server, which runs the machine helper as its user (sudo, one rule per
-// coordinator). The owner proposes, sees current and new, and confirms. Below, the history:
+// updates itself. They belong to the machine, not an instance: a change is recorded by this
+// instance's own server and run by its coordinator, which runs the machine helper (sudo, one rule
+// per coordinator; the dashboard itself can't sudo). The owner proposes, sees current and new, and
+// confirms; the request shows as pending until the coordinator has run it. Below, the history:
 // engine updates (installed, refused, rolled back) and every change the helper made.
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { DotPill, RecordsTable } from './patterns';
 import { ago, Button, Card, cx } from './ui';
+
+/** A machine change asked for from the dashboard, as the coordinator has handled it so far (src/machine-requests.ts). */
+export interface MachineRequestRow {
+  id: string;
+  args: string[];
+  by: string;
+  at: string;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'refused' | 'interrupted';
+  detail: string;
+  finishedAt: string | null;
+}
 
 export interface MachineData {
   owner: string;
@@ -17,7 +29,13 @@ export interface MachineData {
   updates: { configured: true; enabled: boolean; branch: string; requiredChecks: string[] } | { configured: false; enabled: null };
   changes: { at: string; by: string; what: string; from: unknown; to: unknown }[];
   history: { at: string; event: string; from?: string | null; to?: string | null; reason?: string; units?: string[]; failed?: string[]; back?: string }[];
+  /** Changes asked for here, newest first; absent from older servers. */
+  requests?: MachineRequestRow[];
 }
+
+const REQUEST_TONE: Record<MachineRequestRow['status'], 'green' | 'red' | 'orange' | 'ink'> = { pending: 'orange', running: 'orange', done: 'green', failed: 'red', refused: 'red', interrupted: 'red' };
+const REQUEST_LABEL: Record<MachineRequestRow['status'], string> = { pending: 'waiting for the coordinator', running: 'running', done: 'done', failed: 'failed', refused: 'refused', interrupted: 'interrupted' };
+export const anyPending = (d: MachineData) => (d.requests ?? []).some((r) => r.status === 'pending' || r.status === 'running');
 
 const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink' };
 const short = (s?: string | null) => (s ? s.slice(0, 8) : '–');
@@ -59,7 +77,7 @@ function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm
                       setMsg(null);
                       try {
                         await onConfirm(review.value);
-                        setMsg({ ok: true, text: `changed to ${review.text}` });
+                        setMsg({ ok: true, text: `requested ${review.text}: the coordinator applies it on its next tick (below)` });
                         setReview(null);
                       } catch (e) {
                         setMsg({ ok: false, text: (e as Error).message });
@@ -182,6 +200,27 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
         )}
       </section>
 
+      {!!data.requests?.length && (
+        <section className="space-y-1.5" aria-label="Requested changes" data-testid="machine-requests">
+          <div className="text-[13px] font-medium text-ink">Requested here</div>
+          <RecordsTable testId="machine-requests-table" head={['When', 'Who', 'Change', 'Status']} className="[&_th:nth-child(1)]:w-28 [&_th:nth-child(2)]:w-40">
+            {data.requests.map((r) => (
+              <tr key={r.id} className="border-b border-line align-top last:border-0" data-testid="machine-request-row" data-status={r.status}>
+                <td className="primitive-table-cell text-[12px] text-ink-3" title={r.at}>
+                  {ago(r.at)}
+                </td>
+                <td className="primitive-table-cell text-[12.5px] text-ink">@{r.by}</td>
+                <td className="primitive-table-cell font-mono text-[12px] text-ink-2">{r.args.join(' ')}</td>
+                <td className="primitive-table-cell text-[12px] text-ink-2">
+                  <DotPill tone={REQUEST_TONE[r.status]}>{REQUEST_LABEL[r.status]}</DotPill>
+                  {r.detail && <div className="mt-1 break-words text-[11.5px] text-ink-3">{r.detail}</div>}
+                </td>
+              </tr>
+            ))}
+          </RecordsTable>
+        </section>
+      )}
+
       <section className="space-y-1.5" aria-label="Machine changes" data-testid="machine-changes">
         <div className="text-[13px] font-medium text-ink">Machine changes</div>
         {data.changes.length ? (
@@ -210,11 +249,18 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
 export function MachineSettings() {
   const [data, setData] = useState<MachineData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
+  const load = () =>
     api<MachineData>('/api/machine')
       .then((d) => (setData(d), setError(null)))
       .catch((e: Error) => setError(e.message));
-  }, []);
+  useEffect(() => void load(), []);
+  // While a request waits for the coordinator, look again every few seconds until it has run.
+  const waiting = !!data && anyPending(data);
+  useEffect(() => {
+    if (!waiting) return;
+    const t = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(t);
+  }, [waiting]);
   if (error) return <div className="text-[13px] text-red" data-testid="machine-settings">Can't load the machine settings: {error}</div>;
   if (!data) return null;
   return <MachineSettingsView key={JSON.stringify([data.slots.cap, data.updates.enabled, data.changes.length])} data={data} onChanged={setData} />;

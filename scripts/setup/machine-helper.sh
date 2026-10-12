@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Once per machine, as root (review it first): let instances change machine-wide settings from
 # their dashboards, through one root-owned helper that validates and writes only those settings.
+# The dashboard (hardened: NoNewPrivileges) never runs sudo itself: it records the request and the
+# instance's coordinator runs the helper on its next tick (src/machine-requests.ts).
 #
 #   bash scripts/setup/machine-helper.sh <name> [<name>...]     every instance on this machine
 #
