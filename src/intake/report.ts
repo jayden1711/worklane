@@ -50,7 +50,10 @@ const snowflake = (what: string) => z.string().regex(/^\d{5,25}$/, `a Discord ${
 
 export const IntakeConfig = z.strictObject({
   version: z.literal(1),
-  /** Trusted senders: their drafts are filed with `ready`. The owner is trusted by their Discord user id below. */
+  /**
+   * Trusted senders: their drafts are filed with `ready`. The owner is trusted by their Discord user id below. A
+   * trusted Discord id must also be an allowed sender (discord.allowed_senders).
+   */
   trusted: z
     .strictObject({
       discord: z.array(snowflake('user')).default([]),
@@ -65,6 +68,11 @@ export const IntakeConfig = z.strictObject({
       guild: snowflake('server').optional(),
       /** Only these channels of that server count. */
       channels: z.array(snowflake('channel')).default([]),
+      /**
+       * The only Discord users whose messages are taken (user ids). Anyone else's message is dropped before it is
+       * stored, counted only, and gets no reply. Empty: nobody's message is accepted.
+       */
+      allowed_senders: z.array(snowflake('user')).default([]),
       /** In a channel, a message counts only if it mentions the bot or starts with one of these. */
       prefixes: z.array(z.string().min(1)).default(['bug:']),
     })
@@ -108,8 +116,25 @@ export const IntakeConfig = z.strictObject({
       max_usd_per_day: z.number().positive().max(20).default(INTAKE_DEFAULT_CAPS.max_usd_per_day),
     })
     .prefault({}),
+}).superRefine((c, ctx) => {
+  for (const id of c.trusted.discord) {
+    if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['trusted', 'discord'], message: `${id} is trusted but not in discord.allowed_senders; a trusted sender must be allowed` });
+  }
 });
 export type IntakeConfig = z.infer<typeof IntakeConfig>;
+
+/**
+ * May this sender's message be taken at all? Discord: only the allowed senders. Checked on the sender id alone,
+ * before anything of the message is read or stored. In-product reports have no allow-list.
+ */
+export function isAllowed(sender: Sender, cfg: IntakeConfig): boolean {
+  return sender.source === 'discord' ? cfg.discord.allowed_senders.includes(sender.id) : true;
+}
+
+/** What the config allows that is probably not meant, for the start-up check. */
+export function intakeWarnings(cfg: IntakeConfig): string[] {
+  return cfg.discord.enabled && !cfg.discord.allowed_senders.length ? ['discord is on but discord.allowed_senders is empty: no Discord message will be accepted'] : [];
+}
 
 /**
  * Is this sender trusted? Decided only from the adapter's sender id against the instance config: nothing in the

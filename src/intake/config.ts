@@ -3,11 +3,15 @@
 // can write it, or when it belongs to another user. Absent: intake is off.
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { parse } from 'yaml';
-import { IntakeConfig } from './report.js';
+import { IntakeConfig, intakeWarnings } from './report.js';
 
 export const INTAKE_FILE = 'intake.yaml';
 
-export function loadIntakeConfig(path: string): { config: IntakeConfig } | { error: string } | null {
+/**
+ * Load and check intake.yaml. Refused (`error`): unsafe permissions, bad YAML, or an invalid config, including a
+ * trusted sender who isn't an allowed one. `warnings`: valid but probably not meant (Discord on, nobody allowed).
+ */
+export function loadIntakeConfig(path: string): { config: IntakeConfig; warnings: string[] } | { error: string } | null {
   if (!existsSync(path)) return null;
   // Where files have POSIX owners and modes (not Windows, which has neither getuid nor meaningful mode bits).
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -24,5 +28,5 @@ export function loadIntakeConfig(path: string): { config: IntakeConfig } | { err
   }
   const r = IntakeConfig.safeParse(raw);
   if (!r.success) return { error: `${path} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}` };
-  return { config: r.data };
+  return { config: r.data, warnings: intakeWarnings(r.data) };
 }
