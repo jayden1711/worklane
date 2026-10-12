@@ -121,6 +121,12 @@ the same audit entry with `via: discord`. Who may answer from a thread is one fu
 Every post is recorded before it is sent (`discord.posting`) and after (`discord.posted`); one cut off by a
 restart is marked unknown and never resent. Posts are at most 500 characters and ping nobody.
 
+**Running it.** The service (`src/intake/wire.ts`) reads only the instance's own home: no `intake.yaml`, no
+intake; Discord off, or no `intake.discord_token` in `credentials.yaml`, no bot connection. The bot connects
+only after the coordinator holds the instance's lock. `intake.yaml` is read again on every pass, but the
+server, channels and allowed senders the bot listens to are fixed when it connects: restart the instance after
+changing them.
+
 ### 2.1.2 Ideas in conversation
 
 With `discord.conversation: true` (off by default), an addressed message in `discord.channels` from a mapped
