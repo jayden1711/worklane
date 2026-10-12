@@ -759,3 +759,9 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
   assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
 });
+
+test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
+  assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
+  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
+});

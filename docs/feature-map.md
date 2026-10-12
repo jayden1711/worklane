@@ -71,7 +71,7 @@ Any other path shows Overview.
 | Agent runs refused | `issue-detail`, `run-detail` | for anyone but the owner and the project's writers: the runs card and a run page say runs are theirs, instead of an empty list or "No such run" | – | `[data-testid="runs-refused"]` |
 | A run's steps and final message | `run-detail` | the steps card and the final message | – | `[data-testid="run-steps"]`, `[data-testid="run-final"]` |
 | A research run's searches and pages (the owner and writers) | `run-detail` | on a researcher run: each search query, each page with fetched or refused (and why), linked when fetched; a cap it stopped at, in orange. Who may see it is the run page's: the owner and the writers | – | `[data-testid="run-research"]`, `[data-testid="run-research-search"]`, `[data-testid="run-research-fetch"]`, `[data-testid="run-research-capped"]` |
-| Next report preview | `reports` | the preview card | – | `[data-testid="report-preview"]` |
+| Next report preview (owner and writers) | `reports` | the preview card: the next report as it will be posted, plus the throughput section (which the posted report leaves out); for anyone else it says whose it is, without asking | – | `[data-testid="report-preview"]`, `[data-testid="report-refused"]` |
 | Pull requests page | `prs` | the page itself | – | `[data-testid="prs-page"]` |
 | Auto-merge state | `prs` | the card at the top: on or off, why, the kill switch and the repo's setting | – | `[data-testid="prs-auto-merge"]`, `[data-testid="prs-auto-merge-state"]`, `[data-testid="prs-auto-merge-why"]` |
 | Last auto-merge stop and its revert | `prs` | the auto-merge card's last line, after a stop | – | `[data-testid="prs-revert-link"]` |
