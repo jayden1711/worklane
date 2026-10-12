@@ -8,11 +8,14 @@
 #       The coordinator's GitHub identity: a GitHub App installed on only the instance's repo.
 #       Installs the App's private key for wl-<name> (0400), then verifies it by minting an
 #       installation token and checking the installation reaches exactly <owner/repo> with the
-#       permissions below.
+#       permissions below. <key.pem> may be - (the key on stdin). With a 7th argument --shared (one App for
+#       several projects), it checks a token limited to <owner/repo> instead of the whole installation.
 #   bash scripts/setup/credentials.sh <name> verify-app
 #       Read-only: the same check with the key already installed (after changing the App's permissions).
 #   bash scripts/setup/credentials.sh <name> claude
 #       The agent user's Claude login (interactive).
+#   bash scripts/setup/credentials.sh <name> claude-key
+#       Instead of a login: an Anthropic API key for the agent user (stdin or pasted), read through apiKeyHelper.
 #   bash scripts/setup/credentials.sh <name> github
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
@@ -49,8 +52,18 @@ case "$what" in
     inst_id="${4:?installation id missing}"
     src="${5:?path to the App private key (.pem) missing}"
     repo="${6:?the instance repo (owner/name) missing}"
+    # --shared: one App for several projects. Its installation reaches more than this repo, so the check mints a
+    # token limited to this repo (as the coordinator always does) and checks that token instead.
+    shared=""; [ "${7:-}" = --shared ] && shared=shared
     [[ "$app_id" =~ ^[0-9]+$ && "$inst_id" =~ ^[0-9]+$ ]] || { echo "App and installation ids are numbers" >&2; exit 1; }
     [[ "$repo" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || { echo "repo must be owner/name" >&2; exit 1; }
+    from_stdin=""
+    if [ "$src" = - ]; then
+      # The key on stdin (the machine helper's install-app-key): kept in a root-only temp file just long enough to install it.
+      from_stdin=1
+      src="$(mktemp)"; chmod 0600 "$src"; trap 'rm -f "$src"' EXIT
+      head -c 16384 > "$src"
+    fi
     grep -q -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' "$src" || { echo "$src is not a PEM private key" >&2; exit 1; }
     dir="/home/$coord/.config/$name-app"
     key="$dir/private-key.pem"
@@ -58,7 +71,7 @@ case "$what" in
     install -d -o "$coord" -g "$coord" -m 0700 "$dir"
     install -o "$coord" -g "$coord" -m 0400 "$src" "$key"
     say "verify as $coord: mint an installation token and list what the installation reaches"
-    verify_app "$key" "$app_id" "$inst_id" "$repo"
+    verify_app "$key" "$app_id" "$inst_id" "$repo" $shared
     echo
     creds="/home/$coord/.local/state/worklane/instances/$name/credentials.yaml"
     if [ -f "$creds" ]; then
@@ -67,8 +80,12 @@ case "$what" in
     else
       echo "no instance home yet (run engine.sh first); then set in credentials.yaml: github: { kind: app, app_id: $app_id, installation_id: $inst_id, key_path: $key }"
     fi
-    read -rp "Delete the copy you brought to this machine ($src) now with shred? [y/N] " yn
-    if [ "$yn" = y ]; then shred -u "$src" && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
+    if [ -n "$from_stdin" ]; then
+      echo "the key came on stdin; its temp copy is removed"
+    else
+      read -rp "Delete the copy you brought to this machine ($src) now with shred? [y/N] " yn || yn=
+      if [ "$yn" = y ]; then shred -u "$src" && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
+    fi
     echo "Now delete the key on your other machine (the downloaded .pem). If it's ever lost, generate a new one in the App's settings."
     ;;
   verify-app)
@@ -109,6 +126,23 @@ JS
     sudo -iu "$agent" claude
     sudo -iu "$agent" claude auth status --json
     ;;
+  claude-key)
+    # Instead of a subscription login: an Anthropic API key for the agent user's Claude Code (billed per use; the
+    # instance's daily budget still caps the estimated spend). Read from stdin or the terminal, never shown; stored
+    # 0400 for $agent, and Claude Code reads it through apiKeyHelper in $agent's own settings.
+    read -rsp "Paste the API key, then Enter (it is not shown): " key || true; echo
+    [[ "$key" =~ ^sk-ant-[A-Za-z0-9_-]{20,200}$ ]] || { unset key; echo "that doesn't look like an Anthropic API key (sk-ant-...); nothing installed" >&2; exit 1; }
+    file="/home/$agent/.config/claude-key/api-key"
+    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
+    unset key
+    (cd / && sudo -H -u "$agent" node -e '
+      const fs = require("node:fs"), p = `${process.env.HOME}/.claude/settings.json`;
+      let s = {}; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+      s.apiKeyHelper = `cat ${process.argv[1]}`;
+      fs.mkdirSync(`${process.env.HOME}/.claude`, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n", { mode: 0o600 });' "$file")
+    echo "installed $file (0400, $agent only); $agent's Claude Code reads it through apiKeyHelper"
+    ;;
   eval-key)
     # Evals are off unless you turn them on: no key, no eval lane, and the eval user needs no Claude login.
     [ "$flag" = --evals-on ] || { echo "evals are off for $name: no eval key is needed. Pass --evals-on only once you have an API key and want an eval lane." >&2; exit 2; }
@@ -120,7 +154,7 @@ JS
     echo "set credentials.yaml eval_key: $file   (readable only by $eval_user)"
     ;;
   intake-discord)
-    read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token; echo
+    read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token || true; echo
     [[ "$token" =~ ^[A-Za-z0-9._-]{50,100}$ ]] || { echo "that doesn't look like a bot token; nothing installed" >&2; exit 1; }
     install_secret "$intake_dir/discord-token" "$token"; unset token
     echo "installed $intake_dir/discord-token (0400, $coord only). In credentials.yaml set:"

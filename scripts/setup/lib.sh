@@ -70,6 +70,25 @@ machine_sudoers() {
   printf '\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\n' "$users"
 }
 
+# The helper's setup commands (onboarding a project), as scripts/machine/worklane-machine.cjs names them; a test
+# keeps the two lists equal. Those taking no argument are listed with "" (sudo: no arguments at all); the rest
+# take arguments the helper checks one by one against their exact shapes, so sudoers passes them through (*).
+SETUP_COMMANDS=(setup-machine add-instance install-engine install-app-key checkout install-service install-dashboards install-claude-key install-discord-token set-budget claude-status instance-doctor tailscale-serve)
+SETUP_NO_ARGS=" setup-machine tailscale-serve "
+# The sudoers rule for the one setup user (the owner's own account, which runs `worklane add` and the setup
+# console): exactly the helper's setup commands. Never a coordinator, the dashboard viewer or root.
+setup_sudoers() {
+  local u="${1:-}" c cmds=()
+  [[ "$u" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$u" != root && ! "$u" =~ ^wl- ]] || { echo "setup_sudoers: $u can't be the setup user (an ordinary login, not root or a wl- user)" >&2; return 1; }
+  for c in "${SETUP_COMMANDS[@]}"; do
+    if [[ "$SETUP_NO_ARGS" == *" $c "* ]]; then cmds+=("$MACHINE_HELPER $c \"\""); else cmds+=("$MACHINE_HELPER $c *"); fi
+  done
+  printf '# The setup user may onboard projects through the helper'"'"'s setup commands; the helper checks every argument.\n'
+  printf 'Cmnd_Alias WORKLANE_SETUP = %s' "${cmds[0]}"
+  for c in "${cmds[@]:1}"; do printf ', \\\n    %s' "$c"; done
+  printf '\n%s ALL=(root) NOPASSWD: WORKLANE_SETUP\n' "$u"
+}
+
 # The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
 # joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
 # updater refuses a skipped required check. A test derives this list from the workflows.

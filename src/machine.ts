@@ -19,14 +19,16 @@ export interface MachineChange {
   to: unknown;
 }
 
-export type Exec = (file: string, args: string[]) => string;
-const defaultExec: Exec = (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
+/** Run a command and return its stdout; `input`, when given, is its stdin (a secret for a setup command). */
+export type Exec = (file: string, args: string[], input?: string) => string;
+const defaultExec: Exec = (file, args, input) =>
+  execFileSync(file, args, { encoding: 'utf8', stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: input === undefined ? 30_000 : 1_800_000, ...(input === undefined ? {} : { input }) });
 
 export type MachineResult = { ok: true; output: string } | { ok: false; error: string };
 
-function runHelper(args: string[], exec: Exec): MachineResult {
+function runHelper(args: string[], exec: Exec, input?: string): MachineResult {
   try {
-    return { ok: true, output: exec('sudo', ['-n', MACHINE_HELPER, ...args]).trim() };
+    return { ok: true, output: (input === undefined ? exec('sudo', ['-n', MACHINE_HELPER, ...args]) : exec('sudo', ['-n', MACHINE_HELPER, ...args], input)).trim() };
   } catch (e) {
     const err = e as { stderr?: string | Buffer; message: string };
     const text = `${err.stderr ?? ''}`.trim() || err.message;
@@ -48,6 +50,14 @@ export function setSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
 /** Turn automatic engine updates on or off through the helper. */
 export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult {
   return runHelper(['set-updates', on ? 'on' : 'off'], exec);
+}
+
+/**
+ * One of the helper's setup commands (onboarding a project), as the setup user. The arguments are checked by
+ * the caller (console/root-steps.ts) and again by the helper; a secret goes on stdin, never in the arguments.
+ */
+export function runSetupCommand(command: string, args: string[], input?: string, exec: Exec = defaultExec): MachineResult {
+  return runHelper([command, ...args], exec, input);
 }
 
 /** The helper's change log, newest last; unreadable or malformed lines are skipped. */

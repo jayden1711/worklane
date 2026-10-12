@@ -1,7 +1,7 @@
 // The GitHub App's permissions, checked on a real installation token. The
 // setup script runs this as the coordinator user (who alone can read the key),
 // piped on stdin:
-//   node --input-type=module - <key.pem> <app-id> <installation-id> <owner/repo> < app-permissions.mjs
+//   node --input-type=module - <key.pem> <app-id> <installation-id> <owner/repo> [shared] < app-permissions.mjs
 // Imported by tests for the rules alone.
 
 /** Needed for the coordinator to work at all. */
@@ -50,7 +50,19 @@ export function permissionProblems(permissions) {
   return { errors, warnings };
 }
 
-async function main([key, appId, instId, repo]) {
+/**
+ * What a token reaches, against the one repo it must reach. Per project, the token is the whole installation's,
+ * so the installation must reach exactly the repo. Shared (one App, several projects), the token was minted
+ * limited to the repo (as the coordinator's always are), and that token must reach exactly the repo.
+ */
+export function scopeProblem(reached, repo, shared = false) {
+  const r = reached.map((x) => x.toLowerCase());
+  if (r.length === 1 && r[0] === repo.toLowerCase()) return null;
+  return shared ? `a token limited to ${repo} must reach exactly ${repo} (it reaches ${r.length} repo(s))` : `the installation must reach exactly ${repo}`;
+}
+
+async function main([key, appId, instId, repo, mode]) {
+  const shared = mode === 'shared';
   const { createSign } = await import('node:crypto');
   const { readFileSync } = await import('node:fs');
   const b64 = (x) => Buffer.from(x).toString('base64url');
@@ -61,23 +73,24 @@ async function main([key, appId, instId, repo]) {
   const h = (auth) => ({ authorization: `Bearer ${auth}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' });
   const app = await fetch('https://api.github.com/app', { headers: h(jwt) });
   if (!app.ok) throw new Error(`the key does not sign for App ${appId} (GitHub ${app.status})`);
-  const t = await fetch(`https://api.github.com/app/installations/${instId}/access_tokens`, { method: 'POST', headers: h(jwt) });
+  const t = await fetch(`https://api.github.com/app/installations/${instId}/access_tokens`, { method: 'POST', headers: { ...h(jwt), 'content-type': 'application/json' }, ...(shared ? { body: JSON.stringify({ repositories: [repo.split('/')[1]] }) } : {}) });
   if (!t.ok) throw new Error(`could not mint a token for installation ${instId} (GitHub ${t.status})`);
   const { token, permissions } = await t.json();
   const r = await fetch('https://api.github.com/installation/repositories?per_page=100', { headers: h(token) });
   const repos = (await r.json()).repositories.map((x) => x.full_name.toLowerCase());
   console.log(`App ${appId} (${(await app.json()).slug}), installation ${instId}`);
-  console.log(`reaches: ${repos.join(', ') || 'nothing'}`);
+  console.log(`${shared ? `a token limited to ${repo} reaches` : 'reaches'}: ${repos.join(', ') || 'nothing'}`);
   console.log(`token permissions: ${Object.entries(permissions).map(([k, v]) => `${k}:${v}`).join(', ')}`);
-  if (repos.length !== 1 || repos[0] !== repo.toLowerCase()) throw new Error(`the installation must reach exactly ${repo}`);
+  const scope = scopeProblem(repos, repo, shared);
+  if (scope) throw new Error(scope);
   const { errors, warnings } = permissionProblems(permissions);
   for (const w of warnings) console.log(`WARN: ${w}`);
   if (errors.length) throw new Error(errors.join('; '));
-  console.log('OK: the key works, the installation reaches only the instance repo, and its permissions are what the harness needs');
+  console.log(`OK: the key works, ${shared ? "the instance's tokens reach" : 'the installation reaches'} only the instance repo, and its permissions are what the harness needs`);
 }
 
 // Run only when piped in with its arguments (`node -` sets argv[1] to "-"); an import runs nothing.
-if (process.argv[1] === '-' && process.argv.length === 6) {
+if (process.argv[1] === '-' && (process.argv.length === 6 || (process.argv.length === 7 && process.argv[6] === 'shared'))) {
   main(process.argv.slice(2)).catch((e) => {
     console.error(`FAILED: ${e.message}`);
     process.exit(1);

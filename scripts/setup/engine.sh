@@ -12,8 +12,8 @@ name="${2:-}" repo="${3:-}"
 
 say "engine at $ref"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-# The same public repo these scripts were cloned from.
-origin="$(git -C "$(dirname "$0")" remote get-url origin)"
+# The same public repo these scripts were cloned from (the helper's root-owned copies record it beside them).
+if [ -f "$(dirname "$0")/engine-origin" ]; then origin="$(cat "$(dirname "$0")/engine-origin")"; else origin="$(git -C "$(dirname "$0")" remote get-url origin)"; fi
 git clone -q "$origin" "$work/src"
 git -C "$work/src" checkout -q --detach "$ref"
 sha="$(git -C "$work/src" rev-parse HEAD)"

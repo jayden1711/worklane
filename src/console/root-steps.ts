@@ -3,6 +3,7 @@
 // (scripts/setup/machine-helper.sh). Never arbitrary sudo. Anything else is refused here, before sudo is
 // reached, with what it would take: extending the helper, a reviewed change to the helper and its setup script.
 import { MACHINE_HELPER, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { SETUP_STEPS } from './setup-steps.js';
 
 export interface RootStepRule {
   command: string;
@@ -12,10 +13,15 @@ export interface RootStepRule {
   usage: string;
   /** Whether these exact arguments are on the helper's sudoers list. */
   allows: (args: string[]) => boolean;
-  run: (args: string[], exec?: Exec) => MachineResult;
+  /** A setup command that reads one secret on stdin: the credential's name (setup-steps.ts). */
+  secret?: string;
+  run: (args: string[], exec?: Exec, input?: string) => MachineResult;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots 1..16, set-updates on|off. Nothing else. */
+/**
+ * The helper's allowlist, as its sudoers rules spell it out: set-slots 1..16, set-updates on|off (coordinators),
+ * and the setup commands (the setup user only; setup-steps.ts). Nothing else.
+ */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -31,6 +37,7 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     allows: (a) => a.length === 1 && (a[0] === 'on' || a[0] === 'off'),
     run: (a, exec) => setUpdates(a[0] === 'on', exec),
   },
+  ...SETUP_STEPS,
 ];
 
 export type RootStepCheck = { allowed: true; rule: RootStepRule } | { allowed: false; why: string };
