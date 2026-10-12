@@ -1,0 +1,37 @@
+# Project settings. Validated at startup; unknown keys are errors.
+version: 1
+project:
+  name: worklane
+  repo: jayden1711/worklane
+  default_branch: main
+mode: local
+backlog: github
+runner: local
+agent_runtime:
+  kind: cli
+  max_concurrency: 2        # this harness's cap; the instance policy and the machine-wide slot cap still apply
+  run_windows: []
+land_mode: pr
+# The jobs that gate a merge, as GitHub names them (ci.yml and gitleaks.yml).
+# dco runs on pull requests only; scan is gitleaks.yml's job.
+required_checks:
+  - test (ubuntu-latest, 22)
+  - test (ubuntu-latest, 24)
+  - test (macos-latest, 22)
+  - test (macos-latest, 24)
+  - test (windows-latest, 22)
+  - test (windows-latest, 24)
+  - desktop
+  - agentshield
+  - push-gate
+  - denylist
+  - dco
+  - scan
+os: auto
+owners:
+  default: jayden1711
+  writers: [jayden1711]
+  areas: []
+reports:
+  times: ["08:00", "18:00"]
+  to: [jayden1711]

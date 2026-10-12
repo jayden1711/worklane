@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type TaskStatus =
   | 'triage' | 'ready' | 'claimed' | 'reproducing' | 'building' | 'verifying' | 'evaluating'
-  | 'awaiting_decision' | 'queued' | 'landed' | 'done' | 'blocked' | 'released';
+  | 'awaiting_decision' | 'queued' | 'in_review' | 'landed' | 'done' | 'blocked' | 'released';
 
 export interface Task {
   issue: number;
@@ -97,7 +97,7 @@ export interface PrView {
   waitReasons: string[];
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
-  mainResult: { at: string; outcome: 'green' | 'red'; failed: string[] } | null;
+  mainResult: { at: string; outcome: 'green' | 'red' | 'timed_out'; failed: string[] } | null;
   conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: string[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
   lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: string[]; outcome: string | null; waitMs: number | null; detail: string } | null;
   phase: 'waiting' | 'fixing' | 'resolving' | 'light_check' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
@@ -534,7 +534,7 @@ export interface Throughput {
 }
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
-export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held';
+export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held';
 export interface WaitItem {
   kind: WaitKind;
   since: string;

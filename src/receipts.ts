@@ -9,12 +9,16 @@ export interface CheckRecord {
   status: 'pass' | 'fail' | 'unavailable' | 'skipped';
   exitCode?: number | null | undefined;
   duration_ms?: number | undefined;
+  /** A browser check, set by the coordinator, never inferred from a name (a command can be called anything). */
+  kind?: 'browser' | undefined;
 }
 
 /** A sentence that says something was verified: tested, checked, confirmed, ran, passes, works. */
 const VERIFYING = /\b(test(?:ed|s)?|verif(?:y|ied|ies)|check(?:ed|s)?|confirm(?:ed|s)?|ran|runs?|pass(?:es|ed|ing)?|works?|working|reproduc(?:e|ed|es))\b/i;
 /** Places and ways the coordinator never checks: a claim about them is only as good as a recorded command. */
 const UNCHECKED_SCOPE = /\b(mobile|phone|tablet|ios|android|safari|chrome|firefox|edge|browser|device|emulator|simulator|staging|production|prod|live site|manual(?:ly)?|by hand|visual(?:ly)?|screenshots?|in the ui|on (?:my|a) machine|locally on)\b/i;
+/** What a passing browser check (headless Chrome driving the app's flow) does back: the browser, the UI, a screenshot. */
+const BROWSER_SCOPE = /\b(chrome|browser|screenshots?|in the ui)\b/gi;
 
 /** The sentences of a worker's summary that claim verification (at most 10, each at most 300 characters). */
 export function claimsOf(summary: string): string[] {
@@ -44,13 +48,16 @@ function refsOf(claim: string): string[] {
  * by hand) is not backed; and any other is backed only if at least one of the coordinator's checks passed.
  */
 export function unbackedClaims(claims: string[], record: { checks: CheckRecord[]; commands: string[] }): string[] {
-  const passed = record.checks.filter((c) => c.status === 'pass').map((c) => c.check.toLowerCase());
+  const passing = record.checks.filter((c) => c.status === 'pass');
+  const passed = passing.map((c) => c.check.toLowerCase());
   const ran = record.commands.map((c) => c.toLowerCase());
   const evidence = [...passed, ...ran];
   return claims.filter((claim) => {
     const refs = refsOf(claim).map((r) => r.toLowerCase());
     if (refs.length) return !refs.some((r) => evidence.some((e) => e.includes(r)));
-    if (UNCHECKED_SCOPE.test(claim)) return true;
+    // A passing browser check backs a claim about the browser; not one about a phone, Safari or production.
+    const scoped = passing.some((c) => c.kind === 'browser') ? claim.replace(BROWSER_SCOPE, ' ') : claim;
+    if (UNCHECKED_SCOPE.test(scoped)) return true;
     return passed.length === 0;
   });
 }

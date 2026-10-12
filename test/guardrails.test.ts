@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { BRAND } from '../src/brand.js';
 import { GuardrailsConfig } from '../src/config/schema.js';
 import { checkGuardrails, exampleContext } from '../src/guardrails/check.js';
 import { evaluate } from '../src/guardrails/engine.js';
@@ -128,6 +129,30 @@ test('regression: everything under .claude/ and the config folder is protected f
   assert.equal(tool('Edit', 'src/a.ts'), 'none');
   assert.equal(tool('Edit', '.claude/settings.json', false), 'none');
   assert.equal(sh('echo {} > .claude/x.json', false), 'none');
+});
+
+test("regression: agents may edit only the config folder's roles and skills; the rest of it and .claude/ stay protected with no opt-out", () => {
+  const C = BRAND.configDir;
+  // Opted out (nothing listed) and the template's catch-all: the same answer either way.
+  for (const protected_paths of [[], [`${C}/**`, '.claude/settings.json']]) {
+    const g = GuardrailsConfig.parse({ version: 1, rules: [], protected_paths, examples: { must_block: [], must_ask: [], must_allow: [] } });
+    const c = exampleContext(g, '/p', true);
+    const tool = (t: string, path: string) => evaluate({ tool: t, input: { file_path: `/p/${path}` }, cwd: '/p' }, g, c).decision;
+    const sh = (command: string) => evaluate({ tool: 'Bash', input: { command }, cwd: '/p' }, g, c).decision;
+    const why = JSON.stringify(protected_paths);
+    assert.equal(tool('Edit', `${C}/roles/worker.md`), 'none', why);
+    assert.equal(tool('Write', `${C}/skills/x/SKILL.md`), 'none', why);
+    assert.equal(sh(`echo more >> ${C}/roles/worker.md`), 'none', why);
+    for (const path of [`${C}/config.yaml`, `${C}/guardrails.yaml`, `${C}/machine/x.sh`, `${C}/evals/roles/worker.md`, '.claude/settings.json']) {
+      assert.equal(tool('Edit', path), 'deny', `${why} ${path}`);
+      assert.equal(sh(`cp /tmp/x ${path}`), 'deny', `${why} cp ${path}`);
+    }
+    assert.equal(sh(`rm -rf ${C}`), 'deny', 'the whole folder holds protected files');
+    assert.equal(sh(`mv /tmp/x ${C}`), 'deny');
+  }
+  // A project can still protect its role prompts too: its own entries only add.
+  const tight = GuardrailsConfig.parse({ version: 1, rules: [], protected_paths: [`${C}/roles/**`], examples: { must_block: [], must_ask: [], must_allow: [] } });
+  assert.equal(evaluate({ tool: 'Edit', input: { file_path: `/p/${C}/roles/worker.md` }, cwd: '/p' }, tight, exampleContext(tight, '/p', true)).decision, 'deny');
 });
 
 test('secret files: agents may not read them by tool or shell; exclusions apply; humans unaffected', () => {

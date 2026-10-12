@@ -27,7 +27,17 @@ required_checks: []
 # Before an auto-merge, if main moved and touched what the PR touches (or imports), the fast tier
 # (tests.yaml runner.changed) runs on the combination in a scratch worktree; nothing is pushed to the PR.
 # combined_check: true
-os: auto                   # auto | macos | linux | windows-wsl
+# When a writer rejects a PR, revises or rejects a held plan, requests changes in a review, or corrects the
+# chat (a question starting "correction:"), a read-only agent proposes the strongest durable fix (a guard in
+# code > a lint/test/CI check > a skill or AGENTS.md rule > a style line) as an issue labelled `correction`,
+# built into a PR you review. A repeat is grouped with the earlier fix, never proposed twice.
+# corrections: { enabled: true, max_per_day: 10 }
+# The gardener: every every_days days at `at` (local; it starts within 3 hours of it), one read-only run (at
+# most max_usd) looks for dead code, duplicated logic, rule violations linters miss, files that keep
+# conflicting, slow and flaky checks. Findings go to one "Gardener log" issue; a fix (a small cleanup or a lint
+# rule) is filed only for a pattern seen 3+ times, at most max_prs per run, never in a high-risk path.
+# gardener: { enabled: false, every_days: 7, at: "03:00", max_usd: 5, max_prs: 1 }
+os: auto                  # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches
   writers: [your-github-handle] # only issues opened or approved by these accounts are actionable

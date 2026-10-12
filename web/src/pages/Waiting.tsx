@@ -12,6 +12,7 @@ import { Header } from './Overview';
 export const KINDS: [WaitKind, string][] = [
   ['emergency_halt', 'Emergency stop in force'],
   ['merge_stopped', 'Auto-merge stopped'],
+  ['main_checks_timed_out', 'Auto-merges whose checks on the default branch never reported'],
   ['awaiting_decision', 'Decisions waiting for you'],
   ['plan_held', 'Plans held for you'],
   ['needs_owner', 'PRs waiting for you to review and merge'],

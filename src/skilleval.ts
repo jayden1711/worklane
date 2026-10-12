@@ -38,16 +38,50 @@ export function parseCases(md: string): EvalCase[] {
   return cases.filter((c) => c.situation && c.correct.length);
 }
 
-const JUDGE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['notes', 'correct', 'wrong'],
-  properties: {
-    notes: { type: 'string', description: 'Reason through each item FIRST, then fill in the booleans to match your reasoning.' },
-    correct: { type: 'array', items: { type: 'boolean' }, description: 'For each CORRECT item in order: does the plan substantially do it?' },
-    wrong: { type: 'array', items: { type: 'boolean' }, description: 'For each WRONG item in order: would the plan do it in this situation?' },
-  },
-};
+/**
+ * A case's rubric: fixed yes/no items, its CORRECT ones (met when the plan does it) and then its WRONG ones (met
+ * when the plan doesn't). The text is the case's own, unchanged; the score is the number of items met.
+ */
+export interface RubricItem {
+  text: string;
+  /** The answer that meets it: yes for a CORRECT item, no for a WRONG one. */
+  want: boolean;
+}
+export function rubricOf(c: Pick<EvalCase, 'correct' | 'wrong'>): RubricItem[] {
+  return [...c.correct.map((text) => ({ text, want: true })), ...c.wrong.map((text) => ({ text, want: false }))];
+}
+
+/** Wording that compares (two plans, "which is better"): never a rubric item. Judges grade one plan, item by item. */
+const SUBJECT = '(other|plans?|answers?|responses?|outputs?)';
+const PAIRWISE = new RegExp(
+  [
+    `\\b(better|worse|stronger|weaker) than (the |another |an? )?${SUBJECT}\\b`,
+    `\\bwhich (of the |one of the )?${SUBJECT}\\b`,
+    `\\bcompared? (to|with) (the |another |an? )?${SUBJECT}\\b`,
+    `\\b(plan|answer|response|output) [AB12]\\b`,
+    `\\bprefer(red|s)? (the |another |an? )?${SUBJECT}\\b`,
+  ].join('|'),
+  'i',
+);
+export function assertNotPairwise(text: string): void {
+  if (PAIRWISE.test(text)) throw new Error(`not a yes/no rubric item (it compares): ${text.slice(0, 200)}`);
+}
+
+/** The judge's answer schema: exactly one yes/no per rubric item, keyed 1..n; nothing else is accepted. */
+export function rubricSchema(n: number): object {
+  const keys = Array.from({ length: n }, (_, i) => String(i + 1));
+  return { type: 'object', additionalProperties: false, required: keys, properties: Object.fromEntries(keys.map((k) => [k, { type: 'boolean' }])) };
+}
+
+/** The judge's answer, taken only as exactly n yes/no answers (keys 1..n, booleans); anything else is refused. */
+export function acceptJudgement(raw: unknown, n: number): boolean[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('the judge must answer yes/no per rubric item');
+  const r = raw as Record<string, unknown>;
+  const keys = Object.keys(r);
+  const want = Array.from({ length: n }, (_, i) => String(i + 1));
+  if (keys.length !== n || !want.every((k) => typeof r[k] === 'boolean')) throw new Error(`the judge must answer exactly ${n} yes/no items (1..${n}) and nothing else`);
+  return want.map((k) => r[k] as boolean);
+}
 
 export interface CaseResult {
   id: string;
@@ -197,11 +231,15 @@ const PLAN_SCHEMA = {
   properties: { plan: { type: 'string', description: 'In order: exactly what you would do (commands, files to read, changes) and what you would report or decide.' } },
 };
 
-export type CaseOutcome = { id: string; title: string; outcome: 'pass' | 'fail' | 'not run'; samples?: string; correct?: string; wrongDone?: string[] };
+export type CaseOutcome = { id: string; title: string; outcome: 'pass' | 'fail' | 'not run'; samples?: string; correct?: string; wrongDone?: string[]; items?: { met: number; total: number } };
 
 export interface InstructionEval {
   passed: number;
   total: number;
+  /** The score: rubric items met (each by a strict majority of samples), out of every item of every case. */
+  items: { met: number; total: number };
+  /** Samples per case. */
+  samples: number;
   cases: CaseOutcome[];
   costUsd: number;
   /** The cost cap stopped it before every case ran. */
@@ -244,75 +282,113 @@ export async function evalInstructions(o: { instructions: string; cases: EvalCas
       continue;
     }
     try {
-      const runs: { pass: boolean; correct: string; wrongDone: string[] }[] = [];
+      const rubric = rubricOf(c);
+      const runs: { pass: boolean; correct: string; wrongDone: string[]; met: boolean[] }[] = [];
       for (let i = 0; i < k; i++) {
         const plan = String((await ask({ system: o.instructions, prompt: `${c.situation}\n\nYou cannot run anything right now. Write, in order, exactly what you would do and what you would report or decide. Be concrete.`, model: o.model, schema: PLAN_SCHEMA }) as { plan?: string }).plan ?? '');
-        const v = (await ask({ prompt: judgePrompt(c, plan), model: o.judge, schema: JUDGE_SCHEMA })) as { correct: boolean[]; wrong: boolean[] };
-        const hits = c.correct.filter((_, j) => v.correct?.[j]).length;
-        const wrongDone = c.wrong.filter((_, j) => v.wrong?.[j]);
-        runs.push({ pass: !wrongDone.length && hits >= Math.ceil(c.correct.length * CORRECT_THRESHOLD), correct: `${hits}/${c.correct.length}`, wrongDone });
+        const answers = acceptJudgement(await ask({ prompt: judgePrompt(c, plan), model: o.judge, schema: rubricSchema(rubric.length) }), rubric.length);
+        const met = rubric.map((item, j) => answers[j] === item.want);
+        const hits = c.correct.filter((_, j) => met[j]).length;
+        const wrongDone = c.wrong.filter((_, j) => !met[c.correct.length + j]);
+        runs.push({ pass: !wrongDone.length && hits >= Math.ceil(c.correct.length * CORRECT_THRESHOLD), correct: `${hits}/${c.correct.length}`, wrongDone, met });
       }
       const passed = runs.filter((r) => r.pass);
       const best = passed[0] ?? runs[0]!;
-      out.push({ id: c.id, title: c.title, outcome: passed.length * 2 > k ? 'pass' : 'fail', samples: `${passed.length}/${k}`, correct: best.correct, wrongDone: best.wrongDone });
+      // An item is met when a strict majority of samples met it; the case's score is the items met.
+      const itemsMet = rubric.filter((_, j) => runs.filter((r) => r.met[j]).length * 2 > k).length;
+      out.push({ id: c.id, title: c.title, outcome: passed.length * 2 > k ? 'pass' : 'fail', samples: `${passed.length}/${k}`, correct: best.correct, wrongDone: best.wrongDone, items: { met: itemsMet, total: rubric.length } });
     } catch (e) {
       if (!(e instanceof CapReached)) throw e;
       capped = true;
       out.push({ id: c.id, title: c.title, outcome: 'not run' });
     }
   }
-  return { passed: out.filter((x) => x.outcome === 'pass').length, total: out.length, cases: out, costUsd: o.spend.usd - start, capped };
+  const items = { met: out.reduce((n, x) => n + (x.items?.met ?? 0), 0), total: o.cases.reduce((n, c) => n + rubricOf(c).length, 0) };
+  return { passed: out.filter((x) => x.outcome === 'pass').length, total: out.length, items, cases: out, costUsd: o.spend.usd - start, capped, samples: k };
 }
 
 class CapReached extends Error {}
 
-function judgePrompt(c: EvalCase, plan: string): string {
-  return `Grade an agent's plan against an eval case. Judge actions and claims, not wording. A WRONG item counts as done if the plan would do it in the situation as described, including offering it as an acceptable option. Doing something only under different conditions the case doesn't describe is not the wrong action.\n\nSituation:\n${c.situation}\n\nCORRECT (in order):\n${c.correct.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\nWRONG (in order):\n${c.wrong.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\n<plan>\n${plan}\n</plan>`;
+/**
+ * The judge's prompt: one plan and the case's rubric, each item a yes/no question about that plan. Never two plans,
+ * never "which is better": an item that compares is refused before anything is asked.
+ */
+export function judgePrompt(c: EvalCase, plan: string): string {
+  const rubric = rubricOf(c);
+  for (const item of rubric) assertNotPairwise(item.text);
+  return `Grade one agent's plan against an eval case, one yes/no question per rubric item. Judge actions and claims, not wording. Answer yes if the plan does what the item says in the situation as described, including offering it as an acceptable option; doing something only under different conditions the case doesn't describe is a no. Answer every item with yes (true) or no (false), keyed by its number, and nothing else.\n\nSituation:\n${c.situation}\n\nRubric (does the plan ...?):\n${rubric.map((x, i) => `${i + 1}. ${x.text}`).join('\n')}\n\n<plan>\n${plan}\n</plan>`;
 }
 
-export interface EvalComparison {
-  target: string;
+/** Samples per case in a before/after comparison, unless a lower number is asked for (and then reported). */
+export const DEFAULT_SAMPLES = 3;
+
+/** One set of cases (visible or held-out) at base and head. Scores are rubric items met (`passed` of `total`). */
+export interface ScoreComparison {
   base: { passed: number; total: number } | null;
   head: { passed: number; total: number };
-  /** Fewer passes than the base, or any case that passed at the base and doesn't at the head. */
+  /** Fewer items met than at the base, or any case that passed at the base and doesn't at the head. */
   dropped: boolean;
   /** The cap stopped it: not every case ran on both sides. */
   incomplete: boolean;
   changes: { id: string; title: string; base: CaseOutcome['outcome'] | 'new'; head: CaseOutcome['outcome'] }[];
+}
+
+export interface EvalComparison extends ScoreComparison {
+  target: string;
+  /** The held-out set's comparison; null when there are no held-out cases (then the change can't pass). */
+  heldOut: ScoreComparison | null;
+  samples: number;
   costUsd: number;
 }
 
-/** Base and head on the same cases (null base: the instructions are new), under one cost cap. */
-export async function compareInstructions(o: { target: string; baseText: string | null; headText: string; cases: EvalCase[]; model: string; judge: string; samples?: number; capUsd: number; ask: Ask }): Promise<EvalComparison> {
-  const spend: Spend = { usd: 0, cap: o.capUsd };
-  const common = { cases: o.cases, model: o.model, judge: o.judge, ask: o.ask, spend, ...(o.samples ? { samples: o.samples } : {}) };
+async function compareSet(cases: EvalCase[], o: { baseText: string | null; headText: string; model: string; judge: string; samples: number; ask: Ask; spend: Spend }): Promise<ScoreComparison> {
+  const common = { cases, model: o.model, judge: o.judge, ask: o.ask, spend: o.spend, samples: o.samples };
   const base = o.baseText === null ? null : await evalInstructions({ ...common, instructions: o.baseText });
   const head = await evalInstructions({ ...common, instructions: o.headText });
   const changes = head.cases.map((h) => ({ id: h.id, title: h.title, base: base?.cases.find((b) => b.id === h.id)?.outcome ?? ('new' as const), head: h.outcome }));
   const lost = changes.some((c) => c.base === 'pass' && c.head !== 'pass');
-  return {
-    target: o.target,
-    base: base ? { passed: base.passed, total: base.total } : null,
-    head: { passed: head.passed, total: head.total },
-    dropped: base !== null && (head.passed < base.passed || lost),
-    incomplete: Boolean(base?.capped) || head.capped,
-    changes,
-    costUsd: spend.usd,
-  };
+  const score = (e: InstructionEval) => ({ passed: e.items.met, total: e.items.total });
+  return { base: base ? score(base) : null, head: score(head), dropped: base !== null && (head.items.met < base.items.met || lost), incomplete: Boolean(base?.capped) || head.capped, changes };
 }
 
-/** One line for a PR comment: the score at base and head, and the cost. */
+/**
+ * Base and head (null base: the instructions are new) on the visible cases and, when given, the held-out ones,
+ * under one cost cap; 3 samples per case unless fewer are asked for. Held-out cases go last, so a cap that cuts the
+ * run short leaves them incomplete, which never passes.
+ */
+export async function compareInstructions(o: { target: string; baseText: string | null; headText: string; cases: EvalCase[]; heldOut?: EvalCase[] | null; model: string; judge: string; samples?: number; capUsd: number; ask: Ask }): Promise<EvalComparison> {
+  const spend: Spend = { usd: 0, cap: o.capUsd };
+  const samples = o.samples ?? DEFAULT_SAMPLES;
+  const common = { baseText: o.baseText, headText: o.headText, model: o.model, judge: o.judge, samples, ask: o.ask, spend };
+  const visible = await compareSet(o.cases, common);
+  const heldOut = o.heldOut?.length ? await compareSet(o.heldOut, common) : null;
+  return { target: o.target, ...visible, heldOut, samples, costUsd: spend.usd };
+}
+
+/**
+ * Whether a comparison clears the change: the held-out score decides. It must exist, run to the end and not drop;
+ * a visible drop or an incomplete visible run holds it too. The visible score alone never passes a change.
+ */
+export function comparisonPasses(c: EvalComparison): boolean {
+  return c.heldOut !== null && !c.heldOut.incomplete && !c.heldOut.dropped && !c.incomplete && !c.dropped;
+}
+
+/** The report's line: both scores before -> after, the samples (noted when below the default), and the cost. */
 export function comparisonLine(c: EvalComparison): string {
   const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}/${s.total}` : 'new');
-  return `${c.target}: ${score(c.base)} → ${score(c.head)} (~$${c.costUsd.toFixed(2)}, the CLI's estimate)${c.incomplete ? ', incomplete: the cost cap was reached' : ''}`;
+  const part = (name: string, s: ScoreComparison | null) => (s ? `${name} ${score(s.base)} → ${score(s.head)}${s.dropped ? ' (lower)' : ''}${s.incomplete ? ' (incomplete: the cost cap was reached)' : ''}` : `${name}: no cases`);
+  const samples = `${c.samples} sample(s) per case${c.samples < DEFAULT_SAMPLES ? ` (below the default ${DEFAULT_SAMPLES}, asked for explicitly)` : ''}`;
+  return `${c.target}: ${part('visible', c)}; ${part('held-out', c.heldOut)}; ${samples} (~$${c.costUsd.toFixed(2)}, the CLI's estimate)${comparisonPasses(c) ? '' : '; does not pass'}`;
 }
 
 /** The per-case diff: only cases whose outcome isn't the same pass at both ends. */
 export function comparisonDiff(c: EvalComparison): string[] {
-  return c.changes.filter((x) => !(x.base === 'pass' && x.head === 'pass')).map((x) => `case ${x.id} "${x.title}": ${x.base} → ${x.head}`);
+  const diff = (set: string, s: ScoreComparison, titled: boolean) => s.changes.filter((x) => !(x.base === 'pass' && x.head === 'pass')).map((x) => `${set} case ${x.id}${titled ? ` "${x.title}"` : ''}: ${x.base} → ${x.head}`);
+  // Held-out cases by number only: their text stays out of every report a prompt writer could read.
+  return [...diff('visible', c, true), ...(c.heldOut ? diff('held-out', c.heldOut, false) : [])];
 }
 
-/** Instructions an agent works under, which a change can touch: a skill, AGENTS.md, a project's role prompt. */
+/** Instructions an agent works under, which a change can touch: a skill (in .claude/skills or the config folder's skills), AGENTS.md, a project's role prompt. */
 export interface InstructionTarget {
   target: string;
   /** The instructions file, repo-relative. */
@@ -329,7 +405,10 @@ export function instructionTargets(changed: string[]): InstructionTarget[] {
   const cfg = BRAND.configDir;
   for (const p of changed) {
     const skill = /^\.claude\/skills\/([^/]+)\//.exec(p);
+    // A skill in the config folder (where agents may change skills; .claude/ is theirs to read only), cases beside it.
+    const own = new RegExp(`^${cfg.replace(/\./g, '\\.')}/skills/([^/]+)/`).exec(p);
     if (skill) out.set(`skill ${skill[1]}`, { target: `skill ${skill[1]}`, file: `.claude/skills/${skill[1]}/SKILL.md`, cases: `.claude/skills/${skill[1]}/evals/cases.md` });
+    else if (own) out.set(`skill ${own[1]} (${cfg})`, { target: `skill ${own[1]} (${cfg})`, file: `${cfg}/skills/${own[1]}/SKILL.md`, cases: `${cfg}/skills/${own[1]}/evals/cases.md` });
     else if (p === 'AGENTS.md' || p === `${cfg}/evals/AGENTS.md`) out.set('AGENTS.md', { target: 'AGENTS.md', file: 'AGENTS.md', cases: `${cfg}/evals/AGENTS.md` });
     else {
       const role = new RegExp(`^${cfg.replace(/\./g, '\\.')}/(?:roles|evals/roles)/([^/]+)\\.md$`).exec(p);

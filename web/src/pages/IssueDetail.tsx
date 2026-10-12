@@ -26,6 +26,7 @@ function check(d: Record<string, unknown>): string {
   if ('suite' in d) return `suite: ${d.suite} (no new failures vs main)`;
   if ('repro' in d) return 'reproduction test first';
   if ('manual' in d) return `manual: ${d.manual}`;
+  if ('browser' in d) return `browser: the ${d.browser} flow (no new errors, within the app's thresholds)`;
   return JSON.stringify(d);
 }
 

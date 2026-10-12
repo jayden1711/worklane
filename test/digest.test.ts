@@ -23,6 +23,10 @@ function log(): StoredEvent[] {
     // Open: an emergency stop; auto-merge stopped.
     ev('emergency.stop', { by: 'example-owner', reason: 'spend', running: 1 }, h(80)),
     ev('merge.stopped', { reason: 'main went red after #31', number: 31, sha: sha('e'), revert: null }, h(70)),
+    // An auto-merge whose checks on the merge commit never reported (still); one that did report green later.
+    ev('merge.main_result', { issue: 12, number: 121, sha: sha('7'), outcome: 'timed_out', failed: ['ci'] }, h(15)),
+    ev('merge.main_result', { issue: 11, number: 111, sha: sha('8'), outcome: 'timed_out', failed: ['ci'] }, h(14)),
+    ev('merge.main_result', { issue: 11, number: 111, sha: sha('8'), outcome: 'green', failed: [] }, h(13)),
     // Decisions: one open question, one answered, a plan decision (listed as the held plan, not twice).
     ask('d1', 'question', 1, h(50)),
     ask('d2', 'land', 2, h(40)),
@@ -63,6 +67,7 @@ test('every owner-held state still open, from the event that opened it; none tha
   assert.deepEqual(d.items.map((i) => [i.kind, i.issue, i.pr]), [
     ['emergency_halt', null, null],
     ['merge_stopped', 3, 31],
+    ['main_checks_timed_out', 12, 121],
     ['awaiting_decision', 1, null],
     ['plan_held', 6, null],
     ['needs_owner', 3, 31],
@@ -84,6 +89,8 @@ test('every owner-held state still open, from the event that opened it; none tha
   assert.equal(by.check_held!.detail, 'e2e missing', 'the check, named');
   assert.equal(by.check_held!.since, h(10), 'since the first status at this head that held it back');
   assert.equal(by.hotspot_held!.detail, 'behind #12, on src/totals.js');
+  assert.equal(by.main_checks_timed_out!.detail, 'ci never reported on the merge commit 777777777777; check them yourself');
+  assert.equal(by.main_checks_timed_out!.since, h(15));
   assert.equal(by.awaiting_decision!.title, 'Task 1');
   assert.deepEqual([...new Set(d.items.map((i) => i.kind))], [...WAIT_KINDS], 'every kind the issue names');
 });
@@ -98,7 +105,8 @@ test('nothing times out: a hold from weeks ago is still listed, with how long it
 
 test('the digest\'s Markdown: a heading with the count, a section per kind, each line with its issue or PR and how long it has waited', () => {
   const md = digestMarkdown(waitingOnYou(log(), NOW), { project: 'example-shop' });
-  assert.match(md, /^## Waiting on you: example-shop, 2026-10-15 \(11\)\n/);
+  assert.match(md, /^## Waiting on you: example-shop, 2026-10-15 \(12\)\n/);
+  assert.match(md, /\*\*Auto-merges whose checks on the default branch never reported\*\* \(1\)\n- #121 for #12 Task 12: ci never reported on the merge commit 777777777777; check them yourself \(waiting 15 h\)/);
   assert.match(md, /Nothing here times out/);
   assert.match(md, /\*\*Decisions waiting for you\*\* \(1\)\n- #1 Task 1: @example-owner: Which rounding mode\? \(waiting 2 days\)/);
   assert.match(md, /\*\*PRs waiting for you to review and merge\*\* \(1\)\n- #31 for #3 Task 3: high-risk: migrations \(waiting 3 days\)/);
