@@ -1,0 +1,32 @@
+# How the project's tests run. The engine never assumes a framework.
+version: 1
+runner:
+  kind: command
+  # The fast tier: typecheck, then the tests a change touches (every test file importing a changed
+  # module directly or through one intermediate module, plus changed test files; see
+  # checks/touched-tests.mjs). GitHub CI is the full run on every PR.
+  changed: "npm run typecheck && node .worklane/checks/touched-tests.mjs"
+  full: "npm test"
+  one: "node .worklane/checks/touched-tests.mjs --one {file}"
+vacuity:
+  test_globs: ["test/**/*.test.ts"]
+  assertion_pattern: '\bassert\b'
+  app_paths: ["src/**"]
+  dynamic: false
+stop_gate:
+  timeout_s: 1800
+  lock_wait_s: 30
+  busy_patterns: []
+worktree:
+  root: .claude/worktrees
+  setup: ["npm ci --no-audit --no-fund"]
+  est_size_gb: 1
+land:
+  pre: []
+env: {}
+# The PR-gate lints CI also runs: the denylist, the push gate (gitleaks over the commits), sign-offs.
+checks:
+  - npm run check:denylist
+  - npm run check:push
+  - node scripts/check-dco.mjs origin/main HEAD
+tiers: []

@@ -1,0 +1,21 @@
+# Deploy verification: "done" means deployed and verified, not merged.
+# `verify` must print the commit the environment is SERVING (e.g. its newest
+# successful deployment), never "a deployment row mentioning the commit":
+# platforms record skipped or failed deploys of the same commit too.
+version: 1
+environments: []
+# - name: staging
+#   trigger: "your-platform redeploy --environment staging"
+#   verify: "your-command-that-prints-the-deployed-sha"
+# - name: production
+#   verify: "..."
+#   production: true
+
+# The one sanctioned production read path (`worklane prod-read "<SQL>"`): a
+# fixed read-only client runs inside a production service using a read-only
+# role's URL stored on that service. Omit to keep production reads off.
+# prod_read:
+#   via: railway-ssh
+#   service: web
+#   environment: production
+#   url_var: WORKLANE_READONLY_DATABASE_URL
