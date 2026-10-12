@@ -142,6 +142,12 @@ export const CredentialsFile = z.strictObject({
   /** An API key file for eval lanes: owned by the eval user, unreadable to every other. */
   eval_key: path.optional(),
   /**
+   * The agent user's Anthropic API key file (credentials.sh <name> api-key): owned by the agent user, 0400. When
+   * set, the instance's agent runs bill to this key instead of the agent user's Claude login; claude reads it through
+   * apiKeyHelper as the agent user. The coordinator can't read it, and no agent command may (the sandbox denies it).
+   */
+  agent_api_key: path.optional(),
+  /**
    * Work intake's credential: the chat bot's token, a file only the coordinator user can read (0400), installed
    * with credentials.sh. No agent can read it.
    */
@@ -336,7 +342,7 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
     const runAs: RunAs | undefined = who ? { ...who } : undefined;
     const home = runAs?.home ?? process.env.HOME ?? '';
     const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude!.config_dir);
-    const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key])];
+    const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key]), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : [])];
     out[name] = { ...(runAs ? { runAs } : {}), ...(i.policy.sandbox ? { settings: sandboxSettings({ lane: { allowedDomains: lane.allowed_domains }, denyRead }) } : {}) };
   }
   return out;
@@ -362,7 +368,7 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
   const runAs = base?.runAs;
   const home = runAs?.home ?? process.env.HOME ?? '';
   const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude?.config_dir ?? join(home, '.claude'));
-  const always = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(i.credentials.eval_key ? [i.credentials.eval_key] : [])];
+  const always = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(i.credentials.eval_key ? [i.credentials.eval_key] : []), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : [])];
   const noRepo = [...always, i.repo.path, join(root, 'tasks'), join(root, 'chat')];
   const settingsFor = (denyRead: string[], hook: boolean): ResearchLaneSettings => {
     const s = sandboxSettings({ lane: { allowedDomains: [] }, denyRead });

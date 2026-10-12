@@ -22,6 +22,12 @@
 #       App's client secret (pasted, not shown) and a session secret (generated the first time; --rotate-session
 #       makes a new one, which signs everyone out), each 0400 for the hub's viewer user wl-dash only, in its home.
 #       The client id isn't secret: it goes to dashboards.sh --client-id.
+#   bash scripts/setup/credentials.sh <name> api-key [<key-file>]
+#       Bill the agents' runs to an Anthropic API key instead of the agent user's Claude login. The key is pasted
+#       (not shown) or read from <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory
+#       of its own). claude reads it through apiKeyHelper, as the agent user: it is never in an environment, the
+#       coordinator user can't read it, and the sandbox denies it to agent commands. Prints the credentials.yaml
+#       line to add. Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
 #   bash scripts/setup/credentials.sh <name> intake-discord
 #       Work intake (docs/intake.md): the chat bot's token. Pasted (not shown) and installed for wl-<name>
 #       only, 0400, in the instance home, which no agent user can read. Prints the credentials.yaml line to add.
@@ -52,8 +58,8 @@ if [ "${1:-}" = dashboard-signin ]; then
   echo "then: dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name>..."
   exit 0
 fi
-name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ... | credentials.sh dashboard-signin}"
-what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|github|eval-key|intake-discord ...}"
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|github|eval-key|intake-discord ... | credentials.sh dashboard-signin}"
+what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|github|eval-key|intake-discord ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -141,6 +147,39 @@ JS
     printf '%s' "$key" | sudo -u "$eval_user" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; cat > "$1"; chmod 0400 "$1"' _ "$file"
     unset key
     echo "set credentials.yaml eval_key: $file   (readable only by $eval_user)"
+    ;;
+  api-key)
+    id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    dir="/home/$agent/.config/$name-claude-key"
+    file="$dir/api_key"
+    if [ -n "$flag" ]; then
+      [ -f "$flag" ] || { echo "$flag: no such file" >&2; exit 1; }
+      key="$(tr -d '[:space:]' < "$flag")"
+    else
+      read -rsp "Paste the Anthropic API key, then Enter (it is not shown): " key; echo
+    fi
+    case "$key" in sk-ant-*) ;; *) unset key; echo "that doesn't look like an Anthropic API key (sk-ant-...); nothing installed" >&2; exit 1 ;; esac
+    say "install the key for $agent only ($file, 0400, in a 0700 directory)"
+    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$1"; chmod 0700 "$1"; rm -f "$2"; cat > "$2"; chmod 0400 "$2"' _ "$dir" "$file"
+    unset key
+    # claude auth status (the runner's preflight, run as the agent user) reads the agent's own settings; runs get the
+    # same helper in --settings from the coordinator, which passes only this path.
+    say "point $agent's Claude settings at it (apiKeyHelper), keeping its other settings"
+    (cd / && sudo -u "$agent" node --input-type=module - "/home/$agent/.claude/settings.json" "cat -- $file") <<'JS'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+const [file, helper] = process.argv.slice(2);
+const s = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+s.apiKeyHelper = helper;
+mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+writeFileSync(file, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
+JS
+    say "check, as $agent: claude reports API-key auth"
+    sudo -iu "$agent" claude auth status --json
+    echo "In credentials.yaml set:"
+    echo "  agent_api_key: $file"
+    echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
+    echo "and the apiKeyHelper entry from /home/$agent/.claude/settings.json."
     ;;
   intake-discord)
     read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token; echo

@@ -211,6 +211,33 @@ export function stateDir(): string {
   return join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), BRAND.cli);
 }
 
+/** An OS user's numeric id (POSIX), or null if there is no such user (or on native Windows). */
+export function userUid(user: string): number | null {
+  if (process.platform === 'win32') return null;
+  try {
+    const out = execFileSync('id', ['-u', '--', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
+    return /^\d+$/.test(out) ? Number(out) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Who owns a file and who besides the owner may touch it (POSIX): 'missing', 'hidden' when this user can't even
+ * stat it (a directory it may not enter), or its owner uid and whether group or others have any permission. Never
+ * reads the file. Native Windows has no POSIX modes: 'unsupported'.
+ */
+export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden' } | { kind: 'unsupported' } | { kind: 'file'; uid: number; openToOthers: boolean; mode: string } {
+  if (process.platform === 'win32') return { kind: 'unsupported' };
+  try {
+    const s = statSync(file);
+    return { kind: 'file', uid: s.uid, openToOthers: (s.mode & 0o077) !== 0, mode: (s.mode & 0o777).toString(8).padStart(4, '0') };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
+  }
+}
+
 /** Full path of an executable on PATH, or null. */
 /** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
 export function userExists(user: string): boolean {

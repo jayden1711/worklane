@@ -40,7 +40,8 @@ export const ProjectConfig = z.strictObject({
   runner: z.enum(['local', 'ci', 'remote-machine']).default('local'),
   agent_runtime: z
     .strictObject({
-      kind: z.enum(['cli', 'sdk']).default('cli'),
+      // cli: the claude CLI on a Claude subscription login. api_key: the claude CLI billed to an API key (`sdk` is the old name).
+      kind: z.enum(['cli', 'api_key', 'sdk']).default('cli').transform((k) => (k === 'sdk' ? 'api_key' : k)),
       max_concurrency: z.number().int().min(1).max(32).default(2),
       run_windows: z.array(z.strictObject({ from: hhmm, to: hhmm })).default([]),
     })
