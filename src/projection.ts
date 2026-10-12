@@ -1,6 +1,7 @@
 // Read model for the dashboard (and reports): a pure fold over the event log.
 // Nothing here is stored; delete it and replay the log and you get the same.
 import type { StoredEvent } from './events/types.js';
+import { batchSummaries } from './coordinator/pr-batch.js';
 
 export type TaskStatus =
   | 'triage'
@@ -83,9 +84,12 @@ export interface Projection {
   activity: { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }[];
   /** Agent runs in flight (started, not finished), and the most recent finished ones. */
   runs: { active: Run[]; recent: Run[] };
-  /** Changes waiting to land, oldest first, and recent landing batches. */
+  /**
+   * Changes waiting to land, oldest first, and recent batches, newest first: direct landing's (`land`), and PR mode's
+   * (`pr`: `prs` its PRs, `outcome` its status, src/coordinator/pr-batch.ts batchSummaries).
+   */
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
-  batches: { id: string; issues: number[]; tip: string; outcome: string; detail: string; at: string }[];
+  batches: { id: string; kind: 'land' | 'pr'; issues: number[]; prs: number[]; tip: string; outcome: string; detail: string; at: string }[];
   governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
   /** This coordinator's own record of emergency stops: the last time it halted for one, and the last time it resumed. */
   emergency: { lastStop: { at: string; by: string; reason: string; running: number } | null; lastResume: string | null };
@@ -176,6 +180,13 @@ export function summarize(e: StoredEvent): string {
       return `no contract: ${p.why}`;
     case 'land.batch':
       return `batch ${p.outcome}: ${(p.issues as number[]).map((x) => `#${x}`).join(' ')}`;
+    case 'pr_batch.queued':
+      return `PR #${p.number} queued for a batch`;
+    case 'pr_batch.step': {
+      // A viewer's copy has only the id and the step (src/viewer-events.ts).
+      const prs = Array.isArray(p.prs) ? (p.prs as { number: number }[]).map((x) => `#${x.number}`).join(' ') : '';
+      return `${p.id} ${String(p.step).replace('_', ' ')}${prs ? `: ${prs}` : ''}${p.tier ? ` (${p.tier})` : ''}`;
+    }
     case 'governor.hold':
       return `dispatch held: ${p.reason}`;
     case 'governor.release':
@@ -421,7 +432,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       }
       case 'land.batch': {
         const b = batches.get(String(p.id));
-        batches.set(String(p.id), { id: String(p.id), issues: p.issues as number[], tip: String(p.tip), outcome: String(p.outcome), detail: String(p.detail).slice(0, 300), at: b?.at ?? e.ts });
+        batches.set(String(p.id), { id: String(p.id), kind: 'land', issues: p.issues as number[], prs: [], tip: String(p.tip), outcome: String(p.outcome), detail: String(p.detail).slice(0, 300), at: b?.at ?? e.ts });
         break;
       }
       case 'governor.hold':
@@ -462,7 +473,15 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
     activity,
     runs: { active: [...active.values()], recent: recent.slice(-50).reverse() },
     landQueue: [...queue.values()].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt)),
-    batches: [...batches.values()].slice(-30).reverse(),
+    batches: [
+      ...batches.values(),
+      ...batchSummaries(events)
+        .filter((s) => s.prs.length)
+        .map((s) => ({ id: s.id, kind: 'pr' as const, issues: s.prs.map((x) => x.issue), prs: s.prs.map((x) => x.number), tip: '', outcome: s.status, detail: s.detail.slice(0, 300), at: s.at })),
+    ]
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .slice(-30)
+      .reverse(),
     governor,
     emergency,
     reports: reports.slice(-30).reverse(),

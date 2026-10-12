@@ -909,6 +909,20 @@ test('the Board renders for the owner, a writer and a viewer without errors: fiv
   assert.doesNotMatch(onlyB, /data-instance="demo"/, 'filtered to b');
 });
 
+test("the Board's Landing column shows the PR batches, and a card where its PR stands with them; a viewer's without what happened", () => {
+  const owner = { ...boards.owner, batches: [{ id: 'batch-2', status: 'testing', prs: [13], issues: [3], at: '2026-01-01T00:00:00Z', detail: '' }, { id: 'batch-1', status: 'red', prs: [11, 12], issues: [1, 2], at: '2026-01-01T00:00:00Z', detail: 'passed #11; returned #12 (unit failed)' }], cards: boards.owner.cards.map((c, i) => (i === 0 ? { ...c, column: 'landing', batch: { status: 'returned', id: 'batch-1' } } : c)) };
+  const html = clean(() => r.renderBoard([{ name: null, data: owner, error: null }]));
+  assert.match(html, /data-column="landing"[\s\S]*?data-testid="board-batches"/, 'in the Landing column');
+  assert.equal((html.match(/data-testid="board-batch"/g) ?? []).length, 2);
+  assert.match(html, /data-status="red" title="passed #11; returned #12 \(unit failed\)"[\s\S]*?#11 #12/);
+  assert.match(html, /data-testid="board-card-batch"[\s\S]*?batch failed/);
+  const viewer = { ...boards.viewer, batches: owner.batches.map(({ detail: _, ...b }) => b) };
+  const vhtml = clean(() => r.renderBoard([{ name: null, data: viewer, error: null }]));
+  assert.match(vhtml, /data-status="red">/, "a viewer's batch: its status, no detail");
+  assert.doesNotMatch(vhtml, /returned #12/);
+  assert.doesNotMatch(clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, batches: [] }, error: null }])), /data-testid="board-batches"/, 'no batches: no strip');
+});
+
 test('each role sees only its actions on the Board: viewers none; writers Watch, Steer and Answer what they may; the owner also Approves', () => {
   const html = (role: 'owner' | 'writer' | 'viewer') => clean(() => r.renderBoard([{ name: null, data: boards[role], error: null }]));
   const count = (h: string, id: string) => (h.match(new RegExp(`data-testid="${id}"`, 'g')) ?? []).length;
