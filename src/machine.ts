@@ -1,4 +1,4 @@
-// Machine-wide settings an instance may change: the agent slot cap and the engine update switch.
+// Machine-wide settings an instance may change: the agent slot cap, the test-run slot cap and the engine update switch.
 // They are root-owned, so an instance changes them only through the machine helper, which sudo
 // lets each coordinator user run with exactly these arguments (scripts/setup/machine-helper.sh).
 // The helper validates again and logs every change; this side refuses bad values before asking.
@@ -43,6 +43,15 @@ function runHelper(args: string[], exec: Exec): MachineResult {
 export function setSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
   if (!Number.isInteger(n) || n < SLOTS_MIN || n > SLOTS_MAX) return { ok: false, error: `the slot cap must be a whole number from ${SLOTS_MIN} to ${SLOTS_MAX}, not ${n}` };
   return runHelper(['set-slots', String(n)], exec);
+}
+
+export const TEST_SLOTS_MIN = 1;
+export const TEST_SLOTS_MAX = 8;
+
+/** Set how many test runs go at once on the machine (1..8) through the helper. */
+export function setTestSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
+  if (!Number.isInteger(n) || n < TEST_SLOTS_MIN || n > TEST_SLOTS_MAX) return { ok: false, error: `the test-run slot cap must be a whole number from ${TEST_SLOTS_MIN} to ${TEST_SLOTS_MAX}, not ${n}` };
+  return runHelper(['set-test-slots', String(n)], exec);
 }
 
 /** Turn automatic engine updates on or off through the helper. */

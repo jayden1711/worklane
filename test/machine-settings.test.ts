@@ -77,7 +77,7 @@ test('the owner asks for a slot cap or update change; the dashboard records it, 
     assert.equal(coordinatorTick(s, (file, args) => (calls.push([file, ...args]), 'ok')), 2);
     assert.deepEqual(calls, [['sudo', '-n', MACHINE_HELPER, 'set-slots', '4'], ['sudo', '-n', MACHINE_HELPER, 'set-updates', 'off']]);
     assert.deepEqual((await x.view()).requests.map((q) => [q.args.join(' '), q.status, q.detail]), [['set-updates off', 'done', 'ok'], ['set-slots 4', 'done', 'ok']], 'newest first, done with the output');
-    for (const [what, value, why] of [['slots', 17, /set-slots <1\.\.16>/], ['slots', 0, /set-slots <1\.\.16>/], ['slots', 2.5, /set-slots <1\.\.16>/], ['updates', 'yes', /on \(true\) or off \(false\)/], ['cap', 3, /slots or updates/]] as [string, unknown, RegExp][]) {
+    for (const [what, value, why] of [['slots', 17, /set-slots <1\.\.16>/], ['slots', 0, /set-slots <1\.\.16>/], ['slots', 2.5, /set-slots <1\.\.16>/], ['updates', 'yes', /on \(true\) or off \(false\)/], ['cap', 3, /slots, testSlots or updates/], ['testSlots', 9, /set-test-slots <1\.\.8>/]] as [string, unknown, RegExp][]) {
       const bad = await x.post(what, value);
       assert.equal(bad.status, 400, `${what}=${value}`);
       assert.match(((await bad.json()) as { error: string }).error, why);
