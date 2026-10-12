@@ -1,15 +1,18 @@
 // Chat-bot source: a bot connected OUTBOUND to Discord's gateway (no port is
-// opened on the machine). It keeps only messages in the configured channels that
-// are addressed to it, and direct messages; everything else is dropped on
-// receipt and never stored. Replies go out through the REST API. Node's built-in
+// opened on the machine). It keeps only messages in the configured channels of
+// the one configured server that are addressed to it; everything else (other
+// servers, other channels, direct messages) is dropped on receipt and never
+// stored. Replies go out through the REST API. Node's built-in
 // WebSocket and fetch; no dependency. The token lives only in memory here.
 import { addressed } from './addressing.js';
 import type { IncomingReport } from './report.js';
 
 export const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 export const API = 'https://discord.com/api/v10';
-/** GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT: the least the bot needs to read addressed messages. */
-export const INTENTS = (1 << 9) | (1 << 12) | (1 << 15);
+/** GUILD_MESSAGES | MESSAGE_CONTENT: the least the bot needs to read addressed messages. No direct messages. */
+export const INTENTS = (1 << 9) | (1 << 15);
+/** The longest reply the bot sends; anything longer is cut. */
+export const REPLY_CHARS = 500;
 
 /** The part of WebSocket the adapter uses, so tests can pass a fake. */
 export interface Socket {
@@ -20,8 +23,9 @@ export interface Socket {
 
 export interface DiscordOptions {
   token: string;
+  /** The one server (guild) the bot reads; a message from any other is dropped. */
+  guild: string;
   channels: string[];
-  dms: boolean;
   prefixes: string[];
   connect?: (url: string) => Socket;
   fetch?: typeof fetch;
@@ -49,7 +53,7 @@ export class DiscordIntake {
    * gateway has no acknowledgement to hold them. A replay of a message already taken is deduped by its id.
    */
   private queue: IncomingReport[] = [];
-  /** Messages seen and dropped (not addressed, wrong channel, from a bot), counted only. */
+  /** Messages seen and dropped (not addressed, another server or channel, a DM, from a bot), counted only. */
   dropped = 0;
 
   constructor(private o: DiscordOptions) {}
@@ -110,16 +114,10 @@ export class DiscordIntake {
       this.dropped++;
     };
     if (m.author.bot || (this.botId && m.author.id === this.botId)) return drop();
-    const dm = !m.guild_id;
-    let text: string | null;
-    if (dm) {
-      if (!this.o.dms) return drop();
-      text = m.content.trim() || null;
-    } else {
-      if (!this.o.channels.includes(m.channel_id)) return drop();
-      const mentions = this.botId ? [`<@${this.botId}>`, `<@!${this.botId}>`] : [];
-      text = addressed(m.content, this.o.prefixes, mentions);
-    }
+    // A DM has no guild: dropped like any message outside the configured server.
+    if (m.guild_id !== this.o.guild || !this.o.channels.includes(m.channel_id)) return drop();
+    const mentions = this.botId ? [`<@${this.botId}>`, `<@!${this.botId}>`] : [];
+    const text = addressed(m.content, this.o.prefixes, mentions);
     if (!text) return drop();
     this.queue.push({
       source: 'discord',
@@ -127,16 +125,16 @@ export class DiscordIntake {
       sender: { source: 'discord', id: m.author.id, ...(m.author.global_name || m.author.username ? { name: m.author.global_name ?? m.author.username! } : {}) },
       text,
       receivedAt: (this.o.now ?? (() => new Date()))().toISOString(),
-      thread: { kind: dm ? 'dm' : 'channel', id: m.channel_id },
+      thread: { kind: 'channel', id: m.channel_id },
     });
   }
 
-  /** Reply in the same channel or DM. */
+  /** Reply in the same channel, at most REPLY_CHARS. */
   async reply(threadId: string, content: string): Promise<boolean> {
     const r = await (this.o.fetch ?? fetch)(`${API}/channels/${encodeURIComponent(threadId)}/messages`, {
       method: 'POST',
       headers: { authorization: `Bot ${this.o.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ content: content.slice(0, 1900), allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({ content: content.slice(0, REPLY_CHARS), allowed_mentions: { parse: [] } }),
     });
     return r.ok;
   }

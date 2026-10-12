@@ -70,7 +70,7 @@ export function appKeyWarning(days: number | null): string | null {
   return `**GitHub App key installed ${days} days ago.** Rotate it: generate a new private key in the App's settings, install it with credentials.sh, then delete the old key there.`;
 }
 
-export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: Date; now?: Date; slot?: string; tokenExpiresAt?: string | null; appKeyPath?: string; runRecords?: RunRecord[]; weekly?: boolean }): Report {
+export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: Date; now?: Date; slot?: string; tokenExpiresAt?: string | null; appKeyPath?: string; runRecords?: RunRecord[]; weekly?: boolean; throughput?: boolean }): Report {
   const now = opts.now ?? new Date();
   const since = opts.since.getTime();
   const after = (e: StoredEvent) => Date.parse(e.ts) > since;
@@ -146,9 +146,11 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
     lines.push('', ...failureModesMarkdown(f));
     // What resolving and avoiding conflicts cost per merged PR, flagged with a suggestion when it adds more than a few minutes.
     lines.push('', ...mergeCostMarkdown(mergeMetrics(events, { since: weekAgo })));
-    // Merged PRs, cost per merged PR by stage, where PRs waited for the owner, and the top costs with a tuning each.
-    lines.push('', ...throughputMarkdown(throughput(events, { now })));
   }
+
+  // Throughput (merged PRs, cost per merged PR by stage, the owner's waits, the top costs with a tuning each):
+  // the dashboard's preview only, for the owner and the writers. The report posted to GitHub never has it.
+  if (opts.throughput) lines.push('', ...throughputMarkdown(throughput(events, { now })));
 
   return { markdown: lines.join('\n'), proposals };
 }

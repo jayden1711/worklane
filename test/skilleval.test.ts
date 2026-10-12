@@ -216,8 +216,8 @@ test('instruction targets: skills (any file of one), AGENTS.md and project role 
   );
 });
 
-test('the engine ships eval cases for the worker and evaluator role prompts', () => {
-  for (const role of ['worker', 'evaluator-verdict']) {
+test('the engine ships eval cases for the worker, evaluator, investigator and reproduction role prompts', () => {
+  for (const role of ['worker', 'evaluator-verdict', 'investigator', 'evaluator-repro']) {
     const md = engineRoleCases(role);
     assert.ok(md, role);
     const cases = parseCases(md);
