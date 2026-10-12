@@ -158,12 +158,12 @@ if (eventsMod?.EventLog && ctx?.projectStateDir) {
     add('intake.filed', { id: 'r1', issue: 3, ready: true });
     add('intake.replied', { id: 'r1', stage: 'received', ok: true });
     add('intake.replied', { id: 'r1', stage: 'filed', ok: true });
-    add('intake.received', { id: 'r2', source: 'sms', sender: 'd4e5f6', excerpt: 'Could the receipt show the discount code?' });
+    add('intake.received', { id: 'r2', source: 'discord', sender: 'd4e5f6', excerpt: 'Could the receipt show the discount code?' });
     add('intake.triaged', { id: 'r2', kind: 'feature', reproduction: null, ignored: [] });
     add('intake.awaiting', { id: 'r2', decision: 'intake-r2' });
     add('intake.received', { id: 'r3', source: 'product', sender: '9f8e7d', excerpt: 'Receipts should list the discount' });
     add('intake.grouped', { id: 'r3', with: 'r2' });
-    add('intake.received', { id: 'r4', source: 'sms', sender: '0c1d2e', excerpt: 'win a prize [URL]' });
+    add('intake.received', { id: 'r4', source: 'discord', sender: '0c1d2e', excerpt: 'win a prize [URL]' });
     add('intake.dropped', { id: 'r4', reason: 'spam' });
   } catch (e) {
     console.error(`no intake in this engine (${e.message.split('\n')[0]}); the Intake page is empty`);

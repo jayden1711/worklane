@@ -24,10 +24,10 @@ const OWNER_ID = '123456789012';
 const STRANGER_ID = '987654321098';
 const DRAFT = { title: 'Totals ignore discounts', body: '**Outcome:** Totals apply discounts.\n**Sources:** the totals code.\n**Constraints:** leave tax handling alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n' };
 
-const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true }, sms: { enabled: true } });
+const CONFIG = IntakeConfig.parse({ version: 1, trusted: { discord: [OWNER_ID] }, discord: { enabled: true, guild: '555555', channels: ['111111'] }, 'bug-store': { enabled: true } });
 
 let seq = 0;
-function report(o: { from?: string; name?: string; text?: string; source?: 'discord' | 'sms'; sourceId?: string } = {}): IncomingReport {
+function report(o: { from?: string; name?: string; text?: string; source?: 'discord' | 'bug-store'; sourceId?: string } = {}): IncomingReport {
   const source = o.source ?? 'discord';
   return {
     source,
@@ -35,12 +35,12 @@ function report(o: { from?: string; name?: string; text?: string; source?: 'disc
     sender: { source, id: o.from ?? OWNER_ID, ...(o.name ? { name: o.name } : {}) },
     text: o.text ?? 'bug: the checkout total ignores my discount code',
     receivedAt: '2026-10-01T10:00:00.000Z',
-    thread: { kind: 'dm', id: 'thread-1' },
+    thread: { kind: 'channel', id: 'thread-1' },
   };
 }
 
 /** A source that hands out one batch per pull and records every reply. */
-function fakeSource(name: 'discord' | 'sms', batches: IncomingReport[][]) {
+function fakeSource(name: 'discord' | 'bug-store', batches: IncomingReport[][]) {
   const replies: { thread: string; text: string }[] = [];
   const src: IntakeSource & { replies: typeof replies; batches: IncomingReport[][] } = {
     name,
@@ -55,7 +55,7 @@ function fakeSource(name: 'discord' | 'sms', batches: IncomingReport[][]) {
   return src;
 }
 
-function setup(o: { triage?: (req: RunRequest) => object; settings?: InstanceSettings; batches?: IncomingReport[][]; sms?: IncomingReport[][] } = {}) {
+function setup(o: { triage?: (req: RunRequest) => object; settings?: InstanceSettings; batches?: IncomingReport[][]; store?: IncomingReport[][] } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'intake-coord-'));
   const repo = join(base, 'checkout');
   cpSync(join(repoRoot, 'examples', 'basic'), repo, { recursive: true });
@@ -71,7 +71,7 @@ function setup(o: { triage?: (req: RunRequest) => object; settings?: InstanceSet
   mkdirSync(slotsDir);
   const runner = new FakeRunner((req) => ({ structured: (o.triage ?? (() => ({ kind: 'bug', draft: DRAFT })))(req) }));
   const discord = fakeSource('discord', o.batches ?? [[report()]]);
-  const sms = fakeSource('sms', o.sms ?? []);
+  const store = fakeSource('bug-store', o.store ?? []);
   const c = new Coordinator({
     cfg,
     log,
@@ -83,9 +83,9 @@ function setup(o: { triage?: (req: RunRequest) => object; settings?: InstanceSet
     slotsDir,
     machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) },
     settings: () => ({ settings: o.settings ?? {}, error: null }),
-    intake: { config: () => CONFIG, sources: [discord, sms], pullMs: 0 },
+    intake: { config: () => CONFIG, sources: [discord, store], pullMs: 0 },
   });
-  return { base, repo, log, backlog, runner, discord, sms, c, stateDir };
+  return { base, repo, log, backlog, runner, discord, store, c, stateDir };
 }
 
 const payloads = (log: EventLog, type: Parameters<EventLog['read']>[1] extends (infer U)[] | undefined ? U : never) => log.read(0, [type]).map((e) => e.payload as Record<string, unknown>);
@@ -201,10 +201,10 @@ test('intake: over the per-sender cap, a report is dropped before any agent run'
 
 test('intake: a report seen before is not taken again; a source off in the config is not pulled', async () => {
   const again = report({ sourceId: 'same-message' });
-  const t = setup({ batches: [[again], [again]], sms: [[report({ source: 'sms', from: '+15555550100' })]] });
+  const t = setup({ batches: [[again], [again]], store: [[report({ source: 'bug-store', from: 'u-100' })]] });
   await t.c.checkIntake();
   await t.c.checkIntake();
-  assert.equal(t.runner.calls.length, 2, 'one run for the repeat, one for the sms report');
+  assert.equal(t.runner.calls.length, 2, 'one run for the repeat, one for the in-product report');
   assert.equal(payloads(t.log, 'intake.received').length, 2);
   const off = setup({ batches: [] });
   (off.c as unknown as { d: { intake: { config: () => IntakeConfig } } }).d.intake.config = () => IntakeConfig.parse({ version: 1 });

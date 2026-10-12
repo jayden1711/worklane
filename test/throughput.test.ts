@@ -96,14 +96,16 @@ test('with nothing merged: no per-PR figures, costs still shown; no waits; the t
   assert.match(t.top[0]!.suggestion, /^Chat cost \$1\.00: answer from a summary/);
 });
 
-test('the weekly report carries the same numbers; the daily one doesn\'t', () => {
+test('the report preview carries the same numbers; the report posted to GitHub never does, weekly or not', () => {
   const md = throughputMarkdown(throughput(week(), { now: NOW })).join('\n');
   assert.match(md, /Merged PRs: 3/);
   assert.match(md, /Cost per merged PR: ~\$3\.33 \(~\$10 in all\)/);
   assert.match(md, /Waited for you: merging a PR the harness left to you 1× \(median 10 h\)/);
   assert.match(md, /Cost 1: retries, ~\$4\.00 \(40%\)\. Retries are 40%/);
   const cfg = loadConfig(join(repoRoot, 'examples', 'basic'));
-  const weekly = buildReport(week(), cfg, { since: new Date(NOW.getTime() - 86_400_000), now: NOW, slot: '18:00', weekly: true }).markdown;
-  assert.match(weekly, /\*\*Throughput, last 7 days\*\*[\s\S]*Merged PRs: 3/);
-  assert.doesNotMatch(buildReport(week(), cfg, { since: new Date(NOW.getTime() - 86_400_000), now: NOW, slot: '18:00', weekly: false }).markdown, /Throughput/);
+  const at = { since: new Date(NOW.getTime() - 86_400_000), now: NOW, slot: '18:00' };
+  // What the coordinator posts: buildReport as it calls it, without the preview's throughput option.
+  for (const weekly of [true, false]) assert.doesNotMatch(buildReport(week(), cfg, { ...at, weekly }).markdown, /Throughput/, `posted, weekly: ${weekly}`);
+  // The dashboard's preview asks for it.
+  for (const weekly of [true, false]) assert.match(buildReport(week(), cfg, { ...at, weekly, throughput: true }).markdown, /\*\*Throughput, last 7 days\*\*[\s\S]*Merged PRs: 3/, `preview, weekly: ${weekly}`);
 });

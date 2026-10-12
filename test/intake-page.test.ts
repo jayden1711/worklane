@@ -16,10 +16,10 @@ async function serve(user: string) {
   log.append('intake.triaged', { id: 'r1', kind: 'bug', reproduction: 'reproduced', ignored: [] }, 'coordinator');
   log.append('intake.filed', { id: 'r1', issue: 7, ready: true }, 'coordinator');
   log.append('intake.replied', { id: 'r1', stage: 'filed', ok: true }, 'coordinator');
-  log.append('intake.received', { id: 'r2', source: 'sms', sender: 'd4e5f6', excerpt: 'Please add dark mode' }, 'coordinator');
+  log.append('intake.received', { id: 'r2', source: 'bug-store', sender: 'd4e5f6', excerpt: 'Please add dark mode' }, 'coordinator');
   log.append('intake.triaged', { id: 'r2', kind: 'feature', reproduction: null, ignored: [] }, 'coordinator');
   log.append('intake.awaiting', { id: 'r2', decision: 'intake-r2' }, 'coordinator');
-  log.append('intake.received', { id: 'r3', source: 'sms', sender: 'd4e5f6', excerpt: 'buy now [URL]' }, 'coordinator');
+  log.append('intake.received', { id: 'r3', source: 'bug-store', sender: 'd4e5f6', excerpt: 'buy now [URL]' }, 'coordinator');
   log.append('intake.dropped', { id: 'r3', reason: 'spam' }, 'coordinator');
   log.close();
   const { dir: root } = exampleProject();
@@ -45,7 +45,7 @@ test('intake: each report and what became of it, and the health numbers, for the
       assert.deepEqual([by.r3!.outcome, by.r3!.dropped], ['dropped', 'spam']);
       assert.equal(by.r1!.excerpt, 'Checkout total is off by a cent for [AMOUNT]', 'the redacted excerpt, as recorded');
       assert.deepEqual(v.health.dropped, { spam: 1 });
-      assert.deepEqual(v.health.perDay.map((d) => [d.source, d.reports]), [['discord', 1], ['sms', 2]]);
+      assert.deepEqual(v.health.perDay.map((d) => [d.source, d.reports]), [['bug-store', 2], ['discord', 1]]);
       assert.equal(((await (await s.get('/api/state')).json()) as { canReadIntake: boolean }).canReadIntake, true);
     } finally {
       await s.d.close();

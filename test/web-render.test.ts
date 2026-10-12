@@ -26,6 +26,8 @@ interface Render {
   intakeRefusal(state: unknown): string | null;
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
+  renderWaiting(w: unknown, now?: number): string;
+  renderWaitingPage(state: unknown): string;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
@@ -615,8 +617,8 @@ test('the Intake page: each report redacted with what became of it, views, a lin
   const data = {
     reports: [
       report({ id: 'r1', kind: 'bug', reproduction: 'reproduced', outcome: 'filed', issue: 7, replies: ['received', 'filed'], excerpt: 'Checkout total is off by a cent for [AMOUNT]' }),
-      report({ id: 'r2', source: 'sms', sender: 'd4e5f6', kind: 'feature', outcome: 'awaiting_owner', excerpt: 'Please add dark mode' }),
-      report({ id: 'r3', source: 'sms', sender: 'd4e5f6', outcome: 'dropped', dropped: 'spam', excerpt: 'buy now [URL]' }),
+      report({ id: 'r2', source: 'bug-store', sender: 'd4e5f6', kind: 'feature', outcome: 'awaiting_owner', excerpt: 'Please add dark mode' }),
+      report({ id: 'r3', source: 'bug-store', sender: 'd4e5f6', outcome: 'dropped', dropped: 'spam', excerpt: 'buy now [URL]' }),
     ],
     health: { perDay: [], dropped: {}, reportToMerged: { count: 0, medianMinutes: null } },
   };
@@ -631,7 +633,7 @@ test('the Intake page: each report redacted with what became of it, views, a lin
   assert.match(r.renderIntake({ ...data, reports: [] }), /No reports yet[\s\S]*?off until the owner turns it on/);
   // The health numbers, once intake has recorded anything; nothing at all before.
   assert.equal(r.renderIntakeHealth(data.health), '');
-  const health = r.renderIntakeHealth({ perDay: [{ day: '2026-10-10', source: 'discord', reports: 2 }, { day: '2026-10-10', source: 'sms', reports: 5 }], dropped: { spam: 3, 'over the sender cap': 1 }, reportToMerged: { count: 2, medianMinutes: 150 } });
+  const health = r.renderIntakeHealth({ perDay: [{ day: '2026-10-10', source: 'discord', reports: 2 }, { day: '2026-10-10', source: 'bug-store', reports: 5 }], dropped: { spam: 3, 'over the sender cap': 1 }, reportToMerged: { count: 2, medianMinutes: 150 } });
   assert.equal((health.match(/data-testid="health-intake-day"/g) ?? []).length, 2);
   assert.match(health, /data-testid="health-intake-dropped"[\s\S]*?spam: 3[\s\S]*?over the sender cap: 1/, 'drops by reason, most first');
   assert.match(health, /data-testid="health-intake-merged"[^>]*>report to merged fix: median 2\.5 h over 2 report\(s\)/);
@@ -716,4 +718,50 @@ test('a research run on its page: each search, each page fetched or refused (lin
   assert.doesNotMatch(html, /href="javascript:/, 'only http(s) becomes a link');
   assert.match(html, /role="alert"[^>]*data-testid="run-research-capped"[\s\S]*?Stopped at a cap:[\s\S]*?searches: 20 of 20 today/);
   assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
+});
+
+test('waiting on you: every owner-held state grouped in the digest\'s order, each with its issue or PR and how long it has waited; the digest\'s Markdown; refused to anyone else without asking', () => {
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  const ago = (h: number) => new Date(now - h * 3_600_000).toISOString();
+  const w = {
+    at: new Date(now).toISOString(),
+    items: [
+      { kind: 'merge_stopped', since: ago(70), issue: null, pr: null, title: null, detail: 'main went red' },
+      { kind: 'awaiting_decision', since: ago(50), issue: 1, pr: null, title: 'Round totals', detail: '@example-owner: Which rounding mode?' },
+      { kind: 'needs_owner', since: ago(5), issue: 3, pr: 31, title: 'Migrate orders', detail: 'high-risk: migrations' },
+      { kind: 'deploy_failed', since: ago(0.5), issue: null, pr: null, title: null, detail: 'staging: health check 503', sha: 'f'.repeat(40) },
+      { kind: 'check_held', since: ago(10), issue: 5, pr: 51, title: null, detail: 'e2e missing' },
+    ],
+    markdown: '## Waiting on you\n',
+    mergedSince: ago(24),
+    merged: [
+      { pr: 21, issue: 2, title: 'Round totals to the cent', url: 'https://github.com/example-org/example-shop/pull/21', at: ago(5), level: 'L0', confidence: 'high' },
+      { pr: 31, issue: 3, title: 'Document the rounding rule', url: 'https://github.com/example-org/example-shop/pull/31', at: ago(2), level: null, confidence: null },
+    ],
+  };
+  const html = r.renderWaiting(w, now);
+  assert.deepEqual([...html.matchAll(/data-testid="waiting-group" data-kind="([a-z_]+)"/g)].map((m) => m[1]), ['merge_stopped', 'awaiting_decision', 'needs_owner', 'deploy_failed', 'check_held'], 'in the digest\'s order');
+  assert.equal((html.match(/data-testid="waiting-item"/g) ?? []).length, 5);
+  assert.match(html, /data-kind="awaiting_decision"[\s\S]*?data-testid="waiting-issue"[^>]*>#1<[\s\S]*?Round totals[\s\S]*?Which rounding mode\?[\s\S]*?waiting 2 days/);
+  assert.match(html, /data-kind="needs_owner"[\s\S]*?data-testid="waiting-pr"[^>]*>PR #31<[\s\S]*?for[\s\S]*?>#3<[\s\S]*?Migrate orders[\s\S]*?high-risk: migrations[\s\S]*?waiting 5 h/);
+  assert.match(html, /data-kind="deploy_failed"[\s\S]*?ffffffffffff[\s\S]*?staging: health check 503[\s\S]*?waiting 30 min/);
+  assert.match(html, /data-kind="check_held"[\s\S]*?PR #51[\s\S]*?e2e missing/, 'the check, named');
+  assert.match(r.renderWaiting({ ...w, items: [] }, now), /Nothing is waiting on you[\s\S]*?nothing times out/);
+  // Merged since yesterday, for sampling: each PR (linked, rel=noopener) with its review level and the evaluator's confidence.
+  assert.equal((html.match(/data-testid="merged-item"/g) ?? []).length, 2);
+  assert.match(html, /data-testid="merged-since"[\s\S]*?Merged since yesterday[\s\S]*?>2<[\s\S]*?2026-10-14 12:00 UTC/);
+  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/21" target="_blank" rel="noopener noreferrer"[^>]*data-testid="merged-pr"[^>]*>PR #21<[\s\S]*?Round totals to the cent[\s\S]*?data-testid="merged-level"[\s\S]*?>L0<[\s\S]*?data-testid="merged-confidence"[\s\S]*?>evaluator confidence high</);
+  assert.match(html, /PR #31[\s\S]*?level not recorded[\s\S]*?confidence not recorded/);
+  assert.match(r.renderWaiting({ ...w, items: [] }, now), /data-testid="merged-item"/, 'shown even when nothing waits');
+  assert.match(r.renderWaiting({ ...w, merged: [] }, now), /Nothing merged on its own/);
+  // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
+  assert.equal((asOther as unknown as { canReadDigest: boolean }).canReadDigest, false);
+  assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
+});
+
+test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
+  assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
+  assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the owner \(@example-owner\) and the project(&#x27;|')s writers; @someone-else isn(&#x27;|')t one\./);
+  assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
 });
