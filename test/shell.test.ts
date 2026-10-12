@@ -31,6 +31,18 @@ test('finds files written by redirection and tee', () => {
   assert.deepEqual(cs.flatMap((c) => c.writes), ['.worklane/a.yaml', 'b.txt', 'c.txt', 'd.txt']);
 });
 
+test('finds files a command changes through its arguments: copies, moves, in-place edits, removals', () => {
+  const w = (s: string) => splitCommands(s).flatMap((c) => c.writes);
+  assert.deepEqual(w('cp a.txt b/c.txt'), ['b/c.txt', 'b/c.txt/a.txt']);
+  assert.deepEqual(w('mv x .claude'), ['x', '.claude', '.claude/x']);
+  assert.deepEqual(w('rm -rf .claude'), ['.claude']);
+  assert.deepEqual(w("sed -i.bak -e 's/a/b/' f1 f2"), ['f1', 'f2']);
+  assert.deepEqual(w("sed -i 's/a/b/' f1"), ['f1']);
+  assert.deepEqual(w("sed -n 's/a/b/p' f1"), [], 'not in place');
+  assert.deepEqual(w('dd if=a of=b'), ['b']);
+  assert.deepEqual(w('cat a b'), []);
+});
+
 test('subshells and groups', () => {
   assert.deepEqual(argvs('(cd x && railway run --environment production y) ; { a; b; }'), ['cd x', 'railway run --environment production y', 'a', 'b']);
 });

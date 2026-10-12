@@ -12,6 +12,7 @@ import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, ty
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
+import { protectedPaths } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type Level } from './review.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
@@ -827,7 +828,7 @@ export class Coordinator extends MergeFlow {
     const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
-    const protectedRes = this.d.cfg.guardrails.protected_paths.map((g) => globToRegExp(g));
+    const protectedRes = protectedPaths(this.d.cfg.guardrails).map((g) => globToRegExp(g));
     const prot = names.filter((f) => protectedRes.some((re) => re.test(f)));
     if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
     const scan = await scanRange(path, `${base}..${head}`);
