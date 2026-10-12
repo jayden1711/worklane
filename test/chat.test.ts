@@ -246,3 +246,10 @@ test('hub: a cross-instance question is answered from each selected instance, ea
   assert.equal(a.runner.calls.length + b.runner.calls.length, 2);
   assert.ok(existsSync(a.opts.bundleRoot) && existsSync(b.opts.bundleRoot));
 });
+
+test('the chat role\'s eval cases include drafting an issue', async () => {
+  const { engineRoleCases, parseCases } = await import('../src/skilleval.js');
+  const cases = parseCases(engineRoleCases('chief_of_staff') ?? '');
+  assert.ok(cases.length >= 5 && cases.every((c) => c.correct.length && c.wrong.length), `${cases.length} cases`);
+  assert.ok(cases.some((c) => /draft/i.test(c.title)), 'a drafting case');
+});
