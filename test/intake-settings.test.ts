@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { CredentialsFile, credentialProblems } from '../src/instance.js';
 import { loadIntakeConfig } from '../src/intake/config.js';
-import { INTAKE_DEFAULT_CAPS } from '../src/intake/report.js';
+import { INTAKE_DEFAULT_CAPS, IntakeConfig } from '../src/intake/report.js';
 import { changeSetting, currentValue, intakeCaps, loadLimits, settingsProblems } from '../src/settings.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
@@ -45,31 +45,45 @@ test('intake credentials: files the coordinator holds, each checked to exist', (
   const c = CredentialsFile.parse({
     version: 1,
     github: { kind: 'gh-config-dir', path: '/nonexistent/gh' },
-    intake: { discord_token: '/nonexistent/discord-token', twilio: { account_sid: `AC${'0'.repeat(32)}`, auth_token: '/nonexistent/twilio', number: '+15550001111' }, relay_secret: '/nonexistent/relay' },
+    intake: { discord_token: '/nonexistent/discord-token' },
   });
-  const problems = credentialProblems(c);
-  for (const what of ['chat bot token', 'SMS auth token', 'relay secret']) assert.ok(problems.some((p) => p.includes(what)), what);
-  assert.equal(CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/x' }, intake: { twilio: { account_sid: 'nope', auth_token: '/x', number: '+1' } } }).success, false);
+  assert.ok(credentialProblems(c).some((p) => p.includes('chat bot token')));
 });
 
 test('intake.yaml: absent means off; only its owner may change it; invalid is refused', { skip: !posix && 'POSIX owners and modes' }, () => {
   const d = mkdtempSync(join(tmpdir(), 'intake-cfg-'));
   const p = join(d, 'intake.yaml');
   assert.equal(loadIntakeConfig(p), null);
-  writeFileSync(p, 'version: 1\ntrusted: { sms: ["+15550001111"] }\nsms: { enabled: true, relay_url: "https://relay.example.invalid" }\n', { mode: 0o600 });
-  const ok = loadIntakeConfig(p) as { config: { trusted: { sms: string[] }; sms: { enabled: boolean } } };
-  assert.deepEqual([ok.config.trusted.sms, ok.config.sms.enabled], [['+15550001111'], true]);
+  writeFileSync(p, 'version: 1\ntrusted: { discord: ["222222"] }\ndiscord: { enabled: true, guild: "555555", channels: ["111111"] }\n', { mode: 0o600 });
+  const ok = loadIntakeConfig(p) as { config: { trusted: { discord: string[] }; discord: { enabled: boolean; guild: string } } };
+  assert.deepEqual([ok.config.trusted.discord, ok.config.discord.enabled, ok.config.discord.guild], [['222222'], true, '555555']);
   chmodSync(p, 0o620);
   assert.match((loadIntakeConfig(p) as { error: string }).error, /writable by its group or others/);
   chmodSync(p, 0o600);
-  writeFileSync(p, 'version: 1\ntrusted: { sms: ["5550001111"] }\n');
-  assert.match((loadIntakeConfig(p) as { error: string }).error, /E\.164/);
+  writeFileSync(p, 'version: 1\ntrusted: { discord: ["sam"] }\n');
+  assert.match((loadIntakeConfig(p) as { error: string }).error, /Discord user id/);
+});
+
+test('intake.yaml: Discord needs its one server id when enabled; every source is off by default', () => {
+  assert.equal(IntakeConfig.safeParse({ version: 1, discord: { enabled: true, channels: ['111111'] } }).success, false);
+  assert.equal(IntakeConfig.safeParse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'] } }).success, true);
+  assert.equal(IntakeConfig.safeParse({ version: 1, discord: { enabled: false } }).success, true, 'no server id needed while off');
+  const d = IntakeConfig.parse({ version: 1 });
+  assert.deepEqual([d.discord.enabled, d['bug-store'].enabled], [false, false]);
+});
+
+test('intake config and credentials are strict: text-message (SMS) settings and DMs are refused, not ignored', () => {
+  assert.equal(IntakeConfig.safeParse({ version: 1, sms: { enabled: true } }).success, false, 'an sms block');
+  assert.equal(IntakeConfig.safeParse({ version: 1, trusted: { sms: ['+15550001111'] } }).success, false, 'trusted sms senders');
+  assert.equal(IntakeConfig.safeParse({ version: 1, discord: { enabled: true, guild: '555555', dms: true } }).success, false, 'the dms option');
+  assert.equal(CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/x' }, intake: { relay_secret: '/x' } }).success, false, 'a relay secret');
 });
 
 test('credentials.sh installs each intake secret for the coordinator user only, 0400, never echoing it', () => {
   const s = readFileSync(join(repoRoot, 'scripts', 'setup', 'credentials.sh'), 'utf8');
-  for (const sub of ['intake-discord)', 'intake-twilio)', 'intake-relay)']) assert.ok(s.includes(`  ${sub}`), sub);
+  assert.ok(s.includes('  intake-discord)'));
+  assert.deepEqual(s.match(/^  intake-[a-z]+\)/gm), ['  intake-discord)'], 'the chat bot is the only intake credential');
   assert.match(s, /install_secret\(\) \{[\s\S]*?sudo -u "\$coord"[\s\S]*?chmod 0400/);
   for (const v of ['token', 'secret']) assert.doesNotMatch(s, new RegExp(`echo[^\\n]*\\$${v}\\b`), `never echoes $${v}`);
-  assert.equal((s.match(/read -rsp/g) ?? []).length >= 4, true, 'secrets are read without echo');
+  assert.equal((s.match(/read -rsp/g) ?? []).length >= 3, true, 'secrets are read without echo');
 });

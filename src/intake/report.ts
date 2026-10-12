@@ -4,10 +4,10 @@
 // repo, so no agent can read who is trusted or change it. See docs/intake.md.
 import { z } from 'zod';
 
-export const SOURCES = ['discord', 'sms', 'bug-store'] as const;
+export const SOURCES = ['discord', 'bug-store'] as const;
 export type Source = (typeof SOURCES)[number];
 
-/** Who sent it, as the source identifies them: a chat user id, a phone number in E.164, or a store row's reporter id. */
+/** Who sent it, as the source identifies them: a Discord user id, or a store row's reporter id. */
 export interface Sender {
   source: Source;
   id: string;
@@ -15,7 +15,7 @@ export interface Sender {
   name?: string;
 }
 
-/** One report as an adapter produces it. `thread` is where replies go (a channel, a DM, a conversation). */
+/** One report as an adapter produces it. `thread` is where replies go (the channel it came from). */
 export interface IncomingReport {
   source: Source;
   /** The source's own id for this message or row, unique within the source. */
@@ -23,7 +23,7 @@ export interface IncomingReport {
   sender: Sender;
   text: string;
   receivedAt: string;
-  thread?: { kind: 'channel' | 'dm' | 'sms' | 'group'; id: string };
+  thread?: { kind: 'channel'; id: string };
 }
 
 /** A source as the coordinator uses it: new reports since the last take, and a reply into a report's thread. */
@@ -46,34 +46,29 @@ export const INTAKE_DEFAULT_CAPS: IntakeCaps = { reports_per_sender_per_day: 10,
 export const TRIAGE_KINDS = ['bug', 'feature', 'question', 'duplicate', 'not_actionable', 'needs_info'] as const;
 export type TriageKind = (typeof TRIAGE_KINDS)[number];
 
-const e164 = z.string().regex(/^\+[1-9]\d{6,14}$/, 'a phone number in E.164 form, e.g. +15551234567');
+const snowflake = (what: string) => z.string().regex(/^\d{5,25}$/, `a Discord ${what} id (digits)`);
 
 export const IntakeConfig = z.strictObject({
   version: z.literal(1),
-  /** Trusted senders: their drafts are filed with `ready`. The owner is trusted by their chat id / phone below. */
+  /** Trusted senders: their drafts are filed with `ready`. The owner is trusted by their Discord user id below. */
   trusted: z
     .strictObject({
-      discord: z.array(z.string().regex(/^\d{5,25}$/, 'a Discord user id (digits)')).default([]),
-      sms: z.array(e164).default([]),
+      discord: z.array(snowflake('user')).default([]),
       'bug-store': z.array(z.string().min(1)).default([]),
     })
     .prefault({}),
+  /** One server only: messages from any other server, and every direct message, are dropped unstored. */
   discord: z
     .strictObject({
       enabled: z.boolean().default(false),
-      channels: z.array(z.string().regex(/^\d{5,25}$/)).default([]),
-      dms: z.boolean().default(true),
+      /** The server (guild) id; required when enabled. */
+      guild: snowflake('server').optional(),
+      /** Only these channels of that server count. */
+      channels: z.array(snowflake('channel')).default([]),
       /** In a channel, a message counts only if it mentions the bot or starts with one of these. */
       prefixes: z.array(z.string().min(1)).default(['bug:']),
     })
-    .prefault({}),
-  sms: z
-    .strictObject({
-      enabled: z.boolean().default(false),
-      relay_url: z.string().url().optional(),
-      /** In a group, a message counts only if it starts with one of these; the relay drops the rest unstored. */
-      prefixes: z.array(z.string().min(1)).default(['bug:']),
-    })
+    .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
     .prefault({}),
   'bug-store': z
     .strictObject({
@@ -121,5 +116,6 @@ export type IntakeConfig = z.infer<typeof IntakeConfig>;
  * report's text can make a sender trusted.
  */
 export function isTrusted(sender: Sender, cfg: IntakeConfig): boolean {
-  return (cfg.trusted[sender.source] as string[]).includes(sender.id);
+  // A source no longer configured (a report stored before it was removed) is trusted for nobody.
+  return (cfg.trusted[sender.source] as string[] | undefined)?.includes(sender.id) ?? false;
 }
