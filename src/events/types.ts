@@ -211,6 +211,18 @@ export const EventSchemas = {
   'ask.answered': z.strictObject({ id: z.string(), by: z.string(), role: z.enum(['owner', 'writer']), answer: z.string(), detail: z.string() }),
   /** An ask withdrawn before it was answered (by whatever created it, or the owner). */
   'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
+  // onboarding a project (src/onboard/): its progress, so a re-run continues where it stopped
+  /** A step of `add` finished (done or skipped) or failed; `data`: what later steps need (ids, choices, URLs; never a secret). */
+  'onboard.step': z.strictObject({
+    repo: z.string(),
+    instance: z.string(),
+    step: z.string(),
+    status: z.enum(['done', 'skipped', 'failed']),
+    detail: z.string(),
+    data: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])),
+  }),
+  /** An ask a step made, by the step's key; `used`: its answer was taken, so a re-run asks again. */
+  'onboard.ask': z.strictObject({ repo: z.string(), key: z.string(), id: z.string(), used: z.boolean() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),

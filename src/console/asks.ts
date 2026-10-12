@@ -150,7 +150,10 @@ function specOf(input: AskInput): EventPayload<'ask.created'>['spec'] {
       } catch {
         throw new AskError('url is not a URL');
       }
-      if (u.protocol !== 'https:') throw new AskError('an approve_link url must be https');
+      // https, or plain http on this machine's loopback only: GitHub's App manifest flow starts from a form post, so its
+      // page is served by the setup on 127.0.0.1 (src/onboard/manifest.ts).
+      const loopback = u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname);
+      if (u.protocol !== 'https:' && !loopback) throw new AskError('an approve_link url must be https (or http on 127.0.0.1)');
       return { kind: 'approve_link', url: u.toString() };
     }
     case 'question': {

@@ -37,6 +37,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
+import type { OnboardService } from './onboard/http.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -86,6 +87,8 @@ export interface DashboardOptions {
   limitsPath?: string;
   /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
   machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  /** Add project (onboarding, src/onboard/http.ts): only on a dashboard the owner runs as their own login. */
+  onboard?: OnboardService;
 }
 
 /**
@@ -587,6 +590,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         if (!authed(req, url)) return json(res, 401, { error: 'missing or wrong token; open the URL printed by `dashboard`' });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state());
+        if (url.pathname === '/api/onboard' || url.pathname.startsWith('/api/onboard/')) {
+          if (!opts.onboard) return json(res, 404, { error: 'Add project is on a dashboard you run as your own login (`dashboard`, not an instance\'s), or `add <owner/repo>` in a terminal' });
+          if (await opts.onboard.handle(req, res, url, () => readBody(req))) return;
+        }
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {

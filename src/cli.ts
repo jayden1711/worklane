@@ -40,6 +40,12 @@ import { LABELS } from './backlog/types.js';
 import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
+import { Onboarding, realDeps } from './onboard/flow.js';
+import { ghOwner, restGitHub } from './onboard/github.js';
+import { discordApi } from './onboard/discord.js';
+import { answerInTerminal } from './onboard/terminal.js';
+import { onboardService } from './onboard/http.js';
+import { setAgentApiKey, setInstanceBudget } from './onboard/budget.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -96,6 +102,11 @@ usage: ${BRAND.cli} <command> [options]
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
+  add <owner/repo> [--name n] [--owner login]
+                                   onboard a project: its GitHub App, labels, config PR, ruleset,
+                                   users, service, Claude sign-in, optional Discord and Tailscale,
+                                   then doctor; each step you must do is asked, and a re-run continues
+  instance set-budget <name> <usd> the instance policy's daily budget (as its coordinator user)
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
@@ -454,7 +465,10 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       user = user || cfg.project.owners.default;
-      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port });
+      // Add project only on a dashboard run as the owner's own login: never an instance's (its coordinator user) or a service.
+      const api = process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com';
+      const onboard = !instance && !service ? onboardService({ by: user, deps: () => realDeps({ github: restGitHub(fetch, api), owner: ghOwner(), discord: discordApi() }) }) : undefined;
+      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port, ...(onboard ? { onboard } : {}) });
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
@@ -620,6 +634,15 @@ async function main(argv: string[]): Promise<number> {
         console.log(`created ${home}\n  edit policy.yaml, and point credentials.yaml at credentials made for this instance`);
         return 0;
       }
+      if (sub === 'set-agent-api-key' && target) {
+        console.log(`${target}: credentials.yaml agent_api_key: ${setAgentApiKey(target)}`);
+        return 0;
+      }
+      if (sub === 'set-budget' && target) {
+        const r = setInstanceBudget(target, Number(rest[1]));
+        console.log(`${target}: daily budget $${r.from} -> $${r.to}`);
+        return 0;
+      }
       if (sub === 'show' && target) {
         const i = loadInstance(target);
         const missing = instanceProblems(i);
@@ -661,6 +684,35 @@ async function main(argv: string[]): Promise<number> {
       }
       console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] | instance list | instance show <name>');
       return 2;
+    }
+
+    case 'add': {
+      const repo = sub;
+      if (!repo) {
+        console.error('usage: add <owner/repo> [--name <instance>] [--owner <your GitHub login>]');
+        return 2;
+      }
+      const name = option(rest, '--name');
+      const owner = ghOwner();
+      const by = option(rest, '--owner') ?? (await owner.login());
+      if (!by) {
+        console.error('who owns the project? sign in with `gh auth login` as yourself, or pass --owner <your GitHub login>');
+        return 2;
+      }
+      const api = process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com';
+      const onb = new Onboarding({ repo, ...(name ? { name } : {}), by, onStep: (s) => console.log(`${s.status === 'failed' ? 'FAIL' : s.status === 'skipped' ? 'skip' : 'done'}  ${s.step}: ${s.detail.split('\n')[0]}`) }, realDeps({ github: restGitHub(fetch, api), owner, discord: discordApi() }));
+      console.log(`${BRAND.name}: adding ${repo} as instance ${onb.name} (progress in ${onb.dir}; re-run to continue)`);
+      const stop = new AbortController();
+      const answering = answerInTerminal(onb, stop.signal);
+      const r = await onb.run();
+      stop.abort();
+      await answering;
+      for (const c of r.report) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : 'FAIL'}  ${c.name}: ${c.detail.split('\n')[0]}${c.fix ? `\n        fix: ${c.fix}` : ''}`);
+      onb.close();
+      if (!r.ok) console.error(`stopped at ${r.error}\nfix it, then run \`${BRAND.cli} add ${repo}\` again; it continues there`);
+      else console.log(`${repo} is set up: instance ${onb.name}, doctor green`);
+      process.stdin.pause();
+      return r.ok ? 0 : 1;
     }
 
     case 'labels': {
