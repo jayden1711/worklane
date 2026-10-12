@@ -17,6 +17,7 @@ On a machine that runs agents for weeks, use the `/var/lib` and `/etc` locations
 | `slots.lock` | Held for a moment while a harness counts running agents and takes a slot. |
 | `agent-<i>.lock` | One running agent. The **number** of live files is capped, not the index: files may be numbered past the cap, so lowering it never strands an agent that is still running. |
 | `full-run.lock` | A full test run is in progress. At most one per machine. |
+| `test-<i>.lock` | One coordinator test run (docs/test-runs.md). Counted apart from agents and capped by the config's `max_test_runs` (default 2, 1..8), which only the machine helper changes (`set-test-slots`). |
 | `STOP` | Emergency stop, `{"by", "at", "reason"}`. While it exists, every harness halts its running agents and takes no new slot. |
 
 Each lock file holds JSON: `{"pid": 1234, "owner": "free text: harness, project, task", "acquiredAt": "ISO-8601"}`.

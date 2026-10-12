@@ -22,6 +22,33 @@ export interface ExecResult {
   /** null: it timed out or was cancelled. */
   code: number | null;
   out: string;
+  /** What the command used, where the host can tell (the sandbox's unit reports it). */
+  stats?: { cpuS: number | null; memPeakMb: number | null };
+}
+
+const UNIT = { s: 1, ms: 0.001, us: 0.000001, min: 60, h: 3600 } as Record<string, number>;
+const MEM = { B: 1 / 1048576, K: 1 / 1024, M: 1, G: 1024, T: 1048576 } as Record<string, number>;
+
+/**
+ * systemd-run --wait's own lines (its unit's name at the start; its result, CPU time and peak memory at the end),
+ * taken out of a command's output and read.
+ */
+export function systemdRunStats(out: string): { out: string; stats: { cpuS: number | null; memPeakMb: number | null } } {
+  let cpuS: number | null = null;
+  let memPeakMb: number | null = null;
+  const own = /^(Running as unit: |Finished with result: |Main processes terminated with: |Service runtime: |CPU time consumed: |Memory peak: |Memory swap peak: |IP traffic received: |IP traffic sent: |IO bytes read: |IO bytes written: )/;
+  const kept: string[] = [];
+  for (const line of out.split('\n')) {
+    if (!own.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    const cpu = /^CPU time consumed: (.+)$/.exec(line);
+    if (cpu) cpuS = [...cpu[1]!.matchAll(/([\d.]+)(us|ms|min|s|h)/g)].reduce((a, m) => a + Number(m[1]) * UNIT[m[2]!]!, 0);
+    const mem = /^Memory peak: ([\d.]+)([BKMGT])/.exec(line);
+    if (mem) memPeakMb = Math.round(Number(mem[1]) * MEM[mem[2]!]! * 10) / 10;
+  }
+  return { out: kept.join('\n'), stats: { cpuS: cpuS === null ? null : Math.round(cpuS * 10) / 10, memPeakMb } };
 }
 
 export interface RunDatabase {
@@ -44,6 +71,8 @@ export interface RunHost {
   startDb(id: string, db: { image: string; name: string; readyS: number }): Promise<RunDatabase>;
   /** Run a command in the workspace with exactly `env` (and the host's fixed PATH, HOME, TMPDIR, CI). */
   exec(id: string, command: string, env: Record<string, string>, timeoutMs: number, signal?: AbortSignal): Promise<ExecResult>;
+  /** The sandbox's own boundary check; a check that can't run is not ok. */
+  check(): Promise<{ ok: boolean; detail: string }>;
   /** Remove everything of the run: its processes, containers, volumes and files. `left`: what is still there. */
   wipe(id: string): Promise<{ ok: boolean; left: string[] }>;
 }
@@ -157,7 +186,14 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       const args = ['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000)))];
       for (const [k, v] of Object.entries(env)) args.push('--env', `${k}=${v}`);
       // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left).
-      return call([...args, '--', command], { timeoutMs: timeoutMs + 60_000, signal });
+      const r = await call([...args, '--', command], { timeoutMs: timeoutMs + 60_000, signal });
+      const s = systemdRunStats(r.out);
+      return { ...r, out: s.out, stats: s.stats };
+    },
+    async check() {
+      const r = await call(['check'], { timeoutMs: 300_000 });
+      const fails = r.out.split('\n').filter((l) => l.startsWith('FAIL'));
+      return { ok: r.code === 0 && /^OK$/m.test(r.out) && !fails.length, detail: (fails.length ? fails.join('\n') : r.code === 0 ? 'all checks passed' : `the check didn't run: ${r.out.trim().slice(-300)}`).slice(0, 2000) };
     },
     async wipe(id) {
       checkId(id);
@@ -254,6 +290,9 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       // Exactly these variables: never this process's own environment.
       const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
       return run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
+    },
+    async check() {
+      return { ok: false, detail: 'the local host has no sandbox: for the engine\'s tests and development only' };
     },
     async wipe(id) {
       checkId(id);

@@ -9,6 +9,7 @@ import type { MachineStats } from './os/stats.js';
 import { offsiteLine, offsiteStatus, type OffsiteStatus } from './offsite-backup.js';
 import { mergeMetrics, type MergeMetrics } from './merge-metrics.js';
 import { heldUpdate, updateLog, type HeldUpdate, type UpdateEntry } from './updates.js';
+import { testRunStatus, type TestRunStatus } from './testrun/status.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -57,6 +58,8 @@ export interface HealthView {
   merge: MergeMetrics;
   /** An engine update this machine rolled back and holds (the machine's update log); null when none. */
   updateHold: HeldUpdate | null;
+  /** The coordinator's test runs (src/testrun/): queue, runs, per-tier figures, and what keeps them from working. */
+  testRuns: TestRunStatus;
   suggestions: string[];
 }
 
@@ -161,7 +164,7 @@ const secs = (ms: number) => `${Math.round(ms / 1000)} s`;
 export const THRESHOLDS = { memoryAvailablePct: 10, swapUsedPct: 25, unitMemoryPct: 90, diskFreePct: 10, diskFreeGb: 10, rateLimitsPerDay: 3, lockWaitMinPerDay: 30, loadPerCore: 1.5 } as const;
 
 /** Suggestions only, each a "consider", never a change made; one line saying so when there's nothing to suggest. */
-export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' | 'updateHold'> & { offsiteBackup?: OffsiteStatus | null },o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
+export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' | 'updateHold' | 'testRuns'> & { offsiteBackup?: OffsiteStatus | null },o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
   const today = o.today ?? new Date().toISOString().slice(0, 10);
   const out: string[] = [];
   const m = v.machine;
@@ -201,5 +204,7 @@ export function healthView(events: StoredEvent[], machine: MachineStats | null, 
   const started = [...events].reverse().find((e) => e.type === 'coordinator.started')?.payload as { instance?: string } | undefined;
   const since = new Date((o.now ?? new Date()).getTime() - MERGE_DAYS * 86_400_000);
   const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now), merge: mergeMetrics(events, { since }), updateHold: heldUpdate(o.updates ?? updateLog()) };
-  return { ...base, suggestions: suggestions(base, o) };
+  const testRuns = testRunStatus(events);
+  // What stops the test runs working is said first, plainly: it is not a suggestion.
+  return { ...base, testRuns, suggestions: [...testRuns.problems, ...suggestions(base, o)] };
 }

@@ -10,6 +10,7 @@ import { type AgentRunner, type CommitIdentity, type RunAs, type RunControl } fr
 import { type PendingMessage } from '../console.js';
 import type { InstanceSettings } from '../instance.js';
 import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
+import type { PrTestRuns } from './test-runs.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -64,6 +65,8 @@ export interface CoordinatorDeps {
    * sources. `pullMs`: how often the sources are pulled (default 30 s).
    */
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number };
+  /** The fast test runs on every open PR (src/coordinator/test-runs.ts); absent: tests.yaml has no test_run, or no sandbox. */
+  testRuns?: PrTestRuns;
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */

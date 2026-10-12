@@ -146,8 +146,9 @@ exec_run() {
   [ -d "$d/work" ] || die "no run $id"
   inaccessible="-$sock_dir -$root/docker -$root/docker-home"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
-  # The unit's own name carries the run id, so wipe finds (and stops) whatever is left of it.
-  exec systemd-run --quiet --wait --pipe --collect \
+  # The unit's own name carries the run id, so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
+  # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier.
+  exec systemd-run --wait --pipe --collect \
     --unit="worklane-test-$name-$id-$$" --slice="$SLICE" --uid="$user" --gid="$user" \
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
