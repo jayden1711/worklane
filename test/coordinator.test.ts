@@ -447,6 +447,17 @@ test('plan mode: a size:M issue is planned read-only first, the plan posted, and
   assert.equal(t.f.log.read(0, ['decision.asked']).filter((e) => (e.payload as { kind: string }).kind === 'plan').length, 0);
 });
 
+test('plan mode: the planner is told the decisions already made, each with the answer that stands, so it asks none of them again', { skip }, async () => {
+  const t = plannedTask(() => PLAN);
+  t.f.log.append('decision.asked', { id: 'd-fmt', kind: 'question', issue: null, owner: 'example-owner', question: 'Which format do exports use?', options: ['csv', 'json'], recommendation: 'csv', receipts: [] }, 'coordinator');
+  t.f.log.append('decision.answered', { id: 'd-fmt', by: 'example-owner', answer: 'csv' }, 'example-owner', 'human');
+  t.f.log.append('decision.answered', { id: 'd-fmt', by: 'example-collaborator', answer: 'json' }, 'example-collaborator', 'human');
+  await t.run();
+  const planner = t.runner.calls.find((r) => r.role === 'planner')!;
+  assert.match(planner.prompt, /Decisions already made on this project[^\n]*\n- Which format do exports use\? -> csv/);
+  assert.doesNotMatch(planner.prompt, /-> json/, 'only the first answer, the one that stands');
+});
+
 test('plan mode: a plan touching an L3 path is held for the owner and builds nothing until approved; then it builds with that plan', { skip }, async () => {
   const t = plannedTask(() => ({ ...PLAN, files: ['migrations/002_orders.sql', 'src/price.js'] }));
   await t.run();

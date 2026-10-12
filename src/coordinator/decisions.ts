@@ -12,7 +12,7 @@ import { loadMoneyPaths } from '../review.js';
 import { issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
-import { objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from '../plan-mode.js';
+import { decisionsMade, objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from '../plan-mode.js';
 import { Recovery } from './recovery.js';
 import { laneOf, DEFAULT_REVIEW } from './shared.js';
 import { routeRun } from './model-routing.js';
@@ -42,7 +42,7 @@ export abstract class Decisions extends Recovery {
       role: 'planner',
       ...laneOf(issue),
       stateDir: this.d.stateDir,
-      prompt: issueBrief(issue, doneWhen, [...planExtra(), ...(note ? ['', `The owner asked for a revised plan: ${note}`] : [])]),
+      prompt: issueBrief(issue, doneWhen, [...planExtra(), ...decisionsMade(this.d.log.read(0, ['decision.asked', 'decision.answered'])), ...(note ? ['', `The owner asked for a revised plan: ${note}`] : [])]),
       cwd: path,
       model: planModel,
       allowedTools: PLAN_TOOLS,
