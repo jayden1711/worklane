@@ -42,10 +42,16 @@ export interface TestRunResult {
   kind: 'fast' | 'full';
   ok: boolean;
   tiers: TierResult[];
+  /**
+   * How the run ended, if the service says (src/testrun/ records it on testrun.finished): anything but `done` is no
+   * verdict on the code. Without it, a tier that failed without running (no log: `cancelled`, the run couldn't go ahead,
+   * a setup step failed) says the same.
+   */
+  outcome?: 'done' | 'cancelled' | 'error';
 }
 export interface TestRuns {
-  /** Queues, waits for a slot and the lock, runs, wipes, records events. */
-  startTestRun(req: TestRunRequest): Promise<TestRunResult>;
+  /** Queues, waits for a slot and the lock, runs, wipes, records events. `signal`: cancel it (the result says cancelled). */
+  startTestRun(req: TestRunRequest, opts?: { signal?: AbortSignal }): Promise<TestRunResult>;
   /** GitHub check runs via the App, one per tier, on `sha`; `checkNames`: tier -> check name. */
   postChecks(sha: string, result: TestRunResult, checkNames: Record<string, string>): Promise<void>;
   /** Every tier's check name (src/testrun/ checkNamesFor over tests.yaml test_run). */
@@ -344,6 +350,45 @@ export function mergeTurn(o: { events: StoredEvent[]; number: number; head: stri
   return { act: 'merge', batch: b.id };
 }
 
+/**
+ * Why a run gave no verdict on the code, or null when it did (it passed, or a tier that ran failed). Cancelled,
+ * interrupted or errored runs never count as red: they would start a bisection and blame a PR for nothing.
+ */
+export function noVerdict(r: TestRunResult): string | null {
+  if (r.outcome && r.outcome !== 'done') return `the test run was ${r.outcome === 'cancelled' ? 'cancelled' : 'stopped by an error'}`;
+  if (!r.tiers.length) return 'the test run reported no tiers';
+  const notRun = r.tiers.filter((t) => !t.ok && !t.logRef);
+  if (notRun.length) return `tiers that never ran: ${notRun.map((t) => `${t.tier} (${t.summary.split('\n')[0]!.slice(0, 120)})`).join(', ')}`;
+  if (!r.ok && r.tiers.every((t) => t.ok)) return 'the test run failed with every tier passing';
+  return null;
+}
+
+/** A run that gave no verdict: its batch is abandoned and batched again, nobody blamed. */
+class NoVerdict extends Error {}
+
+/**
+ * Whether a green batch's PRs are still merging (posted, not merged, not closed, not left to the owner, posted in
+ * the last half hour). The next batch waits for them: built on the main they're about to change, it would be stale.
+ */
+export function mergesPending(events: StoredEvent[], now: number): boolean {
+  const st = batchState(events);
+  const merged = new Set<string>();
+  const closed = new Set<number>();
+  const owner = new Map<string, boolean>();
+  for (const e of events) {
+    const p = e.payload as Record<string, unknown>;
+    if (e.type === 'merge.done') merged.add(key(Number(p.number), String(p.head)));
+    else if (e.type === 'pr.closed') closed.add(Number(p.number));
+    else if (e.type === 'merge.decided') owner.set(key(Number(p.number), String(p.head)), !p.auto);
+  }
+  for (const [k, id] of st.posted) {
+    const b = st.batches.get(id);
+    if (merged.has(k) || owner.get(k) || closed.has(Number(k.split('@')[0])) || !b || now - Date.parse(b.last) > 30 * 60_000) continue;
+    return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------- the batcher
 
 export interface PrBatchDeps {
@@ -364,6 +409,8 @@ export interface PrBatchDeps {
   ownerOf(issue: number): string;
   /** A PR whose batch passed and whose full check is posted on its head: the merge policy decides it next. */
   tested(e: BatchEntry): void;
+  /** False while a green batch's PRs are still merging (mergesPending): no new batch starts until they settle. */
+  mergesSettled?(): boolean;
   /**
    * Why the merge policy would leave this PR to the owner (high-risk, money-path, or any other reason it won't
    * auto-merge), or null. Such a PR is batched alone: merging the rest around it would leave main untested.
@@ -385,8 +432,38 @@ export class PrBatcher {
   private recovered = false;
   private notWired = false;
   private nextTryAt = 0;
+  private stopping = false;
+  /** The batch whose run is in flight: what drops it, and the signal that cancels its run. */
+  private current: { id: string; prs: BatchEntry[]; base: string; controller: AbortController; why: string | null } | null = null;
 
   constructor(private readonly d: PrBatchDeps) {}
+
+  /** Cancel the in-flight run: its batch is abandoned and batched again. */
+  private cancel(why: string) {
+    const c = this.current;
+    if (!c || c.controller.signal.aborted) return;
+    c.why = why;
+    c.controller.abort(new Error(why));
+  }
+
+  /** The PR watch saw this PR: a head that moved off the one in the running batch, or a closed PR, cancels its run. */
+  observe(number: number, head: string, state: string) {
+    const e = this.current?.prs.find((p) => p.number === number);
+    if (!e) return;
+    if (state !== 'open') this.cancel(`#${number} is ${state}`);
+    else if (head !== e.head) this.cancel(`#${number}'s head moved to ${head.slice(0, 8)}`);
+  }
+
+  /** Main moved off the running batch's base: its result would be stale, so its run is cancelled. */
+  mainMoved(tip: string) {
+    if (this.current && tip && tip !== this.current.base) this.cancel(`${this.d.branch} moved to ${tip.slice(0, 8)}`);
+  }
+
+  /** The coordinator is stopping: cancel the run in flight and start nothing new. */
+  stop() {
+    this.stopping = true;
+    this.cancel('the coordinator is stopping');
+  }
 
   private get now() {
     return this.d.now?.() ?? Date.now();
@@ -444,7 +521,7 @@ export class PrBatcher {
 
   /** One pass: start the next batch in the background, unless one is running (or a restart left one to settle first). */
   tick(): void {
-    if (this.running || this.now < this.nextTryAt) return;
+    if (this.running || this.stopping || this.now < this.nextTryAt) return;
     if (!this.d.testRuns) {
       if (!this.notWired && this.state().queue.length) {
         this.notWired = true;
@@ -453,6 +530,7 @@ export class PrBatcher {
       return;
     }
     if (this.recovered && !this.state().queue.length) return;
+    if (this.recovered && this.d.mergesSettled && !this.d.mergesSettled()) return;
     this.running = (async () => {
       try {
         if (!this.recovered) {
@@ -578,10 +656,17 @@ export class PrBatcher {
     const shards = Math.max(1, this.d.config().shards);
     const base = { repo: this.d.repo, sha, kind: 'full' as const, prs: prs.map((p) => p.number) };
     const reqs: TestRunRequest[] = shards === 1 ? [base] : Array.from({ length: shards }, (_, i) => ({ ...base, shard: { index: i + 1, total: shards } }));
-    const results = await Promise.all(reqs.map((r) => this.d.testRuns!.startTestRun(r)));
+    const signal = this.current?.controller.signal;
+    const results = await Promise.all(reqs.map((r) => this.d.testRuns!.startTestRun(r, signal ? { signal } : {})));
+    // No verdict (cancelled, interrupted, errored, a tier that never ran): never red, never bisected.
+    if (signal?.aborted) throw new NoVerdict(`its run was cancelled: ${this.current?.why ?? 'cancelled'}`);
+    for (const r of results) {
+      if (r.sha !== sha || r.kind !== 'full') throw new NoVerdict(`the test run reported ${r.kind} on ${r.sha.slice(0, 8)}, not full on ${sha.slice(0, 8)}`);
+      const why = noVerdict(r);
+      if (why) throw new NoVerdict(why);
+    }
     const tiers = new Map<string, TierResult>();
     for (const r of results) {
-      if (r.sha !== sha || r.kind !== 'full') tiers.set('(run)', { tier: '(run)', ok: false, durationMs: 0, summary: `the test run reported ${r.kind} on ${r.sha.slice(0, 8)}, not full on ${sha.slice(0, 8)}`, logRef: r.id });
       for (const t of r.tiers) {
         const prior = tiers.get(t.tier);
         tiers.set(
@@ -615,6 +700,35 @@ export class PrBatcher {
     const { entries, alone } = await this.select(id, st.queue, size);
     if (!entries.length) return this.finish(id, [], 'every PR in it left the queue');
     const base = this.fetch(entries);
+    this.current = { id, prs: entries, base, controller: new AbortController(), why: null };
+    try {
+      await this.runBatch(id, entries, base, size, alone);
+    } catch (e) {
+      if (!(e instanceof NoVerdict)) throw e;
+      await this.abandon(id, entries, e.message);
+    } finally {
+      this.current = null;
+    }
+  }
+
+  /**
+   * A run with no verdict: the batch (and a bisection step in flight) is abandoned, PRs that left are dropped, and the
+   * rest are batched again. Nobody is blamed. Not cancelled by us (an errored run, a setup step that failed): wait a
+   * while first, and say why.
+   */
+  private async abandon(id: string, entries: BatchEntry[], why: string) {
+    await this.live(id, entries);
+    for (const b of this.state().batches.values()) if (b.open && b.parent === id) this.step(b.id, 'abandoned', b.prs, { parent: id, detail: why });
+    this.step(id, 'abandoned', entries, { detail: `${why}; batched again, nobody blamed` });
+    this.dropRef(id);
+    if (!this.current?.controller.signal.aborted) {
+      this.nextTryAt = this.now + RETRY_MS;
+      this.emit('coordinator.error', { instance: this.d.instance, where: `pr-batch ${id}`, kind: 'no_verdict', message: why.slice(0, 500) });
+    }
+  }
+
+  private async runBatch(id: string, entries: Live[], base: string, size: number, alone: string | null): Promise<void> {
+    const cfg = this.d.config();
     const b = this.build(id, entries, base);
     for (const e of b.conflicts) {
       this.step(id, 'conflict', [e], { base, detail: `does not merge onto ${this.d.branch} at ${base.slice(0, 8)}` });

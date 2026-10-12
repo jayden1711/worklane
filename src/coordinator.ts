@@ -129,6 +129,7 @@ export class Coordinator extends Gardener {
 
   stop() {
     this.stopped = true;
+    this.prBatchStop();
   }
 
   /**

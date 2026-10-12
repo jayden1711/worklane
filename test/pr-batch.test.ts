@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import type { PullRequest } from '../src/backlog/types.js';
-import { batchSize, batchState, mayMerge, mergeTurn, passRate, PrBatcher, PR_BATCH_EVENTS, runsPerPr, type BatchEntry, type PrBatchConfig, type TestRunRequest, type TestRunResult, type TestRuns } from '../src/coordinator/pr-batch.js';
+import { batchSize, batchState, mayMerge, mergesPending, mergeTurn, noVerdict, passRate, PrBatcher, PR_BATCH_EVENTS, runsPerPr, type BatchEntry, type PrBatchConfig, type TestRunRequest, type TestRunResult, type TestRuns } from '../src/coordinator/pr-batch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ID = ['-c', 'user.email=t@example.com', '-c', 'user.name=T', '-c', 'commit.gpgsign=false'];
@@ -47,14 +47,26 @@ function world(n: number) {
 type World = ReturnType<typeof world>;
 
 /** A fake test-run service: a run fails tier `unit` when the commit holds a culprit's file (or `red(sha)` says so). */
-function fakeRuns(w: World, o: { culprits?: number[]; red?: (sha: string) => boolean; during?: (req: TestRunRequest) => void; hang?: () => boolean; hangPost?: (sha: string) => boolean } = {}) {
+/** What src/testrun/ returns for a run that was cancelled or couldn't go ahead: every tier failed, none run (no log). */
+const notRun = (req: TestRunRequest, summary: string): TestRunResult => ({ id: 'run-x', sha: req.sha, kind: 'full', ok: false, tiers: ['lint', 'unit'].map((tier) => ({ tier, ok: false, durationMs: 0, summary, logRef: '' })) });
+
+function fakeRuns(
+  w: World,
+  o: { culprits?: number[]; red?: (sha: string) => boolean; during?: (req: TestRunRequest) => void; hang?: () => boolean; hangPost?: (sha: string) => boolean; untilAborted?: () => boolean; as?: (req: TestRunRequest, n: number) => TestRunResult | null } = {},
+) {
   const runs: TestRunRequest[] = [];
+  const signals: (AbortSignal | undefined)[] = [];
   const posted: { sha: string; names: Record<string, string>; run: string }[] = [];
   let id = 0;
   const t: TestRuns = {
-    async startTestRun(req) {
+    async startTestRun(req, opts) {
       runs.push(req);
+      signals.push(opts?.signal);
       if (o.hang?.()) return new Promise<TestRunResult>(() => {});
+      // As the real service does: waits (for a slot, the lock, its tiers) until it is cancelled.
+      if (o.untilAborted?.()) return new Promise<TestRunResult>((resolve) => opts?.signal?.addEventListener('abort', () => resolve(notRun(req, 'cancelled'))));
+      const forced = o.as?.(req, runs.length);
+      if (forced) return forced;
       o.during?.(req);
       const files = git(w.repo, 'ls-tree', '--name-only', req.sha).split('\n');
       const bad = (o.culprits ?? []).filter((c) => files.includes(`pr-${c}.txt`));
@@ -67,7 +79,7 @@ function fakeRuns(w: World, o: { culprits?: number[]; red?: (sha: string) => boo
     },
     checkNames: () => ({ lint: 'full-lint', unit: 'full' }),
   };
-  return { t, runs, posted };
+  return { t, runs, posted, signals };
 }
 
 const CFG: PrBatchConfig = { enabled: true, max: 8, shards: 1, fast_checks: ['fast'], full_checks: ['full'] };
@@ -386,4 +398,104 @@ test("a merge whose tree isn't the one the batch tested, or a PR ahead that left
   v.log.append('pr.closed', { issue: 101, number: 1, merged: false }, 'c');
   const t3 = mergeTurn({ events: v.log.read(), number: 2, head: v.prs.get(2)!.headSha, tip: stepsOf(v, 'built')[0]!.base!, treeOf: treeIn(v) });
   assert.ok(t3.act === 'stale' && /left the batch/.test(t3.why), JSON.stringify(t3));
+});
+
+test('dropping a batch cancels its run in flight (a head that moved, a closed PR, main moving, the coordinator stopping); the batch is abandoned and batched again', async () => {
+  for (const drop of ['head', 'closed', 'main', 'stop'] as const) {
+    const w = world(3);
+    let hold = true;
+    const f = fakeRuns(w, { untilAborted: () => hold });
+    const { b } = batcher(w, f.t);
+    for (const n of [1, 2, 3]) b.enqueue(entry(w, n));
+    b.tick();
+    for (let i = 0; i < 100 && !f.runs.length; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(f.runs.length, 1, `${drop}: the run is in flight`);
+    assert.ok(f.signals[0] && !f.signals[0].aborted, `${drop}: the run was given a signal`);
+    if (drop === 'head') {
+      w.prs.get(2)!.headSha = w.push(2, 'change 2 again\n');
+      b.observe(2, w.prs.get(2)!.headSha, 'open');
+    } else if (drop === 'closed') {
+      w.prs.get(2)!.state = 'closed';
+      b.observe(2, w.prs.get(2)!.headSha, 'closed');
+    } else if (drop === 'main') b.mainMoved('e'.repeat(40));
+    else b.stop();
+    hold = false;
+    await b.idle();
+    assert.ok(f.signals[0]!.aborted, `${drop}: cancelled`);
+    assert.deepEqual(stepsOf(w, 'abandoned').map((s) => s.id), ['batch-1'], `${drop}: abandoned`);
+    assert.equal(stepsOf(w, 'red').length + stepsOf(w, 'culprit').length, 0, `${drop}: not red, nobody blamed`);
+    assert.equal(f.runs.length, 1, `${drop}: no bisection`);
+    const queue = b.state().queue.map((q) => q.number);
+    assert.deepEqual(queue, drop === 'head' || drop === 'closed' ? [1, 3] : [1, 2, 3], `${drop}: batched again`);
+    if (drop === 'head' || drop === 'closed') assert.deepEqual(stepsOf(w, 'dropped').map((s) => s.prs[0]!.number), [2]);
+    assert.equal(w.log.read(0, ['coordinator.error']).length, 0, `${drop}: our own cancel is no error`);
+  }
+});
+
+test('a run that was cancelled or errored, or whose tiers never ran, blames nobody: abandoned and batched again, never bisected', async () => {
+  const cases: [string, (req: TestRunRequest) => TestRunResult][] = [
+    ['cancelled (tiers that never ran)', (req) => notRun(req, 'cancelled')],
+    ["the run couldn't go ahead", (req) => notRun(req, "the run couldn't go ahead: no workspace")],
+    ['outcome cancelled (cut off in its last tier)', (req) => ({ id: 'r', sha: req.sha, kind: 'full', ok: false, outcome: 'cancelled', tiers: [{ tier: 'unit', ok: false, durationMs: 4, summary: 'timed out or cancelled', logRef: 'x/unit.log' }] })],
+  ];
+  for (const [name, result] of cases) {
+    const w = world(3);
+    let t = 0;
+    const f = fakeRuns(w, { as: (req, n) => (n === 1 ? result(req) : null) });
+    const { b, comments } = batcher(w, f.t);
+    (b as unknown as { d: { now: () => number } }).d.now = () => t; // the clock, to step past the wait
+    for (const n of [1, 2, 3]) b.enqueue(entry(w, n));
+    await pass(b);
+    assert.equal(stepsOf(w, 'red').length + stepsOf(w, 'culprit').length, 0, `${name}: not red, nobody blamed`);
+    assert.equal(f.runs.length, 1, `${name}: no bisection`);
+    assert.equal(comments.length, 0, `${name}: nobody told`);
+    assert.equal(stepsOf(w, 'abandoned').length, 1, `${name}: abandoned`);
+    assert.deepEqual(b.state().queue.map((q) => q.number), [1, 2, 3], `${name}: batched again`);
+    assert.match((w.log.read(0, ['coordinator.error']).at(-1)!.payload as { message: string }).message, /.+/);
+    await pass(b);
+    assert.equal(f.runs.length, 1, `${name}: waits a while before trying again`);
+    t = Date.now() + 10 * 60_000;
+    await pass(b);
+    assert.deepEqual(f.runs.at(-1)!.prs, [1, 2, 3], `${name}: then the same batch again`);
+    assert.equal(stepsOf(w, 'checks_posted').length, 3);
+  }
+});
+
+test('a tier that ran and failed is red: it still bisects to the culprit', async () => {
+  const w = world(2);
+  const f = fakeRuns(w, { culprits: [2] });
+  const { b } = batcher(w, f.t);
+  for (const n of [1, 2]) b.enqueue(entry(w, n));
+  await pass(b);
+  assert.equal(stepsOf(w, 'red').length, 1, 'the batch is red');
+  assert.deepEqual(f.runs.map((r) => r.prs), [[1, 2], [1]], 'and bisected');
+  assert.deepEqual(stepsOf(w, 'culprit').map((s) => [s.prs[0]!.number, s.tier]), [[2, 'unit']]);
+  assert.equal(stepsOf(w, 'abandoned').length, 0);
+});
+
+test('a green batch still merging holds the next batch; merged, left to the owner, closed or old, it does not', async () => {
+  const w = world(2);
+  const { b } = batcher(w, fakeRuns(w).t);
+  b.enqueue(entry(w, 1));
+  b.enqueue(entry(w, 2));
+  await pass(b);
+  const now = Date.now();
+  assert.equal(mergesPending(w.log.read(), now), true, 'posted, not merged yet');
+  assert.equal(mergesPending(w.log.read(), now + 31 * 60_000), false, 'not for ever');
+  w.log.append('merge.done', { issue: 101, number: 1, head: w.prs.get(1)!.headSha, sha: 'f'.repeat(40), url: 'u', title: 't' }, 'c');
+  assert.equal(mergesPending(w.log.read(), now), true, '#2 still to merge');
+  w.log.append('merge.decided', { issue: 102, number: 2, head: w.prs.get(2)!.headSha, auto: false, reasons: ['x'] }, 'c');
+  assert.equal(mergesPending(w.log.read(), now), false, 'left to the owner');
+});
+
+test('which runs give a verdict, and when a green batch is still merging', () => {
+  const tier = (ok: boolean, logRef = 'l') => ({ tier: 'unit', ok, durationMs: 1, summary: ok ? 'ok' : 'fail', logRef });
+  const r = (o: Partial<TestRunResult>): TestRunResult => ({ id: 'r', sha: 'a'.repeat(40), kind: 'full', ok: false, tiers: [], ...o });
+  assert.equal(noVerdict(r({ ok: true, tiers: [tier(true)] })), null);
+  assert.equal(noVerdict(r({ tiers: [tier(true), tier(false)] })), null, 'a tier that ran and failed: red');
+  assert.equal(noVerdict(r({ outcome: 'done', tiers: [tier(false)] })), null);
+  assert.match(noVerdict(r({ tiers: [tier(false, '')] }))!, /never ran/);
+  assert.match(noVerdict(r({ outcome: 'cancelled', tiers: [tier(false)] }))!, /cancelled/);
+  assert.match(noVerdict(r({ outcome: 'error', tiers: [tier(false)] }))!, /error/);
+  assert.match(noVerdict(r({ tiers: [] }))!, /no tiers/);
 });
