@@ -19,6 +19,7 @@ export function stageOf(role: string, attempt = 1): Stage {
   if (role === 'worker') return attempt > 1 ? 'retries' : 'worker';
   if (role === 'evaluator-verdict' || role === 'evaluator-repro' || role === 'investigator') return 'evaluator';
   if (role === 'evaluator-escalated') return 'evaluator';
+  if (role === 'instruction-eval' || role === 'eval-case-writer') return 'evaluator';
   if (role === 'planner') return 'plan';
   if (role === 'researcher') return 'research';
   if (role === 'research-on-demand') return 'research';

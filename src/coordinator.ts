@@ -12,7 +12,7 @@ import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, ty
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { protectedPaths } from './guardrails/engine.js';
+import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
@@ -26,7 +26,7 @@ import { pushProblems } from './push-check.js';
 import { needsPlan, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { changedFiles } from './merge-base.js';
-import { importsOf, lightCheckPlan } from './light-check.js';
+import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow } from './settings.js';
@@ -41,9 +41,11 @@ import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
-import { MergeFlow } from './coordinator/merge-flow.js';
+import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { routeBuild, routeRun } from './coordinator/model-routing.js';
 import { maybePostDigest } from './coordinator/digest.js';
+import { Gardener } from './coordinator/gardener.js';
+import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
@@ -58,7 +60,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends MergeFlow {
+export class Coordinator extends Gardener {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -85,6 +87,9 @@ export class Coordinator extends MergeFlow {
     await step('prs', () => this.watchPrs(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
+    await step('corrections', () => this.checkCorrections(), undefined);
+    await step('delegation', () => this.checkDelegation(), undefined);
+    await step('gardener', () => this.checkGardener(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
@@ -96,6 +101,8 @@ export class Coordinator extends MergeFlow {
     await this.chatQueue;
     await this.intakeQueue;
     await this.poolRefill;
+    await this.correctionsRun;
+    await this.gardenerRun;
   }
 
   /**
@@ -855,8 +862,12 @@ export class Coordinator extends MergeFlow {
         continue;
       }
       try {
-        const c = await compareInstructions({ target: t.target, baseText, headText, cases, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
-        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd });
+        // A role is judged on its held-out cases too (the coordinator's own, never in the repo); they decide.
+        const held = t.role ? await heldOutFor({ role: t.role, baseText, headText, stateDir: this.d.stateDir, model: judge, ask: runnerAsk(this.d.runner, (r) => this.cost(n, CASE_WRITER_COST_ROLE, r as RunResult), this.d.stateDir) }) : null;
+        const c = await compareInstructions({ target: t.target, baseText, headText, cases, heldOut: held && 'cases' in held ? held.cases : null, model, judge, samples: cfg.samples, capUsd: cfg.cap_usd, ask });
+        // Held-out cases go into the log by number only: their titles stay in the coordinator's store.
+        const heldOut = c.heldOut ? { base: c.heldOut.base, result: c.heldOut.head, dropped: c.heldOut.dropped, incomplete: c.heldOut.incomplete, changes: c.heldOut.changes.map((x) => ({ ...x, title: '' })) } : null;
+        record({ base: c.base, result: c.head, dropped: c.dropped, incomplete: c.incomplete, changes: c.changes, cost_usd: c.costUsd, samples: c.samples, ...(t.role ? { held_out: heldOut } : {}), ...(held && 'error' in held ? { held_out_error: held.error } : {}) });
       } catch (e) {
         if (e instanceof Halted) throw e;
         record({ ...none, error: (e as Error).message.slice(0, 500) });
@@ -883,8 +894,7 @@ export class Coordinator extends MergeFlow {
     const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
-    const protectedRes = protectedPaths(this.d.cfg.guardrails).map((g) => globToRegExp(g));
-    const prot = names.filter((f) => protectedRes.some((re) => re.test(f)));
+    const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
     if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
     const scan = await scanRange(path, `${base}..${head}`);
     if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };
@@ -918,9 +928,12 @@ export class Coordinator extends MergeFlow {
     return { files, tampered, patchHash };
   }
 
+  /** Browser baselines per (base, flow), kept across a task's attempts (src/coordinator/browser.ts). */
+  private readonly browserBaselines = new Map<string, BaselineRun>();
+
   /** The coordinator's own run of the contract: it never trusts the agent's word. */
   protected async verify(n: number, path: string, head: string, doneWhen: DoneWhenList, repro: { path: string } | null) {
-    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number }[] = [];
+    const checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped'; exitCode: number | null; tail: string; duration_ms?: number; kind?: 'browser' }[] = [];
     // Each check's wall time, so a project's test times can be followed over time.
     const timed = async (command: string) => {
       const t0 = Date.now();
@@ -945,7 +958,28 @@ export class Coordinator extends MergeFlow {
         if (one) await run(one.replaceAll('{file}', d.test));
         else checks.push({ check: `test ${d.test}`, status: 'unavailable', exitCode: null, tail: 'tests.yaml runner.one not set' });
       }
+      // A person checks it: listed under NOT CHECKED in the PR's receipts, never run here.
+      else if ('manual' in d) continue;
+      // The frozen reproduction test, run below from `repro`.
+      else if ('repro' in d) continue;
+      // Run below with the UI-paths gate, which may add flows of its own (src/coordinator/browser.ts).
+      else if ('browser' in d) continue;
+      else {
+        // A done_when kind without a branch here must not pass by being skipped: typecheck fails on a new kind
+        // (d is never), and anything that reaches this at run time fails the attempt.
+        const unknown: never = d;
+        checks.push({ check: `done_when ${JSON.stringify(unknown).slice(0, 200)}`, status: 'fail', exitCode: null, tail: 'unknown done_when kind: the coordinator has no way to check it' });
+      }
     }
+    // Browser checks (src/coordinator/browser.ts), each flow judged against its run at the change's base.
+    const change = changeAt(this.events(n), head);
+    const out = join(this.d.stateDir, 'browser', `issue-${n}`);
+    const runAs = this.d.commandsAs ? { runAs: this.d.commandsAs } : {};
+    const app = this.d.cfg.app;
+    const baseline = change && app ? (chrome: string) => worktreeBaseline({ wt: this.wt, name: `issue-${n}-browser-base`, base: change.base, app, cache: this.browserBaselines, outDir: join(out, `base-${change.base.slice(0, 12)}`), chrome, ...runAs }) : undefined;
+    const browser = await browserChecks({ app, doneWhen, changed: change?.files ?? [], cwd: path, outDir: join(out, head.slice(0, 12)), ...(baseline ? { baseline } : {}), ...runAs });
+    checks.push(...browser.checks);
+    if (browser.lines.length) this.emit('browser.evidence', { issue: n, head, lines: browser.lines });
     if (repro?.path && one) await run(one.replaceAll('{file}', repro.path));
     // The project's checks can be long (a full suite): once the issue's own checks have failed the attempt
     // is rejected anyway, so they're recorded as skipped instead of run.
@@ -1050,7 +1084,7 @@ export class Coordinator extends MergeFlow {
    * Otherwise the result of the check on that exact head and branch tip (started in the background if there is
    * none yet: 'pending'). The PR is never changed: a pass merges the unchanged head that already passed CI.
    */
-  protected async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | { hold: string }> {
+  protected async combinedGate(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<'merge' | 'pending' | 'conflict' | { hold: string }> {
     if (!this.d.cfg.project.combined_check) return 'merge';
     const { number } = w;
     const baseRef = pr.base || this.branch;
@@ -1078,8 +1112,14 @@ export class Coordinator extends MergeFlow {
       .at(-1);
     if (done?.outcome === 'merge') return 'merge';
     if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
-    if (done?.outcome === 'conflict') return 'pending'; // GitHub reports the conflict next, and the conflict path takes it
+    if (done?.outcome === 'conflict') return 'conflict'; // GitHub should report it next, and the conflict path take it (capped in mergeOrWait)
     if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
+      // Debounced: a burst of moves of main checks at most twice, then the newest main once the window allows.
+      const wait = lightCheckWait(this.d.log.read(0, ['light_check.started']).filter((e) => (e.payload as { number: number }).number === number).map((e) => Date.parse(e.ts)), Date.now());
+      if (wait > 0) {
+        this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + wait);
+        return 'pending';
+      }
       this.lightRunning.add(number);
       void this.lightCheck(w, pr, baseRef, mainSha, plan.overlap)
         .catch((e: Error) => this.emit('coordinator.error', { instance: this.d.instance, where: `combined check #${number}`, kind: 'error', message: e.message.slice(0, 500) }))

@@ -1,5 +1,6 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
+import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { projectEnvProblem } from '../project-env.js';
 
@@ -73,6 +74,31 @@ export const ProjectConfig = z.strictObject({
    * WebFetch only. Fetches of a listed domain (or any subdomain of it) are refused and recorded.
    */
   research: z.strictObject({ domain_blocklist: z.array(z.string().min(1)).default([]) }).prefault({}),
+  /**
+   * Corrections become durable rules: when a writer rejects a PR, revises or rejects a held plan, requests
+   * changes in a review, or corrects the chat ("correction: ..."), a read-only agent proposes the strongest
+   * durable fix as an issue the pipeline builds into a reviewed PR. At most `max_per_day` agent runs a day.
+   */
+  corrections: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      max_per_day: z.number().int().min(0).default(10),
+    })
+    .prefault({}),
+  /**
+   * The gardener: every `every_days` days at `at` (local, off-hours; it starts within 3 hours of it), one read-only
+   * run (at most `max_usd`) looks for tech debt and anti-patterns. Findings go to one log issue; a fix is filed only
+   * for a pattern seen 3+ times, at most `max_prs` per run, never in a high-risk or safety-floor path.
+   */
+  gardener: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      every_days: z.number().int().min(1).max(90).default(7),
+      at: hhmm.default('03:00'),
+      max_usd: z.number().positive().max(100).default(5),
+      max_prs: z.number().int().min(0).max(10).default(1),
+    })
+    .prefault({}),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),
@@ -129,6 +155,8 @@ export const RoleNames = [
   'ci_repair',
   'monitor',
   'release_prep',
+  'corrections',
+  'gardener',
 ] as const;
 
 export const AgentsConfig = z
@@ -177,11 +205,11 @@ export const AgentsConfig = z
       .strictObject({
         enabled: z.boolean().default(true),
         /** Spend cap for one eval (base and head together), on the CLI's cost estimate. */
-        cap_usd: z.number().positive().default(5),
+        cap_usd: z.number().positive().default(10),
         /** The model under test (default: the workers' model) and the judge (default: the evaluator's); never the same. */
         model: model.optional(),
         judge: model.optional(),
-        samples: z.number().int().min(1).max(5).default(1),
+        samples: z.number().int().min(1).max(5).default(3),
       })
       .prefault({}),
   })
@@ -319,6 +347,11 @@ export const TestsConfig = z.strictObject({
       pre: z.array(z.string()).default([]),
       /** Changes tested and landed together; 1 = strictly serial. A red batch is split in half. */
       batch_max: z.number().int().min(1).max(32).default(4),
+      /**
+       * How long a queued land may wait on the machine-wide full-run slot (held, pass after pass, by another
+       * run), measured from its first such deferral in a row, before it goes to the owner.
+       */
+      defer_timeout_minutes: z.number().int().min(1).max(7 * 24 * 60).default(180),
     })
     .prefault({}),
   /** Which tiers gate what. Names are tiers[] entries, or "changed" / "full" (runner commands). */
@@ -410,8 +443,25 @@ export const ReviewConfig = z.strictObject({
       max_files: z.number().int().positive().default(20),
       /** Categories (built-in or from `categories`) that wait, on top of the L3 ones, ci-config and dependency. */
       wait_categories: z.array(z.string()).default([]),
+      /**
+       * Categories the owner stopped waiting on (gradual delegation); a revert, a red main or a later fix in one
+       * proposes waiting again. High-risk and safety-floor categories can never be listed here.
+       */
+      loosened: z.array(z.string()).default([]),
     })
     .prefault({}),
+  /**
+   * Gradual delegation, suggest-only: a waiting category whose last `min_clean` PRs were approved unchanged, with
+   * no revert, red main or later fix, is put to the owner for loosening, with the evidence. Never automatic.
+   */
+  delegation: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      min_clean: z.number().int().min(3).default(10),
+    })
+    .prefault({}),
+}).superRefine((r, ctx) => {
+  for (const message of loosenedProblems(r)) ctx.addIssue({ code: 'custom', path: ['merge', 'loosened'], message });
 });
 
 // ---------- app.yaml ----------

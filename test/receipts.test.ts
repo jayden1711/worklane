@@ -24,6 +24,17 @@ test('a generic claim is backed only when at least one of the coordinator\'s che
   assert.deepEqual(unbackedClaims(['The tests pass.'], { checks: [{ check: 'x', status: 'fail' }], commands: [] }), ['The tests pass.']);
 });
 
+test('a passing browser check backs a claim about the browser, but not one about a phone, Safari, staging or by hand', () => {
+  const browser: CheckRecord[] = [...passed, { check: 'browser checkout', status: 'pass', exitCode: null, kind: 'browser' }];
+  const claims = ['Checked the checkout in the browser.', 'Verified in Chrome, screenshot attached.', 'Tested on mobile Safari.', 'Verified manually in the UI.', 'Checked it on staging.'];
+  assert.deepEqual(unbackedClaims(claims, { checks: browser, commands: [] }), ['Tested on mobile Safari.', 'Verified manually in the UI.', 'Checked it on staging.']);
+  assert.equal(unbackedClaims(claims, { checks: passed, commands: [] }).length, 5, 'without a browser check, none of them is backed');
+  const failed: CheckRecord[] = [...passed, { check: 'browser checkout', status: 'fail', exitCode: null, kind: 'browser' }];
+  assert.equal(unbackedClaims(claims, { checks: failed, commands: [] }).length, 5, 'a failed browser check backs nothing');
+  const named: CheckRecord[] = [...passed, { check: 'browser checkout', status: 'pass', exitCode: 0 }];
+  assert.equal(unbackedClaims(claims, { checks: named, commands: [] }).length, 5, 'a command merely named like a browser check backs nothing');
+});
+
 test('confidence drops one step for any unbacked claim, never below low', () => {
   assert.deepEqual([lowerConfidence('high', 0), lowerConfidence('high', 2), lowerConfidence('medium', 1), lowerConfidence('low', 1)], ['high', 'medium', 'low', 'low']);
 });
