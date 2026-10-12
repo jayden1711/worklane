@@ -254,6 +254,7 @@ export abstract class Landing extends Decisions {
     const lvl = last<{ level: string; reasons: string[] }>('review.level_set');
     const verdict = last<EventPayload<'eval.verdict'>>('eval.verdict');
     const checks = last<EventPayload<'check.result'>>('check.result');
+    const browser = last<EventPayload<'browser.evidence'>>('browser.evidence');
     const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
     const issue = await this.d.backlog.get(n);
     const body = [
@@ -266,6 +267,7 @@ export abstract class Landing extends Decisions {
       ...evalLines(this.instructionResults(n)),
       '',
       ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
+      ...(browser?.head === q.head ? ['', ...browser.lines] : []),
     ].join('\n');
     let url: string;
     try {

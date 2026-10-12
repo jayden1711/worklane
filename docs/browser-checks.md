@@ -1,12 +1,12 @@
 # Browser checks for a project's app
 
-Status: being built as modules (Track B). Nothing runs yet: the coordinator doesn't start apps or run browser
-checks until Track B's wiring lands, and a project without an app never will.
+Status: wired into the coordinator's verify() (`src/coordinator/browser.ts`). A project without an app runs
+none unless an issue asks for one, and then the check is unavailable, which fails the attempt.
 
 A project with a web app can have its changes checked in a real browser: the harness starts the app in the
 task's worktree, drives headless Chromium through named flows, and records console errors, failed and slow
-requests, a performance-trace summary and a screenshot. A UI fix is reproduced first (evidence attached), fixed,
-and the same flow run again (after-evidence attached). Only PRs that touch the app's UI paths, or issues that
+requests, a performance-trace summary and a screenshot (a run before the change, for comparison, is not yet
+done; see the end of this page). Only PRs that touch the app's UI paths, or issues that
 ask for it, run a browser check; everything else pays nothing.
 
 ## `.worklane/app.yaml`
@@ -98,7 +98,20 @@ In the claims receipts, a passing browser check is recorded as one (`kind: brows
 from its name). It backs a worker's claim about the browser, the UI or a screenshot. It doesn't back a claim
 about a phone, another browser, staging or checking by hand.
 
+## In the coordinator (`src/coordinator/browser.ts`)
+
+verify() runs the browser checks after the issue's own checks, from the gate above:
+- **Flows the issue asks for** are checks like any other. Unavailable (no app, no browser on the machine) fails
+  the attempt, as verify() fails anything that isn't a pass.
+- **Flows run because the change touched `ui_paths`** are held to their result. With no browser on the machine,
+  though, they are listed in the PR and skipped, so one machine without Chrome doesn't stop a project's UI changes.
+
+Each check is recorded with `kind: browser`. Its screenshots go under the instance's state folder
+(`browser/issue-<n>/<head>/<flow>/`). The PR description gets the `BROWSER CHECKS` section for the head it opens.
+
 ## Not yet
 
-- A `browser:` check in an issue's `done_when` is refused until the coordinator runs browser checks, so one can
-  never be skipped and counted as passed.
+- **A baseline run before the change.** Every console error and failed request counts as new, so an app that
+  already logs an error fails every browser check until that's fixed. The judge and the PR section already take
+  a before-run (`judgeFlow`'s baseline, `browserEvidenceLines`' `before`); running the flow at the base commit
+  is next.

@@ -122,6 +122,8 @@ export const EventSchemas = {
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
+  /** The browser checks a verify ran (src/coordinator/browser.ts): the PR description's BROWSER CHECKS section. */
+  'browser.evidence': z.strictObject({ issue, head: sha, lines: z.array(z.string().max(1000)).max(300) }),
   /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
   'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
   'eval.verdict': z.strictObject({
