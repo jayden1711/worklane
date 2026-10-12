@@ -30,7 +30,8 @@ import { healthView } from './health.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount } from './os/index.js';
-import { machineStats, type MachineStats } from './os/stats.js';
+import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
+import { boardView, feedOutline } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, setSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, type Exec } from './machine.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
@@ -100,6 +101,8 @@ export interface DashboardOptions {
   policyFile?: string | null;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
+  /** What running agents' process groups use now, for the board; the OS adapter's processGroupUsage when unset. */
+  processUsage?: (pgids: number[]) => Map<number, ProcessGroupUsage>;
   /** The backlog a confirmed chat draft is filed to (the instance's); made when first needed. */
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
@@ -673,6 +676,24 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
+        // Everyone with a role reads it; each action is refused again by the route it calls (decide, the console).
+        if (url.pathname === '/api/board' && req.method === 'GET') {
+          const slots = slotStatus(opts.slotsDir);
+          return json(res, 200, boardView({ events: readEvents(opts.eventsDb), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) }));
+        }
+        // Watching a run from the Board as someone who may not read runs (a viewer): its steps as an outline (kind,
+        // tool, outcome, when), never their content. Reading the feed itself stays behind the runs gate below.
+        const outline = url.pathname.match(/^\/api\/board\/watch\/([A-Za-z0-9_-]+)$/);
+        if (outline && req.method === 'GET') {
+          try {
+            const f = feedOrWait(opts, outline[1]!, Number(url.searchParams.get('after') ?? -1));
+            return json(res, 200, { items: feedOutline(f.items), ended: f.ended });
+          } catch (e) {
+            if (e instanceof ConsoleError) return json(res, 404, { error: e.message });
+            throw e;
+          }
+        }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
           if (!isOwnerHere) return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
