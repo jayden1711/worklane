@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { agentSettingsPath, guardrailSettings, HOOK_MARKER, projectSettingsRefusal, readAgentSettings, runSettings, type Settings } from '../src/agent-settings.js';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
-import { install } from '../src/install.js';
+import { install, invokedEngine } from '../src/install.js';
 import { childEnv } from '../src/os/index.js';
 import { CliRunner } from '../src/runner.js';
 import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
@@ -52,17 +52,19 @@ test("install --instance writes the hooks and rules to the instance's agent sett
   assert.throws(() => install({ root: dir, engineCli, instance: 'nope' }), /no instance "nope"/);
 });
 
-test('an agent run without guardrails never starts: no agent settings and no hooks in the checkout is an error', (t) => {
+test('an agent run without agent settings never starts, and the error names the exact install command', (t) => {
   const { dir, home } = setup(t);
-  assert.throws(() => guardrailSettings(home, dir), /no guardrail hooks for agents/);
-  // An instance installed before agent settings: its checkout's committed hooks keep it working.
+  const fix = `${BRAND.cli} install --root ${JSON.stringify(dir)} --instance shop`;
+  assert.throws(() => guardrailSettings(home, 'shop', dir), (e: Error) => e.message.includes(fix) && /no agent settings at/.test(e.message));
+  // Regression: hooks in the checkout's own .claude/settings.json (an install from before agent settings) never
+  // stand in for them.
   install({ root: dir, engineCli });
-  assert.equal(guardrailSettings(home, dir), null);
+  assert.throws(() => guardrailSettings(home, 'shop', dir), (e: Error) => e.message.includes(fix));
   install({ root: dir, engineCli, instance: 'shop' });
-  assert.ok(guardrailSettings(home, dir)?.hooks?.PreToolUse);
+  assert.ok(guardrailSettings(home, 'shop', dir).hooks?.PreToolUse);
   // Incomplete agent settings are an error, never "no hooks".
   writeFileSync(agentSettingsPath(home), JSON.stringify({ hooks: {}, disableAllHooks: false }));
-  assert.throws(() => guardrailSettings(home, dir), /hook PreToolUse: not installed/);
+  assert.throws(() => guardrailSettings(home, 'shop', dir), /hook PreToolUse: not installed/);
 });
 
 test('a project .claude/settings.json that could loosen agent runs refuses them; hooks and tightening rules are fine', () => {
@@ -122,12 +124,12 @@ const req = (cwd: string, lane?: string) => ({ prompt: 'p', model: 'm', cwd, all
 test("acceptance: an instance's agent run gets the hooks with --settings; without them, or with a loosening project file, it never starts", { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
   const { dir, home } = setup(t);
   const lanes = { default: { settings: { sandbox: { enabled: true }, permissions: { deny: ['Read(//x/**)'] } } }, research: { ownHooks: true } };
-  const runner = (bin: string) => new CliRunner('cli', childEnv(), bin, undefined, lanes, undefined, {}, (cwd) => guardrailSettings(home, cwd));
+  const runner = (bin: string) => new CliRunner('cli', childEnv(), bin, undefined, lanes, undefined, {}, () => guardrailSettings(home, 'shop', dir));
 
   let c = fakeClaude();
   let r = await runner(c.bin).run(req(dir));
   assert.equal(r.reason, 'failed');
-  assert.match(r.detail, /no guardrail hooks for agents[\s\S]*not starting/);
+  assert.match(r.detail, /no agent settings at [\s\S]*install --root [\s\S]* --instance shop`; not starting/);
   assert.equal(c.seen(), null, 'claude never ran');
 
   install({ root: dir, engineCli, instance: 'shop' });
@@ -157,18 +159,18 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   assert.equal(c.seen(), null, 'claude never ran');
 });
 
-test("doctor checks an instance's agent hooks where they now live, and says where an older install's still are", (t) => {
+test("doctor checks an instance's agent hooks where they now live, and fails an older install's project-level hooks", (t) => {
   const { dir, home } = setup(t);
   // The instance is found through the repo it runs, as on the coordinator's machine.
   writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n');
   let checks = doctor(dir);
   assert.equal(checks.find((c) => c.name === 'agent hooks shop')?.level, 'fail');
-  // Older install: the hooks in the checkout. Still works, with a pointer to the new place.
+  // Regression: an older install's hooks in the checkout no longer count; doctor fails and names the command.
   install({ root: dir, engineCli });
   checks = doctor(dir);
   const legacy = checks.find((c) => c.name === 'agent hooks shop');
-  assert.equal(legacy?.level, 'warn');
-  assert.match(legacy!.detail, /still get them from this checkout's \.claude\/settings\.json[\s\S]*install --instance shop/);
+  assert.equal(legacy?.level, 'fail');
+  assert.match(legacy!.detail, /no longer used for agent runs[\s\S]*install --root "[^"]+" --instance shop/);
   // Moved: the agent settings are checked, and a repo without .claude/settings.json is fine.
   install({ root: dir, engineCli, instance: 'shop' });
   const fresh = exampleProject().dir;
@@ -195,4 +197,15 @@ test('the CLI: install --instance and doctor --instance', { skip: isWindows && '
   assert.match(inst.stdout, /hooks for shop's agent runs written to .*agent-settings\.json/);
   const doc = spawnSync(process.execPath, [engineCli, 'doctor', '--root', dir, '--instance', 'shop'], { encoding: 'utf8', env });
   assert.match(doc.stdout, /ok {4}agent hook shop PreToolUse: installed, fails closed, for agent runs only/);
+});
+
+test('install --instance points the hooks at the engine as invoked, not the versioned release behind its link', { skip: isWindows && 'symlinks need privileges on Windows' }, () => {
+  // /usr/local/bin/<cli> -> /opt/<cli>/current/dist/src/cli.js, where current -> a release that an update replaces.
+  const base = mkdtempSync(join(tmpdir(), 'engine-links-'));
+  mkdirSync(join(base, 'release-1'));
+  writeFileSync(join(base, 'release-1', 'cli.js'), '');
+  symlinkSync(join(base, 'release-1'), join(base, 'current'));
+  symlinkSync(join(base, 'current', 'cli.js'), join(base, 'bin-cli'));
+  assert.equal(invokedEngine(join(base, 'bin-cli')), join(base, 'current', 'cli.js'));
+  assert.equal(invokedEngine(join(base, 'release-1', 'cli.js')), join(base, 'release-1', 'cli.js'), 'not a link: itself');
 });

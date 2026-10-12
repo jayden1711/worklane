@@ -99,7 +99,7 @@ export function readAgentSettings(instanceHome: string): Settings {
   return s;
 }
 
-/** A checkout's own .claude/settings.json, when it carries our hooks (the location before agent settings). */
+/** A checkout's own .claude/settings.json, when it carries our hooks: where installs before agent settings put them. */
 export function legacyProjectHooks(dir: string): boolean {
   const file = join(dir, '.claude', 'settings.json');
   if (!existsSync(file)) return false;
@@ -110,15 +110,18 @@ export function legacyProjectHooks(dir: string): boolean {
   }
 }
 
+/** The command that writes an instance's agent settings, run as its coordinator user. */
+export const installCommand = (instance: string, checkout: string) => `${BRAND.cli} install --root ${JSON.stringify(checkout)} --instance ${instance}`;
+
 /**
- * The guardrail settings for an agent run in `cwd`: the instance's agent settings. An instance installed before
- * they existed, whose checkout still carries the hooks in .claude/settings.json, runs on those (null). Neither:
- * an error, so the run doesn't start.
+ * The guardrail settings for an instance's agent runs: its agent settings, and nothing else. Hooks in a checkout's
+ * own .claude/settings.json (where installs before agent settings put them) never stand in: without agent
+ * settings, the run and the coordinator refuse to start, naming the command that fixes it.
  */
-export function guardrailSettings(instanceHome: string, cwd: string): Settings | null {
-  if (existsSync(agentSettingsPath(instanceHome))) return readAgentSettings(instanceHome);
-  if (legacyProjectHooks(cwd)) return null;
-  throw new AgentSettingsError(`no guardrail hooks for agents: ${agentSettingsPath(instanceHome)} missing; run \`${BRAND.cli} install --instance <name>\` as the coordinator`);
+export function guardrailSettings(instanceHome: string, instance: string, checkout: string): Settings {
+  const file = agentSettingsPath(instanceHome);
+  if (!existsSync(file)) throw new AgentSettingsError(`no agent settings at ${file}, so ${instance}'s agent runs have no guardrail hooks; as its coordinator user, run \`${installCommand(instance, checkout)}\``);
+  return readAgentSettings(instanceHome);
 }
 
 /** What a project's .claude/settings.json may set for an agent run: hooks (they only add) and permission rules. */

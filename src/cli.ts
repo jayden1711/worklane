@@ -11,7 +11,7 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
-import { install, installGitHook } from './install.js';
+import { install, installGitHook, invokedEngine } from './install.js';
 import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
@@ -167,9 +167,10 @@ async function main(argv: string[]): Promise<number> {
       }
       const gitHooks = flag(args, '--git-hooks');
       // A machine-wide engine (e.g. /opt/<cli>/current/...): hooks call that stable path, not this run's versioned one.
-      const engineCli = option(args, '--engine');
       // An instance's agents: hooks and rules in its agent settings, for its agent runs only, not in the checkout.
       const instance = instanceOpt;
+      // For an instance, the engine as invoked (a stable path), unless named.
+      const engineCli = option(args, '--engine') ?? (instance ? invokedEngine() : undefined);
       const r = install({ root, gitHooks, ...(engineCli ? { engineCli } : {}), ...(instance ? { instance } : {}) });
       console.log(`${r.scaffolded ? 'scaffolded' : 'kept'} ${BRAND.configDir}/; hooks ${instance ? `for ${instance}'s agent runs written to` : 'merged into'} ${r.settingsPath}`);
       if (r.gitHook) console.log(`pre-commit secret scan: ${r.gitHook}`);
@@ -624,7 +625,7 @@ async function main(argv: string[]): Promise<number> {
         const missing = instanceProblems(i);
         let hooks = `agent runs only, from ${agentSettingsPath(i.home)}`;
         try {
-          if (guardrailSettings(i.home, i.repo.path) === null) hooks = `from the checkout's .claude/settings.json (older install; run \`${BRAND.cli} install --instance ${i.name}\` to move them to agent runs only)`;
+          guardrailSettings(i.home, i.name, i.repo.path);
         } catch (e) {
           missing.push((e as Error).message);
           hooks = 'none';

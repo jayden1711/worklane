@@ -295,11 +295,10 @@ export class CliRunner implements AgentRunner {
     private identity: CommitIdentity = DEFAULT_COMMIT_IDENTITY,
     private retry: RetryOptions = {},
     /**
-     * An instance's guardrail hooks and rules for a run in `cwd`, read for every run and passed with --settings
-     * (agent-settings.ts). null: the checkout's own .claude/settings.json carries them (an instance installed
-     * before agent settings). Throws when there are none: the run doesn't start.
+     * An instance's guardrail hooks and rules, read for every run and passed with --settings (agent-settings.ts).
+     * Throws when there are none: the run doesn't start.
      */
-    private guardrails?: (cwd: string) => Settings | null,
+    private guardrails?: () => Settings,
   ) {}
 
   /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
@@ -359,11 +358,11 @@ export class CliRunner implements AgentRunner {
     let guard: Settings | null = null;
     if (this.guardrails && !lane?.ownHooks) {
       try {
-        guard = this.guardrails(req.cwd);
+        guard = this.guardrails();
       } catch (e) {
         return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
       }
-      const refusal = guard ? projectSettingsRefusal(req.cwd, guard) : null;
+      const refusal = projectSettingsRefusal(req.cwd, guard);
       if (refusal) return { reason: 'failed', detail: `${refusal}; not starting`, costUsd: 0, turns: 0, model: req.model };
     }
     // Preflight, inside the login lock: an unreadable status that mentions a token refresh (or any other

@@ -8,7 +8,7 @@ import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
-import { agentSettingsPath, hookChecks, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
+import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { canRunAgents, detectOs, shimsNeedShell, which, wslAvailable } from './os/index.js';
@@ -69,8 +69,10 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   for (const name of instances) {
     const file = agentSettingsPath(join(instancesDir(), name));
     if (!existsSync(file)) {
-      if (legacyProjectHooks(root)) add(`agent hooks ${name}`, 'warn', `not at ${file}: ${name}'s agents still get them from this checkout's .claude/settings.json, which also applies to people's own sessions here. Run \`${BRAND.cli} install --instance ${name}\` as its coordinator to move them to agent runs only`);
-      else add(`agent hooks ${name}`, 'fail', `${file} missing, and no hooks in this checkout either: ${name}'s agent runs won't start. Run \`${BRAND.cli} install --instance ${name}\` as its coordinator`);
+      // Hooks in the checkout's own .claude/settings.json (an install from before agent settings) don't count: the
+      // runner never falls back to them.
+      const old = legacyProjectHooks(root) ? ` The hooks in this checkout's .claude/settings.json are no longer used for agent runs.` : '';
+      add(`agent hooks ${name}`, 'fail', `${file} missing: ${name}'s agent runs and its coordinator won't start.${old} As its coordinator user, run \`${installCommand(name, root)}\``);
       continue;
     }
     let s: Settings;

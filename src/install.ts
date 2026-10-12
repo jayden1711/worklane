@@ -7,7 +7,7 @@
 // local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from './agent-settings.js';
@@ -138,6 +138,20 @@ export interface InstallReport {
   settingsPath: string;
   gitHook?: string;
   notes: string[];
+}
+
+/**
+ * The engine as it was invoked, following one link only: a machine-wide command (/usr/local/bin/<cli> -> a stable
+ * /opt/<cli>/current/... path) stays on the stable path, not the versioned release Node resolves it to, which an
+ * engine update removes.
+ */
+export function invokedEngine(argv1 = process.argv[1]): string | undefined {
+  if (!argv1) return undefined;
+  try {
+    return resolve(dirname(argv1), readlinkSync(argv1));
+  } catch {
+    return resolve(argv1);
+  }
 }
 
 /** The hooks and rules for an instance's agent runs: our entries only, with every hook kept on. */

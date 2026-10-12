@@ -102,7 +102,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   }
   // Agents' guardrails: checked here so a missing install stops the instance at start, and again for every run.
   try {
-    guardrailSettings(i.home, i.repo.path);
+    guardrailSettings(i.home, i.name, i.repo.path);
   } catch (e) {
     console.error(`instance ${name} not started: ${(e as Error).message}`);
     return 1;
@@ -141,7 +141,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, (cwd) => guardrailSettings(i.home, cwd)), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE) }, new CliRunner(i.config.project.agent_runtime.kind, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path)), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
