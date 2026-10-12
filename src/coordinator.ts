@@ -12,7 +12,9 @@ import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, ty
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { computeLevel, loadMoneyPaths, type Level } from './review.js';
+import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { evalLevel, judge } from './coordinator/eval-routing.js';
+import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { type RunResult } from './runner.js';
@@ -31,7 +33,7 @@ import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
 import { nightlyDue, queueNightly } from './nightly.js';
-import { buildReport, dueSlot, recentRunRecords } from './reports.js';
+import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
@@ -39,10 +41,17 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './wor
 import { refillPool, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { MergeFlow } from './coordinator/merge-flow.js';
+import { maybePostDigest } from './coordinator/digest.js';
 import { COMMAND_TIMEOUT_MS, POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { stuckFeedback } from './coordinator/stuck-guard.js';
+import { labelWeek } from './coordinator/stage-labels.js';
+import { doneWhenCommands } from './stage-label.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
+
+/** What one worker build ends in: stop the task, or go on to inspect its change. */
+type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; noChange?: string };
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
@@ -68,6 +77,7 @@ export class Coordinator extends MergeFlow {
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
+    await step('digest', () => maybePostDigest({ log: this.d.log, backlog: this.d.backlog, project: this.d.cfg.project, emit: (p) => this.emit('digest.posted', p) }), null);
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
@@ -114,7 +124,8 @@ export class Coordinator extends MergeFlow {
     let used = 0;
     for (const e of this.events(n)) {
       if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
-      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker') used++;
+      // A run resumed after research it asked for continues its attempt; it isn't another one.
+      else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker' && !(e.payload as { resumed?: string }).resumed) used++;
     }
     return used;
   }
@@ -128,8 +139,10 @@ export class Coordinator extends MergeFlow {
     if (posted.some((e) => (e.payload as { day: string; slot: string }).day === day && (e.payload as { slot: string }).slot === slot)) return;
     const last = posted.at(-1);
     const since = last ? new Date(last.ts) : new Date(now.getTime() - 12 * 3_600_000);
-    const events = this.d.log.read();
     const runRecords = recentRunRecords(this.d.stateDir, new Date(now.getTime() - 7 * 86_400_000));
+    // The weekly section groups the week's failed runs by their earliest failed stage: label the new ones first.
+    if (weeklyDue(this.d.cfg.project.reports.times, slot, now)) await this.labelStages(now, runRecords);
+    const events = this.d.log.read();
     const report = buildReport(events, this.d.cfg, { since, now, slot, runRecords, ...(this.d.tokenExpiresAt !== undefined ? { tokenExpiresAt: this.d.tokenExpiresAt } : {}), ...(this.d.appKeyPath ? { appKeyPath: this.d.appKeyPath } : {}) });
     // A fix proposed for a repeated failure goes to the owner's Inbox once; it changes nothing until answered.
     const asked = new Set(events.filter((e) => e.type === 'decision.asked').flatMap((e) => (e.payload as { receipts: string[] }).receipts));
@@ -145,6 +158,31 @@ export class Coordinator extends MergeFlow {
     if (issue === null) issue = await this.d.backlog.createIssue(`${BRAND.name} reports`, `Scheduled ${BRAND.name} reports are posted here as comments (${this.d.cfg.project.reports.times.join(' and ')}).`, ['report']);
     await this.d.backlog.comment(issue, `${report.markdown}\n\n${mention}`.trim());
     this.emit('report.posted', { day, slot, issue });
+  }
+
+  /** Label the week's unlabelled failed worker runs (coordinator/stage-labels.ts); a problem never stops the report. */
+  private async labelStages(now: Date, runRecords: ReturnType<typeof recentRunRecords>) {
+    try {
+      await labelWeek({
+        events: this.d.log.read(),
+        records: runRecords,
+        since: new Date(now.getTime() - 7 * 86_400_000),
+        until: now,
+        instance: this.d.instance,
+        runner: this.d.runner,
+        // The judge has no tools: it reads only what the prompt carries, wherever it runs.
+        cwd: this.d.repo,
+        doneWhenOf: async (n) => {
+          const c = parseContract((await this.d.backlog.get(n)).body);
+          return c.ok ? doneWhenCommands(c.done_when, this.d.cfg.tests.runner) : [];
+        },
+        spentToday: () => this.spentToday(),
+        dailyBudgetUsd: this.d.cfg.agents.daily_budget_usd,
+        emit: (type, payload) => this.emit(type, payload),
+      });
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'stage labels', kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
   }
 
   /** Queue the nightly runs once a day, after tests.yaml nightly_at. */
@@ -487,6 +525,11 @@ export class Coordinator extends MergeFlow {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan);
         if (out.stop) return;
+        // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
+        if (out.stuck) {
+          feedback = stuckFeedback(out.stuck);
+          continue;
+        }
         removeSandboxPlaceholders(path);
         const head = this.git(path, 'rev-parse', 'HEAD');
         // A finding of "no change" counts only for a branch with nothing on it: work an earlier attempt committed is
@@ -510,7 +553,7 @@ export class Coordinator extends MergeFlow {
           feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
           continue;
         }
-        const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files.map((f) => f.path));
+        const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files);
         if (!verdict.patch_correct && attempt < maxAttempts) {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
@@ -650,7 +693,7 @@ export class Coordinator extends MergeFlow {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null) {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0): Promise<BuildOut> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
     const model = issue.labels.includes('size:L') && role.hard_issues_model ? role.hard_issues_model : role.model;
@@ -685,13 +728,13 @@ export class Coordinator extends MergeFlow {
       timeoutMs: COMMAND_TIMEOUT_MS,
       onStart: (p) => {
         pid = p;
-        this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt });
+        this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt, ...(researched ? { resumed: 'research' as const } : {}) });
       },
     });
     void pid;
     this.cost(n, 'worker', r);
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level; research_request?: unknown };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
@@ -706,6 +749,7 @@ export class Coordinator extends MergeFlow {
       await this.block(n, owner, `worker run ended: ${r.reason} (${r.detail})`, true, r.reason === 'rate_limited' ? retryAfter('rate_limit') : r.reason === 'budget_exhausted' ? retryAfter('budget') : undefined);
       return { stop: true as const };
     }
+    if (r.reason === 'stuck') return { stop: false as const, stuck: r.detail };
     // A run that failed almost at once and committed nothing never got to work: another attempt would fail the
     // same way, so say what claude reported instead of spending the attempts on "no passing change".
     const secs = Math.round((Date.now() - started) / 1000);
@@ -714,6 +758,12 @@ export class Coordinator extends MergeFlow {
       const said = r.detail.slice(0, 1500).replace(/`{3,}/g, "'''");
       await this.block(n, owner, `the worker's claude run failed to start (ended after ${secs}s, ${r.turns} turn(s), nothing committed), so no further attempts were made. claude reported:\n\n\`\`\`\n${said}\n\`\`\``);
       return { stop: true as const };
+    }
+    // Research it asked for instead of guessing: answered within the caps and the per-task limit, then the same
+    // attempt resumes with the answer (or why there is none) in its brief. Past the limit, its output stands as is.
+    if (s.research_request && researched < MAX_REQUESTS_PER_TASK) {
+      const section = await this.answerResearch(issue, s.research_request, path, 'worker');
+      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1);
     }
     if (s.ask) {
       await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '']);
@@ -902,9 +952,10 @@ export class Coordinator extends MergeFlow {
     return checks;
   }
 
-  protected async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], changed: string[], opts: { extra?: string[]; schema?: object } = {}) {
+  protected async evaluate(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, head: string, patchHash: string, checks: { check: string; status: string }[], repro: { path: string } | null, tampered: string[], files: ChangeFile[], opts: { extra?: string[]; schema?: object } = {}) {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.evaluator!;
+    const changed = files.map((f) => f.path);
     const unverified = this.unverifiedClaims(n, checks);
     const extra = [
       `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
@@ -914,27 +965,49 @@ export class Coordinator extends MergeFlow {
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
       ...(opts.extra ?? []),
     ];
-    const r = await this.d.runner.run({
-      env: this.projectEnv(),
-      role: 'evaluator-verdict',
+    type Out = { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
+    // The model is chosen in code from the change's level; a cheap verdict that isn't a confident pass is judged
+    // once more by the evaluator role's model. What the run read comes from its record, not from its own list.
+    const judged = await judge({
+      level: evalLevel({ files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, tampered }),
+      strongModel: role.model,
+      routing: this.d.cfg.agents.eval_routing,
+      changed,
       stateDir: this.d.stateDir,
-      prompt: issueBrief(issue, doneWhen, extra),
-      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
-      cwd: path,
-      model: role.model,
-      allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
-      disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
-      maxTurns: 60,
-      maxBudgetUsd: role.budget_usd ?? 5,
-      jsonSchema: opts.schema ?? VERDICT_SCHEMA,
-      stallMs: 15 * 60_000,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      verdictOf: (r) => (r.reason === 'succeeded' && r.structured ? { patch_correct: (r.structured as Out)?.patch_correct === true, confidence: (r.structured as Out)?.confidence ?? 'low' } : null),
+      run: async (model, costRole) => {
+        // Research the evaluator asked for instead of guessing: answered, then it judges again with the answer.
+        let brief = extra;
+        for (let researched = 0; ; researched++) {
+          let runId: string | null = null;
+          const r = await this.d.runner.run({
+            env: this.projectEnv(),
+            role: 'evaluator-verdict',
+            stateDir: this.d.stateDir,
+            prompt: issueBrief(issue, doneWhen, brief),
+            appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
+            cwd: path,
+            model,
+            allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
+            disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+            maxTurns: 60,
+            maxBudgetUsd: role.budget_usd ?? 5,
+            jsonSchema: opts.schema ?? VERDICT_SCHEMA,
+            stallMs: 15 * 60_000,
+            timeoutMs: COMMAND_TIMEOUT_MS,
+            onControl: (c) => void (runId = c.runId),
+          });
+          this.cost(n, costRole, r);
+          const asked = r.reason === 'succeeded' ? (r.structured as { research_request?: unknown } | undefined)?.research_request : undefined;
+          if (!asked || researched >= MAX_REQUESTS_PER_TASK) return { r, runId };
+          brief = [...brief, '', await this.answerResearch(issue, asked, path, 'evaluator')];
+        }
+      },
     });
-    this.cost(n, 'evaluator-verdict', r);
-    const s = r.structured as { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; files_reviewed?: string[]; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
+    const r = judged.r;
+    const s = r.structured as Out;
     // A review that didn't read every changed file can't pass on its own: those files go to a human.
-    const reviewed = new Set((s?.files_reviewed ?? []).map((f) => f.replace(/^\.\//, '')));
-    const unread = changed.filter((f) => !reviewed.has(f));
+    const unread = judged.unread;
     // No verdict is a failed verdict, never a pass.
     // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
     const v = {
@@ -946,7 +1019,7 @@ export class Coordinator extends MergeFlow {
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design });
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}) });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
   }
 

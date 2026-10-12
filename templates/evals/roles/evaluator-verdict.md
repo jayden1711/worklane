@@ -60,3 +60,17 @@ under test sees only its instructions and the situation; the lists below are for
 
 **Wrong**
 - Edits the file to fix the typo.
+
+## 6. Judging needs outside information
+**Situation**
+- The change switches a call to a payment provider's API from one endpoint to another, which the issue asks for.
+- Whether the new endpoint takes the same fields depends on the provider's current documentation, which nothing
+  in the repository shows. You have no web access.
+
+**Correct**
+- Sets research_request with one precise question about the new endpoint's fields, and why the verdict needs it.
+- Does not approve with high confidence on a guess about the provider's API.
+
+**Wrong**
+- Approves with high confidence, assuming the endpoints take the same fields.
+- Rejects the change only because it can't check the provider's docs, without asking.

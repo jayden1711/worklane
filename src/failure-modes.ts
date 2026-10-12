@@ -7,6 +7,7 @@
 import type { StoredEvent } from './events/types.js';
 import type { MergeMetrics } from './merge-metrics.js';
 import type { RunRecord } from './run-record.js';
+import { STAGES, type StageLabel } from './stage-label.js';
 
 export type Outcome =
   | 'startup failure'
@@ -16,6 +17,7 @@ export type Outcome =
   | 'evaluator rejected'
   | 'push refused'
   | 'timed out'
+  | 'stuck'
   | 'rate limited'
   | 'budget reached'
   | 'auth problem'
@@ -163,6 +165,7 @@ export function classifyRuns(events: StoredEvent[], since: Date, until: Date, re
       else if (reason === 'budget_exhausted') [outcome, cause] = ['budget reached', 'per-run budget reached'];
       else if (reason === 'auth_mismatch') [outcome, cause] = ['auth problem', normalizeCause(detail)];
       else if (reason === 'canceled_by_reconciliation') [outcome, cause] = ['canceled', 'stopped by the coordinator'];
+      else if (reason === 'stuck') [outcome, cause] = ['stuck', normalizeCause(detail)];
       else if (reason === 'failed' && !committed && (startupEvent || seconds < STARTUP_SECS)) [outcome, cause] = ['startup failure', normalizeCause(detail)];
       // Reported as a success but ended at once with nothing done: the same failure, seen from the other side.
       else if (reason === 'succeeded' && role === 'worker' && !committed && nothing && seconds < STARTUP_SECS && (nTurns ?? 0) <= 1) [outcome, cause] = ['startup failure', `ended after ${nTurns ?? 0} turn(s) with nothing done: ${normalizeCause(detail)}`];
@@ -342,6 +345,23 @@ export function mergeCostMarkdown(m: MergeMetrics): string[] {
   if (m.flags.length) {
     lines.push('', '**Tuning suggestions** (nothing changes unless you change the config)');
     for (const f of m.flags) lines.push(`- ${f}`);
+  }
+  return lines;
+}
+
+/** The weekly section for the earliest failed stage: per stage, how many failed runs each instance had there, and example reasons. */
+export function stageLabelsMarkdown(labels: (StageLabel & { instance: string })[], opts: { examples?: number } = {}): string[] {
+  const lines: string[] = [`**Where failed runs first went wrong, last 7 days** (${labels.length} labelled)`];
+  if (!labels.length) return [...lines, '- no failed runs labelled'];
+  const per = Math.max(0, opts.examples ?? 2);
+  for (const stage of STAGES) {
+    const at = labels.filter((l) => l.stage === stage);
+    if (!at.length) continue;
+    const byInstance = new Map<string, number>();
+    for (const l of at) byInstance.set(l.instance, (byInstance.get(l.instance) ?? 0) + 1);
+    const counts = [...byInstance].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([i, n]) => `${i} ${n}`).join(', ');
+    lines.push(`- ${stage}: ${at.length} (${counts})`);
+    for (const l of at.slice(0, per)) lines.push(`  - /runs/${l.run}: ${l.reason.split('\n')[0]!.slice(0, 200)}`);
   }
   return lines;
 }

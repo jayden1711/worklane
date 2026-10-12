@@ -58,7 +58,9 @@ test('the instance settings: each value in effect and where it comes from, the b
     'intake.reports_per_sender_per_day',
     'intake.drafts_per_day',
     'intake.max_usd_per_day',
+    'stuck_guard',
   ]);
+  assert.equal(by.stuck_guard!.value, 'dry-run', 'the stuck-run guard only logs unless the owner turns it on');
   assert.equal(by['research.repo_access']!.value, false, 'research has no repo access unless the owner turns it on');
   assert.deepEqual(by.daily_budget_usd, { key: 'daily_budget_usd', value: 12, source: 'instance' });
   assert.equal(by.workers!.source, 'repo', 'not set on the instance: the repo default');
@@ -91,6 +93,7 @@ test('where a value comes from: the instance\'s policy, else the repo\'s config 
     'intake.reports_per_sender_per_day': 'engine', // intake caps default from intake.yaml, never the repo's config
     'intake.drafts_per_day': 'engine',
     'intake.max_usd_per_day': 'engine',
+    stuck_guard: 'engine', // only the instance's policy sets the guard's mode
   });
   // The repo's config as written, not as loaded with defaults: drop a key from the file and it's the engine's.
   const agents = join(s.cfg.dir, 'agents.yaml');
