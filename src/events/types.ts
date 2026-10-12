@@ -192,6 +192,25 @@ export const EventSchemas = {
   /** The owner (or a writer) objected to a plan that was built at once: the task stopped. */
   'plan.objected': z.strictObject({ issue, by: z.string(), why: z.string() }),
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string() }),
+  // the setup console's asks (src/console/asks.ts): what the harness needs from the owner and can't do itself
+  /** An ask, as created. A paste_secret ask names the credential only; its value is never in any event. */
+  'ask.created': z.strictObject({
+    id: z.string(),
+    instance: z.string(),
+    title: z.string(),
+    detail: z.string(),
+    created_by: z.string(),
+    spec: z.discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('paste_secret'), credential: z.string(), where: z.string() }),
+      z.strictObject({ kind: z.literal('approve_link'), url: z.string() }),
+      z.strictObject({ kind: z.literal('question'), options: z.array(z.string()), writers_may_answer: z.boolean() }),
+      z.strictObject({ kind: z.literal('root_step'), command: z.string(), args: z.array(z.string()) }),
+    ]),
+  }),
+  /** An ask's one answer: who (and in what role), and the outcome; for a secret only that it was stored. */
+  'ask.answered': z.strictObject({ id: z.string(), by: z.string(), role: z.enum(['owner', 'writer']), answer: z.string(), detail: z.string() }),
+  /** An ask withdrawn before it was answered (by whatever created it, or the owner). */
+  'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),
