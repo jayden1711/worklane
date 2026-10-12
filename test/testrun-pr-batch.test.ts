@@ -53,7 +53,17 @@ function world(n: number) {
   }
   const repo = join(base, 'clone');
   git(base, 'clone', '-q', remote, repo);
-  return { base, repo, prs };
+  /** Push a new commit to PR k's branch (its head moves), and return it. */
+  const move = (k: number) => {
+    git(seed, 'checkout', '-q', `t/pr-${k}`);
+    writeFileSync(join(seed, `pr-${k}.txt`), `change ${k}, again\n`);
+    git(seed, ...ID, 'commit', '-q', '-am', `PR ${k}, again`);
+    git(seed, 'push', '-q', 'origin', `t/pr-${k}`);
+    const head = git(seed, 'rev-parse', 'HEAD');
+    prs.set(k, { ...prs.get(k)!, headSha: head });
+    return head;
+  };
+  return { base, repo, prs, move };
 }
 
 /**
@@ -201,16 +211,19 @@ test('the coordinator stopping cancels a batch\'s run in flight: the signal reac
   }
 });
 
-test('a batch dropped mid-run (a PR\'s head moved) cancels the real run: it is wiped, the batch is abandoned and batched again, nobody is blamed', { skip: !hasPerl && 'perl' }, async () => {
-  const r = rig(2, 'sleep 30');
+test('a batch dropped mid-run (a PR\'s head moved) cancels the real run: it is wiped, nobody is blamed, and the batch re-forms on the new head and passes', { skip: !hasPerl && 'perl' }, async () => {
+  // The first run hangs until the test lets runs through; the re-formed batch's run passes at once.
+  const go = join(mkdtempSync(join(tmpdir(), 'tr-go-')), 'go');
+  const r = rig(2, `for i in $(seq 300); do [ -f '${go}' ] && exit 0; sleep 0.1; done; exit 1`);
   try {
     for (const k of [1, 2]) r.b.enqueue(r.entry(k));
     r.b.tick();
     for (let i = 0; i < 100 && !r.log.read(0, ['testrun.started']).length; i++) await new Promise((res) => setTimeout(res, 100));
     await new Promise((res) => setTimeout(res, 300));
     const t0 = Date.now();
-    // The PR watch sees #2's head move while the batch's run is going.
-    r.b.observe(2, 'f'.repeat(40), 'open');
+    // #2's head moves while the batch's run is going, and the PR watch sees it.
+    const moved = r.w.move(2);
+    r.b.observe(2, moved, 'open');
     await r.b.idle();
     assert.ok(Date.now() - t0 < 15_000, 'the run was cancelled, not run to the end');
     const run = r.finished()[0]!;
@@ -222,6 +235,18 @@ test('a batch dropped mid-run (a PR\'s head moved) cancels the real run: it is w
     assert.deepEqual(r.blamed, [], 'no comment or label on any PR');
     assert.ok(!r.posted.length, 'no check posted');
     assert.deepEqual(r.tested, []);
+    // The batch re-forms: #1 batched again, #2 at its new head once the PR watch queues it, and the run passes.
+    writeFileSync(go, '');
+    assert.ok(r.b.enqueue({ issue: 102, number: 2, head: moved }));
+    for (let i = 0; i < 4 && r.tested.length < 2; i++) {
+      r.b.tick();
+      await r.b.idle();
+    }
+    const last = r.finished().at(-1)!;
+    assert.deepEqual([last.outcome, last.ok, last.prs.slice().sort()], ['done', true, [1, 2]]);
+    assert.deepEqual(r.tested.slice().sort(), [1, 2]);
+    assert.deepEqual(r.posted.map((p) => [p.head_sha, p.conclusion]).sort(), [[r.w.prs.get(1)!.headSha, 'success'], [moved, 'success']].sort(), 'the full check on #2\'s new head, never its old one');
+    assert.deepEqual(r.blamed, [], 'still nobody blamed');
   } finally {
     useTestRuns(null);
   }

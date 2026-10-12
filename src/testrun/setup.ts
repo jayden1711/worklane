@@ -20,7 +20,8 @@ import type { TestRuns } from '../coordinator/pr-batch.js';
 export function batchTestRuns(config: TestRunConfig, stopped: AbortSignal): TestRuns & { startTestRun(req: TestRunRequest, opts?: { signal?: AbortSignal }): Promise<TestRunResult> } {
   return {
     startTestRun: (req: TestRunRequest, opts: { signal?: AbortSignal } = {}) => startTestRun(req, { signal: opts.signal ? AbortSignal.any([stopped, opts.signal]) : stopped }),
-    postChecks: (sha, result, checkNames) => postChecks(sha, result, checkNames),
+    // The batcher's combined result may omit outcome (its contract makes it optional); a posted result is a verdict.
+    postChecks: (sha, result, checkNames) => postChecks(sha, { ...result, outcome: result.outcome ?? 'done' }, checkNames),
     checkNames: () => checkNamesFor(config),
   };
 }
