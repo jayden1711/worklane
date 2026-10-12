@@ -57,6 +57,19 @@ name other than lowercase letters, digits and dashes is refused, with the reason
 With no Chrome or Chromium on the machine (set `CHROME` to its path), the run is skipped with that reason and
 nothing is started.
 
+**Timeouts** (`browserTimeouts()` in `src/browser/cdp.ts`):
+
+| Wait | Default |
+|---|---|
+| Chrome's start, until its DevTools port and page are up | 30 s |
+| One DevTools command, such as a navigation or a screenshot | 30 s |
+| A step waiting for its target or text | 10 s |
+| The DevTools socket opening | 10 s |
+
+A slow or loaded machine, such as a shared CI runner, scales them all with `WORKLANE_BROWSER_TIMEOUT_SCALE` (1 to 20). The repo's real-Chrome tests set it to 3.
+
+If Chrome's DevTools port never appears, Chrome is stopped and started once more, and the evidence notes it. A Chrome that can't start or crashes isn't retried.
+
 ## The `browser:` check (`src/browser/check.ts`)
 
 `- browser: checkout` in `done_when` runs the app's `checkout` flow and judges it. It passes only when:

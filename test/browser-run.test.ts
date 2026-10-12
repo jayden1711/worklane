@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { REAL_CHROME_TIMEOUT, realChromeTests, unscaled } from './browser-helpers.js';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfig } from '../src/config/schema.js';
-import { findChrome, freePort, portInUse } from '../src/browser/cdp.js';
+import { findChrome, freePort, launchChrome, portInUse } from '../src/browser/cdp.js';
 import { isLocal, runFlow, stepLabel, type FlowEvidence } from '../src/browser/run.js';
 import { summarizeTrace } from '../src/browser/trace.js';
 
@@ -57,8 +58,9 @@ createServer((req, res) => {
 }
 
 const chrome = findChrome(process.env.CHROME);
+realChromeTests();
 
-test('a flow against a real app: errors, a failed, a slow and a blocked request, a trace and a screenshot; then the app and its children are stopped', { skip: !chrome && 'no Chrome or Chromium on this machine (set CHROME); the run itself says so and skips', timeout: 120_000 }, async () => {
+test('a flow against a real app: errors, a failed, a slow and a blocked request, a trace and a screenshot; then the app and its children are stopped', { skip: !chrome && 'no Chrome or Chromium on this machine (set CHROME); the run itself says so and skips', timeout: REAL_CHROME_TIMEOUT }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   fixtureApp(dir);
   const port = await freePort();
@@ -99,7 +101,8 @@ test('a flow against a real app: errors, a failed, a slow and a blocked request,
   assert.equal(alive, false, `the app's child ${childPid} was stopped with it`);
 
   // A failing step is evidence, not a crash: the flow stops there, and the screenshot and teardown still happen.
-  const bad = (await runFlow({ app, flow: 'broken', cwd: dir, outDir: join(dir, 'evidence'), chrome })) as FlowEvidence;
+  // This step is meant to time out: at the unscaled 10 s, as waiting longer for it proves nothing.
+  const bad = (await unscaled(() => runFlow({ app, flow: 'broken', cwd: dir, outDir: join(dir, 'evidence'), chrome }))) as FlowEvidence;
   assert.equal(bad.ok, false);
   assert.equal(bad.steps.at(-1)!.ok, false);
   assert.match(bad.steps.at(-1)!.error!, /never shown/);
@@ -107,7 +110,7 @@ test('a flow against a real app: errors, a failed, a slow and a blocked request,
   assert.equal(await portInUse(port), false);
 });
 
-test('an app that never becomes ready: the run fails with its output, and the app is stopped', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: 60_000 }, async () => {
+test('an app that never becomes ready: the run fails with its output, and the app is stopped', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: REAL_CHROME_TIMEOUT }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   writeFileSync(join(dir, 'never.mjs'), `import { writeFileSync } from 'node:fs'; writeFileSync('app.pid', String(process.pid)); console.log('starting, but never listening'); setInterval(() => {}, 1000);`);
   const port = await freePort();
@@ -164,7 +167,24 @@ test("a browser that can't start fails the run at once, and the app (already run
 // does Windows' chmod.
 const cannotLock = process.platform === 'win32' || process.getuid?.() === 0;
 
-test("a teardown that goes wrong (the profile can't be removed) is a note, never a failed run; Chrome and the app's whole tree are still stopped", { skip: (!chrome && 'no Chrome or Chromium on this machine') || (cannotLock && 'needs a directory permission that holds (not Windows, not root)'), timeout: 120_000 }, async () => {
+test('a Chrome whose DevTools port never appears is stopped and started once more, and that is noted; the stuck one is gone', { skip: (!chrome && 'no Chrome or Chromium on this machine') || (process.platform === 'win32' && 'the stand-in browser is a shell script'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
+  // A stand-in that hangs the first time (as Chrome can on a loaded machine), then is the real Chrome.
+  const stub = join(dir, 'chrome');
+  writeFileSync(stub, `#!/bin/sh\nif [ ! -f "${dir}/started" ]; then echo $$ > "${dir}/started"; exec sleep 600; fi\nexec "${chrome}" "$@"\n`);
+  chmodSync(stub, 0o755);
+  const b = await launchChrome(stub, { launchMs: 8_000 });
+  try {
+    assert.match(b.notes.join('\n'), /Chrome was started twice: the first never opened its DevTools port \(timed out after 8000 ms/);
+    assert.ok((await b.cdp.send<{ product: string }>('Browser.getVersion')).product, 'the second start works');
+  } finally {
+    await b.close();
+  }
+  assert.equal(await pidGone(Number(readFileSync(join(dir, 'started'), 'utf8'))), true, 'the stuck first start was stopped');
+  await assert.rejects(launchChrome(join(dir, 'no-such-browser')), /couldn't be started/, 'a browser that fails to start is not retried');
+});
+
+test("a teardown that goes wrong (the profile can't be removed) is a note, never a failed run; Chrome and the app's whole tree are still stopped", { skip: (!chrome && 'no Chrome or Chromium on this machine') || (cannotLock && 'needs a directory permission that holds (not Windows, not root)'), timeout: REAL_CHROME_TIMEOUT }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   fixtureApp(dir);
   const root = join(dir, 'profiles');

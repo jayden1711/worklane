@@ -6,9 +6,39 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { BRAND } from '../brand.js';
 import { chromeCandidates, killTree, spawnDetached, which } from '../os/index.js';
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * How long the browser may take. The defaults suit a normal machine; a slow or loaded one (a shared CI runner)
+ * scales them all with <PREFIX>_BROWSER_TIMEOUT_SCALE (1 to 20).
+ */
+export function browserTimeouts(env: NodeJS.ProcessEnv = process.env) {
+  const scale = Math.min(20, Math.max(1, Number(env[`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]) || 1));
+  return {
+    /** Chrome started until its DevTools port and page are up (once more on a retry). */
+    launchMs: 30_000 * scale,
+    /** One DevTools command (a navigation, a screenshot). */
+    commandMs: 30_000 * scale,
+    /** A flow step waiting for its target or text. */
+    stepMs: 10_000 * scale,
+    /** The DevTools WebSocket opening. */
+    socketMs: 10_000 * scale,
+  };
+}
+
+/** Processes started for browser checks (Chrome, the app) that haven't been seen to exit: none, between runs. */
+const live = new Map<number, string>();
+/** Record a process as running until stopTree sees it gone. */
+export function track(p: ChildProcess, what: string) {
+  if (p.pid !== undefined) live.set(p.pid, what);
+}
+/** What's still running (for tests: nothing may leak from one run into the next). */
+export function liveProcesses(): { pid: number; what: string }[] {
+  return [...live].map(([pid, what]) => ({ pid, what }));
+}
 
 /** Poll `fn` until it returns something truthy, or fail after `ms` naming what was awaited (and the last error). */
 export async function until<T>(what: string, fn: () => T | Promise<T>, ms = 15_000, every = 100): Promise<NonNullable<T>> {
@@ -94,14 +124,15 @@ export class Cdp {
     if (!WebSocketCtor) throw new Error(`this Node (${process.version}) has no WebSocket; Node 22.4 or later does`);
     const ws = new WebSocketCtor(url);
     await new Promise<void>((ok, fail) => {
-      const t = setTimeout(() => fail(new Error(`DevTools WebSocket ${url} didn't open in 10 s`)), 10_000);
+      const ms = browserTimeouts().socketMs;
+      const t = setTimeout(() => fail(new Error(`DevTools WebSocket ${url} didn't open in ${ms / 1000} s`)), ms);
       ws.addEventListener('open', () => (clearTimeout(t), ok()), { once: true });
       ws.addEventListener('error', () => (clearTimeout(t), fail(new Error(`DevTools WebSocket ${url} refused`))), { once: true });
     });
     return new Cdp(ws);
   }
   /** A command, failing after `ms` if Chrome never answers (a hung browser must not hang its caller). */
-  send<T = Params>(method: string, params: Params = {}, ms = 30_000): Promise<T> {
+  send<T = Params>(method: string, params: Params = {}, ms = browserTimeouts().commandMs): Promise<T> {
     const id = this.next++;
     return new Promise((ok, fail) => {
       const t = setTimeout(() => {
@@ -134,6 +165,8 @@ export interface Browser {
    * returned as a note, as cleanup is never a reason a check fails. Safe to call more than once.
    */
   close(): Promise<string | null>;
+  /** What happened starting it (a start retried). */
+  notes: string[];
 }
 
 /** Stop a process and everything in its group (Chrome's renderers, an app's children), and wait until it's gone. */
@@ -153,11 +186,33 @@ export async function stopTree(p: ChildProcess, kill: () => void = () => killTre
   p.stdout?.destroy();
   p.stderr?.destroy();
   p.unref();
+  if (exited() && p.pid !== undefined) live.delete(p.pid);
   return exited();
 }
 
-/** Start headless Chrome on a temporary profile and connect to its page. Chrome is stopped if connecting fails. */
-export async function launchChrome(chrome: string, o: { width?: number; height?: number; noSandbox?: boolean; extraArgs?: string[]; profileRoot?: string } = {}): Promise<Browser> {
+/** Chrome never opened its DevTools port in time: worth one more start (a loaded machine), unlike a crash. */
+class PortTimeout extends Error {}
+
+type LaunchOptions = { width?: number; height?: number; noSandbox?: boolean; extraArgs?: string[]; profileRoot?: string; launchMs?: number };
+
+/**
+ * Start headless Chrome on a temporary profile and connect to its page. If its DevTools port never appears (a
+ * loaded machine), it's stopped and started once more, and that is noted; any other failure, or a second
+ * timeout, stops it and throws.
+ */
+export async function launchChrome(chrome: string, o: LaunchOptions = {}): Promise<Browser> {
+  try {
+    return await startChrome(chrome, o);
+  } catch (e) {
+    if (!(e instanceof PortTimeout)) throw e;
+    const b = await startChrome(chrome, o);
+    b.notes.push(`Chrome was started twice: the first never opened its DevTools port (${e.message.split('\n')[0]})`);
+    return b;
+  }
+}
+
+async function startChrome(chrome: string, o: LaunchOptions): Promise<Browser> {
+  const launchMs = o.launchMs ?? browserTimeouts().launchMs;
   const profile = mkdtempSync(join(o.profileRoot ?? tmpdir(), 'cdp-chrome-'));
   const proc = spawn(
     chrome,
@@ -177,6 +232,7 @@ export async function launchChrome(chrome: string, o: { width?: number; height?:
     // Its own process group, so stopping it stops its renderers and helpers too, before the profile is removed.
     { stdio: ['ignore', 'ignore', 'pipe'], detached: spawnDetached },
   );
+  track(proc, 'Chrome');
   let stderr = '';
   proc.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-2000)));
   proc.on('error', (e) => (stderr += `\n${e.message}`));
@@ -207,12 +263,12 @@ export async function launchChrome(chrome: string, o: { width?: number; height?:
     died.catch(() => {});
     const devtools = await Promise.race([
       died,
-      until('Chrome to open its DevTools port', () => existsSync(portFile) && readFileSync(portFile, 'utf8').split(/\r?\n/)[0], 20_000).catch((e: Error) => {
-        throw new Error(`${e.message}\nChrome said: ${stderr.trim() || '(nothing)'}`);
+      until('Chrome to open its DevTools port', () => existsSync(portFile) && readFileSync(portFile, 'utf8').split(/\r?\n/)[0], launchMs).catch((e: Error) => {
+        throw new PortTimeout(`${e.message}\nChrome said: ${stderr.trim() || '(nothing)'}`);
       }),
     ]);
-    const target = await until('a page target', async () => ((await (await fetch(`http://127.0.0.1:${devtools}/json/list`, { signal: AbortSignal.timeout(2000) })).json()) as { type: string; webSocketDebuggerUrl: string }[]).find((t) => t.type === 'page'));
-    return { cdp: await Cdp.connect(target.webSocketDebuggerUrl), proc, close };
+    const target = await until('a page target', async () => ((await (await fetch(`http://127.0.0.1:${devtools}/json/list`, { signal: AbortSignal.timeout(2000) })).json()) as { type: string; webSocketDebuggerUrl: string }[]).find((t) => t.type === 'page'), launchMs);
+    return { cdp: await Cdp.connect(target.webSocketDebuggerUrl), proc, close, notes: [] };
   } catch (e) {
     await close();
     throw e;
