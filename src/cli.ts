@@ -10,6 +10,7 @@ import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
+import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installGitHook } from './install.js';
 import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
@@ -46,9 +47,11 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
-  install [--git-hooks] [--engine path] | install --git-hooks-only
-                                   scaffold ${BRAND.configDir}/, merge hooks into .claude/settings.json
-  doctor [--agentshield] [--json] [--policy file]
+  install [--instance name] [--git-hooks] [--engine path] | install --git-hooks-only
+                                   scaffold ${BRAND.configDir}/; with --instance, write the hooks and rules
+                                   for that instance's agent runs only (in its home); without, merge them
+                                   into .claude/settings.json for local runs
+  doctor [--agentshield] [--json] [--policy file] [--instance name]
                                    verify the install, and the config against any local instance's policy
   guardrails check                 run rules against their must-block/ask/allow examples
   guardrails refresh               fetch production fingerprints (stores hashes only)
@@ -165,8 +168,10 @@ async function main(argv: string[]): Promise<number> {
       const gitHooks = flag(args, '--git-hooks');
       // A machine-wide engine (e.g. /opt/<cli>/current/...): hooks call that stable path, not this run's versioned one.
       const engineCli = option(args, '--engine');
-      const r = install({ root, gitHooks, ...(engineCli ? { engineCli } : {}) });
-      console.log(`${r.scaffolded ? 'scaffolded' : 'kept'} ${BRAND.configDir}/; hooks merged into ${r.settingsPath}`);
+      // An instance's agents: hooks and rules in its agent settings, for its agent runs only, not in the checkout.
+      const instance = instanceOpt;
+      const r = install({ root, gitHooks, ...(engineCli ? { engineCli } : {}), ...(instance ? { instance } : {}) });
+      console.log(`${r.scaffolded ? 'scaffolded' : 'kept'} ${BRAND.configDir}/; hooks ${instance ? `for ${instance}'s agent runs written to` : 'merged into'} ${r.settingsPath}`);
       if (r.gitHook) console.log(`pre-commit secret scan: ${r.gitHook}`);
       for (const n of r.notes) console.log(`note: ${n}`);
       console.log(`next: ${BRAND.cli} doctor`);
@@ -176,7 +181,8 @@ async function main(argv: string[]): Promise<number> {
     case 'doctor': {
       const json = flag(args, '--json');
       const policy = option(args, '--policy');
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}) });
+      const instance = instanceOpt;
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}) });
       if (json) console.log(JSON.stringify(checks, null, 2));
       else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;
@@ -616,11 +622,19 @@ async function main(argv: string[]): Promise<number> {
       if (sub === 'show' && target) {
         const i = loadInstance(target);
         const missing = instanceProblems(i);
+        let hooks = `agent runs only, from ${agentSettingsPath(i.home)}`;
+        try {
+          if (guardrailSettings(i.home, i.repo.path) === null) hooks = `from the checkout's .claude/settings.json (older install; run \`${BRAND.cli} install --instance ${i.name}\` to move them to agent runs only)`;
+        } catch (e) {
+          missing.push((e as Error).message);
+          hooks = 'none';
+        }
         console.log(`${i.name}: ${i.repo.repo} at ${i.repo.path}`);
         console.log(`  policy: budget $${i.policy.budget.daily_usd}/day, max ${i.policy.agents.max_workers} workers, land ${i.policy.land_mode}`);
         console.log(`  repo config: within policy`);
         const gh = i.credentials.github;
         console.log(`  github: ${gh.kind === 'app' ? `App ${gh.app_id}, installation ${gh.installation_id}, key ${gh.key_path}` : `gh config ${gh.path} (fallback: a personal access token)`}`);
+        console.log(`  guardrail hooks: ${hooks}`);
         console.log(`  claude: ${i.runAs ? `${i.runAs.user}'s own login, in its home` : `config ${i.credentials.claude!.config_dir}`}`);
         for (const m of missing) console.log(`  MISSING ${m}`);
         if (missing.length) return 1;

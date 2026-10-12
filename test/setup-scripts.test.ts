@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { repoRoot } from './helpers.js';
 
@@ -79,7 +80,8 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.match(r.stdout, /^worklane install --root \. --git-hooks-only$/m);
     r = runAs(checkout[1]!, ['site', dest, repo]);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^worklane install --root \. --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m);
+    assert.match(r.stdout, /^worklane install --root \. --instance site --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m);
+    assert.match(r.stdout, /^git add \.worklane$/m, 'the config only: no .claude/settings.json is committed');
     assert.match(r.stdout, /^git push -q origin HEAD:refs\/heads\/worklane\/setup$/m);
     assert.match(r.stdout, /compare\/worklane\/setup/);
     r = runAs(service[0]!, ['site']);
@@ -87,6 +89,29 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.equal(r.stdout, 'worklane instance show site\n');
   } finally {
     rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test("checkout.sh installs the agent runs' guardrail hooks whether or not the repo has its config, and never commits .claude/settings.json", { skip: process.platform === 'win32' && 'bash scripts' }, () => {
+  const config = sections('checkout.sh')[1]!;
+  const stubs = 'worklane() { echo "worklane $*"; }\ngit() { echo "git $*"; case "$1" in rev-parse) echo main;; esac; }\n';
+  const run = (dest: string) => spawnSync('bash', ['-euo', 'pipefail', '-c', stubs + config, '_', 'site', dest, 'example-org/shop'], { encoding: 'utf8' });
+  const install = /^worklane install --root \. --instance site --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m;
+  const withConfig = mkdtempSync(join(tmpdir(), 'wl-checkout-'));
+  const without = mkdtempSync(join(tmpdir(), 'wl-checkout-'));
+  try {
+    mkdirSync(join(withConfig, '.worklane'));
+    let r = run(withConfig);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, install, 'a repo that already has .worklane/ still gets the hooks');
+    assert.doesNotMatch(r.stdout, /git (switch|add|commit|push)/, 'and nothing is committed or pushed');
+    r = run(without);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, install);
+    assert.doesNotMatch(r.stdout, /settings\.json/);
+  } finally {
+    rmSync(withConfig, { recursive: true, force: true });
+    rmSync(without, { recursive: true, force: true });
   }
 });
 

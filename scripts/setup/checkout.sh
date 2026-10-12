@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Clone an instance's repo as its coordinator, through its GitHub App, with
 # permissions that let agents write the code but not the repo's git config
-# or hooks. If the repo has no Worklane config yet, scaffold it on a
-# worklane/setup branch and push only that branch, for a PR you review and
-# merge. Never pushes the default branch.
+# or hooks. Install the guardrail hooks for the instance's agent runs, every
+# time, in the coordinator's own instance home. If the repo has no Worklane
+# config yet, scaffold it on a worklane/setup branch and push only that
+# branch, for a PR you review and merge. Never pushes the default branch.
 # Re-running it fast-forwards an existing checkout (e.g. after that PR merges).
 #   bash scripts/setup/checkout.sh <name> <owner/repo>
 source "$(dirname "$0")/lib.sh"
@@ -40,17 +41,27 @@ chmod 0644 "$dest/.git/config"
 chmod 0755 "$dest/.git/hooks"
 find "$dest/.git/hooks" -type f -exec chmod 0755 {} +
 
-say "Worklane config in the repo"
+say "Worklane config in the repo, and the guardrail hooks for $name's agent runs"
+# The hooks and permission rules go to the instance's agent settings, in the coordinator's own instance home (only
+# that user can read it): they apply to agent runs only, never to people's own sessions in the repo, and the repo
+# commits no .claude/settings.json. Written on every run, whether or not the repo has its config yet; a re-run
+# rewrites them from the current config.
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
   cd "$2"
-  if [ -d .worklane ]; then echo ".worklane/ present on $(git rev-parse --abbrev-ref HEAD)"; exit 0; fi
+  engine=/opt/worklane/current/dist/src/cli.js
+  if [ -d .worklane ]; then
+    echo ".worklane/ present on $(git rev-parse --abbrev-ref HEAD)"
+    worklane install --root . --instance "$1" --engine "$engine"
+    exit 0
+  fi
   git switch -q -c worklane/setup
-  worklane install --root . --engine /opt/worklane/current/dist/src/cli.js
-  git add -A .worklane .claude/settings.json
+  worklane install --root . --instance "$1" --engine "$engine"
+  git add .worklane
   git -c user.name="$1 coordinator" -c user.email="noreply@localhost" commit -q -m "Add Worklane config (to review before the first task)"
   git push -q origin HEAD:refs/heads/worklane/setup
   git switch -q -
   echo "pushed branch worklane/setup. Open its PR, review and adjust the config, and merge it yourself:"
   echo "  https://github.com/$3/compare/worklane/setup?expand=1"
+  echo "until it merges, the agent hooks carry the template config rules; run this again after it does"
 ' "$name" "$dest" "$repo"

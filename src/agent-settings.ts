@@ -1,0 +1,177 @@
+// Guardrail hooks and permission rules for an instance's agent runs only.
+//
+// `install --instance <name>` writes them to agent-settings.json in the
+// instance's home (owned by the coordinator user, 0700, which the agent user
+// can neither read nor write). The runner reads that file for every agent run
+// and hands it to claude with --settings. Human sessions in the repo never see
+// it, and the repo needs no .claude/settings.json.
+//
+// Why --settings, and what a project's own .claude/settings.json can still do
+// (Claude Code docs, settings, permissions and hooks pages; checked against
+// Claude Code 2.1.296):
+// - Precedence is managed > command line (--settings) > local project >
+//   shared project > user. A key we set in --settings beats the project's.
+// - Lists merge across sources, and a deny rule from any source beats an
+//   allow from any other: a project file can't lift our deny rules.
+// - Hooks merge across sources: a project file can add hooks, not remove ours.
+// - disableAllHooks is read after precedence: a project `true` turns off every
+//   non-managed hook, ours included, unless a higher source sets `false`. We
+//   set `false` in --settings.
+// - A project's `env` is applied to hooks over the process environment, so the
+//   run's harness variables are pinned in --settings too; and a project file
+//   that sets env, widens allow rules, or sets anything but hooks and
+//   permission rules refuses the run (projectSettingsRefusal).
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { BRAND } from './brand.js';
+
+/** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
+export const HOOK_MARKER = `${BRAND.envPrefix}_HOOK=1`;
+
+/** The file in an instance's home that holds its agents' hooks and rules. */
+export const AGENT_SETTINGS_FILE = 'agent-settings.json';
+export const agentSettingsPath = (instanceHome: string) => join(instanceHome, AGENT_SETTINGS_FILE);
+
+/** The hook events every agent run must carry, each failing closed. */
+export const GUARDED_EVENTS = ['PreToolUse', 'SessionStart', 'SessionEnd'] as const;
+
+export interface HookEntry {
+  matcher?: string;
+  hooks: { type: 'command'; command: string; timeout?: number }[];
+}
+export type Settings = Record<string, unknown> & {
+  hooks?: Record<string, HookEntry[]>;
+  permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } & Record<string, unknown>;
+  env?: Record<string, string>;
+  disableAllHooks?: boolean;
+};
+
+export class AgentSettingsError extends Error {}
+
+export interface HookCheck {
+  event: string;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Whether settings carry each guarded hook once, failing closed for agents, with its engine present.
+ * `enginePath` maps the path in a command to a file on this machine (e.g. $CLAUDE_PROJECT_DIR expanded).
+ */
+export function hookChecks(s: Settings, enginePath: (p: string) => string = (p) => p): HookCheck[] {
+  return GUARDED_EVENTS.map((event) => {
+    const cmds = (s.hooks?.[event] ?? []).flatMap((e) => e.hooks ?? []).map((h) => h.command).filter((c) => typeof c === 'string' && c.includes(HOOK_MARKER));
+    if (cmds.length !== 1) return { event, ok: false, detail: cmds.length ? `${cmds.length} ${BRAND.cli} entries (expected 1)` : 'not installed' };
+    const cmd = cmds[0]!;
+    const raw = cmd.match(/E="([^"]+)"/)?.[1];
+    const path = raw ? enginePath(raw) : undefined;
+    if (!cmd.includes('|| exit 2') || !/_AGENT" = 1 \]; then [^;]*>&2; exit 2/.test(cmd)) return { event, ok: false, detail: 'does not fail closed for agents' };
+    if (!path || !existsSync(path)) return { event, ok: false, detail: `engine not found at ${path ?? '(unparsed)'}` };
+    return { event, ok: true, detail: 'installed, fails closed' };
+  });
+}
+
+function readSettings(file: string): Settings {
+  const v = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not a JSON object');
+  return v as Settings;
+}
+
+/** Every way an instance's agent settings fall short: the hooks, and disableAllHooks pinned off. */
+export function agentSettingsProblems(s: Settings): string[] {
+  const out = hookChecks(s).filter((c) => !c.ok).map((c) => `hook ${c.event}: ${c.detail}`);
+  if (s.disableAllHooks !== false) out.push('disableAllHooks is not pinned to false, so a project file could turn the hooks off');
+  return out;
+}
+
+/** An instance's agent settings, checked. Missing, unreadable or incomplete: an error, never "no hooks". */
+export function readAgentSettings(instanceHome: string): Settings {
+  const file = agentSettingsPath(instanceHome);
+  if (!existsSync(file)) throw new AgentSettingsError(`${file} missing`);
+  let s: Settings;
+  try {
+    s = readSettings(file);
+  } catch (e) {
+    throw new AgentSettingsError(`${file} unreadable: ${(e as Error).message}`);
+  }
+  const problems = agentSettingsProblems(s);
+  if (problems.length) throw new AgentSettingsError(`${file}: ${problems.join('; ')}`);
+  return s;
+}
+
+/** A checkout's own .claude/settings.json, when it carries our hooks (the location before agent settings). */
+export function legacyProjectHooks(dir: string): boolean {
+  const file = join(dir, '.claude', 'settings.json');
+  if (!existsSync(file)) return false;
+  try {
+    return hookChecks(readSettings(file), (p) => p.replace('$CLAUDE_PROJECT_DIR', dir)).every((c) => c.ok);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The guardrail settings for an agent run in `cwd`: the instance's agent settings. An instance installed before
+ * they existed, whose checkout still carries the hooks in .claude/settings.json, runs on those (null). Neither:
+ * an error, so the run doesn't start.
+ */
+export function guardrailSettings(instanceHome: string, cwd: string): Settings | null {
+  if (existsSync(agentSettingsPath(instanceHome))) return readAgentSettings(instanceHome);
+  if (legacyProjectHooks(cwd)) return null;
+  throw new AgentSettingsError(`no guardrail hooks for agents: ${agentSettingsPath(instanceHome)} missing; run \`${BRAND.cli} install --instance <name>\` as the coordinator`);
+}
+
+/** What a project's .claude/settings.json may set for an agent run: hooks (they only add) and permission rules. */
+const PROJECT_KEYS = new Set(['$schema', 'hooks', 'permissions']);
+const PROJECT_PERMISSION_KEYS = new Set(['allow', 'deny', 'ask']);
+
+/**
+ * Why an agent run in `cwd` must not start because of the checkout's .claude/settings.json, or null. Deny and ask
+ * rules only tighten and hooks only add, so they're fine; an allow rule our settings don't have would widen what
+ * the agent may do, and any other key (env, sandbox, additionalDirectories, defaultMode, ...) could loosen the run.
+ * .claude/settings.local.json isn't checked: the runner loads project settings only (--setting-sources project).
+ */
+export function projectSettingsRefusal(cwd: string, ours: Settings): string | null {
+  const file = join(cwd, '.claude', 'settings.json');
+  if (!existsSync(file)) return null;
+  let s: Settings;
+  try {
+    s = readSettings(file);
+  } catch (e) {
+    return `${file} can't be read (${(e as Error).message}), so what it changes can't be checked`;
+  }
+  const keys = Object.keys(s).filter((k) => !PROJECT_KEYS.has(k));
+  const pkeys = Object.keys(s.permissions ?? {}).filter((k) => !PROJECT_PERMISSION_KEYS.has(k));
+  const allowed = new Set(ours.permissions?.allow ?? []);
+  const wider = (s.permissions?.allow ?? []).filter((a) => !allowed.has(a));
+  const why = [
+    ...(keys.length ? [`it sets ${keys.join(', ')}`] : []),
+    ...(pkeys.length ? [`it sets permissions.${pkeys.join(', permissions.')}`] : []),
+    ...(wider.length ? [`it allows ${wider.join(', ')}, beyond the instance's agent settings`] : []),
+  ];
+  return why.length ? `the checkout's .claude/settings.json could loosen agent runs: ${why.join('; ')}. Remove those entries (agents get their hooks and rules from the instance), or add allow rules to guardrails.yaml pre_approved and re-run \`${BRAND.cli} install --instance <name>\`` : null;
+}
+
+const union = (...lists: (string[] | undefined)[]) => [...new Set(lists.flatMap((l) => l ?? []))];
+
+/**
+ * The settings one agent run gets with --settings: the instance's guardrails, the lane's own (its sandbox and deny
+ * rules) and the run's harness variables, pinned so no project file can change them. disableAllHooks stays false.
+ */
+export function runSettings(ours: Settings, lane: object | undefined, pinnedEnv: Record<string, string>): Settings {
+  const l = (lane ?? {}) as Settings;
+  const hooks: Record<string, HookEntry[]> = {};
+  for (const e of new Set([...Object.keys(ours.hooks ?? {}), ...Object.keys(l.hooks ?? {})])) hooks[e] = [...(ours.hooks?.[e] ?? []), ...(l.hooks?.[e] ?? [])];
+  const perm = (k: 'allow' | 'deny' | 'ask') => {
+    const v = union(ours.permissions?.[k], l.permissions?.[k]);
+    return v.length ? { [k]: v } : {};
+  };
+  return {
+    ...l,
+    ...ours,
+    hooks,
+    permissions: { ...perm('allow'), ...perm('deny'), ...perm('ask') },
+    env: { ...(ours.env ?? {}), ...(l.env ?? {}), ...pinnedEnv },
+    disableAllHooks: false,
+  };
+}

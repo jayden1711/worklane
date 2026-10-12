@@ -52,7 +52,8 @@ secret_paths:
   - ~/.claude/.credentials.json
 
 # Tool credential stores no Claude session reads, agent or human
-# (written into .claude/settings.json as Read(...) deny rules).
+# (written as Read(...) deny rules: into an instance's agent settings, or for
+# local runs into .claude/settings.json).
 credential_stores:
   - ~/.ssh/**
   - ~/.aws/**
