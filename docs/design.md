@@ -363,6 +363,16 @@ How each level is cleared:
     2. Split the batch into cumulative prefixes and test them, re-running only the tests that failed in the parent.
     3. Land the longest prefix that passes, and recurse on the rest.
     4. A failing singleton is ejected to its issue with the logs.
+- **PR-mode batching (`tests.yaml` `land.pr_batch`, off by default; src/coordinator/pr-batch.ts).** The same idea for PR mode, with the full suite run once per batch instead of once per PR.
+  - **Queue.** A watched PR that is ready on its fast checks (`fast_checks`; the `full_checks` are left out of readiness until its batch posts them) waits in a queue, in the order PRs became ready.
+  - **Batch.** The head of the queue, up to the batch size, merged in order onto the default branch's tip as merge commits on a local `<cli>/batch-<n>` branch (never pushed). A PR that doesn't merge onto the tip goes back to its author; one that only conflicts with a PR ahead of it waits for the next batch.
+  - **Run.** One full run of the batch commit through the test-run service (`startTestRun({ kind: 'full', prs, sha })`), split into `shards` parallel runs.
+  - **Green.** The passing full check is posted on each PR's head; the PR watch then hands each to the merge policy, unchanged: auto-merge where it allows, the owner otherwise (high-risk and money-path PRs still wait for the owner). While the default branch is still the batch's base plus merges of that batch's PRs, the combined-state check is not due.
+  - **Red.** A binary search over the batch's prefixes, each tested on the same base, finds the first PR that turns it red. It goes back to its author with the failing tier (a comment, `ci-failing`, out of readiness until its head changes). The longest green prefix merges; the PRs after the culprit go back in the queue and are tested again. A red batch of one is first checked against the base alone: a red base blames nobody, and the queue waits for the default branch to move.
+  - **Never untested.** Right before any merge: every fast check passing on the PR's head, and a passing full run from a batch that held exactly that head (`mayMerge`). A PR whose head changes, or that closes, leaves its batch; if that happens after the run, the rest is tested again without it.
+  - **Size.** Adaptive: the size with the fewest full runs per PR, `1/k + (1 - p)(log2 k + 1)`, at the recent pass rate `p` (smoothed toward 0.9), about `ln 2 / (1 - p)`, capped by `max` (default 8).
+  - **Restarts.** Every step is a `pr_batch.step` event. A green batch cut off before all its checks were posted finishes posting them (`resumed`); any other open batch is `abandoned` and its PRs are back in the queue. A head is posted once and merged once.
+  - **Events.** `pr_batch.queued`, and `pr_batch.step` (built, green, red, checks_posted, culprit, dropped, conflict, requeued, abandoned, resumed, error, finished).
 - **Baseline:**
   - `baseline.recorded` stores main's failing-test set at a SHA, taken from nightly full runs or the last full run.
   - It is shown on the dashboard.

@@ -89,6 +89,7 @@ export class Coordinator extends Gardener {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
+    await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
@@ -107,6 +108,7 @@ export class Coordinator extends Gardener {
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;
+    await this.prBatchIdle();
   }
 
   /**

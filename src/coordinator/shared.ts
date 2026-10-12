@@ -10,6 +10,7 @@ import { type AgentRunner, type CommitIdentity, type RunAs, type RunControl } fr
 import { type PendingMessage } from '../console.js';
 import type { InstanceSettings } from '../instance.js';
 import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
+import type { TestRuns } from './pr-batch.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -64,6 +65,11 @@ export interface CoordinatorDeps {
    * sources. `pullMs`: how often the sources are pulled (default 30 s).
    */
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number };
+  /**
+   * The test-run service (src/testrun/: startTestRun, postChecks) for PR-mode batching (tests.yaml land.pr_batch).
+   * Absent with batching on: queued PRs wait, and nothing merges untested.
+   */
+  testRuns?: TestRuns;
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */

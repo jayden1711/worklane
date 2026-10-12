@@ -108,7 +108,7 @@ export const approve = (design = false) => (req: RunRequest) => ({ patch_correct
 export const approveBoth = (kept: boolean, confidence = 'high') => (req: RunRequest) => ({ ...approve()(req), confidence, ...(/both_sides_kept/.test(req.prompt) ? { both_sides_kept: kept } : {}) });
 
 /** PR mode with one required check and fix runs on; runs the task until its PR is open. */
-export async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: Fixture['cfg']) => void } = {}) {
+export async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: Fixture['cfg']) => void; deps?: Partial<ConstructorParameters<typeof Coordinator>[0]> } = {}) {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
@@ -116,7 +116,7 @@ export async function openPr(over: Partial<Record<string, (r: RunRequest) => obj
   opts.edit?.(f.cfg);
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   const runner = agents(over);
-  const c = coordinator(f, runner, { prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}) });
+  const c = coordinator(f, runner, { prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}), ...opts.deps });
   await c.tick();
   await c.idle();
   await c.tick();
