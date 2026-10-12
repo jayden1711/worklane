@@ -10,13 +10,33 @@ import { globToRegExp } from './glob.js';
 import { BRAND } from '../brand.js';
 
 /**
- * Harness config no agent writes, whatever a project's guardrails list: the config folder, and everything under
- * .claude/ (settings, skills, commands, agents, hooks), which Claude Code itself reads.
+ * Harness config no agent writes, whatever a project's guardrails list (there's no opt-out): the config folder, and
+ * everything under .claude/ (settings, skills, commands, agents, hooks), which Claude Code itself reads.
  */
 export const BUILTIN_PROTECTED = [`${BRAND.configDir}/**`, '.claude/**'];
 
-/** The paths agents may not write: the built-in ones plus the project's own. */
-export const protectedPaths = (g: Pick<GuardrailsConfig, 'protected_paths'>): string[] => [...new Set([...BUILTIN_PROTECTED, ...g.protected_paths])];
+/**
+ * Under the config folder, the only paths agents may write: the agents' own role prompts and skills (a correction
+ * lands there). A change to them is always high-risk and never auto-merges (review.ts AGENT_INSTRUCTIONS).
+ */
+export const AGENT_EDITABLE = [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`];
+
+const BUILTIN_RES = BUILTIN_PROTECTED.map((g) => globToRegExp(g));
+const EDITABLE_RES = AGENT_EDITABLE.map((g) => globToRegExp(g));
+/** A path, or a directory that holds it: `.claude` counts as under `.claude/**`. */
+const under = (res: RegExp[], rel: string) => res.some((re) => re.test(rel) || re.test(`${rel}/`));
+
+/**
+ * May an agent not write this path (relative to the project root; a directory counts for what's under it)? The
+ * built-in paths always apply, except the agents' own instructions. A project's own list can only add to them;
+ * its catch-all for the config folder (the template's) is the built-in rule now, so it doesn't take the agents'
+ * instructions away from them.
+ */
+export function isProtectedPath(rel: string, g: Pick<GuardrailsConfig, 'protected_paths'>): boolean {
+  if (under(BUILTIN_RES, rel) && !under(EDITABLE_RES, rel)) return true;
+  const own = g.protected_paths.filter((p) => p.replace(/^\.\//, '') !== `${BRAND.configDir}/**`).map((p) => globToRegExp(p));
+  return under(own, rel);
+}
 
 export type Decision = 'deny' | 'ask' | 'none';
 
@@ -193,7 +213,6 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
 
   // Harness files: agents may not write them.
   {
-    const res = protectedPaths(cfg).map((g) => globToRegExp(g));
     const targets: string[] = [];
     if (EDIT_TOOLS.has(call.tool)) {
       const p = filePathOf(call);
@@ -201,10 +220,7 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     }
     for (const c of commands) targets.push(...c.writes);
     // A target may be a directory (rm -rf .claude, mv x .claude): it matches if anything under it would.
-    const hit = targets.find((t) => {
-      const rel = relToRoot(ctx.projectRoot, call.cwd, t);
-      return res.some((re) => re.test(rel) || re.test(`${rel}/`));
-    });
+    const hit = targets.find((t) => isProtectedPath(relToRoot(ctx.projectRoot, call.cwd, t), cfg));
     if (hit) return { decision: 'deny', rule: 'protected-path', reason: `${hit} is harness config; change it through a reviewed proposal` };
   }
 

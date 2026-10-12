@@ -6,27 +6,12 @@ import { defaultRolePrompt, defaultRoles } from '../src/roles.js';
 import { RESEARCH_PROMPT } from '../src/research.js';
 import { INTAKE_PROMPT } from '../src/intake/run.js';
 
-/**
- * Roles not rewritten yet; each later rewrite removes its entry. Never add one: a new role (the gardener, the
- * corrections agent) must follow the contract from the start.
- */
-const NOT_YET = new Set<string>();
-
+// The prompts the runs actually get, besides the role table: the researcher's and intake's are read from it.
 const prompts = (): [string, string][] => [...defaultRoles().map((r) => [r, defaultRolePrompt(r)] as [string, string]), ['researcher', RESEARCH_PROMPT], ['intake', INTAKE_PROMPT]];
 
-test('every role prompt follows the contract (Own, Sources, Output, Approval, Failure, Never), except the ones still to rewrite', () => {
-  for (const [role, prompt] of prompts()) {
-    if (NOT_YET.has(role)) continue;
-    assert.deepEqual(contractProblems(prompt), [], role);
-  }
-});
-
-test('the list of roles still to rewrite only shrinks: each one in it exists and does not follow the contract yet', () => {
-  const all = new Map(prompts());
-  for (const role of NOT_YET) {
-    assert.ok(all.has(role), `${role} is a role`);
-    assert.notDeepEqual(contractProblems(all.get(role)!), [], `${role} follows the contract now: take it off the list`);
-  }
+test('every role prompt follows the contract (Own, Sources, Output, Approval, Failure, Never), with no exceptions', () => {
+  // A new role (the gardener, the corrections agent) follows it from the start.
+  for (const [role, prompt] of prompts()) assert.deepEqual(contractProblems(prompt), [], role);
 });
 
 test('contractProblems: each part named, in order, with text, and the failure rule word for word', () => {

@@ -356,7 +356,7 @@ export abstract class CoordinatorBase {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]): Promise<string> {
+  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI

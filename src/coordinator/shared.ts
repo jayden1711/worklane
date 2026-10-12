@@ -160,7 +160,8 @@ export const DEFAULT_REVIEW = {
     L2_notify: { when: ['app-non-money-large', 'dependency', 'test-machinery'] },
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
-  merge: { auto: true, max_lines: 800, max_files: 20, wait_categories: [] as string[] },
+  merge: { auto: true, max_lines: 800, max_files: 20, wait_categories: [] as string[], loosened: [] as string[] },
+  delegation: { enabled: false, min_clean: 10 },
 };
 
 /** The PR body's lines for instruction evals: base and head scores, the cost, and every case that changed. */
@@ -172,8 +173,10 @@ export function evalLines(results: EventPayload<'instructions.eval'>[]): string[
     `**Instruction evals** (base → head; ~$${total.toFixed(2)}, the CLI's cost estimate):`,
     ...results.map((r) => {
       const changed = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `case ${c.id} ${c.base} → ${c.head}`);
-      const what = r.error ? `not evaluated: ${r.error}` : `${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}`;
-      return `- ${r.target}: ${what} (~$${r.cost_usd.toFixed(2)})`;
+      const what = r.error ? `not evaluated: ${r.error}` : `visible ${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}`;
+      const h = r.held_out;
+      const held = r.error || h === undefined ? '' : h === null ? `; held-out: none${r.held_out_error ? ` (${r.held_out_error})` : ''}` : `; held-out ${score(h.base)} → ${score(h.result)}${h.dropped ? ', **lower**' : ''}${h.incomplete ? ', incomplete (cost cap)' : ''}`;
+      return `- ${r.target}: ${what}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
     }),
   ];
 }

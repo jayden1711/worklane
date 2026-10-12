@@ -3,7 +3,7 @@
 // big or in doubt waits for a human; so does everything while the instance's
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
-import type { LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -52,6 +52,9 @@ export interface InstructionEvalResult {
   changes: { id: string; title: string; base: string; head: string }[];
   cost_usd: number;
   error?: string | undefined;
+  /** A role's held-out comparison (decides); null: no held-out cases; absent: the target isn't a role. */
+  held_out?: { base: { passed: number; total: number } | null; result: { passed: number; total: number }; dropped: boolean; incomplete: boolean; changes: { id: string; title: string; base: string; head: string }[] } | null | undefined;
+  held_out_error?: string | undefined;
 }
 
 /**
@@ -70,6 +73,16 @@ export function instructionEvalReasons(targets: string[], results: InstructionEv
       const diff = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - case ${c.id} "${c.title}": ${c.base} → ${c.head}`);
       out.push([`eval: ${t} scored lower, ${score(r.base)} → ${score(r.result)} (~$${r.cost_usd.toFixed(2)}):`, ...diff].join('\n'));
     }
+    if (!r || r.error || !t.startsWith('role ')) continue;
+    // A role's held-out score decides: without it, or with it incomplete or lower, the change waits.
+    const h = r.held_out;
+    if (!h) out.push(`eval: ${t} has no held-out score${r.held_out_error ? `: ${r.held_out_error}` : ' (the visible score alone never passes a role change)'}`);
+    else if (h.incomplete) out.push(`eval: ${t} held-out is incomplete: the cost cap was reached, ${score(h.base)} → ${score(h.result)} on the cases that ran`);
+    else if (h.dropped) {
+      // By number only: a held-out case's text never reaches a PR, where a prompt writer could read it.
+      const diff = h.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - held-out case ${c.id}: ${c.base} → ${c.head}`);
+      out.push([`eval: ${t} scored lower on its held-out cases, ${score(h.base)} → ${score(h.result)}:`, ...diff].join('\n'));
+    }
   }
   return out;
 }
@@ -82,9 +95,12 @@ export interface MergeDecision {
 
 const paths = (p: string[]) => `${p.slice(0, 3).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
 
-/** The categories that always wait for a human: review.yaml's L3, CI config, and the repo's merge.wait_categories. */
+/**
+ * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;
+ * no review.yaml removes it), and the repo's merge.wait_categories.
+ */
 export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] } }; merge: { wait_categories: string[] } }): string[] {
-  return [...review.levels.L3_human.when, 'ci-config', ...review.merge.wait_categories];
+  return [...new Set([...review.levels.L3_human.when, 'ci-config', AGENT_INSTRUCTIONS, ...review.merge.wait_categories])];
 }
 
 /**
@@ -94,7 +110,8 @@ export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] 
  */
 export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: string[]; design?: { flag: boolean | undefined; reason?: string | undefined; by: string }; newTopLevel: string[] }): string[] {
   const reasons: string[] = [];
-  for (const c of o.waitCategories) {
+  // The agents' own instructions always count, whatever list a caller passes (the floor).
+  for (const c of new Set([...o.waitCategories, AGENT_INSTRUCTIONS])) {
     const hit = o.level.categories[c];
     if (hit?.length) reasons.push(`high-risk: ${c} (${paths(hit)})`);
   }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { importsOf, lightCheckPlan, lightOutcome } from '../src/light-check.js';
+import { importsOf, LIGHT_CHECK_WINDOW_MS, lightCheckPlan, lightCheckWait, lightOutcome } from '../src/light-check.js';
 
 const files = new Set(['src/price.ts', 'src/money/round.ts', 'src/money/index.ts', 'src/orders.js', 'lib/util.mjs', 'pkg/__init__.py', 'pkg/tax.py', 'pkg/sub/rates.py', 'app/main.py']);
 
@@ -38,4 +38,13 @@ test('the combined check merges the unchanged head when the fast tier passes; a 
   assert.equal(lightOutcome({ merged: true, fastPassed: true }), 'merge');
   assert.equal(lightOutcome({ merged: true, fastPassed: false }), 'hold');
   assert.equal(lightOutcome({ merged: false, fastPassed: null }), 'conflict');
+});
+
+test('light checks are debounced: two in a window start at once, the next waits for the window, then the newest main is checked', () => {
+  const t0 = 1_000_000;
+  assert.equal(lightCheckWait([], t0), 0, 'the first starts');
+  assert.equal(lightCheckWait([t0], t0 + 2_000), 0, 'one catch-up starts');
+  assert.equal(lightCheckWait([t0, t0 + 2_000], t0 + 4_000), LIGHT_CHECK_WINDOW_MS - 4_000, 'a third waits until the first leaves the window');
+  assert.equal(lightCheckWait([t0, t0 + 2_000], t0 + LIGHT_CHECK_WINDOW_MS), 0, 'then one more may start');
+  assert.equal(lightCheckWait([t0 - LIGHT_CHECK_WINDOW_MS * 2, t0 - LIGHT_CHECK_WINDOW_MS], t0), 0, 'old checks do not count');
 });
