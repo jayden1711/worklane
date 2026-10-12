@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import type { z } from 'zod';
 import { BRAND } from '../brand.js';
-import { FILES, type AgentsConfig, type DeployConfig, type GuardrailsConfig, type ProjectConfig, type ReviewConfig, type TestsConfig } from './schema.js';
+import { FILES, type AgentsConfig, type AppConfig, type DeployConfig, type GuardrailsConfig, type ProjectConfig, type ReviewConfig, type TestsConfig } from './schema.js';
 
 export interface Config {
   root: string;
@@ -14,6 +14,8 @@ export interface Config {
   tests: TestsConfig;
   review?: ReviewConfig;
   deploy?: DeployConfig;
+  /** The project's app, for browser checks; absent: browser checks are off (Track B is inactive). */
+  app?: AppConfig;
 }
 
 export interface ConfigError {
@@ -29,7 +31,7 @@ export class ConfigInvalid extends Error {
 }
 
 const REQUIRED = ['config.yaml', 'agents.yaml', 'guardrails.yaml', 'tests.yaml'] as const;
-const OPTIONAL = ['review.yaml', 'deploy.yaml'] as const;
+const OPTIONAL = ['review.yaml', 'deploy.yaml', 'app.yaml'] as const;
 
 function parseFile(path: string, file: string, errors: ConfigError[]): unknown {
   const doc = parseDocument(readFileSync(path, 'utf8'), { uniqueKeys: true });
@@ -70,6 +72,7 @@ export function loadConfig(root: string): Config {
     tests: out['tests.yaml'] as TestsConfig,
     ...(out['review.yaml'] ? { review: out['review.yaml'] as ReviewConfig } : {}),
     ...(out['deploy.yaml'] ? { deploy: out['deploy.yaml'] as DeployConfig } : {}),
+    ...(out['app.yaml'] ? { app: out['app.yaml'] as AppConfig } : {}),
   };
 }
 

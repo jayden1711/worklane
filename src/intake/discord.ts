@@ -26,6 +26,8 @@ export interface DiscordOptions {
   /** The one server (guild) the bot reads; a message from any other is dropped. */
   guild: string;
   channels: string[];
+  /** The only users whose messages are taken (discord.allowed_senders); anyone else's is dropped unread. */
+  allowedSenders: string[];
   prefixes: string[];
   connect?: (url: string) => Socket;
   fetch?: typeof fetch;
@@ -55,6 +57,8 @@ export class DiscordIntake {
   private queue: IncomingReport[] = [];
   /** Messages seen and dropped (not addressed, another server or channel, a DM, from a bot), counted only. */
   dropped = 0;
+  /** The same drops by reason: `sender` (not an allowed sender), `bot`, `place` (another server or channel, a DM), `unaddressed`. */
+  droppedBy: Record<'sender' | 'bot' | 'place' | 'unaddressed', number> = { sender: 0, bot: 0, place: 0, unaddressed: 0 };
 
   constructor(private o: DiscordOptions) {}
 
@@ -110,15 +114,18 @@ export class DiscordIntake {
   }
 
   private onMessage(m: MessageCreate) {
-    const drop = () => {
+    const drop = (why: keyof DiscordIntake['droppedBy']) => {
       this.dropped++;
+      this.droppedBy[why]++;
     };
-    if (m.author.bot || (this.botId && m.author.id === this.botId)) return drop();
+    if (m.author.bot || (this.botId && m.author.id === this.botId)) return drop('bot');
+    // Only allowed senders, checked on the author id before anything of the message is read.
+    if (!this.o.allowedSenders.includes(m.author.id)) return drop('sender');
     // A DM has no guild: dropped like any message outside the configured server.
-    if (m.guild_id !== this.o.guild || !this.o.channels.includes(m.channel_id)) return drop();
+    if (m.guild_id !== this.o.guild || !this.o.channels.includes(m.channel_id)) return drop('place');
     const mentions = this.botId ? [`<@${this.botId}>`, `<@!${this.botId}>`] : [];
     const text = addressed(m.content, this.o.prefixes, mentions);
-    if (!text) return drop();
+    if (!text) return drop('unaddressed');
     this.queue.push({
       source: 'discord',
       sourceId: m.id,

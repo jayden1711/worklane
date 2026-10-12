@@ -53,6 +53,11 @@ senders. There are two sources: the Discord bot and in-product reports.
   channels. A message from any other server, from a channel not listed, or sent as a direct message is dropped
   on receipt and never stored. In a listed channel, the bot acts only on messages addressed to it (a mention,
   or the configured prefix such as `bug:`).
+- **Allowed senders only.** `discord.allowed_senders` lists the Discord user ids whose messages are taken.
+  Anyone else's message is dropped on their user id alone, before any of it is read or stored: no raw file,
+  no event, no reply, only a count by reason. Empty (the default) means nobody, and the start-up check says
+  so when Discord is on. Every trusted sender must be an allowed one; a trusted id that isn't allowed is a
+  config error at start-up.
 - Replies go back through Discord's REST API to the same channel, at most 500 characters, and never ping
   anyone.
 - Heartbeats and resume follow the gateway protocol; a dropped connection reconnects with backoff. The
@@ -100,14 +105,22 @@ senders. There are two sources: the Discord bot and in-product reports.
    then dropped to the Inbox for the owner or a writer.
 9. **Trust.**
    - Senders on the instance's trusted list (the owner by default; others added by Discord user id in
-     `intake.yaml`) have their drafts filed directly with `ready`.
-   - Everyone else's drafts become Inbox decisions for the owner or a writer: approve, edit (opens the draft
+     `intake.yaml`, each also an allowed sender) have their drafts filed directly with `ready`.
+   - Every other allowed sender's drafts become Inbox decisions for the owner or a writer: approve, edit (opens the draft
      to change), or reject. One tap each.
    - Not actionable and needs-more-info reports never become issues: the sender gets a polite reply asking
      for what's missing.
 10. **Reply** on the same channel: when the issue is filed, when its fix merges, and when it's deployed.
     Untrusted senders get a short status ("we've logged this", "a fix is merged", "the fix is live") with no
     internal links; trusted senders also get the issue link.
+    - **Casual replies** (off by default; `casual_replies: true` in `intake.yaml`): the `intake-replier` role
+      words the reply in plain friendly language instead. Its only inputs are the redacted message and the
+      engine's facts (the stage, the issue number when the sender may see it, trusted or not); it has no tools
+      at all, and each reply is one short run counted against intake's daily spend cap. Code checks every reply
+      before it is sent: at most 500 characters; no link but the issue link the engine supplies; no mentions;
+      no more than a short quote of the message; no promise of a date, a fix or money; nothing the facts
+      contradict (such as "fixed" before the merge). Any failure sends the fixed reply instead, and the reason
+      is recorded (`intake.reply_checked`).
 
 ## 4. The intake agent
 
@@ -174,8 +187,8 @@ test with an injection-style report.
 2. **In-product reports:** create a read-only database role limited to the bug-report table or view, store
    its connection string on the production service (as for `prod-read`), and set the query in the project's
    config. Only when the owner gives the go for that project.
-3. **Enable** each source per instance in `intake.yaml` (Discord also needs the server id), and add trusted
-   senders there by Discord user id.
+3. **Enable** each source per instance in `intake.yaml` (Discord also needs the server id), list the allowed
+   senders (`discord.allowed_senders`) and, among them, the trusted ones, by Discord user id.
 
 ## 11. Build order
 

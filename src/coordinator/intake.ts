@@ -7,12 +7,13 @@ import { mayAnswer } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
 import { intakeCaps, researchRepoAccess } from '../settings.js';
-import { isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
+import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
 import { redactPii } from '../intake/redact.js';
 import { IntakeMeter, purgeRaw, purgeSeen, rawIds, readRaw, reportId, seen, storeRaw } from '../intake/store.js';
 import { candidates as intakeCandidates } from '../intake/dedupe.js';
 import { acceptTriage } from '../intake/triage.js';
-import { decide as intakeDecide, excerpt, statusReply, type IntakeAction } from '../intake/decide.js';
+import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
+import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
 import { ResearchRuns } from './research.js';
 import { type CoordinatorDeps } from './shared.js';
@@ -118,7 +119,14 @@ export abstract class Intake extends ResearchRuns {
         continue;
       }
       // An adapter speaks only for its own source: trust is looked up per source. Each conversation in arrival order.
-      const batch = got.filter((x) => x.source === src.name).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
+      const mine = got.filter((x) => x.source === src.name);
+      // Only allowed senders, on the sender id alone: anyone else's message is never stored or replied to, only counted.
+      const notAllowed = mine.filter((r) => !isAllowed(r.sender, cfg));
+      if (notAllowed.length) {
+        const meter = new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
+        for (const _ of notAllowed) meter.countDrop('not_allowed');
+      }
+      const batch = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
       for (const r of batch) {
         if (this.halt.signal.aborted || this.stopped) break;
         try {
@@ -127,8 +135,8 @@ export abstract class Intake extends ResearchRuns {
           error(`intake ${src.name} report`, e);
         }
       }
-      // Only what is recorded (its id in the seen ledger) is acknowledged; the rest comes again.
-      const recorded = batch.filter((r) => seen(this.d.stateDir, r)).map((r) => r.sourceId);
+      // Only what is recorded (its id in the seen ledger), or dropped by rule, is acknowledged; the rest comes again.
+      const recorded = [...batch.filter((r) => seen(this.d.stateDir, r)), ...notAllowed].map((r) => r.sourceId);
       if (recorded.length && src.ack) await src.ack(recorded).catch((e: unknown) => error(`intake ${src.name} ack`, e));
       if (this.halt.signal.aborted || this.stopped) return;
     }
@@ -249,12 +257,42 @@ export abstract class Intake extends ResearchRuns {
     let ok = false;
     if (src && r?.thread) {
       try {
-        ok = await src.reply(r.thread, text);
+        ok = await src.reply(r.thread, await this.casualReply(id, r, stage, text));
       } catch {
         ok = false;
       }
     }
     this.emit('intake.replied', { id, stage, ok });
+  }
+
+  /**
+   * The reply's text: the casual replier's when casual replies are on and its reply passes every check in code,
+   * else the engine's fixed `fixed`. Its inputs are the redacted message and the facts only; one run, no tools,
+   * within intake's daily spend cap. Which text was used, and why, is recorded.
+   */
+  private async casualReply(id: string, r: IncomingReport, stage: string, fixed: string): Promise<string> {
+    const cfg = this.d.intake?.config();
+    const facts: ReplyStage | null = stage === 'filed' || stage === 'merged' || stage === 'deployed' || stage === 'question' ? stage : stage === 'info' && fixed === NEEDS_INFO_REPLY ? 'needs_info' : null;
+    if (!cfg?.casual_replies || !facts) return fixed;
+    const use = (text: string, why: string | null) => {
+      this.emit('intake.reply_checked', { id, stage, used: why === null ? 'casual' : 'fixed', why });
+      return text;
+    };
+    const meter = new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
+    const can = meter.canDraft();
+    if (!can.ok && can.reason === 'spend_cap') return use(fixed, 'spend_cap');
+    const trusted = isTrusted(r.sender, cfg);
+    const issue = trusted ? this.intakeIssues().get(id) : undefined;
+    const f: ReplyFacts = { stage: facts, trusted, ...(issue !== undefined ? { issue } : {}) };
+    const redacted = redactPii(r.text, { names: [...(r.sender.name ? [r.sender.name] : []), ...cfg.redact.names], patterns: cfg.redact.patterns });
+    const role = this.d.cfg.agents.roles.researcher ?? this.d.cfg.agents.roles.workers!;
+    const cwd = replierDir(dirname(this.d.repo), this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, id, stage);
+    const run = await this.d.runner.run({ ...replierRun({ cwd, redacted, facts: f }), stateDir: this.d.stateDir, model: role.model, maxBudgetUsd: 0.25, stallMs: 2 * 60_000, timeoutMs: 5 * 60_000 });
+    this.emit('run.cost', { issue: null, role: REPLIER_ROLE, model: run.model, usd: run.costUsd, turns: run.turns });
+    meter.recordSpend(run.costUsd);
+    if (run.reason !== 'succeeded') return use(fixed, `the run ended: ${run.reason}`);
+    const checked = checkReply((run.structured as { reply?: unknown } | undefined)?.reply, { redacted, facts: f });
+    return checked.ok ? use(checked.text, null) : use(fixed, checked.why.slice(0, 300));
   }
 
   /** Open issues a report may repeat: those with the labels intake files under, and ready work. */
