@@ -77,6 +77,8 @@ export class PrTestRuns {
   /** pr -> heads whose fast run finished (from the log, so a restart doesn't run them again). */
   private finished = new Map<number, Set<string>>();
   private lastPoll = 0;
+  /** Aborted when the coordinator stops: every run from here, and the batches' (batchTestRuns), is cancelled and wiped. */
+  readonly stopped = new AbortController();
 
   constructor(private d: PrTestRunDeps) {
     const queued = new Map<string, EventPayload<'testrun.queued'>>();
@@ -183,6 +185,7 @@ export class PrTestRuns {
   }
 
   stop(): void {
+    this.stopped.abort();
     for (const f of this.inFlight.values()) f.controller.abort();
   }
 }
