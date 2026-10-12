@@ -26,6 +26,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
+import { attachTerminal } from './console/terminal-server.js';
+import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
+import { currentUser } from './os/index.js';
 
 export interface HubInstance {
   name: string;
@@ -50,9 +53,10 @@ export interface HubOptions {
   signIn?: SignInConfig | null;
   /**
    * The owner terminal (the setup console) reads who is asking on the hub's port through a SessionOf: the hub's
-   * own (`session` on what startHub returns) unless one is given here.
+   * own (`session` on what startHub returns) unless one is given here; it runs as consoleUser (console_user; none: it
+   * never opens). The rest is for tests.
    */
-  terminal?: { session?: SessionOf };
+  terminal?: { consoleUser?: string | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
   now?: () => number;
 }
 
@@ -316,12 +320,25 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     }
   });
 
+  // The owner terminal, on WebSocket upgrades to the sign-in port (src/console/terminal-server.ts); every attempt and command goes to the hub's audit log.
+  const t = opts.terminal;
+  const detachTerminal = attachTerminal(server, {
+    config: { consoleUser: t?.consoleUser ?? null, hubUser: t?.hubUser ?? currentUser() },
+    instances: opts.instances.map((i) => i.name),
+    session,
+    audit: t?.audit ?? fileAudit(join(opts.stateDir, 'terminal-audit.jsonl')),
+    ...(t?.spawnPty ? { spawnPty: t.spawnPty } : {}),
+    ...(t?.exec ? { exec: t.exec } : {}),
+    ...(t?.now ? { now: t.now } : {}),
+    ...(t?.idleMs ? { idleMs: t.idleMs } : {}),
+  });
   const shown = host.includes(':') ? `[${host}]` : host;
   const port = await listen(server, opts.port ?? 0, host);
   let bgPort: number;
   try {
     bgPort = await listen(breakGlass, opts.breakGlassPort ?? 0, host);
   } catch (e) {
+    detachTerminal();
     server.close();
     throw e;
   }
@@ -332,8 +349,9 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     breakGlassUrl: `http://${shown}:${bgPort}/?t=${token}`,
     token,
     session,
-    close: () =>
-      Promise.all(
+    close: () => {
+      detachTerminal();
+      return Promise.all(
         [server, breakGlass].map(
           (s) =>
             new Promise<void>((r) => {
@@ -341,6 +359,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
               s.close(() => r());
             }),
         ),
-      ).then(() => undefined),
+      ).then(() => undefined);
+    },
   };
 }

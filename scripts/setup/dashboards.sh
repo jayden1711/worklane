@@ -21,17 +21,22 @@
 #     4398 (the token, on this machine only), which it never forwards.
 #
 #   bash scripts/setup/credentials.sh dashboard-signin      (first, once)
-#   bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--console-user <admin user>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+#
+#   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh
+#     with the same user first. Without it the terminal never opens. With it, the hub's unit drops
+#     NoNewPrivileges and its read-only filesystem: sudo (to start the terminal, and in it) needs both.
 #
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
-client_id="" public_url=""
+usage="usage: dashboards.sh [--console-user <admin user>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
+client_id="" public_url="" console_user=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
+    --console-user) console_user="${2:-}"; shift 2 ;;
     --) shift; break ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *) break ;;
@@ -40,6 +45,10 @@ done
 [ "$#" -ge 1 ] && [ -n "$client_id" ] && [ -n "$public_url" ] || { echo "$usage" >&2; exit 2; }
 [[ "$client_id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "--client-id: the sign-in App's client id (letters, digits, dots, dashes)" >&2; exit 2; }
 [[ "$public_url" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin, as browsers reach it through tailscale serve (https://<machine>.<tailnet>.ts.net)" >&2; exit 2; }
+if [ -n "$console_user" ]; then
+  [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
+  [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
+fi
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 viewer=wl-dash
@@ -94,18 +103,30 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${console_user:+ --console-user $console_user}
 Restart=on-failure
 UMask=0007
 RestartSec=10
+$(hub_sandbox)
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# The hub's sandbox. With the owner terminal, sudo must be able to switch users (no NoNewPrivileges), and the
+# admin's shell, a child of the hub, must see the real filesystem (no read-only mounts), so both are dropped.
+hub_sandbox() {
+  if [ -n "$console_user" ]; then
+    echo "NoNewPrivileges=no"
+    return
+  fi
+  cat <<EOF
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/$viewer
 PrivateTmp=yes
-
-[Install]
-WantedBy=multi-user.target
 EOF
 }
 

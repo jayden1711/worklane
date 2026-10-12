@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
+import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -27,6 +27,7 @@ import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
 import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
+import { SetupConsoleView } from './pages/Setup';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -81,3 +82,5 @@ export const renderSignIn = () => renderToStaticMarkup(<SignInPage />);
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';
+export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
+export { keyData } from './pages/Setup';

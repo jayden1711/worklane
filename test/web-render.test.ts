@@ -28,6 +28,8 @@ interface Render {
   renderThroughputPanel(state: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderSetup(data: unknown): string;
+  keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
@@ -809,4 +811,29 @@ test('the report preview: refused to anyone but the owner and the writers withou
   assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
   assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderPage('reports', asOwner), /report-refused/);
+});
+
+test('the setup console shows each ask with its status; answer controls only where the server allows; a secret is a password field', () => {
+  const base = { instance: 'demo', detail: 'why', createdAt: '2026-10-12T10:00:00Z', createdBy: 'coordinator', cancelled: null };
+  const asks = [
+    { ...base, id: 'ask-000000000001', kind: 'paste_secret', title: 'Bot token', credential: 'intake-discord', where: 'intake', status: 'open', answer: null, canAnswer: true },
+    { ...base, id: 'ask-000000000002', kind: 'question', title: 'Owner question', options: ['yes', 'no'], writersMayAnswer: false, status: 'open', answer: null, canAnswer: false },
+    { ...base, id: 'ask-000000000003', kind: 'root_step', title: 'Install', command: 'apt-get', args: ['install', 'x'], allowed: false, refusal: 'it needs the helper extended', status: 'open', answer: null, canAnswer: true },
+    { ...base, id: 'ask-000000000004', kind: 'approve_link', title: 'Install the App', url: 'https://github.com/apps/x/installations/new', status: 'answered', answer: { by: 'olive', role: 'owner', answer: 'approved', detail: '', at: '2026-10-12T11:00:00Z' }, canAnswer: false },
+  ];
+  const html = r.renderSetup({ role: 'owner', login: 'olive', asks });
+  assert.equal((html.match(/data-testid="ask-card"/g) ?? []).length, 4);
+  const secret = html.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
+  assert.match(secret, /type="password"/);
+  assert.doesNotMatch(secret, /value=/, 'never prefilled');
+  assert.doesNotMatch(html, /data-testid="ask-option"/, "no answer buttons on a question this person can't answer");
+  assert.match(html, /Waiting on the owner/);
+  assert.match(html, /data-testid="ask-refusal"[^>]*>[^<]*it needs the helper extended/);
+  assert.match(html.match(/<button[^>]*data-testid="ask-run"[^>]*>/)?.[0] ?? '', /disabled=""/, "a step off the allowlist can't be run");
+  assert.match(html, /data-testid="ask-answered"[^>]*>approved by @olive \(owner\)/);
+  const viewer = r.renderSetup({ role: 'viewer', login: 'vic', asks: asks.map((a) => ({ ...a, canAnswer: false })) });
+  assert.doesNotMatch(viewer, /data-testid="ask-secret"|data-testid="ask-run"|data-testid="ask-option"/);
+  assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
+  assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
+  assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });

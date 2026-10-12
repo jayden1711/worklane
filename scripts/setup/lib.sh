@@ -79,3 +79,16 @@ UPDATE_DEFAULT_CHECKS=("agentshield" "denylist" "desktop" "push-gate" "scan" "te
 updates_config_json() {
   node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
 }
+
+# The sudoers rule for the dashboard's owner terminal: the hub's viewer user may run the console shell as the
+# admin user, with exactly `check` or `shell`, and nothing else; never as root. sudo inside that shell still
+# asks for the admin's password (the rule is NOPASSWD only for the console shell itself).
+CONSOLE_SHELL=/usr/local/libexec/worklane-console-shell
+CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console   # what install_sudoers worklane-console writes
+console_sudoers() {
+  local viewer="$1" admin="$2"
+  [[ "$viewer" =~ ^wl-[a-z][a-z0-9-]{0,20}$ ]] || { echo "console_sudoers: $viewer is not a viewer user" >&2; return 1; }
+  [[ "$admin" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$admin" != root && "$admin" != "$viewer" ]] || { echo "console_sudoers: $admin can't be the console user" >&2; return 1; }
+  printf '# The dashboard hub (%s) may start the owner terminal as %s: the console shell, exactly check or shell.\n' "$viewer" "$admin"
+  printf '%s ALL=(%s) NOPASSWD: %s check, %s shell\n' "$viewer" "$admin" "$CONSOLE_SHELL" "$CONSOLE_SHELL"
+}

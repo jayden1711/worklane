@@ -42,6 +42,7 @@ import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
+import { handleAskRoute } from './console/routes.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -106,6 +107,12 @@ export interface DashboardOptions {
   limitsPath?: string;
   /** Machine settings: how the helper is run (sudo), and where its change log and the updater's files are. The system's when unset. */
   machine?: { exec?: Exec; changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  /** The instance's name (the setup console's asks); the project's name when unset. */
+  instance?: string;
+  /** Who is asking (the setup console): #197's per-person session; until then, `user` with its role from project.owners. */
+  session?: SessionOf;
+  /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
+  secretsHome?: string;
 }
 
 /**
@@ -678,6 +685,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!isOwnerHere) return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
           return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
         }
+        // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
+        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machine?.exec ? { exec: opts.machine.exec } : {}) })) return;
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {

@@ -3,7 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { availableParallelism, homedir, loadavg } from 'node:os';
+import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 import { safeProjectEnv } from '../project-env.js';
@@ -125,6 +125,56 @@ export function writeOwnerOnly(file: string, data: string): void {
   writeFileSync(tmp, data, { mode: 0o600 });
   if (process.platform !== 'win32') chmodSync(tmp, 0o600);
   renameSync(tmp, file);
+}
+
+/**
+ * Install a secret for this user only, as the setup scripts do (credentials.sh): `dir` 0700, the file 0400,
+ * written to a fresh temp name (O_EXCL) and renamed over any old one. Refuses a symlinked directory or file, a
+ * directory another user owns, and running as root (a secret belongs to the coordinator user). Returns the path.
+ */
+export function installOwnerOnlySecret(dir: string, name: string, value: string): string {
+  const posix = process.platform !== 'win32';
+  if (posix && process.getuid!() === 0) throw new Error("refusing to install a secret as root; the dashboard runs as the instance's coordinator user");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a symlink; refusing`);
+  if (posix) {
+    if (statSync(dir).uid !== process.getuid!()) throw new Error(`${dir} isn't owned by this user; refusing`);
+    chmodSync(dir, 0o700);
+  }
+  const file = join(dir, name);
+  if (existsSync(file) && lstatSync(file).isSymbolicLink()) throw new Error(`${file} is a symlink; refusing`);
+  const tmp = join(dir, `.${name}.${randomBytes(6).toString('hex')}.tmp`);
+  try {
+    writeFileSync(tmp, value, { mode: 0o400, flag: 'wx' });
+    if (posix) chmodSync(tmp, 0o400);
+    renameSync(tmp, file);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+  return file;
+}
+
+/**
+ * How to run `argv` (a fixed command) in a pseudo-terminal, for the dashboard's owner terminal. Linux only:
+ * util-linux `script` makes the PTY, so no native module is needed. `script -c` hands its command to a shell, so
+ * every word must be plain (no shell metacharacters). Returns the [file, args] to spawn.
+ */
+export function ptyCommand(argv: string[], size: { cols: number; rows: number }): [file: string, args: string[]] {
+  if (process.platform !== 'linux') throw new Error('the owner terminal needs Linux (util-linux script)');
+  if (!argv.length || argv.some((w) => !/^[A-Za-z0-9_./:=@-]+$/.test(w))) throw new Error('the terminal command must be plain words');
+  const cols = Math.max(20, Math.min(400, Math.floor(size.cols) || 80));
+  const rows = Math.max(5, Math.min(200, Math.floor(size.rows) || 24));
+  return ['/usr/bin/script', ['-q', '-f', '-e', '-c', `stty cols ${cols} rows ${rows}; exec ${argv.join(' ')}`, '/dev/null']];
+}
+
+/** The OS user this process runs as. */
+export function currentUser(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return '';
+  }
 }
 
 export function writeGroupOnly(file: string, data: string | Uint8Array): void {
