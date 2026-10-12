@@ -94,7 +94,7 @@ function AskCard({ run, ask, onDone }: { run: OnboardRun; ask: OnboardAsk; onDon
           </code>
           {ask.allowed ? (
             <div className="flex gap-1.5">
-              <Button size="sm" disabled={busy} onClick={() => post('/api/onboard/run', {})} data-testid="onboard-run">
+              <Button size="sm" disabled={busy} onClick={() => post('/api/onboard/run', {})} data-testid="onboard-run-step">
                 {busy ? 'Running…' : 'Run as root (machine helper)'}
               </Button>
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => post('/api/onboard/answer', { answer: 'declined' })}>
