@@ -371,6 +371,31 @@ export const EventSchemas = {
   /** A held task started (or stopped being ready): how long it waited, on which files. */
   'hotspot.released': z.strictObject({ issue, waited_ms: z.number().int().nonnegative(), files: z.array(z.string()), started: z.boolean() }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
+  // test runs (src/testrun/): a project's CI run by the coordinator, as the sandboxed test user
+  'testrun.queued': z.strictObject({ id: z.string(), sha, kind: z.enum(['fast', 'full']), prs: z.array(z.number().int().positive()), shard: z.strictObject({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable() }),
+  /** It has a slot and the full-run lock (shared); `lock_wait_ms`: how long an exclusive holder kept it waiting. */
+  'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative() }),
+  /** One tier's outcome. `summary`: the end of its output; `log_ref`: its full log in the instance's state (never a viewer's). */
+  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable() }),
+  /** `results`: each tier's pass or fail, all a viewer sees of a run. */
+  'testrun.finished': z.strictObject({
+    id: z.string(),
+    sha,
+    kind: z.enum(['fast', 'full']),
+    prs: z.array(z.number().int().positive()),
+    ok: z.boolean(),
+    outcome: z.enum(['done', 'cancelled', 'error', 'interrupted']),
+    results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
+    detail: z.string().max(2000),
+  }),
+  'testrun.wipe_failed': z.strictObject({ id: z.string(), left: z.array(z.string()) }),
+  'testrun.checks_posted': z.strictObject({ id: z.string(), sha, checks: z.array(z.strictObject({ name: z.string(), conclusion: z.enum(['success', 'failure', 'cancelled']) })) }),
+  /** no_permission: the App lacks Checks: write (the owner adds it); the checks were not posted. */
+  'testrun.checks_failed': z.strictObject({ id: z.string(), sha, reason: z.enum(['no_permission', 'error']), detail: z.string().max(1000) }),
+  /** The App's Checks permission on the repo, as GitHub reports it. */
+  'testrun.checks_permission': z.strictObject({ level: z.enum(['write', 'read', 'none', 'unknown']), detail: z.string().max(500) }),
+  /** The sandbox's own check (the helper's `check`): no run starts until it passed. */
+  'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000) }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;

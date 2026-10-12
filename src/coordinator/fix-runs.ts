@@ -1,4 +1,5 @@
 // CI fix runs and conflict fix runs on the harness's own PRs.
+import { localDoneWhen } from '../testrun/local.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -125,7 +126,7 @@ export abstract class FixRuns extends Landing {
     const { issue: n, number } = w;
     const last = <T>(type: StoredEvent['type']) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
     const claimed = last<EventPayload<'issue.claimed'>>('issue.claimed')!;
-    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
+    const doneWhen = localDoneWhen((last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList, this.d.cfg.tests);
     const frozen = last<EventPayload<'repro.frozen'>>('repro.frozen');
     const repro = frozen ? { path: frozen.path, hash: frozen.hash } : null;
     const issue = await this.d.backlog.get(n);
@@ -332,7 +333,7 @@ export abstract class FixRuns extends Landing {
     const { issue: n, number } = w;
     const last = <T>(type: StoredEvent['type']) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
     const claimed = last<EventPayload<'issue.claimed'>>('issue.claimed')!;
-    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
+    const doneWhen = localDoneWhen((last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList, this.d.cfg.tests);
     const frozen = last<EventPayload<'repro.frozen'>>('repro.frozen');
     const repro = frozen ? { path: frozen.path, hash: frozen.hash } : null;
     const issue = await this.d.backlog.get(n);

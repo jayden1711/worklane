@@ -1,6 +1,6 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
@@ -742,5 +742,69 @@ export function flockHeld(path: string): boolean | null {
     return false;
   } catch (e) {
     return (e as { status?: number }).status === 1 ? true : null;
+  }
+}
+
+/** A held flock(2) lock, kept by a small holder process until released (or this process exits: its stdin closes). */
+export interface HeldFlock {
+  release(): Promise<void>;
+}
+
+/**
+ * Take a flock(2) lock on `path`, shared or exclusive, waiting for as long as it takes (until `signal` aborts). The
+ * file is opened read-only, so a root-owned 0644 lock file works. A perl holder (perl ships with macOS and every
+ * Linux distribution) takes it and keeps it while its stdin is open, so a crashed coordinator never leaves it held.
+ * Rejects when the file is missing or the holder can't run: a run never goes ahead unlocked. Windows has no flock.
+ */
+export function holdFlock(path: string, mode: 'shared' | 'exclusive', signal?: AbortSignal): Promise<HeldFlock> {
+  if (process.platform === 'win32') return Promise.reject(new Error('flock locks need macOS or Linux'));
+  if (!existsSync(path)) return Promise.reject(new Error(`the lock file ${path} is missing`));
+  const script = 'use Fcntl qw(:flock); $| = 1; open(my $f, "<", $ARGV[0]) or exit 2; flock($f, $ARGV[1] eq "x" ? LOCK_EX : LOCK_SH) or exit 3; print "held\\n"; 1 while <STDIN>; exit 0';
+  return new Promise((resolve, reject) => {
+    const child = spawn('perl', ['-e', script, path, mode === 'exclusive' ? 'x' : 's'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    let held = false;
+    const onAbort = () => child.kill('SIGKILL');
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdin.on('error', () => {});
+    child.stdout.on('data', (d: Buffer) => {
+      if (held || !d.toString().includes('held')) return;
+      held = true;
+      signal?.removeEventListener('abort', onAbort);
+      resolve({
+        release: () =>
+          new Promise<void>((done) => {
+            if (child.exitCode !== null || child.signalCode !== null) return done();
+            child.once('exit', () => done());
+            child.stdin.end();
+            setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
+          }),
+      });
+    });
+    child.on('error', (e) => reject(new Error(`can't take ${path}: ${e.message}`)));
+    child.on('exit', (code) => {
+      signal?.removeEventListener('abort', onAbort);
+      if (!held) reject(signal?.aborted ? new Error('cancelled while waiting for the lock') : new Error(`can't take ${path} (holder exit ${code ?? 'killed'})`));
+    });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+/** Who holds flock(2) locks on `path` now, each holder's pid and mode, from /proc/locks (Linux); null where it can't tell. */
+export function flockHolders(path: string): { pid: number; mode: 'shared' | 'exclusive' }[] | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    const st = statSync(path, { bigint: true });
+    const major = ((st.dev >> 8n) & 0xfffn) | ((st.dev >> 32n) & ~0xfffn);
+    const minor = (st.dev & 0xffn) | ((st.dev >> 12n) & ~0xffn);
+    const out: { pid: number; mode: 'shared' | 'exclusive' }[] = [];
+    for (const line of readFileSync('/proc/locks', 'utf8').split('\n')) {
+      const f = line.trim().split(/\s+/);
+      if (f[1] !== 'FLOCK') continue;
+      const id = /^([0-9a-f]+):([0-9a-f]+):(\d+)$/i.exec(f[5] ?? '');
+      if (id && BigInt(`0x${id[1]}`) === major && BigInt(`0x${id[2]}`) === minor && BigInt(id[3]!) === st.ino) out.push({ pid: Number(f[4]), mode: f[3] === 'WRITE' ? 'exclusive' : 'shared' });
+    }
+    return out;
+  } catch {
+    return null;
   }
 }

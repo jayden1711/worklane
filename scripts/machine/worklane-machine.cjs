@@ -5,6 +5,7 @@
 //
 //   worklane-machine set-slots <1..16>     the machine's agent slot cap (slots.json max_agents)
 //   worklane-machine set-updates on|off    automatic engine updates (updates.json enabled)
+//   worklane-machine set-test-slots <1..8> how many test runs go at once (slots.json max_test_runs)
 //
 // Each change is written atomically (a temp file in the same directory, then a rename), appended
 // as one JSON line to the machine change log (who, what, from, to, when; nothing secret), and
@@ -18,13 +19,14 @@ const { execFileSync } = require('node:child_process');
 const ETC = '/etc/worklane';
 const LOG = '/var/lib/worklane/machine-changes.jsonl';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8>';
 
 /** The change an argument list asks for, or null when it is anything but the exact allowed forms. */
 function parse(args) {
   if (args.length !== 2) return null;
   const [cmd, arg] = args;
   if (cmd === 'set-slots' && /^([1-9]|1[0-6])$/.test(arg)) return { what: 'slots.max_agents', file: 'slots.json', key: 'max_agents', value: Number(arg) };
+  if (cmd === 'set-test-slots' && /^[1-8]$/.test(arg)) return { what: 'slots.max_test_runs', file: 'slots.json', key: 'max_test_runs', value: Number(arg) };
   if (cmd === 'set-updates' && (arg === 'on' || arg === 'off')) return { what: 'updates.enabled', file: 'updates.json', key: 'enabled', value: arg === 'on' };
   return null;
 }

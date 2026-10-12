@@ -83,10 +83,11 @@ function evaluateChecks(runs, required) {
   return { ok: true };
 }
 
-/** Quiet: no live agent slot or full-run lock, and no emergency stop. entries: [{ name, pid|null }]. */
+/** Quiet: no live agent slot, test-run slot or full-run lock, and no emergency stop. entries: [{ name, pid|null }]. */
 function quiet(entries, alive) {
   for (const e of entries) {
     if (e.name === 'STOP') return { quiet: false, why: 'an emergency stop is in force' };
+    if (/^test-\d+\.lock$/.test(e.name) && e.pid && alive(e.pid)) return { quiet: false, why: 'a test run is going' };
     if ((/^agent-\d+\.lock$/.test(e.name) || e.name === 'full-run.lock') && e.pid && alive(e.pid)) return { quiet: false, why: e.name === 'full-run.lock' ? 'a full test run is going' : 'an agent is running' };
   }
   return { quiet: true };

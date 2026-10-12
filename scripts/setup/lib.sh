@@ -74,8 +74,8 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 18
-# allowed commands (set-slots 1..16, set-updates on, set-updates off) as root, and nothing else.
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 26
+# allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 machine_sudoers() {
@@ -86,7 +86,8 @@ machine_sudoers() {
   done
   for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
-  printf '# Coordinators may change the machine slot cap and the update switch, through one validating helper.\n'
+  for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
+  printf '# Coordinators may change the machine slot caps and the update switch, through one validating helper.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
