@@ -25,7 +25,7 @@ import { pushProblems } from './push-check.js';
 import { needsPlan, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { changedFiles } from './merge-base.js';
-import { importsOf, lightCheckPlan } from './light-check.js';
+import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow } from './settings.js';
@@ -1104,6 +1104,12 @@ export class Coordinator extends Gardener {
     if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
     if (done?.outcome === 'conflict') return 'conflict'; // GitHub should report it next, and the conflict path take it (capped in mergeOrWait)
     if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
+      // Debounced: a burst of moves of main checks at most twice, then the newest main once the window allows.
+      const wait = lightCheckWait(this.d.log.read(0, ['light_check.started']).filter((e) => (e.payload as { number: number }).number === number).map((e) => Date.parse(e.ts)), Date.now());
+      if (wait > 0) {
+        this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + wait);
+        return 'pending';
+      }
       this.lightRunning.add(number);
       void this.lightCheck(w, pr, baseRef, mainSha, plan.overlap)
         .catch((e: Error) => this.emit('coordinator.error', { instance: this.d.instance, where: `combined check #${number}`, kind: 'error', message: e.message.slice(0, 500) }))
