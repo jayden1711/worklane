@@ -95,6 +95,41 @@ test('protected harness files: agents denied (including shell redirects); humans
   assert.equal(bash('echo x > .claude/settings.json', '/p', false), 'none');
 });
 
+test('regression: everything under .claude/ and the config folder is protected for agents, whatever the project lists', () => {
+  // A project whose guardrails protect nothing: the built-in harness paths still apply.
+  const bare = GuardrailsConfig.parse({ version: 1, rules: [], protected_paths: [], examples: { must_block: [], must_ask: [], must_allow: [] } });
+  const c = (agent = true) => exampleContext(bare, '/p', agent);
+  const tool = (t: string, path: string, agent = true) => evaluate({ tool: t, input: { file_path: `/p/${path}` }, cwd: '/p' }, bare, c(agent)).decision;
+  const sh = (command: string, agent = true) => evaluate({ tool: 'Bash', input: { command }, cwd: '/p' }, bare, c(agent)).decision;
+  assert.equal(tool('Edit', '.claude/settings.json'), 'deny');
+  assert.equal(tool('Write', '.claude/x.json'), 'deny', 'a new file under .claude/ too');
+  assert.equal(tool('MultiEdit', '.claude/skills/a/SKILL.md'), 'deny');
+  assert.equal(tool('Write', '.worklane/tests.yaml'), 'deny');
+  for (const command of [
+    'echo {} > .claude/x.json',
+    'printf x | tee -a .claude/settings.json',
+    'cp /tmp/s.json .claude/settings.json',
+    'cp /tmp/x.json .claude',
+    'mv /tmp/s.json .claude/settings.local.json',
+    'mv .claude/settings.json /tmp/old.json',
+    "sed -i 's/true/false/' .claude/settings.json",
+    "perl -pi -e 's/a/b/' .claude/settings.json",
+    'rm -rf .claude',
+    'touch .claude/x.json',
+    'mkdir -p .claude/hooks',
+    'ln -s /tmp/evil.json .claude/settings.json',
+    'dd if=/tmp/x of=.claude/settings.json',
+    "bash -c 'cp /tmp/x .worklane/review.yaml'",
+  ]) assert.equal(sh(command), 'deny', command);
+  // Reading them, writing elsewhere, and people's own sessions are unaffected.
+  assert.equal(sh('cat .claude/settings.json'), 'none');
+  assert.equal(sh('cp .claude/settings.json /tmp/copy.json'), 'none');
+  assert.equal(sh("sed -n '1p' .claude/settings.json"), 'none');
+  assert.equal(tool('Edit', 'src/a.ts'), 'none');
+  assert.equal(tool('Edit', '.claude/settings.json', false), 'none');
+  assert.equal(sh('echo {} > .claude/x.json', false), 'none');
+});
+
 test('secret files: agents may not read them by tool or shell; exclusions apply; humans unaffected', () => {
   const withSecrets = GuardrailsConfig.parse({ ...cfg, secret_paths: ['./.env', './.env.*', '!./.env.example', '~/.railway/**'] });
   const c = (agent: boolean) => ({ ...exampleContext(withSecrets, '/p', agent), home: '/home/u' });

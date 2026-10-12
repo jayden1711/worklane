@@ -10,8 +10,46 @@ export interface SimpleCommand {
   argv: string[];
   /** VAR=value assignments that prefixed the command. */
   assignments: Record<string, string>;
-  /** Files written by redirection (>, >>, &>) or tee. */
+  /**
+   * Files written by redirection (>, >>, &>) or tee, or that the command's own arguments name as changed: copied
+   * or moved to, moved or removed, edited in place (sed -i, perl -i), created (touch, mkdir), linked, dd of=.
+   * A copy or move into what may be a directory is also listed with the file's name in it, so `cp x .claude`
+   * counts as a write to `.claude/x`.
+   */
   writes: string[];
+}
+
+const COPY_LIKE = new Set(['cp', 'ln', 'install', 'rsync']);
+const CHANGES_EACH = new Set(['rm', 'rmdir', 'unlink', 'touch', 'truncate', 'mkdir', 'shred']);
+
+/** Every operand of a command that it writes, moves or removes (see SimpleCommand.writes). */
+function argumentWrites(base: string, argv: string[]): string[] {
+  const args = argv.slice(1);
+  const operands = args.filter((a) => !a.startsWith('-'));
+  const into = (dest: string, srcs: string[]) => [dest, ...srcs.map((s) => `${dest.replace(/\/+$/, '')}/${basename(s)}`)];
+  // mv also changes its sources: they're gone from where they were.
+  if (base === 'mv') return operands.length < 2 ? [] : [...operands.slice(0, -1), ...into(operands.at(-1)!, operands.slice(0, -1))];
+  if (COPY_LIKE.has(base)) return operands.length < 2 ? [] : into(operands.at(-1)!, operands.slice(0, -1));
+  if (CHANGES_EACH.has(base)) return operands;
+  if (base === 'dd') return args.filter((a) => a.startsWith('of=')).map((a) => a.slice(3));
+  if (base === 'sed' || base === 'perl') {
+    if (!args.some((a) => (base === 'sed' && a.startsWith('--in-place')) || /^-[a-zA-Z]*i/.test(a))) return [];
+    // The script is the first operand unless given with -e/-f (or perl -e/-E); the rest are the files edited.
+    const files: string[] = [];
+    let script = false;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i]!;
+      if (/^-[a-zA-Z]*[efE]$/.test(a) || a === '--expression' || a === '--file') {
+        script = true;
+        i++;
+      } else if (!a.startsWith('-')) {
+        if (!script) script = true;
+        else files.push(a);
+      }
+    }
+    return files;
+  }
+  return [];
 }
 
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
@@ -245,6 +283,7 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
     if (argv.length || Object.keys(assignments).length || writes.length) {
       const base = argv.length ? basename(argv[0]!) : '';
       if (base === 'tee') for (const f of argv.slice(1)) if (!f.startsWith('-')) writes.push(f);
+      writes.push(...argumentWrites(base, argv));
       result.push({ argv, assignments, writes });
       // Re-parse the script given to a shell or eval.
       if (SHELLS.has(base)) {

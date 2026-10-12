@@ -1,17 +1,22 @@
-// `install`: scaffold the config folder, merge hooks and permissions into
-// .claude/settings.json (keeping the project's own entries), and optionally
-// add a gitleaks pre-commit hook. Re-running is safe: our entries are
+// `install`: scaffold the config folder, write the guardrail hooks and
+// permission rules, and optionally add a gitleaks pre-commit hook.
+// With --instance, the hooks and rules go to the instance's agent settings
+// (see agent-settings.ts): they apply to its agent runs only, and the repo
+// needs no .claude/settings.json. Without, they're merged into the
+// checkout's .claude/settings.json (keeping the project's own entries), for
+// local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
-import { policiesForRepo } from './instance.js';
+import { instancesDir, policiesForRepo } from './instance.js';
+import { writeOwnerOnly } from './os/index.js';
 
-/** Leading env assignment that marks our hook commands (the shell ignores it otherwise). */
-export const HOOK_MARKER = `${BRAND.envPrefix}_HOOK=1`;
+export { HOOK_MARKER };
 export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
 
 /** The engine's packaged templates directory. */
@@ -48,15 +53,6 @@ export function engineRef(root: string, engineCli: string): string {
   const rel = relative(root, engineCli);
   return !rel.startsWith('..') && !isAbsolute(rel) ? `$CLAUDE_PROJECT_DIR/${rel.split('\\').join('/')}` : engineCli;
 }
-
-interface HookEntry {
-  matcher?: string;
-  hooks: { type: 'command'; command: string; timeout?: number }[];
-}
-type Settings = Record<string, unknown> & {
-  hooks?: Record<string, HookEntry[]>;
-  permissions?: { allow?: string[]; deny?: string[]; ask?: string[] } & Record<string, unknown>;
-};
 
 export function mergeSettings(existing: Settings, enginePath: string, preApproved: string[], domains: string[], secretPaths: string[] = []): Settings {
   const s: Settings = structuredClone(existing);
@@ -130,6 +126,11 @@ export interface InstallOptions {
   /** Path to the engine's cli.js (defaults to this running engine). */
   engineCli?: string;
   gitHooks?: boolean;
+  /**
+   * The instance whose agents run this checkout: the hooks and rules go to its agent settings (in its home, which
+   * only the coordinator user can read), never into the checkout.
+   */
+  instance?: string;
 }
 
 export interface InstallReport {
@@ -139,10 +140,32 @@ export interface InstallReport {
   notes: string[];
 }
 
+/**
+ * The engine as it was invoked, following one link only: a machine-wide command (/usr/local/bin/<cli> -> a stable
+ * /opt/<cli>/current/... path) stays on the stable path, not the versioned release Node resolves it to, which an
+ * engine update removes.
+ */
+export function invokedEngine(argv1 = process.argv[1]): string | undefined {
+  if (!argv1) return undefined;
+  try {
+    return resolve(dirname(argv1), readlinkSync(argv1));
+  } catch {
+    return resolve(argv1);
+  }
+}
+
+/** The hooks and rules for an instance's agent runs: our entries only, with every hook kept on. */
+export function agentSettings(enginePath: string, preApproved: string[], domains: string[], secretPaths: string[]): Settings {
+  return { disableAllHooks: false, ...mergeSettings({}, enginePath, preApproved, domains, secretPaths) };
+}
+
 export function install(opts: InstallOptions): InstallReport {
   const root = resolve(opts.root);
   const notes: string[] = [];
   const cfgDir = join(root, BRAND.configDir);
+  // An instance's home must exist before anything is written for it.
+  const instanceHome = opts.instance ? join(instancesDir(), opts.instance) : null;
+  if (instanceHome && !existsSync(instanceHome)) throw new Error(`no instance "${opts.instance}" at ${instanceHome}; run \`${BRAND.cli} instance init\` first`);
   let scaffolded = false;
   if (!existsSync(cfgDir)) {
     cpSync(templatesDir(), cfgDir, { recursive: true });
@@ -155,11 +178,22 @@ export function install(opts: InstallOptions): InstallReport {
   }
   // Settings are generated from valid config only; a broken config fails here, loudly.
   const cfg = loadConfig(root);
-  const engineCli = resolve(opts.engineCli ?? projectLocalEngine(root) ?? fileURLToPath(new URL('./cli.js', import.meta.url)));
-  const settingsPath = join(root, '.claude', 'settings.json');
-  mkdirSync(dirname(settingsPath), { recursive: true });
-  const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.guardrails.credential_stores);
-  writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+  const running = fileURLToPath(new URL('./cli.js', import.meta.url));
+  let settingsPath: string;
+  if (instanceHome) {
+    // Agent runs only. Never the checkout's node_modules engine: agents can write the checkout. An absolute path,
+    // owner-only file in the coordinator's instance home: the agent user can neither read nor change it.
+    const engineCli = resolve(opts.engineCli ?? running);
+    settingsPath = agentSettingsPath(instanceHome);
+    writeOwnerOnly(settingsPath, JSON.stringify(agentSettings(engineCli, cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.guardrails.credential_stores), null, 2) + '\n');
+    if (existsSync(join(root, '.claude', 'settings.json'))) notes.push(`agents no longer get their hooks from this checkout's .claude/settings.json but from ${settingsPath}; the repo can drop that file`);
+  } else {
+    const engineCli = resolve(opts.engineCli ?? projectLocalEngine(root) ?? running);
+    settingsPath = join(root, '.claude', 'settings.json');
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    const merged = mergeSettings(readJson(settingsPath), engineRef(root, engineCli), cfg.guardrails.pre_approved, cfg.guardrails.network.allow, cfg.guardrails.credential_stores);
+    writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+  }
   const report: InstallReport = { scaffolded, settingsPath, notes };
   if (opts.gitHooks) report.gitHook = installGitHook(root);
   else notes.push('git pre-commit secret scan not installed (pass --git-hooks); it applies to every worktree of the repo');

@@ -338,7 +338,7 @@ export interface ResearchLaneSettings {
  * is a bundle with no project settings, so the project's own hook doesn't run there. `research-repo` may read
  * the repo like any agent. Both get their settings whether or not the policy's sandbox is on.
  */
-export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined): Record<string, { runAs?: RunAs; settings: ResearchLaneSettings }> {
+export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined): Record<string, { runAs?: RunAs; settings: ResearchLaneSettings; ownHooks?: boolean }> {
   const root = dirname(i.repo.path);
   const researchRoot = join(root, RESEARCH_DIR);
   const runAs = base?.runAs;
@@ -353,7 +353,8 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
     return { ...(i.policy.sandbox ? { sandbox: s.sandbox } : {}), permissions: { deny }, ...hooks };
   };
   return {
-    [RESEARCH_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(noRepo, true) },
+    // Its own hook, in research mode: the instance's guardrail hooks would refuse a directory with no project config.
+    [RESEARCH_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(noRepo, true), ownHooks: true },
     [RESEARCH_REPO_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(always, false) },
   };
 }

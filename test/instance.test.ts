@@ -195,6 +195,21 @@ test('an instance coordinator refuses to start without its own credentials', () 
   assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
 });
 
+test("regression: an instance coordinator refuses to start without its agents' guardrail settings, naming the install command", { skip: process.platform === 'win32' && 'agent users are POSIX users' }, () => {
+  const { dir, made } = two();
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
+  rmSync(join(made[0]!.home, 'agent-settings.json'));
+  // Hooks in the checkout's own .claude/settings.json (an older install) don't stand in for them.
+  const repo = loadInstance('alpha', dir).repo.path;
+  const inst = spawnSync(process.execPath, [cli, 'install', '--root', repo], { encoding: 'utf8', env });
+  assert.equal(inst.status, 0, inst.stderr);
+  const r = spawnSync(process.execPath, [cli, 'coordinator', 'run', '--instance', 'alpha', '--once'], { encoding: 'utf8', env, timeout: 120_000 });
+  assert.equal(r.status, 1);
+  assert.ok(r.stderr.includes(`not started: no agent settings at ${join(made[0]!.home, 'agent-settings.json')}`), r.stderr);
+  assert.ok(r.stderr.includes(`${BRAND.cli} install --root ${JSON.stringify(repo)} --instance alpha`), r.stderr);
+  assert.equal(existsSync(join(made[0]!.home, 'state', 'events.db')), false, 'nothing ran');
+});
+
 test('agents get the instance\'s Claude config dir, and still no tokens', () => {
   const env = agentEnv({ PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/inst/claude', GH_TOKEN: 't', GH_CONFIG_DIR: '/inst/gh' }, 'cli');
   assert.equal(env.CLAUDE_CONFIG_DIR, '/inst/claude');

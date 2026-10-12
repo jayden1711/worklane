@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
+import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
@@ -293,11 +294,19 @@ export class CliRunner implements AgentRunner {
     private base: NodeJS.ProcessEnv = process.env,
     private bin = 'claude',
     private runAs?: RunAs,
-    /** Per lane: the user and sandbox settings. When set, a run in an unknown lane is refused. */
-    private lanes?: Record<string, { runAs?: RunAs; settings?: object }>,
+    /**
+     * Per lane: the user and sandbox settings. When set, a run in an unknown lane is refused. A lane with `ownHooks`
+     * brings its own hooks (research without repo access) and doesn't get the guardrails below.
+     */
+    private lanes?: Record<string, { runAs?: RunAs; settings?: object; ownHooks?: boolean }>,
     /** Agents' commits carry this identity, never one they pick. */
     private identity: CommitIdentity = DEFAULT_COMMIT_IDENTITY,
     private retry: RetryOptions = {},
+    /**
+     * An instance's guardrail hooks and rules, read for every run and passed with --settings (agent-settings.ts).
+     * Throws when there are none: the run doesn't start.
+     */
+    private guardrails?: () => Settings,
   ) {}
 
   /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
@@ -352,6 +361,18 @@ export class CliRunner implements AgentRunner {
     if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
     const runAs = lane ? lane.runAs : this.runAs;
     const runEnv = runAs ? runAsEnv(env, runAs) : env;
+    // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
+    // could loosen them.
+    let guard: Settings | null = null;
+    if (this.guardrails && !lane?.ownHooks) {
+      try {
+        guard = this.guardrails();
+      } catch (e) {
+        return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
+      }
+      const refusal = projectSettingsRefusal(req.cwd, guard);
+      if (refusal) return { reason: 'failed', detail: `${refusal}; not starting`, costUsd: 0, turns: 0, model: req.model };
+    }
     // Preflight, inside the login lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
     const status = claudeAuthStatus(runEnv, runAs, this.bin);
@@ -374,7 +395,9 @@ export class CliRunner implements AgentRunner {
     // The live view of the same run, under the record's id: redacted and capped, ended when the run ends.
     const feed = record && req.stateDir ? new RunFeed(req.stateDir, { run: record.id, issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model, cwd: req.cwd }) : null;
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
-    const settings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
+    const laneSettings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
+    // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
+    const settings = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.

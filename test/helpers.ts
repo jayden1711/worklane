@@ -3,6 +3,8 @@ import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { agentSettingsPath } from '../src/agent-settings.js';
+import { agentSettings } from '../src/install.js';
 
 export const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 export const engineCli = join(repoRoot, 'dist', 'src', 'cli.js');
@@ -22,10 +24,14 @@ export function exampleProject(): { dir: string; stateDir: string } {
   return { dir, stateDir: join(base, 'state') };
 }
 
-/** Point a test instance's run_as at the current user, so a coordinator started in a test passes the agent-user check. */
+/**
+ * Point a test instance's run_as at the current user, and give its agents their guardrail settings, so a
+ * coordinator started in a test passes the agent-user and agent-hooks checks.
+ */
 export function agentIsSelf(instanceHome: string): void {
   const f = join(instanceHome, 'instance.yaml');
   writeFileSync(f, readFileSync(f, 'utf8').replace(/^ {2}agent_user: .*$/m, `  agent_user: ${userInfo().username}`).replace(/^ {2}agent_home: .*$/m, `  agent_home: ${JSON.stringify(homedir())}`));
+  writeFileSync(agentSettingsPath(instanceHome), JSON.stringify(agentSettings(engineCli, [], [], [])), { mode: 0o600 });
 }
 
 /**
