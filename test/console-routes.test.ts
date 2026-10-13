@@ -11,7 +11,7 @@ import { secretsDir } from '../src/console/secrets.js';
 import type { Role } from '../src/console/asks.js';
 import { MACHINE_HELPER } from '../src/machine.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
-import { exampleProject, machineOwnersFile } from './helpers.js';
+import { exampleProject } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 // Not secret-shaped (the log's pattern redaction wouldn't catch it): only never writing it keeps it out.
@@ -28,7 +28,6 @@ async function site(roles: Record<string, Role> = { olive: 'owner', wendy: 'writ
     return 'slot cap now 4';
   };
   const home = join(dir, 'home');
-  const owners = machineOwnersFile('olive');
   const d = await startDashboard({
     root,
     cfg: loadConfig(root),
@@ -40,11 +39,9 @@ async function site(roles: Record<string, Role> = { olive: 'owner', wendy: 'writ
     slotsDir: join(dir, 'slots'),
     secretsHome: home,
     machine: {},
-    machineOwnersFile: owners,
-    // A person signed in just now, from an allowed console device (a machine change needs both).
     session: (req) => {
       const login = String(req.headers['x-login'] ?? '');
-      return login ? { login, role: roles[login] ?? null, authenticatedAt: Date.now(), csrfOk: true, deviceOk: true } : null;
+      return login ? { login, role: roles[login] ?? null, authenticatedAt: null, csrfOk: true } : null;
     },
   });
   const base = d.url.split('/?')[0]!;
@@ -55,7 +52,7 @@ async function site(roles: Record<string, Role> = { olive: 'owner', wendy: 'writ
     bodies.push(text);
     return { status: r.status, json: JSON.parse(text) as Record<string, unknown> };
   };
-  return { d, db, dir, log, home, calls, exec, call, bodies, owners, a: asks(log) };
+  return { d, db, dir, log, home, calls, exec, call, bodies, a: asks(log) };
 }
 
 /** Everything written to stdout and stderr while `fn` runs. */
@@ -155,12 +152,12 @@ test("a root step off the helper's allowlist is refused and never reaches sudo; 
     assert.equal((await s.call(`/api/asks/${ok.id}/run`, 'olive', '{}')).status, 409, 'one request at a time');
     const listed = (await s.call('/api/asks', 'olive')).json.asks as { id: string; request: { status: string } | null }[];
     assert.equal(listed.find((x) => x.id === ok.id)!.request!.status, 'pending');
-    runMachineRequests({ log: s.log, instance: 'demo', exec: s.exec, ownersFile: s.owners });
+    runMachineRequests({ log: s.log, instance: 'demo', exec: s.exec });
     assert.deepEqual(s.calls, [['sudo', '-n', MACHINE_HELPER, 'set-slots', '4']]);
     assert.equal(s.a.get(ok.id)!.answer!.answer, 'ran');
     assert.equal(s.a.get(ok.id)!.answer!.by, 'olive');
     assert.equal((await s.call(`/api/asks/${ok.id}/run`, 'olive', '{}')).status, 409, 'once');
-    runMachineRequests({ log: s.log, instance: 'demo', exec: s.exec, ownersFile: s.owners });
+    runMachineRequests({ log: s.log, instance: 'demo', exec: s.exec });
     assert.equal(s.calls.length, 1);
   } finally {
     s.log.close();

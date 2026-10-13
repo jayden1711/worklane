@@ -5,7 +5,6 @@
 import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
-import type { MachineRequester } from '../machine-owners.js';
 import { MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
@@ -69,11 +68,10 @@ export function checkRootStep(command: string, args: readonly string[]): RootSte
 
 /**
  * Ask the coordinator to run an open, allowlisted root_step ask through the helper (src/machine-requests.ts):
- * the dashboard can't sudo, and never tries. The instance's owner only, and a machine owner with a fresh sign-in on
- * an allowed device (or the break-glass; src/machine-owners.ts). One off the allowlist is refused here, and again by
+ * the dashboard can't sudo, and never tries. Owner only. One off the allowlist is refused here, and again by
  * the coordinator. The coordinator answers the ask (ran or failed, with the output) once it has run.
  */
-export function requestRootStep(log: EventLog, id: string, a: { by: string; role: Role | null; requester: MachineRequester; ownersFile?: string }): { ask: Ask; request: MachineRequest } {
+export function requestRootStep(log: EventLog, id: string, a: { by: string; role: Role | null }): { ask: Ask; request: MachineRequest } {
   const ask = asks(log).get(id);
   if (!ask) throw new AskError(`no ask ${id}`, 404);
   if (!mayAnswerAsk(ask, a.role)) throw new AskError(`only the owner may run a root step; @${a.by || 'unknown'} (${a.role ?? 'no role'}) may not`, 403);
@@ -82,7 +80,7 @@ export function requestRootStep(log: EventLog, id: string, a: { by: string; role
   const c = checkRootStep(ask.command, ask.args);
   if (!c.allowed) throw new AskError(`not run: ${c.why}`, 403);
   try {
-    return { ask, request: requestMachineChange(log, { args: [ask.command, ...ask.args], requester: a.requester, via: 'ask', ask: id, ...(a.ownersFile ? { ownersFile: a.ownersFile } : {}) }) };
+    return { ask, request: requestMachineChange(log, { args: [ask.command, ...ask.args], by: a.by, via: 'ask', ask: id }) };
   } catch (e) {
     if (e instanceof MachineRequestError) throw new AskError(e.message, e.status);
     throw e;

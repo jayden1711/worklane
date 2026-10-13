@@ -118,36 +118,3 @@ console_sudoers() {
   printf '# The dashboard hub (%s) may start the owner terminal as %s: the console shell, exactly check or shell.\n' "$viewer" "$admin"
   printf '%s ALL=(%s) NOPASSWD: %s check, %s shell\n' "$viewer" "$admin" "$CONSOLE_SHELL" "$CONSOLE_SHELL"
 }
-
-# The machine owners (src/machine-owners.ts): the GitHub logins that may change the machine from the dashboard
-# (slot caps, engine updates), as opposed to an instance's owners. Root's file; every instance user reads it.
-MACHINE_OWNERS=/etc/worklane/machine-owners.json
-# A GitHub login, strictly: letters, digits and single dashes inside, at most 39 characters.
-github_login_ok() { [[ "${#1}" -le 39 && "$1" =~ ^[A-Za-z0-9](-?[A-Za-z0-9])*$ ]]; }
-# {"owners":[...]} from a comma-separated list of logins; refuses an empty list, an empty entry, a bad login or a repeat.
-machine_owners_json() {
-  local csv="$1" l low out="" seen="," logins
-  [[ -n "$csv" && "$csv" != *, && "$csv" != ,* && "$csv" != *,,* ]] || { echo "--machine-owner: GitHub logins, comma-separated, at least one, no empty ones" >&2; return 2; }
-  IFS=, read -ra logins <<< "$csv"
-  for l in "${logins[@]}"; do
-    github_login_ok "$l" || { echo "--machine-owner: $l isn't a GitHub login (letters, digits and single dashes, at most 39)" >&2; return 2; }
-    low="$(printf '%s' "$l" | tr '[:upper:]' '[:lower:]')"
-    [[ "$seen" != *",$low,"* ]] || { echo "--machine-owner: $l is listed twice" >&2; return 2; }
-    seen="$seen$low,"
-    out="${out:+$out,}\"$l\""
-  done
-  printf '{"owners":[%s]}\n' "$out"
-}
-# Write the machine owners file, root:root 0644: a dotted temp name next to it, then moved into place.
-install_machine_owners() {
-  local csv="$1" file="${2:-$MACHINE_OWNERS}" json tmp
-  json="$(machine_owners_json "$csv")" || return 2
-  [ -d "$(dirname "$file")" ] || { echo "no $(dirname "$file"); run machine.sh first" >&2; return 1; }
-  tmp="$(dirname "$file")/.$(basename "$file").tmp"
-  rm -f "$tmp"
-  printf '%s\n' "$json" > "$tmp"
-  chown root:root "$tmp"
-  chmod 0644 "$tmp"
-  mv -f "$tmp" "$file"
-  echo "machine owners ($file): $json"
-}

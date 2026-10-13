@@ -1,6 +1,5 @@
 // The coordinator's side of machine changes (src/machine-requests.ts): each request the dashboard recorded is
-// claimed once, checked again against the machine helper's allowlist and the machine owners (the request names who
-// asked; src/machine-owners.ts), run through the helper with sudo -n (the
+// claimed once, checked again against the machine helper's allowlist, run through the helper with sudo -n (the
 // coordinator's unit allows it; the dashboard's doesn't), and its outcome recorded. A request a coordinator
 // claimed but never finished (it stopped mid-run) is marked interrupted, never run again.
 import type { EventLog } from '../events/log.js';
@@ -8,7 +7,6 @@ import { checkRootStep } from '../console/root-steps.js';
 import { recordAnswer } from '../console/asks.js';
 import type { Exec } from '../machine.js';
 import { MACHINE_EVENTS, machineRefusal, machineRequests, type MachineRequest } from '../machine-requests.js';
-import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners, ownersText } from '../machine-owners.js';
 
 /** A claim older than this with no outcome is from a coordinator that stopped mid-run (the helper times out at 30 s). */
 export const STALE_CLAIM_MS = 5 * 60_000;
@@ -19,18 +17,6 @@ export interface MachineRequestDeps {
   /** How the helper is run (sudo -n); machine.ts's default when unset. */
   exec?: Exec;
   now?: () => number;
-  /** The machine owners file; the system's when unset (tests). */
-  ownersFile?: string;
-}
-
-/**
- * Why the person a request names may not change the machine; null when they may. Checked here as well as by the
- * dashboard: a request written to the log some other way, naming someone who isn't a machine owner, never runs.
- * One marked as the break-glass's is allowed, as the dashboard allows it.
- */
-export function requesterRefusal(r: Pick<MachineRequest, 'by' | 'breakGlass'>, file = MACHINE_OWNERS_FILE): string | null {
-  if (r.breakGlass) return null;
-  return isMachineOwner(r.by, file) ? null : `@${r.by} isn't one of the machine's owners (machine owners: ${ownersText(machineOwners(file))}), so it wasn't run`;
 }
 
 /** Claim a pending request: append machine.started inside a write transaction, so of two takers only one wins. */
@@ -73,7 +59,7 @@ export function runMachineRequests(d: MachineRequestDeps): number {
     }
     if (r.status !== 'pending' || !claim(d.log, r.id, d.instance)) continue;
     // Checked again here, whatever the dashboard checked: a request written any other way can't widen what runs.
-    const why = requesterRefusal(r, d.ownersFile) ?? machineRefusal(r.args);
+    const why = machineRefusal(r.args);
     if (why) {
       d.log.append('machine.finished', { id: r.id, outcome: 'refused', detail: why.slice(0, 1000) }, d.instance, 'coordinator');
       continue;

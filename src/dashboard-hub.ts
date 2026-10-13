@@ -25,9 +25,8 @@ import { createServer, request, type IncomingMessage, type Server, type ServerRe
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
-import { assertLoopbackHost, AUTH_AT_HEADER, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, DEVICE_HEADER, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
+import { assertLoopbackHost, AUTH_AT_HEADER, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 import { attachTerminal } from './console/terminal-server.js';
-import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
 import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
 import { currentUser } from './os/index.js';
 
@@ -121,9 +120,8 @@ const readToken = (i: HubInstance): string | null => {
  * Forward one API call to an instance's own server with its token; the instance's token never reaches the browser.
  * `login`: the signed-in person, named to the instance, which reads their role itself; null for the break-glass.
  * Only the headers the instance needs go upstream, built here: never a cookie, a CSRF token or a client's own login header.
- * `deviceOk`: Tailscale identified this write's device as an allowed console device (DEVICE_HEADER; machine changes need it).
  */
-function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null, authenticatedAt: number | null = null, deviceOk = false): void {
+function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null, authenticatedAt: number | null = null): void {
   const token = readToken(i);
   if (!token) return json(res, 502, { error: `can't read instance ${i.name}'s dashboard token (${i.tokenFile}): is its dashboard running, and the hub allowed to read it?` });
   search.delete('t');
@@ -132,7 +130,6 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   if (req.headers['last-event-id']) headers['last-event-id'] = String(req.headers['last-event-id']);
   if (login) headers[LOGIN_HEADER] = login;
   if (login && authenticatedAt) headers[AUTH_AT_HEADER] = String(authenticatedAt);
-  if (login && deviceOk) headers[DEVICE_HEADER] = '1';
   const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers }, (r) => {
     const h: Record<string, string> = { 'cache-control': 'no-store' };
     if (r.headers['content-type']) h['content-type'] = r.headers['content-type'];
@@ -236,9 +233,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     return { login: s.login, role: byName.has(instance) ? (knownRole(instance, s.login)?.role ?? null) : null, authenticatedAt: s.created, csrfOk: writeOk(req, sid) };
   };
   const session = opts.terminal?.session ?? hubSession;
-  const t = opts.terminal;
-  // The console's allowed devices, as Tailscale identifies them: the terminal needs one, and so does a machine change.
-  const devices: DeviceOptions = { allow: t?.devices ?? [], breakGlassPort: opts.breakGlassPort ?? HUB_BREAK_GLASS_PORT, ...(t?.whois ? { whois: t.whois } : {}), ...(t?.peerUid ? { peerUid: t.peerUid } : {}) };
 
   /** The hub's port: sign-in, sessions, and the instances as the signed-in person sees them. Never the token. */
   const server = createServer(async (req, res) => {
@@ -293,9 +287,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (m) {
           const inst = byName.get(m[1]!);
           if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${m[1]}` });
-          // A write says whether it came from an allowed console device (asked of Tailscale only for writes: they're rare).
-          const deviceOk = write && deviceRefusal(req, devices).why === null;
-          return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, session.created, deviceOk);
+          return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, session.created);
         }
         return json(res, 404, { error: 'not found: the hub serves /api/me, /api/hub and /api/i/<instance>/...' });
       }
@@ -333,13 +325,14 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   });
 
   // The owner terminal, on WebSocket upgrades to the sign-in port (src/console/terminal-server.ts); every attempt and command goes to the hub's audit log.
+  const t = opts.terminal;
   const detachTerminal = attachTerminal(server, {
     config: { consoleUser: t?.consoleUser ?? null, hubUser: t?.hubUser ?? currentUser() },
     instances: opts.instances.map((i) => i.name),
     session,
     audit: t?.audit ?? fileAudit(join(opts.stateDir, 'terminal-audit.jsonl')),
     // Never served on the break-glass server (only this one), and refused there anyway if it ever were.
-    devices,
+    devices: { allow: t?.devices ?? [], breakGlassPort: opts.breakGlassPort ?? HUB_BREAK_GLASS_PORT, ...(t?.whois ? { whois: t.whois } : {}), ...(t?.peerUid ? { peerUid: t.peerUid } : {}) },
     ...(t?.spawnPty ? { spawnPty: t.spawnPty } : {}),
     ...(t?.exec ? { exec: t.exec } : {}),
     ...(t?.now ? { now: t.now } : {}),

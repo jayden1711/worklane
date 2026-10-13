@@ -36,12 +36,6 @@ export const LOGIN_HEADER = 'x-dashboard-login';
 export const FRESH_HEADER = 'x-dashboard-fresh-role';
 /** The header the hub passes the person's sign-in time with (ms since the epoch), alongside LOGIN_HEADER. */
 export const AUTH_AT_HEADER = 'x-dashboard-authenticated-at';
-/**
- * Set (to 1) by the hub on a forwarded write when Tailscale identified the request's device as one of the console's
- * allowed devices (src/console/terminal-devices.ts); only the hub can tell, and it builds every forwarded header
- * itself, so a browser's own copy never reaches an instance. Machine changes need it (src/machine-owners.ts).
- */
-export const DEVICE_HEADER = 'x-dashboard-console-device';
 
 /**
  * Who is asking, in the shape the setup console (src/console/session.ts) reads: the login, the role on this
@@ -53,10 +47,6 @@ export interface ConsoleSession {
   role: Role | null;
   authenticatedAt: number | null;
   csrfOk: boolean;
-  /** The owner's break-glass (no person named). */
-  breakGlass?: boolean;
-  /** The hub identified this write's device as an allowed console device (DEVICE_HEADER). */
-  deviceOk?: boolean;
 }
 export type SessionOf = (req: IncomingMessage, instance: string) => ConsoleSession | null;
 

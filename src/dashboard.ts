@@ -38,7 +38,6 @@ import { cpuCount, flockHolders } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
-import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
@@ -50,7 +49,7 @@ import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
-import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
+import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 
 /**
@@ -133,8 +132,6 @@ export interface DashboardOptions {
   machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
-  /** The machine owners file (src/machine-owners.ts); the system's when unset (tests). */
-  machineOwnersFile?: string;
 }
 
 /**
@@ -182,8 +179,6 @@ export interface Who {
   via: 'session' | 'break-glass';
   /** When they signed in with GitHub, as the hub says (null for the break-glass: no sign-in). */
   authenticatedAt: number | null;
-  /** Whether the hub identified this request's device as an allowed console device (a write's only; false for the break-glass). */
-  deviceOk: boolean;
 }
 
 /** The identity each request was resolved to, for as long as the request lives. */
@@ -278,23 +273,14 @@ export function healthStats(o: { serviceUnit: string | null; root: string; state
  * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
  * the helper's change log and the updater's log, newest first.
  */
-export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine' | 'machineOwnersFile'> & { role?: Role | null; breakGlass?: boolean; requests?: MachineRequest[] }) {
+export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine'> & { role?: Role | null; requests?: MachineRequest[] }) {
   const owner = o.cfg.project.owners.default;
   const slots = slotStatus(o.slotsDir);
   const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
-  const ownersFile = o.machineOwnersFile ?? MACHINE_OWNERS_FILE;
-  const machineOwner = !!o.breakGlass || isMachineOwner(o.user, ownersFile);
   return {
     owner,
     user: o.user,
-    /** The machine's owners (src/machine-owners.ts): only they (or the break-glass) may change these. */
-    machineOwners: machineOwners(ownersFile),
-    /** Whether this person is one of them (true on the break-glass). */
-    machineOwner,
-    /** An instance owner who is a machine owner; the server checks the sign-in time and the device again on each change. */
-    canChange: isOwner(o.role) && machineOwner,
-    /** What a change needs besides, for the page to say (nothing on the break-glass). */
-    needs: o.breakGlass ? null : 'a GitHub sign-in within the last 5 minutes, from one of the console\'s allowed devices',
+    canChange: isOwner(o.role),
     helper: MACHINE_HELPER,
     slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
     testSlots: { cap: testSlotCap(o.slotsDir), running: testSlotsHeld(o.slotsDir).length, min: TEST_SLOTS_MIN, max: TEST_SLOTS_MAX },
@@ -709,10 +695,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       const role = opts.roleOf ? await opts.roleOf(named, { fresh }) : null;
       if (!role) return { status: 403, login: named, error: `@${named} has no access to this instance: it needs at least read access to ${repo}` };
       const at = Number(req.headers[AUTH_AT_HEADER]);
-      return { login: named, role, via: 'session', authenticatedAt: Number.isSafeInteger(at) && at > 0 ? at : null, deviceOk: req.headers[DEVICE_HEADER] === '1' };
+      return { login: named, role, via: 'session', authenticatedAt: Number.isSafeInteger(at) && at > 0 ? at : null };
     }
     if (!breakGlassAllowed(req)) return { status: 403, error: "the token is the owner's break-glass: accepted only on this machine, never through a proxy" };
-    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', authenticatedAt: null, deviceOk: false };
+    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', authenticatedAt: null };
   };
 
   /** Every write a person makes, recorded with who (login and role), how they came in, the instance and what was done. */
@@ -777,7 +763,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);
         // The hub asks this of each instance, to list only the ones the person has a role on.
-        if (!('status' in id)) resolved.set(req, { login: id.login, role: id.role, authenticatedAt: id.authenticatedAt, csrfOk: true, breakGlass: id.via === 'break-glass', deviceOk: id.deviceOk });
+        if (!('status' in id)) resolved.set(req, { login: id.login, role: id.role, authenticatedAt: id.authenticatedAt, csrfOk: true });
         const sessionOf = opts.session ?? dashboardSession;
         if (url.pathname === '/api/role' && req.method === 'GET') {
           if ('status' in id) return id.status === 403 && id.login ? json(res, 200, { login: id.login, role: null }) : json(res, id.status, { error: id.error });
@@ -809,7 +795,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
         }
         // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
-        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machineOwnersFile ? { machineOwnersFile: opts.machineOwnersFile } : {}) })) return;
+        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}) })) return;
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
@@ -1030,10 +1016,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
         }
         // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
-        // instance's owner who is also a machine owner, freshly signed in on an allowed device (or the break-glass),
-        // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
+        // owner may ask for a change; it's recorded for the coordinator, which runs the machine helper
         // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
-        const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        const machine = () => machineView({ ...opts, user: who.login, role: who.role, requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
         if (url.pathname === '/api/machine' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
           return json(res, 200, machine());
@@ -1046,7 +1031,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const log = new EventLog(opts.eventsDb);
           let r: MachineRequest;
           try {
-            r = requestMachineChange(log, { args, requester: { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk }, via: 'settings', ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+            r = requestMachineChange(log, { args, by: who.login, via: 'settings' });
           } catch (e) {
             if (e instanceof MachineRequestError) return json(res, e.status, { error: e.message });
             throw e;

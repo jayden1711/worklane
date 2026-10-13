@@ -164,21 +164,6 @@ How the device is identified: the hub sits behind `tailscale serve --https=443 h
 
 A request through an ssh tunnel, or on the break-glass port 4398, can't be tied to a device, so the terminal is refused there.
 
-## Machine owners
-
-The machine itself (the agent and test-run slot caps, engine updates) belongs to its machine owners, a list of GitHub logins, not to each instance's owners:
-
-```bash
-sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--console-user ... --console-devices ...] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
-```
-
-The list goes to `/etc/worklane/machine-owners.json` (`{"owners": ["<login>", ...]}`, root:root 0644; `src/machine-owners.ts`). A rerun without `--machine-owner` keeps it. A machine change from the dashboard (Settings, or a root step) needs all of:
-- the instance's owner, who is also a machine owner;
-- a GitHub sign-in in the last 5 minutes;
-- one of the console's allowed devices (`--console-devices`), as the hub identifies it for the terminal.
-
-The instance's dashboard checks these before it records the request, and the coordinator checks the machine owner again before it runs it. The break-glass (port 4398, on the machine) is still allowed. An instance owner who isn't a machine owner sees the machine settings read-only, with the machine owners' logins. With no file (or one anyone but root may write), there are no machine owners, and only the break-glass may change the machine.
-
 ## The Board
 
 The home page (`/`, `g b`) shows every task in flight, one column per stage: **Planning** (ready, claimed, a plan or research run), **Building**, **Verifying** (the coordinator's checks and the evaluator; in PR mode, a PR whose checks are running or being fixed), **Waiting on you** (the holds only the owner ends, as on the Waiting page: a decision, a held plan, a PR left to you, a CI fix that gave up, a block, a failed landing) and **Landing** (queued to land, or a PR the merge rules are merging). On a hub it shows every instance you have a role on, with a filter to pick one; an instance's own dashboard shows its own. It follows each instance's live stream.

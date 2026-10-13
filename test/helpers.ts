@@ -50,19 +50,6 @@ export const exampleRole = (login: string): 'owner' | 'writer' | 'viewer' => {
 export const exampleRoles = async (login: string) => exampleRole(login);
 /** The header the hub names a signed-in person with (src/dashboard-auth.ts LOGIN_HEADER). */
 export const asPerson = (login: string): Record<string, string> => ({ 'x-dashboard-login': login });
-/**
- * A person as the hub names them on a machine change: signed in with GitHub just now (AUTH_AT_HEADER), from an
- * allowed console device (DEVICE_HEADER). Machine changes need both (src/machine-owners.ts).
- */
-export const asFreshPerson = (login: string, signedInAt = Date.now()): Record<string, string> => ({ ...asPerson(login), 'x-dashboard-authenticated-at': String(signedInAt), 'x-dashboard-console-device': '1' });
-/** A machine owners file naming these logins (src/machine-owners.ts), this user's, 0644. */
-export function machineOwnersFile(...logins: string[]): string {
-  const f = join(mkdtempSync(join(tmpdir(), 'machine-owners-')), 'machine-owners.json');
-  writeFileSync(f, `${JSON.stringify({ owners: logins })}\n`, { mode: 0o644 });
-  return f;
-}
-/** A machine owner asking for a change through the dashboard: signed in just now, from an allowed device. */
-export const freshRequester = (login: string) => ({ login, breakGlass: false, authenticatedAt: Date.now(), deviceOk: true });
 
 export const STDIN_LINE = `(() => { const fs = require('node:fs'); const b = Buffer.alloc(1); const out = []; for (;;) { let n = 0; try { n = fs.readSync(0, b, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; throw e; } if (!n || b[0] === 10) break; out.push(b[0]); } return Buffer.from(out).toString('utf8'); })()`;
 

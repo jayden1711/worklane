@@ -547,11 +547,6 @@ test('the machine settings: the owner gets the slot cap and engine updates with 
   const theirs = r.renderMachine({ ...data, user: 'example-collaborator', canChange: false });
   assert.match(theirs, /data-testid="machine-read-only"[^>]*>Only the owner, @example-owner, can change these; you are @example-collaborator\./);
   assert.doesNotMatch(theirs, /data-testid="machine-setting-input"/);
-  // An instance owner who isn't a machine owner: read-only, naming who may change the machine.
-  const instanceOnly = r.renderMachine({ ...data, user: 'ivy', canChange: false, machineOwner: false, machineOwners: ['ada', 'olu'], needs: 'x' });
-  assert.match(instanceOnly, /data-testid="machine-read-only"[^>]*>Read-only: only the machine(&#x27;|')s owners can change these; you are @ivy\. <span data-testid="machine-owners">machine owners: @ada, @olu<\/span>/);
-  assert.doesNotMatch(instanceOnly, /data-testid="machine-setting-input"|data-testid="machine-needs"/);
-  assert.match(r.renderMachine({ ...data, machineOwner: true, machineOwners: ['example-owner'], needs: 'a GitHub sign-in within the last 5 minutes' }), /data-testid="machine-needs"[^>]*>A change needs a GitHub sign-in within the last 5 minutes\./, 'a machine owner is told what a change needs');
   const noUpdater = r.renderMachine({ ...data, updates: { configured: false, enabled: null }, history: [] });
   assert.match(noUpdater, /data-setting="updates"[\s\S]*?not set up/);
   assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
