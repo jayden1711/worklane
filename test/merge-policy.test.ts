@@ -5,7 +5,11 @@ import type { StoredEvent } from '../src/events/types.js';
 import { PolicyFile } from '../src/instance.js';
 import { instructionEvalReasons, mergeDecision, waitCategoriesOf, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
-import { AGENT_INSTRUCTIONS, computeLevel } from '../src/review.js';
+import { AGENT_INSTRUCTIONS, computeLevel, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
+import { execFileSync } from 'node:child_process';
+import { globToRegExp } from '../src/guardrails/glob.js';
+import { loosenedProblems } from '../src/delegation.js';
+import { repoRoot } from './helpers.js';
 import { BRAND } from '../src/brand.js';
 import { rolePrompt, VERDICT_SCHEMA } from '../src/roles.js';
 import { exampleProject } from './helpers.js';
@@ -37,7 +41,7 @@ function clean(over: Partial<MergeInput> = {}): MergeInput {
 }
 
 test('merge policy: a clean change merges', () => {
-  assert.deepEqual(mergeDecision(clean()), { auto: true, reasons: [] });
+  assert.deepEqual(mergeDecision(clean()), { auto: true, reasons: [], why: [] });
 });
 
 test('merge policy: a revert the harness opened never auto-merges, however clean', () => {
@@ -77,6 +81,89 @@ test("regression: a change to the agents' role prompts, skills, AGENTS.md or any
   }
   // Other files don't land in the category (only the root AGENTS.md counts).
   for (const path of ['src/a.ts', 'docs/AGENTS.md']) assert.equal(computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose).categories[AGENT_INSTRUCTIONS], undefined, path);
+});
+
+/** The engine's own files, as git tracks them. */
+const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
+
+test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
+  for (const part of SELF_MODIFICATION_PARTS) {
+    for (const glob of part.globs) assert.ok(engineFiles.some((f) => globToRegExp(glob).test(f)), `${part.what}: ${glob} matches no file in the repo`);
+  }
+  assert.deepEqual(LOCKED_CATEGORIES[SELF_MODIFICATION], SELF_MODIFICATION_PARTS.flatMap((p) => p.globs));
+  // The files the guard is for, each landing in the part that names it.
+  const part = (path: string) => SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what;
+  for (const [path, what] of [
+    ['src/merge-policy.ts', 'the merge policy'],
+    ['src/coordinator/merge-flow.ts', 'the merge policy'],
+    ['src/main-watch.ts', 'the main watch'],
+    ['src/push-guard.ts', 'the push guard'],
+    ['src/updates.ts', 'the updater'],
+    [`scripts/machine/${BRAND.cli}-update.cjs`, 'the updater'],
+    [`${BRAND.configDir}/review.yaml`, 'the review levels'],
+    ['src/review.ts', 'the review levels'],
+    [`${BRAND.configDir}/guardrails.yaml`, 'the guardrails'],
+    ['src/guardrails/engine.ts', 'the guardrails'],
+    ['scripts/setup/machine.sh', 'the machine setup'],
+    ['scripts/machine/worklane-machine.cjs'.replace('worklane', BRAND.cli), 'the machine setup'],
+    ['.github/workflows/ci.yml', 'the CI workflows'],
+    ['src/dashboard-auth.ts', 'sign-in, credentials or secrets'],
+    ['src/github-app.ts', 'sign-in, credentials or secrets'],
+    ['src/console/secrets.ts', 'sign-in, credentials or secrets'],
+    ['src/console/terminal.ts', 'sign-in, credentials or secrets'],
+    ['src/setup/app-manifest.ts', 'sign-in, credentials or secrets'],
+    ['src/decide.ts', 'who may approve'],
+    ['src/intake/people.ts', 'who may approve'],
+    ['src/machine-owners.ts', 'who may approve'],
+  ] as const) {
+    assert.ok(engineFiles.includes(path), `${path} is a real file`);
+    assert.equal(part(path), what, path);
+  }
+  // Nothing else in the engine falls in it by accident.
+  for (const path of ['src/coordinator.ts', 'src/dashboard.ts', 'web/src/pages/Waiting.tsx', 'test/merge-policy.test.ts', 'docs/design.md', 'scripts/push-gate.mjs']) assert.equal(part(path), undefined, path);
+});
+
+test('regression: a harness PR touching any self-modification file waits for the owner at L3 and never auto-merges, whatever review.yaml tries', () => {
+  // A review.yaml that tries to drop it: the category redefined to nothing, nothing at L3 or waiting, no limits worth the name.
+  const loose = {
+    ...review,
+    categories: { [SELF_MODIFICATION]: [] as string[], engine: [] as string[] },
+    levels: { ...review.levels, L2_notify: { ...review.levels.L2_notify, when: [] as string[] }, L3_human: { ...review.levels.L3_human, when: [] as string[] } },
+    merge: { ...review.merge, wait_categories: [] as string[] },
+  };
+  let n = 0;
+  for (const part of SELF_MODIFICATION_PARTS) {
+    for (const glob of part.globs) {
+      for (const path of engineFiles.filter((f) => globToRegExp(glob).test(f))) {
+        // The first part that matches names it (scripts/machine's updater is the updater, not machine setup).
+        const what = SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))!.what;
+        const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose);
+        assert.deepEqual(lvl.categories[SELF_MODIFICATION], [path], path);
+        assert.equal(lvl.level, 'L3', `${path}: always L3`);
+        const d = mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose) }));
+        assert.equal(d.auto, false, path);
+        assert.ok(d.reasons.includes(`high-risk: ${SELF_MODIFICATION} (${path})`), `${path}: ${d.reasons.join(' | ')}`);
+        assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes ${what}: ${path}` }, path);
+        // Even a caller that passes no wait categories at all: the floor holds.
+        assert.equal(mergeDecision(clean({ level: lvl, waitCategories: [] })).auto, false, `${path}: the floor`);
+        n++;
+      }
+    }
+  }
+  assert.ok(n >= 40, `${n} files checked`);
+  // review.yaml can't loosen it either (gradual delegation).
+  assert.deepEqual(loosenedProblems({ ...review, merge: { ...review.merge, loosened: [SELF_MODIFICATION] } }), [`merge.loosened: ${SELF_MODIFICATION} is high-risk or a safety floor and can never be loosened`]);
+});
+
+test('merge policy: why a high-risk PR waits, plainly, naming the category and its first file', () => {
+  const d = mergeDecision(clean({ level: level(['src/merge-policy.ts', 'src/review.ts', 'db/migrations/002.sql']), waitCategories: waitCategoriesOf(review) }));
+  assert.deepEqual(d.why.filter((y) => y.category !== 'engine'), [
+    { category: 'migration', text: 'changes a database migration: db/migrations/002.sql' },
+    { category: SELF_MODIFICATION, text: 'changes the merge policy: src/merge-policy.ts and 1 more' },
+  ]);
+  const custom = computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [] }, { ...review, categories: { pricing: ['src/price.js'] } });
+  assert.deepEqual(mergeDecision(clean({ level: custom, waitCategories: ['pricing'] })).why, [{ category: 'pricing', text: 'touches pricing: src/price.js' }]);
+  assert.deepEqual(mergeDecision(clean()).why, [], 'nothing high-risk: nothing to say');
 });
 
 test('merge policy: high-risk paths wait (L3 categories, CI config, and the repo’s own categories)', () => {

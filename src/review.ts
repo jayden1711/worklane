@@ -17,9 +17,40 @@ const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
  * waitCategoriesOf), whatever review.yaml says; review.yaml can't redefine, drop or loosen it.
  */
 export const AGENT_INSTRUCTIONS = 'agent-instructions';
+
+/**
+ * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
+ * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, and who may approve.
+ * Always L3 and never auto-merged (merge-policy.ts waitCategoriesOf), whatever review.yaml says; review.yaml can't
+ * redefine, drop or loosen it. Each part says, in the words "Waiting on you" shows, what such a change changes; the
+ * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
+ */
+export const SELF_MODIFICATION = 'self-modification';
+export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
+  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*'] },
+  { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
+  { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
+  { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
+  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts'] },
+  { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
+  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**'] },
+  { what: 'the CI workflows', globs: ['.github/workflows/**'] },
+  { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*'] },
+  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts'] },
+];
+
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
+  [SELF_MODIFICATION]: SELF_MODIFICATION_PARTS.flatMap((p) => p.globs),
 };
+
+/** Locked categories that are always L3, whatever review.yaml's levels list. */
+const ALWAYS_L3 = [SELF_MODIFICATION];
+
+/** What a change to this path changes, in plain words (the self-modification part it falls in), or null. */
+export function selfModificationPart(path: string): string | null {
+  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what ?? null;
+}
 
 /** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
 
@@ -123,6 +154,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   }
   for (const c of L.L2_notify.when) if (c !== 'app-non-money-large' && categories[c]?.length) raise('L2', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
   for (const c of L.L3_human.when) if (categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  for (const c of ALWAYS_L3) if (!L.L3_human.when.includes(c) && categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
   if (L.L3_human.over_lines !== undefined && lines > L.L3_human.over_lines) raise('L3', `${lines} lines (> ${L.L3_human.over_lines})`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {

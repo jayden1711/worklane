@@ -136,6 +136,16 @@ function WaitList({ w, now }: { w: Waiting; now?: number }) {
                   <li key={n} className="flex flex-wrap items-start gap-x-3 gap-y-0.5 px-4 py-2.5" data-testid="waiting-item">
                     <div className="min-w-0 flex-1">
                       <Subject i={i} />
+                      {i.why?.length ? (
+                        <ul className="mt-1 space-y-1" aria-label="Why it waits for you">
+                          {i.why.map((y) => (
+                            <li key={y.category} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5" data-testid="waiting-why" data-category={y.category}>
+                              <Badge tone="warn">{y.category}</Badge>
+                              <span className="min-w-0 break-words text-[13px] text-ink">{y.text}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                       <div className="mt-0.5 text-[12.5px] text-ink-2" data-testid="waiting-detail">
                         {i.detail}
                       </div>

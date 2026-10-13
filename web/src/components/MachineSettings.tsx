@@ -45,7 +45,7 @@ const REQUEST_TONE: Record<MachineRequestRow['status'], 'green' | 'red' | 'orang
 const REQUEST_LABEL: Record<MachineRequestRow['status'], string> = { pending: 'waiting for the coordinator', running: 'running', done: 'done', failed: 'failed', refused: 'refused', interrupted: 'interrupted' };
 export const anyPending = (d: MachineData) => (d.requests ?? []).some((r) => r.status === 'pending' || r.status === 'running');
 
-const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink' };
+const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink', canary_passed: 'green', canary_failed: 'red', canary_filed: 'ink' };
 const short = (s?: string | null) => (s ? s.slice(0, 8) : '–');
 const val = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : v === null || v === undefined ? '–' : String(v));
 
@@ -218,12 +218,12 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
         {data.history.length ? (
           <RecordsTable testId="updates-history-table" head={['When', 'What', 'From → to', 'Why']} className="[&_th:nth-child(1)]:w-28 [&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-44">
             {data.history.map((h, i) => (
-              <tr key={i} className="border-b border-line last:border-0" data-testid="update-row" style={{ background: h.event === 'rolled_back' || h.event === 'build_failed' || h.event === 'error' ? 'var(--red-tint)' : undefined }}>
+              <tr key={i} className="border-b border-line last:border-0" data-testid="update-row" style={{ background: h.event === 'rolled_back' || h.event === 'build_failed' || h.event === 'error' || h.event === 'canary_failed' ? 'var(--red-tint)' : undefined }}>
                 <td className="primitive-table-cell text-[12px] text-ink-3" title={h.at}>
                   {ago(h.at)}
                 </td>
                 <td className="primitive-table-cell">
-                  <DotPill tone={EVENT_TONE[h.event] ?? 'ink'}>{h.event.replace('_', ' ')}</DotPill>
+                  <DotPill tone={EVENT_TONE[h.event] ?? 'ink'}>{h.event.replaceAll('_', ' ')}</DotPill>
                 </td>
                 <td className="primitive-table-cell font-mono text-[12px] text-ink-2">
                   {short(h.from)} → {short(h.to)}

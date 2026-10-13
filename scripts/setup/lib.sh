@@ -9,6 +9,13 @@ as_root() {
 # A user's home directory, from the passwd database: never assumed to be /home/<user>.
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
+# A JSON string (for the scripts that print JSON lines): backslashes and quotes escaped, newlines as \n, other control characters dropped.
+json_str() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\t'/ }"
+  printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"
+}
+
 # Run a bash script as another user, its arguments passed through intact.
 # Never `sudo -i ... -c`: -i re-quotes the command for a login shell, which
 # mangles multi-line scripts. From / so the user needn't reach our cwd.
@@ -74,8 +81,9 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 26
-# allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8) as root, and nothing else.
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 28
+# allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8, claude-account status,
+# claude-account switch) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
 #
 # And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
@@ -93,8 +101,9 @@ machine_sudoers() {
   for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
+  cmds+=("$MACHINE_HELPER claude-account status" "$MACHINE_HELPER claude-account switch")
   cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
-  printf '# Coordinators may change the machine slot caps and the update switch, and add a project, through one validating helper.\n'
+  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, and add a project, through one validating helper.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -154,8 +163,10 @@ repo_ok() {
 }
 
 # The agent's Claude login, from `claude setup-token`'s token on stdin, written as that user's own Claude
-# credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude), keeping the file's other entries. The
-# token goes from stdin to that file and nowhere else: never an argument, an environment variable or a log line.
+# credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude; or <dir>/.credentials.json when an instance
+# names its agent's claude_config_dir), keeping the file's other entries. The token goes from stdin to that file and
+# nowhere else: never an argument, an environment variable or a log line.
+#   install_claude_token <user> [<claude config dir>]
 install_claude_token() {
   (cd / && sudo -H -u "$1" "$(command -v node)" --input-type=module -e '
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -166,7 +177,11 @@ if (!/^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,500}$/.test(token)) {
   console.error("that is not a token from claude setup-token (sk-ant-oat01-...); nothing installed");
   process.exit(1);
 }
-const dir = join(homedir(), ".claude");
+const dir = process.argv[1] || join(homedir(), ".claude");
+if (!dir.startsWith("/")) {
+  console.error("the Claude config dir must be an absolute path; nothing installed");
+  process.exit(1);
+}
 const file = join(dir, ".credentials.json");
 mkdirSync(dir, { recursive: true, mode: 0o700 });
 chmodSync(dir, 0o700);
@@ -182,13 +197,38 @@ const tmp = `${file}.tmp-${process.pid}`;
 writeFileSync(tmp, `${JSON.stringify(c)}\n`, { mode: 0o600 });
 renameSync(tmp, file);
 console.log(`installed ${file} (0600, this user only)`);
-')
+' "${2:-}")
 }
 # Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes).
 claude_login_ok() {
   command -v claude >/dev/null 2>&1 || return 0
   (cd / && sudo -H -u "$1" claude auth status --json) | grep -q '"loggedIn": *true'
 }
+
+# The Claude account switch (claude-account.sh): what it last found for each agent user (status.json), the last
+# switch's progress (switch.jsonl, one JSON line per step change), and the instances a switch stopped and hasn't
+# started again (paused). Root's, 0644: account names and expiry dates, never a token.
+CLAUDE_ACCOUNT_DIR=/var/lib/worklane/claude-account
+CLAUDE_ACCOUNT_LOCK=/run/lock/worklane-claude-account.lock
+# The token a dashboard switch takes: pasted by a machine owner into the asking instance's dashboard, which stores it
+# for its coordinator user only (src/console/secrets.ts); claude-account.sh reads it once, as root, and deletes it.
+CLAUDE_ACCOUNT_CREDENTIAL=claude-account-token
+# A token from `claude setup-token`, strictly: install_claude_token's check, and src/claude-account.ts's.
+# (The length apart: a repeat bound over 255 is no regular expression to every libc.)
+claude_token_ok() { [[ "${#1}" -le 513 && "$1" =~ ^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}$ ]]; }
+# claude auth status --json as this user; nothing when claude isn't installed or doesn't answer within a minute.
+claude_status_json() {
+  command -v claude >/dev/null 2>&1 || return 0
+  (cd / && sudo -H -u "$1" timeout 60 claude auth status --json 2>/dev/null) || true
+}
+# Whether a path is a plain file (not a link) that this user owns.
+file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -user "$2" 2>/dev/null)" ]; }
+# Pause an instance: SIGTERM to its coordinator's main process only. It starts no more runs, lets the ones it has
+# going finish, then exits on its own; a clean exit isn't restarted (Restart=on-failure). Its unit's own stop
+# (unit_stop, `systemctl stop`) would end those runs after TimeoutStopSec: used only once the wait has timed out.
+unit_drain() { systemctl kill --kill-whom=main --signal=SIGTERM "$1"; }
+unit_stop() { systemctl stop "$1"; }
+unit_start() { systemctl start "$1"; }
 
 # The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
 # joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
