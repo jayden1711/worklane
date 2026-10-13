@@ -27,10 +27,11 @@ import {
   STATE_COOKIE,
 } from '../src/dashboard-auth.js';
 import { EventLog } from '../src/events/log.js';
+import { MACHINE_EVENTS, machineRequests } from '../src/machine-requests.js';
 import { BRAND } from '../src/brand.js';
 import { fullRunLock, tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { exampleProject, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { exampleProject, machineOwnersFile, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
 
 const CLIENT_ID = 'Iv1.testclient01';
 const CLIENT_SECRET = 'client-secret-for-tests';
@@ -101,8 +102,9 @@ const MARKS: Record<'a' | 'b', InstanceMarks> = {
  * `machine`: as on a real machine, both instances share one slots dir, and each is seeded with items on every page
  * (MARKS), its coordinator holding an agent slot and a test slot there (b also the full-run lock).
  */
-async function setup(o: { machine?: boolean } = {}) {
+async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string } } = {}) {
   const gh = await fakeGitHub();
+  const ownersFile = o.machineOwners ? machineOwnersFile(...o.machineOwners) : undefined;
   const clock = { t: Date.parse('2026-10-12T12:00:00Z') };
   const now = () => clock.t;
   const shared = o.machine ? mkdtempSync(join(tmpdir(), 'auth-slots-')) : null;
@@ -125,7 +127,7 @@ async function setup(o: { machine?: boolean } = {}) {
     log.append('decision.asked', ask(`${name}-p`, 'plan'), 'c');
     log.append('decision.asked', ask(`${name}-l`, 'land'), 'c');
     const roleOf = cachedRoles(repoPermission({ repo: `example/${name}`, token: async () => INSTANCE_TOKEN, api: gh.url }), now);
-    const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf, instance: name, slotsDir: shared ?? join(dir, 'slots'), actor: m.actor, pollMs: 50 });
+    const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf, instance: name, slotsDir: shared ?? join(dir, 'slots'), actor: m.actor, pollMs: 50, ...(ownersFile ? { machineOwnersFile: ownersFile } : {}) });
     return { d, log, dir, port: Number(new URL(d.url).port) };
   };
   const a = await instance('a');
@@ -137,7 +139,7 @@ async function setup(o: { machine?: boolean } = {}) {
     { name: 'b', port: b.port, tokenFile: join(b.dir, 'dashboard-token') },
   ];
   const hubState = mkdtempSync(join(tmpdir(), 'auth-hub-'));
-  const h = await startHub({ instances, stateDir: hubState, webDir: web, now, signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url } });
+  const h = await startHub({ instances, stateDir: hubState, webDir: web, now, signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { terminal: { devices: o.devices.allow, whois: o.devices.whois, peerUid: () => 0 } } : {}) });
   const base = h.url.replace(/\/$/, '');
   const glass = h.breakGlassUrl.split('/?')[0]!;
 
@@ -628,6 +630,66 @@ test('a request through the hub carries the person to the instance only in a hea
       });
     assert.equal(await raw({ 'x-dashboard-login': 'not a login!' }), 400);
     assert.equal(await raw({ 'x-dashboard-login': 'stranger' }), 403, 'no permission on the repo: refused');
+  } finally {
+    await s.close();
+  }
+});
+
+test('a machine change through the hub: only a machine owner, signed in in the last 5 minutes, from an allowed console device; the hub alone says which device', async () => {
+  // Fake tailnet fixtures, built here so no address or node name is spelled out (the push gate's rules).
+  const net = ['tail1234', 'ts', 'net'].join('.');
+  const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
+  const nodes: Record<string, unknown> = { [ip(3)]: { Node: { Name: `laptop.${net}.`, Tags: [] } }, [ip(5)]: { Node: { Name: `someone-else.${net}.`, Tags: ['tag:guest'] } } };
+  const whois = (a: string) => {
+    if (!nodes[a]) throw new Error('no such peer');
+    return JSON.stringify(nodes[a]);
+  };
+  // Two machine owners; ivy owns instance a (admin on its repo) and nothing more.
+  const s = await setup({ machineOwners: ['ada', 'olu'], devices: { allow: ['laptop'], whois } });
+  try {
+    s.clock.t = Date.now();
+    for (const l of ['ada', 'olu', 'ivy']) s.gh.perms.set(`example/a:${l}`, 'admin');
+    const [ada, olu, ivy] = [await s.signIn('ada'), await s.signIn('olu'), await s.signIn('ivy')];
+    const laptop = { 'x-forwarded-for': ip(3) };
+    const stranger = { 'x-forwarded-for': ip(5) };
+    const change = async (p: typeof ada, what: string, value: unknown, headers: Record<string, string>) => {
+      const r = await p.post('/api/i/a/machine', { what, value }, { headers });
+      return { status: r.status, body: (await r.json()) as { error?: string } };
+    };
+    for (const [what, value] of [['slots', 4], ['updates', true]] as const) {
+      const ok = await change(ada, what, value, laptop);
+      assert.equal(ok.status, 200, `${what}: a machine owner, fresh, on an allowed device: ${JSON.stringify(ok.body)}`);
+      assert.equal((await change(olu, what, value, laptop)).status, 200, `${what}: the second machine owner too`);
+      const instanceOnly = await change(ivy, what, value, laptop);
+      assert.equal(instanceOnly.status, 403, `${what}: an instance-only owner`);
+      assert.match(instanceOnly.body.error!, /machine owners: @ada, @olu\); @ivy isn't one/);
+      const elsewhere = await change(ada, what, value, stranger);
+      assert.equal(elsewhere.status, 403, `${what}: a device not on the console's list`);
+      assert.match(elsewhere.body.error!, /allowed devices/);
+      // A browser's own copy of the hub's device header never reaches the instance.
+      assert.equal((await change(ada, what, value, { ...stranger, 'x-dashboard-console-device': '1' })).status, 403, `${what}: a forged device header`);
+    }
+    // ivy reads the settings read-only, with who may change them.
+    const seen = (await (await ivy.get('/api/i/a/machine')).json()) as { canChange: boolean; machineOwner: boolean; machineOwners: string[] };
+    assert.deepEqual([seen.canChange, seen.machineOwner, seen.machineOwners], [false, false, ['ada', 'olu']]);
+    assert.equal(((await (await ada.get('/api/i/a/machine')).json()) as { canChange: boolean }).canChange, true);
+
+    // A sign-in more than 5 minutes ago is stale for a machine change, though the session itself is still good.
+    s.clock.t = Date.now() - 6 * 60_000;
+    const stale = await s.signIn('ada');
+    s.clock.t = Date.now();
+    for (const [what, value] of [['slots', 4], ['updates', true]] as const) {
+      const r = await change(stale, what, value, laptop);
+      assert.equal(r.status, 403, `${what}: a stale sign-in`);
+      assert.match(r.body.error!, /sign-in within the last 5 minutes/);
+    }
+    assert.equal((await stale.get('/api/i/a/state')).status, 200, 'the stale session still reads');
+
+    // The break-glass needs none of it.
+    const glass = await fetch(`${s.glass}/api/i/a/machine`, { method: 'POST', headers: { authorization: `Bearer ${s.h.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ what: 'slots', value: 5 }) });
+    assert.equal(glass.status, 200, await glass.clone().text());
+    const requests = machineRequests(s.a.log.read(0, [...MACHINE_EVENTS]));
+    assert.deepEqual(requests.map((r) => [r.by, r.args.join(' '), r.breakGlass]), [['ada', 'set-slots 4', false], ['olu', 'set-slots 4', false], ['ada', 'set-updates on', false], ['olu', 'set-updates on', false], ['example-owner', 'set-slots 5', true]], 'only the allowed ones were recorded');
   } finally {
     await s.close();
   }

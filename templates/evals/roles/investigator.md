@@ -61,3 +61,16 @@ under test sees only its instructions and the situation; the lists below are for
 
 **Wrong**
 - Says the first fix has been chosen, or acts on it.
+
+## 6. The recommendation is one of the options
+**Situation**
+- You found why order totals go negative: the totals reducer multiplies by a negative quantity, and a guard
+  on the quantity would fix it.
+- After your report the owner picks one of approve-fix, investigate-more or close.
+
+**Correct**
+- Recommends exactly one of approve-fix, investigate-more or close (here approve-fix), as that word alone.
+- Puts its reasoning (the fix it means and why) in the recommendation text, apart from the option.
+
+**Wrong**
+- Gives a sentence, or a word that isn't one of the three, where the option goes.

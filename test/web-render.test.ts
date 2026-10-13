@@ -74,6 +74,11 @@ interface Render {
   pages: Record<string, unknown>;
 }
 
+/** A long prose recommendation (the kind once cut mid-sentence in a one-line pill). */
+const LONG_PROSE =
+  'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
+  'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
+
 let r: Render;
 let asOwner: State;
 let asOther: State;
@@ -114,6 +119,10 @@ before(async () => {
     if (prev === undefined) delete process.env[`${BRAND.envPrefix}_STATE_DIR`];
     else process.env[`${BRAND.envPrefix}_STATE_DIR`] = prev;
   });
+  // An event an older engine stored: an agent's prose straight in the recommendation, not one of the options.
+  const older = new EventLog(demo.eventsDb);
+  older.append('decision.asked', { id: 'demo-old-prose', kind: 'question', issue: null, owner: 'example-owner', question: 'What should happen to the stale claim?', options: ['fix-it', 'look-further', 'leave-it'], recommendation: LONG_PROSE, receipts: ['confidence high'] }, 'demo@local');
+  older.close();
   const state = async (user: string) => {
     const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'web-render-state-')), user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'web-render-slots-')) });
     try {
@@ -171,6 +180,39 @@ test('every page renders with the demo\'s state, and shows its data', () => {
     assert.ok(page.includes(esc(t.title)), `issue #${t.issue} shows its title`);
     assert.match(page, /Checks run by the coordinator/);
     assert.match(page, /Agent runs/);
+  }
+});
+
+test('a prose recommendation is wrapped text, whole, clamped with Show more; only an option is a pill (Decisions and Inbox)', () => {
+  const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+  /** One decision card's markup, from its own tag to the next card. */
+  const cardOf = (html: string, id: string) => {
+    const at = html.indexOf(`data-decision="${id}"`);
+    assert.ok(at >= 0, `the card for ${id}`);
+    const next = html.indexOf('data-decision="', at + 1);
+    return html.slice(at, next < 0 ? undefined : next);
+  };
+  const open = asOwner.decisions.filter((d) => !d.answer) as unknown as { id: string; options: string[]; recommendation: string; receipts: string[] }[];
+  assert.ok(open.some((d) => d.id === 'demo-old-prose'));
+  for (const page of ['decisions', 'inbox']) {
+    const html = r.renderPage(page, asOwner);
+    const prose = cardOf(html, 'demo-old-prose');
+    assert.ok(prose.includes(esc(LONG_PROSE)), `${page}: the whole recommendation, never cut`);
+    assert.doesNotMatch(prose, /data-testid="decision-recommended"/, `${page}: prose is not a pill`);
+    assert.match(prose, /<p[^>]*class="[^"]*\bline-clamp-4\b[^"]*\bbreak-words\b|<p[^>]*class="[^"]*\bbreak-words\b[^"]*\bline-clamp-4\b/, `${page}: wrapped and clamped by CSS`);
+    assert.match(prose, /data-testid="decision-recommendation-toggle"[^>]*>Show more</, `${page}: Show more`);
+    assert.doesNotMatch(prose, /…|\.\.\./, `${page}: not truncated in the string`);
+    // Every option recommendation is the pill; no other card has one.
+    for (const d of open) {
+      const card = cardOf(html, d.id);
+      if (d.options.includes(d.recommendation)) assert.match(card, new RegExp(`data-testid="decision-recommended"[^>]*>Recommended: <span[^>]*>${esc(d.recommendation).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</span>`), `${page}: ${d.id}'s option is a pill`);
+      else assert.doesNotMatch(card, /data-testid="decision-recommended"/, `${page}: ${d.id} recommends no option: no pill`);
+      // A reasoning line in the detail is shown as prose too, not as a one-line receipt.
+      for (const x of d.receipts.filter((x) => x.startsWith('Recommendation: '))) {
+        assert.ok(card.includes(esc(x.slice('Recommendation: '.length))), `${page}: ${d.id}'s reasoning is shown`);
+        assert.ok(!card.includes(`title="${esc(x)}"`), `${page}: ${d.id}'s reasoning isn't a truncated receipt`);
+      }
+    }
   }
 });
 
@@ -505,6 +547,11 @@ test('the machine settings: the owner gets the slot cap and engine updates with 
   const theirs = r.renderMachine({ ...data, user: 'example-collaborator', canChange: false });
   assert.match(theirs, /data-testid="machine-read-only"[^>]*>Only the owner, @example-owner, can change these; you are @example-collaborator\./);
   assert.doesNotMatch(theirs, /data-testid="machine-setting-input"/);
+  // An instance owner who isn't a machine owner: read-only, naming who may change the machine.
+  const instanceOnly = r.renderMachine({ ...data, user: 'ivy', canChange: false, machineOwner: false, machineOwners: ['ada', 'olu'], needs: 'x' });
+  assert.match(instanceOnly, /data-testid="machine-read-only"[^>]*>Read-only: only the machine(&#x27;|')s owners can change these; you are @ivy\. <span data-testid="machine-owners">machine owners: @ada, @olu<\/span>/);
+  assert.doesNotMatch(instanceOnly, /data-testid="machine-setting-input"|data-testid="machine-needs"/);
+  assert.match(r.renderMachine({ ...data, machineOwner: true, machineOwners: ['example-owner'], needs: 'a GitHub sign-in within the last 5 minutes' }), /data-testid="machine-needs"[^>]*>A change needs a GitHub sign-in within the last 5 minutes\./, 'a machine owner is told what a change needs');
   const noUpdater = r.renderMachine({ ...data, updates: { configured: false, enabled: null }, history: [] });
   assert.match(noUpdater, /data-setting="updates"[\s\S]*?not set up/);
   assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
