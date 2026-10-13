@@ -6,6 +6,7 @@ import { appJwt, type AppCredentials } from '../github-app.js';
 import { readFileSync } from 'node:fs';
 import { classifyGitHubError } from '../github/errors.js';
 import type { EventLog } from '../events/log.js';
+import { redactString } from '../events/redact.js';
 import type { TestRunResult } from './run.js';
 
 type Fetch = typeof fetch;
@@ -40,9 +41,28 @@ export function checksFor(result: TestRunResult, checkNames: Record<string, stri
 }
 
 /**
- * Post one completed check run per check name on `sha`. The output names each tier's pass or fail and how long it
- * took; never its log (a check is readable by everyone who can read the repo). Throws ChecksPermissionMissing when
- * the App lacks Checks: write, after recording it.
+ * A check's title and summary. Each tier's pass or fail and how long it took; never a tier's log (a check is readable
+ * by everyone who can read the repo). A run that failed in setup says which step, why, and the last lines of that
+ * step's stderr, redacted (never its stdout: db-start prints the database's password there).
+ */
+export function checkOutput(result: TestRunResult, tiers: TestRunResult['tiers'], conclusion: 'success' | 'failure'): { title: string; summary: string } {
+  const head = `${result.kind} test run ${result.id}`;
+  const foot = "Logs are on the instance's dashboard.";
+  const s = result.setup;
+  if (!s) {
+    const lines = tiers.map((t) => `- ${t.ok ? 'passed' : 'failed'}: ${t.tier} (${fmt(t.durationMs)})`);
+    return { title: conclusion === 'success' ? 'Passed' : 'Failed', summary: `${head}\n\n${lines.join('\n')}\n\n${foot}` };
+  }
+  const clean = (x: string) => redactString(x).replace(/```/g, "'''");
+  const err = s.stderr.trim() ? `\n\nThe last lines of its stderr (redacted):\n\n\`\`\`\n${clean(s.stderr.trim()).slice(-4000)}\n\`\`\`` : '';
+  const lines = tiers.map((t) => `- not run: ${t.tier}`);
+  const title = s.step === 'helper' ? 'Not run: the test sandbox helper is outdated' : `Failed in setup: ${s.step}`.slice(0, 200);
+  return { title, summary: `${head}\n\nSetup failed at **${clean(s.step)}**: ${clean(s.detail)}${err}\n\n${lines.join('\n')}\n\n${foot}` };
+}
+
+/**
+ * Post one completed check run per check name on `sha` (its output: checkOutput). Throws ChecksPermissionMissing
+ * when the App lacks Checks: write, after recording it.
  */
 export async function postChecks(d: ChecksDeps, sha: string, result: TestRunResult, checkNames: Record<string, string>): Promise<void> {
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`a check needs the full commit, not ${sha}`);
@@ -50,7 +70,6 @@ export async function postChecks(d: ChecksDeps, sha: string, result: TestRunResu
   const api = d.api ?? 'https://api.github.com';
   const posted: { name: string; conclusion: 'success' | 'failure' }[] = [];
   for (const c of checksFor(result, checkNames)) {
-    const lines = c.tiers.map((t) => `- ${t.ok ? 'passed' : 'failed'}: ${t.tier} (${fmt(t.durationMs)})`);
     const body = {
       name: c.name,
       head_sha: sha,
@@ -59,7 +78,7 @@ export async function postChecks(d: ChecksDeps, sha: string, result: TestRunResu
       completed_at: new Date().toISOString(),
       external_id: result.id,
       ...(d.detailsUrl ? { details_url: d.detailsUrl } : {}),
-      output: { title: c.conclusion === 'success' ? 'Passed' : 'Failed', summary: `${result.kind} test run ${result.id}\n\n${lines.join('\n')}\n\nLogs are on the instance's dashboard.` },
+      output: checkOutput(result, c.tiers, c.conclusion),
     };
     const res = await f(`${api}/repos/${d.repo}/check-runs`, {
       method: 'POST',

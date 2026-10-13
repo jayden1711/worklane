@@ -13,7 +13,7 @@
 import { isAllowed, type IncomingReport, type IntakeConfig, type IntakeSource } from '../intake/report.js';
 import { IntakeMeter } from '../intake/store.js';
 import { intakeCaps } from '../settings.js';
-import { ChannelChat } from './channel-chat.js';
+import { DeployCommands } from './deploy-commands.js';
 import type { CoordinatorDeps } from './shared.js';
 
 /** Replies running at once per instance (chat and thread questions together). Agent slots don't count them. */
@@ -25,7 +25,7 @@ export const TYPING_MAX_MS = 10 * 60_000;
 /** After a failed typing send (a 429 among them): no indicator in that channel for this long. */
 export const TYPING_PAUSE_MS = 60_000;
 
-export abstract class QuickReplies extends ChannelChat {
+export abstract class QuickReplies extends DeployCommands {
   private quickBusy = false;
   private quickAgain = false;
   private quickPass: Promise<void> = Promise.resolve();

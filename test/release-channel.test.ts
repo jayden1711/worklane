@@ -107,6 +107,7 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
       slots: () => [],
       alive: () => false,
       installTree: (sha: string) => calls.push(`installTree ${sha.slice(0, 4)}`),
+      syncHelpers: () => [],
       switchTo: (sha: string) => ((current = sha), calls.push(`switchTo ${sha.slice(0, 4)}`)),
       now: () => clock,
       sleep: async (ms: number) => void (clock += ms),

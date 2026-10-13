@@ -5,6 +5,7 @@
 #   bash scripts/setup/test-user.sh install <name> [options]
 #   bash scripts/setup/test-user.sh check <name>
 #   bash scripts/setup/test-user.sh remove <name>
+#   bash scripts/setup/test-user.sh update-helper          only the sandbox helper, from this checkout; nothing else
 #   bash scripts/setup/test-user.sh --print install <name> [options]     (changes nothing)
 #
 # What install does:
@@ -28,6 +29,9 @@
 #   --memory-max <size>     [6G]  for all test runs together, databases included
 #   --cpu-weight <1-10000>  [10]  must stay below worklane.slice's (20 by default)
 #   --io-weight <1-10000>   [10]
+# update-helper reinstalls just /usr/local/libexec/worklane-testrun (shared by every instance), atomically, root:root
+# 0755: no user, slice, Docker or sudoers change, so it keeps every option an install was given. An engine whose
+# helper is outdated (its `version` isn't the engine's protocol) names this command; restart the instances after it.
 # The full-run lock (/run/lock/worklane-full-run.lock) must already exist, root-owned 0644: the project's own
 # machine script makes it at boot. The coordinator takes it shared for each run; agents' full runs take it exclusive.
 source "$(dirname "$0")/lib.sh"
@@ -42,7 +46,7 @@ docker_version=29.8.2
 docker_sha256_x64=995d1ef289677f74fd58d8d2c35727b6a4ee389c69db8638a3e42d0487aa5b0f
 docker_rootless_sha256_x64=707ebf6a5afd88104086e7b6749997b2366e816aeaf2c3ef2305b08fde9ee007
 
-usage="usage: test-user.sh [--print] install <name> [options] | check <name> | remove <name>"
+usage="usage: test-user.sh [--print] install <name> [options] | check <name> | remove <name> | update-helper"
 print="" cpus="" memory_max=6G cpu_weight=10 io_weight=10
 pos=()
 while [ "$#" -gt 0 ]; do
@@ -60,6 +64,7 @@ cmd="${pos[0]:-}" name="${pos[1]:-}"
 case "$cmd" in
   install) [ "${#pos[@]}" -eq 2 ] || { echo "$usage" >&2; exit 2; } ;;
   check | remove) [ "${#pos[@]}" -eq 2 ] && [ -z "$print" ] || { echo "$usage" >&2; exit 2; } ;;
+  update-helper) [ "${#pos[@]}" -eq 1 ] && [ -z "$print" ] || { echo "$usage" >&2; exit 2; }; name=helper ;; # no instance: a placeholder name, never used
   *) echo "$usage" >&2; exit 2 ;;
 esac
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "the instance name: lowercase letters, digits and dashes, at most 21" >&2; exit 2; }
@@ -280,6 +285,23 @@ check_cmd() {
   return "$fail"
 }
 
+# The helper, atomically: a temp file beside it, checked, then renamed over it (a run in progress keeps the old one).
+install_helper() {
+  local tmp
+  tmp="$(dirname "$helper")/.worklane-testrun.tmp"
+  install -d -o root -g root -m 0755 "$(dirname "$helper")"
+  install -o root -g root -m 0755 "$machine_dir/worklane-testrun.sh" "$tmp"
+  bash -n "$tmp" || { rm -f "$tmp"; echo "the helper doesn't parse; nothing installed" >&2; exit 1; }
+  mv -f "$tmp" "$helper"
+  echo "installed $helper (protocol $(sed -n 's/^PROTOCOL=\([0-9][0-9]*\)$/\1/p' "$helper"))"
+}
+
+update_helper_cmd() {
+  if [ -f "$helper" ] && cmp -s "$helper" "$machine_dir/worklane-testrun.sh"; then echo "$helper already matches this checkout's"; return 0; fi
+  install_helper
+  echo "restart each instance (systemctl restart worklane-<name>.service) so its coordinator asks the helper again"
+}
+
 install_cmd() {
   local s
   [ "$(uname -m)" = x86_64 ] || { echo "the pins here are x86_64 builds; this is $(uname -m)" >&2; exit 1; }
@@ -328,9 +350,7 @@ install_cmd() {
   fi
 
   say "the sandbox helper, root-owned, in $helper"
-  install -o root -g root -m 0755 "$machine_dir/worklane-testrun.sh" "$(dirname "$helper")/.worklane-testrun.tmp"
-  bash -n "$(dirname "$helper")/.worklane-testrun.tmp" || { rm -f "$(dirname "$helper")/.worklane-testrun.tmp"; echo "the helper doesn't parse; nothing installed" >&2; exit 1; }
-  mv -f "$(dirname "$helper")/.worklane-testrun.tmp" "$helper"
+  install_helper
 
   say "state in $root: runs, caches and Docker's data, the test user's"
   install -d -o root -g root -m 0711 /var/lib/worklane-test
@@ -394,4 +414,5 @@ case "$cmd" in
   install) install_cmd ;;
   check) check_cmd ;;
   remove) remove_cmd ;;
+  update-helper) update_helper_cmd ;;
 esac

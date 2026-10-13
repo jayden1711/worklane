@@ -46,6 +46,7 @@ if (!dist || !instance || !dbImage || !fixtures || !idsFile) {
 }
 const { sandboxHost, newRunId, systemdRunStats, SANDBOX_HELPER } = await load(dist, 'testrun/host.js');
 const { createWorkspace, wipeWorkspace } = await load(dist, 'testrun/workspace.js');
+const { checkHelper, HELPER_PROTOCOL } = await load(dist, 'testrun/helper.js');
 
 // Postgres itself answers on the port: an SSLRequest gets its one-byte reply, 'S' or 'N'.
 const postgresAnswers = (port) => new Promise((resolve, reject) => {
@@ -69,6 +70,11 @@ const sha = git('rev-parse', 'HEAD');
 
 const host = sandboxHost(instance);
 const id = newRunId('fast', sha);
+
+step('the helper\'s protocol, asked through sudo as the coordinator asks it at start');
+const proto = await checkHelper(host, instance);
+console.log(JSON.stringify(proto));
+assert.deepEqual([proto.ok, proto.have], [true, HELPER_PROTOCOL], proto.detail);
 appendFileSync(idsFile, `${id}\n`);
 
 step(`create ${id} from a bundle`);

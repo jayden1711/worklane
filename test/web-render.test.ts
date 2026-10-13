@@ -58,6 +58,7 @@ interface Render {
   renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
   countdown(resetAt: string, now: number): string;
   renderProtection(protection: unknown, brand: string): string;
+  renderDeployGate(gate: unknown): string;
   renderMainWatchAlert(protection: unknown): string;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
@@ -761,6 +762,19 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+});
+
+test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
+  const a = 'a'.repeat(40);
+  const b = 'b'.repeat(40);
+  const now = new Date().toISOString();
+  const moving = r.renderDeployGate({ branch: 'deploy', deployed: { sha: a, url: `https://github.com/o/r/commit/${a}`, at: now, by: 'gate', override: false }, held: null, refused: null });
+  assert.match(moving, /Pre-deploy gate[\s\S]*Moving/);
+  assert.match(moving, /data-testid="deploy-gate-deployed"[\s\S]*deploy[\s\S]*aaaaaaaa/);
+  assert.doesNotMatch(moving, /deploy-gate-held/);
+  const held = r.renderDeployGate({ branch: 'deploy', deployed: { sha: a, url: '', at: null, by: null, override: false }, held: { sha: b, url: `https://github.com/o/r/commit/${b}`, at: now, reason: 'failed: suite' }, refused: null });
+  assert.match(held, /Held<[\s\S]*data-testid="deploy-gate-held"[\s\S]*bbbbbbbb[\s\S]*failed: suite/);
+  assert.match(r.renderDeployGate({ branch: 'deploy', deployed: null, held: null, refused: { at: now, reason: 'deploy is off main' } }), /Refused[\s\S]*not moved by the gate yet[\s\S]*deploy is off main/);
 });
 
 test('bootstrap merges on the Machine page: an admin gets the accept field, a writer the list read-only, a viewer neither', () => {

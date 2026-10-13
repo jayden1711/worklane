@@ -452,6 +452,43 @@ jobs:
             grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo ci2 || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
+      - name: an outdated helper is replaced by the updater (and by update-helper), as root, with sudoers unchanged
+        run: |
+          H=/usr/local/libexec/worklane-testrun
+          need="$(sed -n 's/^PROTOCOL=\([0-9][0-9]*\)$/\1/p' scripts/machine/worklane-testrun.sh)"
+          sudo sha256sum /etc/sudoers.d/worklane-test-ci /etc/sudoers.d/worklane-test-ci2 > "$RUNNER_TEMP/sudoers.before"
+          old() {
+            # The helper as a machine had it before db-start took max_connections: no version command.
+            sudo install -o root -g root -m 0755 test/fixtures/testrun-helper-protocol-1.sh "$H"
+            if out="$(sudo -u wl-ci sudo -n "$H" ci version 2>&1)"; then echo "the old helper answered version: $out" >&2; exit 1; fi
+            grep -q 'unknown command version' <<<"$out"
+            echo "old helper in place; as wl-ci, version says: $out"
+          }
+          in_step() {
+            sudo cmp "$H" scripts/machine/worklane-testrun.sh
+            [ "$(stat -c '%U:%G %a' "$H")" = 'root:root 755' ] || { stat -c '%U:%G %a' "$H" >&2; exit 1; }
+            [ "$(sudo -u wl-ci sudo -n "$H" ci version)" = "$need" ]
+            sudo sha256sum -c "$RUNNER_TEMP/sudoers.before"
+            if sudo ls -A "$(dirname "$H")" | grep -q '^\.'; then echo "a temp file was left" >&2; sudo ls -la "$(dirname "$H")" >&2; exit 1; fi
+          }
+          # The updater's own function, as root, from an engine tree as it installs one: root-owned, under /opt.
+          old
+          E="$(sudo mktemp -d /opt/wl-engine-XXXXXX)"
+          sudo cp -r scripts "$E/"
+          sudo chown -R root:root "$E"
+          sync_helpers() { sudo "$(command -v node)" -e 'console.log(JSON.stringify(require(process.argv[1]).syncHelpers(process.argv[2])))' "$PWD/scripts/machine/worklane-update.cjs" "$E"; }
+          sync_helpers | tee "$RUNNER_TEMP/sync1.json"
+          jq -e --arg h "$H" 'map(select(.path == $h))[0].state == "updated"' "$RUNNER_TEMP/sync1.json"
+          in_step
+          sync_helpers | tee "$RUNNER_TEMP/sync2.json"
+          jq -e --arg h "$H" 'map(select(.path == $h))[0].state == "same"' "$RUNNER_TEMP/sync2.json"
+          # And the admin's fix the engine names: update-helper, nothing else.
+          old
+          sudo bash scripts/setup/test-user.sh update-helper | tee "$RUNNER_TEMP/update-helper.log"
+          grep -q "^installed $H (protocol $need)" "$RUNNER_TEMP/update-helper.log"
+          in_step
+          sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed'
+          sudo rm -rf "$E"
       - name: the database image, pinned to the digest it has today
         run: |
           docker pull -q postgres:17-alpine

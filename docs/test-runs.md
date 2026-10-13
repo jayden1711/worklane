@@ -125,7 +125,7 @@ The smaller of the two is 2 (`recommendTestSlots`). Give `worklane-test.slice` t
 3. **root** `sudo bash scripts/setup/test-user.sh install <name> --cpus <list> --memory-max <size>`. It checks the boundaries as the test user before installing anything else, and everything again at the end.
 4. **root** `sudo bash scripts/setup/machine-helper.sh <every instance>` again, so the coordinators may run `set-test-slots`.
 5. **owner** In the App's settings, add **Checks: read & write**, then accept the new permission on the installation. Then restart the instance: it records the permission at start.
-6. **owner** Once the checks show on PRs, require them in the branch protection.
+6. **owner** Once the checks show on PRs, require them in the branch protection (not strict, unless `config.yaml` `protection.strict` opts the repo in).
 
 ## Check
 
@@ -135,6 +135,16 @@ The smaller of the two is 2 (`recommendTestSlots`). Give `worklane-test.slice` t
 - each protected path, probed as the test user: only an explicit "denied" passes, and a probe that didn't run is a FAIL;
 - the same paths probed again from inside a sandboxed run;
 - the lock file, the slice's caps against the instances', rootless Docker and its cgroups (the daemon in its unit's `daemon` subgroup, the controllers delegated), and that the installed helper matches the checkout's.
+
+## The helper's protocol
+
+The engine and the helper change together, but root installs the helper. So at start the coordinator asks the helper its protocol version (`worklane-testrun <name> version`), once, and starts no test run unless it is exactly the engine's (`HELPER_PROTOCOL` in `src/testrun/helper.ts`, `PROTOCOL` in the helper; a test keeps them equal). A helper too old to have `version` counts as outdated. When it is outdated, each PR gets a failing check saying so and how to fix it, and the watchdog raises one `helper_outdated` incident. The fix only reinstalls the helper and changes nothing else:
+
+**root** `sudo bash /opt/worklane/current/scripts/setup/test-user.sh update-helper`, then restart the instance.
+
+The updater keeps the helpers in step on its own. With the services stopped, just before it switches to a new engine, it replaces each root helper the machine has (this one, the machine helper and the console shell) with the new engine's copy when they differ. It writes a checked temp file beside the helper with the same owner and mode, then renames it over the helper. It never touches sudoers. If a helper can't be replaced, it rolls back and holds the update. Every rollback puts the old engine's helpers back.
+
+A setup step that fails (the workspace, a cache, the database, a setup command) is named in the check, with the last 20 lines of its stderr, redacted. Its stdout is never shown: `db-start` prints the database's password there.
 
 ## Undo
 
