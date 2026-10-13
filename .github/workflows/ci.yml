@@ -431,6 +431,8 @@ jobs:
           in_step
           sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed'
           sudo rm -rf "$E"
+      - name: a red main tip doesn't block the updater, as root (the newest green first-parent commit; its verdict memo root-owned)
+        run: sudo "$(command -v node)" scripts/ci/updater-lookback-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
       - name: the database image, pinned to the digest it has today
         run: |
           docker pull -q postgres:17-alpine
