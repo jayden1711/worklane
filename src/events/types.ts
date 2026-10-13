@@ -305,6 +305,35 @@ export const EventSchemas = {
   'delegation.suggested': z.strictObject({ category: z.string(), direction: z.enum(['loosen', 'tighten']), decision: z.string(), receipts: z.array(z.string()) }),
   /** The owner's answer; loosen or tighten files the review.yaml change as an issue (built into a PR they review). */
   'delegation.decided': z.strictObject({ category: z.string(), decision: z.string(), answer: z.string(), by: z.string(), issue: issue.nullable() }),
+  /**
+   * One weekly optimization pass (src/coordinator/optimize.ts; started_at by the coordinator's clock): the target it
+   * picked, main's numbers (baseline), and the task it filed; outcome: `filed`, or why it stopped.
+   */
+  'optimize.pass': z.strictObject({
+    started_at: z.string(),
+    target: z.string().max(400).nullable(),
+    unit: z.string().max(20).default(''),
+    lower_is_better: z.boolean().default(true),
+    issue: issue.nullable(),
+    baseline: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    outcome: z.string().max(1000),
+  }),
+  /**
+   * An optimization task measured on its change (head): `improved` becomes the PR (its numbers in the body);
+   * `discarded` is closed with why (no improvement, within the noise, the benchmark failed, or the week's budget).
+   */
+  'optimize.result': z.strictObject({
+    issue,
+    target: z.string().max(400),
+    head: sha.nullable(),
+    outcome: z.enum(['improved', 'discarded']),
+    why: z.string().max(1000),
+    before: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    after: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    gain: z.number().nullable(),
+    pct: z.number().nullable(),
+    noise: z.number().nullable(),
+  }),
   /** A gardener finding: a pattern and the places it was seen (from the run or the event log's signals). */
   'gardener.finding': z.strictObject({ pattern: z.string(), kind: z.enum(['dead_code', 'duplication', 'rule_violation', 'hotspot', 'slow_check', 'flaky_check']), where: z.array(z.string()), detail: z.string() }),
   /** A gardener fix filed (an issue the pipeline builds into a reviewed PR): once per pattern. */
