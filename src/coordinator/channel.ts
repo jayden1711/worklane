@@ -11,7 +11,7 @@
 import type { EventPayload } from '../events/types.js';
 import { ASK_EVENTS, asksFrom, asks as askApi, AskError } from '../console/asks.js';
 import { answerDecision, auditWrite, firstAnswer } from '../decide.js';
-import { alreadyText, askBack, askPost, commentText, decidedText, decisionPost, parseChoice, type ChannelPost } from '../intake/channel.js';
+import { alreadyText, askBack, askPost, commentText, decidedText, decisionPost, mainWatchPost, parseChoice, type ChannelPost } from '../intake/channel.js';
 import { NEVER_FROM_CHAT, mayAnswerAskFromChat, mayAnswerFromChat, personOf, type ChatPerson } from '../intake/people.js';
 import { redactPii } from '../intake/redact.js';
 import { IntakeMeter, reportId, storeRaw } from '../intake/store.js';
@@ -248,6 +248,11 @@ export abstract class Channel extends ResearchOnDemand {
     for (const a of all) {
       if (a.status !== 'open' || posted.has(`ask:${a.id}`)) continue;
       await this.channelSend(src, `ask:${a.id}`, { channel }, askPost(a, o));
+    }
+    // The main watch's alerts: one notice per unaccounted commit.
+    for (const e of this.d.log.read(0, ['main_watch.unaccounted'])) {
+      const u = e.payload as EventPayload<'main_watch.unaccounted'>;
+      if (!posted.has(`main-watch:${u.sha}`)) await this.channelSend(src, `main-watch:${u.sha}`, { channel }, mainWatchPost(u, o));
     }
     // Decided elsewhere (the dashboard, GitHub, the CLI): the thread says so, once.
     for (const [thread, target] of this.channelThreads()) {

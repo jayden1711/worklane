@@ -41,7 +41,7 @@ const settingsOf = (argv: string[]) => {
 };
 
 test('instance billing: an API key only when credentials.yaml names one; the environment never carries a key', () => {
-  const fake = (extra: object) => ({ name: 'x', stateDir: '/tmp/x', credentials: { version: 1, github: { kind: 'gh-config-dir', path: '/tmp/gh' }, ...extra } }) as unknown as Instance;
+  const fake = (extra: object) => ({ name: 'x', home: '/tmp/x-home', stateDir: '/tmp/x', credentials: { version: 1, github: { kind: 'gh-config-dir', path: '/tmp/gh' }, ...extra } }) as unknown as Instance;
   assert.deepEqual(instanceRuntime(fake({})), { runtime: 'cli' });
   assert.deepEqual(instanceRuntime(fake({ agent_api_key: KEY_FILE })), { runtime: 'api_key', apiKeyFile: KEY_FILE });
   const base = { PATH: '/bin', ANTHROPIC_API_KEY: 'sk-ant-' + 'x'.repeat(30), ANTHROPIC_AUTH_TOKEN: 't' };

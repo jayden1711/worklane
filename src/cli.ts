@@ -11,7 +11,8 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
-import { install, installGitHook, invokedEngine } from './install.js';
+import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
+import { recordPushBlocked } from './push-guard.js';
 import { homeDir } from './os/index.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
@@ -35,7 +36,7 @@ import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
 import { openUrl, stateDir } from './os/index.js';
-import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status } from './service.js';
+import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -175,6 +176,15 @@ async function main(argv: string[]): Promise<number> {
       // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.
       if (flag(args, '--git-hooks-only')) {
         console.log(`pre-commit secret scan: ${installGitHook(root)}`);
+        // An instance's checkout (checkout.sh): never a push of the default branch from it, by anyone. The config's
+        // branch when the repo has its config yet; origin/HEAD's at push time either way.
+        let branches: string[] = [];
+        try {
+          branches = [loadConfig(root).project.project.default_branch];
+        } catch {
+          // no config yet: the hook goes by origin/HEAD
+        }
+        console.log(`pre-push default-branch guard: ${installCheckoutPrePush(root, branches, invokedEngine())}`);
         return 0;
       }
       const gitHooks = flag(args, '--git-hooks');
@@ -541,7 +551,8 @@ async function main(argv: string[]): Promise<number> {
       }
       const i = loadInstance(name);
       const cfg = i.config;
-      // As the coordinator does: the instance's own git credentials and commit identity, never the operator's.
+      // As the coordinator does: the instance's own git credentials, hooks and commit identity, never the operator's.
+      writeInstanceHooks(i);
       const env = instanceEnv(i);
       for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
       Object.assign(process.env, env);
@@ -562,6 +573,7 @@ async function main(argv: string[]): Promise<number> {
         ...(dryRun ? {} : { backlog: backlogFor(cfg, i.repo.path, i.stateDir, instanceTokens(i, env)) }),
         identity,
         stateDir: i.stateDir,
+        onBlocked: (ref, head) => recordPushBlocked(join(i.stateDir, 'events.db'), ref, head, 'coordinator'),
       });
       console.log(`profiled \`${r.profile.command}\` on ${r.profile.cores} cores:`);
       for (const run of r.profile.runs) console.log(`  ${String(run.workers).padStart(3)} worker(s): ${run.ok ? `${run.seconds.toFixed(0)} s` : 'FAILED'}${run.peakWorkerMb ? `, ${run.peakWorkerMb.toFixed(0)} MB per worker` : ''}`);
@@ -655,6 +667,21 @@ async function main(argv: string[]): Promise<number> {
       } catch (e) {
         return refuse(`instance ${name}: ${(e as Error).message.split('\n')[0]}`);
       }
+    }
+
+    case 'push-blocked': {
+      // The pre-push hook's record of a refused push to the default branch (push-guard.ts). Best effort: the hook
+      // has refused the push already; this only writes the event, to the instance's log (the coordinator's git names
+      // it in the environment) or else this checkout's.
+      const args = [sub, ...rest].filter((a): a is string => a !== undefined);
+      try {
+        const name = process.env[`${BRAND.envPrefix}_INSTANCE`];
+        const db = name ? join(loadInstanceCredentials(name).stateDir, 'events.db') : logPath(root);
+        recordPushBlocked(db, option(args, '--ref') ?? '?', option(args, '--sha') ?? null, 'hook');
+      } catch {
+        // nowhere to record it: the refusal stands regardless
+      }
+      return 0;
     }
 
     case 'stop-all': {

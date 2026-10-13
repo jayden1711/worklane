@@ -8,6 +8,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { globToRegExp } from './guardrails/glob.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
+import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
 
 export interface PushLimits {
   max_file_mb: number;
@@ -83,8 +84,12 @@ export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok:
  * `force` replaces the branch (a task branch the harness owns); `expect` updates
  * it only if the remote is still exactly at that commit (never over someone
  * else's push); with neither, the push succeeds only as a fast-forward.
+ * `guard`: the default branch is never pushed (push-guard.ts), except as the direct land (land_mode direct); a push
+ * to it is refused before anything else and recorded through the guard.
  */
-export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; force?: boolean; expect?: string }): PushResult {
+export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; guard: PushGuard; force?: boolean; expect?: string }): PushResult {
+  const main = defaultBranchRefusal(o.guard, o.ref, o.head);
+  if (main) return { ok: false, refused: [main] };
   const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
   if (refused.length) return { ok: false, refused };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];

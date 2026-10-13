@@ -17,6 +17,8 @@ const level = (paths: string[]) => computeLevel({ files: paths.map((path) => ({ 
 /** A change the policy merges: everything clean. Each test turns one thing. */
 function clean(over: Partial<MergeInput> = {}): MergeInput {
   return {
+    branch: `${BRAND.cli}/issue-7`,
+    openedByHarness: true,
     policyOn: true,
     repoOn: true,
     stopped: null,
@@ -36,6 +38,20 @@ function clean(over: Partial<MergeInput> = {}): MergeInput {
 
 test('merge policy: a clean change merges', () => {
   assert.deepEqual(mergeDecision(clean()), { auto: true, reasons: [] });
+});
+
+test('merge policy: a revert the harness opened never auto-merges, however clean', () => {
+  for (const branch of [`${BRAND.cli}/revert-pr-12`, `${BRAND.cli}/revert-0123456789ab`]) {
+    const d = mergeDecision(clean({ branch }));
+    assert.equal(d.auto, false, branch);
+    assert.match(d.reasons.join(), /never auto-merged: a revert the harness opened/);
+  }
+});
+
+test("merge policy: a PR the harness didn't open (a person's, a bot's) never auto-merges, however green", () => {
+  const d = mergeDecision(clean({ openedByHarness: false, branch: 'feature/totals' }));
+  assert.equal(d.auto, false);
+  assert.deepEqual(d.reasons, ['never auto-merged: the harness did not open this PR; a person merges it']);
 });
 
 test('merge policy: the kill switch, the repo switch and a stop each make every PR wait', () => {
