@@ -46,6 +46,13 @@ export const EventSchemas = {
     role: z.string(),
     reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped', 'stuck']),
     detail: z.string(),
+    /** The claude session the run was: a fix run on the issue's PR resumes the latest one (src/coordinator/fix-runs.ts). */
+    session: z.string().max(200).optional(),
+    /**
+     * A fix run's session: `resumed` the session that wrote the change (`session`), or `fresh` (a new session; `why`:
+     * none was stored, or resuming `session` failed, e.g. it is gone).
+     */
+    resume: z.strictObject({ outcome: z.enum(['resumed', 'fresh']), session: z.string().max(200).nullable(), why: z.string() }).optional(),
   }),
   /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
   'run.lock_waited': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), wait_ms: z.number().int().nonnegative() }),
@@ -298,6 +305,35 @@ export const EventSchemas = {
   'delegation.suggested': z.strictObject({ category: z.string(), direction: z.enum(['loosen', 'tighten']), decision: z.string(), receipts: z.array(z.string()) }),
   /** The owner's answer; loosen or tighten files the review.yaml change as an issue (built into a PR they review). */
   'delegation.decided': z.strictObject({ category: z.string(), decision: z.string(), answer: z.string(), by: z.string(), issue: issue.nullable() }),
+  /**
+   * One weekly optimization pass (src/coordinator/optimize.ts; started_at by the coordinator's clock): the target it
+   * picked, main's numbers (baseline), and the task it filed; outcome: `filed`, or why it stopped.
+   */
+  'optimize.pass': z.strictObject({
+    started_at: z.string(),
+    target: z.string().max(400).nullable(),
+    unit: z.string().max(20).default(''),
+    lower_is_better: z.boolean().default(true),
+    issue: issue.nullable(),
+    baseline: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    outcome: z.string().max(1000),
+  }),
+  /**
+   * An optimization task measured on its change (head): `improved` becomes the PR (its numbers in the body);
+   * `discarded` is closed with why (no improvement, within the noise, the benchmark failed, or the week's budget).
+   */
+  'optimize.result': z.strictObject({
+    issue,
+    target: z.string().max(400),
+    head: sha.nullable(),
+    outcome: z.enum(['improved', 'discarded']),
+    why: z.string().max(1000),
+    before: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    after: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    gain: z.number().nullable(),
+    pct: z.number().nullable(),
+    noise: z.number().nullable(),
+  }),
   /** A gardener finding: a pattern and the places it was seen (from the run or the event log's signals). */
   'gardener.finding': z.strictObject({ pattern: z.string(), kind: z.enum(['dead_code', 'duplication', 'rule_violation', 'hotspot', 'slow_check', 'flaky_check']), where: z.array(z.string()), detail: z.string() }),
   /** A gardener fix filed (an issue the pipeline builds into a reviewed PR): once per pattern. */
@@ -369,8 +405,13 @@ export const EventSchemas = {
   'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),
-  /** A CI fix run on a PR whose required check failed at `head`; `lease` is its claim. */
-  'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
+  /**
+   * A fix run on a PR at `head`: a required check failed, or (`reviews`, their ids) a writer's review asked for
+   * changes or commented. Both count toward roles.ci_repair.max_fixes_per_pr. `lease` is its claim.
+   */
+  'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha, reviews: z.array(z.number().int().positive()).optional() }),
+  /** Writers' reviews on a harness PR that get no fix run (the cap, runs off, someone else's push): recorded once, the owner told why. */
+  'review_fix.declined': z.strictObject({ issue, number: z.number().int().positive(), reviews: z.array(z.number().int().positive()), reason: z.string() }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
   'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted', 'claim_lost']), head: sha.nullable(), detail: z.string() }),
   /** An eval of instructions the change touches, base vs head (base null: new instructions). `error`: it couldn't run. */

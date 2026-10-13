@@ -20,6 +20,7 @@ import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
 import { sh, evalLines, pushRefusal, DEFAULT_REVIEW } from './shared.js';
 import { slotDeferringSince } from './wait-caps.js';
+import { optimizePrLines } from '../optimize.js';
 
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
@@ -326,6 +327,8 @@ export abstract class Landing extends Decisions {
       '',
       ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
       ...(browser?.head === q.head ? ['', ...browser.lines] : []),
+      // An optimization task (src/optimize.ts): the benchmark's before and after, and every raw run.
+      ...((o) => (o.length ? ['', ...o] : []))(optimizePrLines(this.events(n), q.head)),
     ].join('\n');
     const refused = prBodyProblems(body, computed.cls);
     if (refused.length) {

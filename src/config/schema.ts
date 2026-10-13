@@ -7,6 +7,7 @@ import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
+import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -164,6 +165,13 @@ export const ProjectConfig = z.strictObject({
       tasks: z.string().min(1).optional(),
     })
     .prefault({}),
+  /**
+   * The weekly optimization pass (src/optimize.ts): on `weekday` after `at`, the top target (a benchmarks.yaml
+   * benchmark, or the slowest test the metrics recorded) is measured on main, then built as a normal task on the
+   * strongest model; it becomes a PR only if its median beats main's by more than the noise. Off by default; a hard
+   * stop at `budget_usd` a week, at most `max_prs` PRs a week.
+   */
+  optimize: OptimizeConfig,
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),
@@ -726,4 +734,5 @@ export const FILES = {
   'review.yaml': ReviewConfig,
   'deploy.yaml': DeployConfig,
   'app.yaml': AppConfig,
+  'benchmarks.yaml': BenchmarksConfig,
 } as const;
