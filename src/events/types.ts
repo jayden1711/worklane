@@ -242,8 +242,12 @@ export const EventSchemas = {
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
   /** The browser checks a verify ran (src/coordinator/browser.ts): the PR description's BROWSER CHECKS section. */
   'browser.evidence': z.strictObject({ issue, head: sha, lines: z.array(z.string().max(1000)).max(300) }),
-  /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
-  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
+  /**
+   * The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts; and the
+   * worker's intent paragraph and risk class for the top of the PR body (src/pr-rules.ts; the class can only raise
+   * the one computed from the paths). Both absent in older events.
+   */
+  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()), intent: z.string().max(4000).optional(), risk_class: z.enum(['docs-only', 'logic', 'protected']).optional() }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -575,6 +579,11 @@ export const EventSchemas = {
     results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
     detail: z.string().max(2000),
   }),
+  /**
+   * One tier's per-test durations, read from its output (src/test-durations.ts): its slowest tests (at most 100) and
+   * how many it printed durations for in all (0: its runner prints none this reads). For the metrics' slow tests.
+   */
+  'testrun.durations': z.strictObject({ id: z.string(), tier: z.string(), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative() }),
   'testrun.wipe_failed': z.strictObject({ id: z.string(), left: z.array(z.string()) }),
   'testrun.checks_posted': z.strictObject({ id: z.string(), sha, checks: z.array(z.strictObject({ name: z.string(), conclusion: z.enum(['success', 'failure', 'cancelled']) })) }),
   /** no_permission: the App lacks Checks: write (the owner adds it); the checks were not posted. */
@@ -619,6 +628,14 @@ export const EventSchemas = {
   }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
+  // CI timings read from GitHub for the metrics (src/ci-metrics.ts): each recorded once, so each is asked once.
+  /**
+   * A merged PR's CI wall-clock on its head: from the first check run starting to the last required check
+   * (config.yaml required_checks; every check when none) completing. `wall_ms` null: not measurable (`why`).
+   */
+  'ci.pr_timing': z.strictObject({ number: z.number().int().positive(), head: sha, wall_ms: z.number().int().nonnegative().nullable(), first_started: z.string().nullable(), last_completed: z.string().nullable(), why: z.string().max(500).nullable() }),
+  /** One GitHub Actions job's per-test durations on a default-branch commit, from its log (src/test-durations.ts). */
+  'ci.test_durations': z.strictObject({ sha, job: z.string().max(200), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative(), error: z.string().max(500).nullable() }),
   // flaky tests (src/flaky.ts, coordinator/flaky.ts): before the default branch counts as red, its failing checks re-run on the same commit
   /**
    * The default branch's required checks failed on `sha` (a red run): each failing check (`failed`) is re-run there.

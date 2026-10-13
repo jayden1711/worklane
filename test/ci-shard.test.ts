@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { globSync } from 'node:fs';
+import { globSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { repoRoot } from './helpers.js';
@@ -14,6 +15,7 @@ const s = (await import(pathToFileURL(script).href)) as {
   timings: () => Record<string, number>;
   assign: (files: string[], ms: Record<string, number>, n: number) => Shard[];
   built: (f: string) => string;
+  only: (file: string) => string[];
 };
 
 /** What npm test's glob (dist/test/**\/*.test.js) runs once built: the sources, found here without the script. */
@@ -64,4 +66,24 @@ test('on the measured timings the shards are balanced: none past the longest fil
   assert.ok(Math.max(...loads) <= Math.max(longest, mean * 1.1), `loads ${loads.join(', ')}, longest file ${longest}, mean ${mean}`);
   assert.ok(Math.min(...loads) >= mean * 0.75, `loads ${loads.join(', ')}, mean ${mean}`);
   assert.ok(files.filter((f) => ms[f] === undefined).length < files.length / 10, 'test/timings.json covers most of the suite');
+});
+
+test('--only splits just the files a selection lists, balanced the same way; an empty list leaves every shard empty', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'shard-only-'));
+  const list = (name: string, files: string[]) => {
+    writeFileSync(join(dir, name), files.map((f) => `${f}\n`).join(''));
+    return join(dir, name);
+  };
+  const run = (...a: string[]) => spawnSync(process.execPath, [script, ...a], { encoding: 'utf8' });
+  const picked = glob().slice(0, 3);
+  const sel = list('sel', picked);
+  const out = [1, 2, 3, 4].flatMap((k) => run(`${k}/4`, '--only', sel).stdout.split('\n').filter(Boolean));
+  assert.deepEqual(out.sort(), picked.map((f) => s.built(f)).sort(), 'each selected file in exactly one shard, nothing else');
+  assert.deepEqual(s.only(sel), picked);
+  const empty = list('empty', []);
+  for (const k of [1, 2, 3, 4]) assert.deepEqual([run(`${k}/4`, '--only', empty).status, run(`${k}/4`, '--only', empty).stdout], [0, ''], `shard ${k}`);
+  const bad = run('1/4', '--only', list('bad', ['test/not-a-file.test.ts']));
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /not a test file of the suite/);
+  assert.equal(run('1/4', '--only').status, 2);
 });

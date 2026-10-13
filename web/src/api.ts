@@ -940,6 +940,37 @@ export interface Trust {
 }
 
 /**
+ * Metrics (GET /api/metrics, src/merge-metrics.ts deliveryMetrics): over 7 and 30 days, the owner's and writers'. A
+ * figure whose source has recorded nothing yet is `{ measured: false, why }`: "not measured yet", never a 0.
+ */
+export type Measure<T> = ({ measured: true } & T) | { measured: false; why: string };
+export interface MetricsWindow {
+  days: number;
+  since: string;
+  merges: Measure<{ total: number; perDay: number }>;
+  mainRed: Measure<{ count: number; stillRed: boolean }>;
+  timeToGreen: Measure<{ minutes: number[]; medianMinutes: number | null }>;
+  reverts: Measure<{ opened: number; onRed: number; merged: number; redTimes: number; rate: number | null }>;
+  fixForward: Measure<{ attempts: number; fixed: number; reverted: number; successRate: number | null }>;
+  prCi: Measure<{ prs: number; medianMinutes: number | null; p90Minutes: number | null; slowest: { number: number; minutes: number }[] }>;
+  startup: Measure<{ runs: number; medianSeconds: number | null; p90Seconds: number | null }>;
+  flake: Measure<{ reruns: number; flaky: number; rate: number | null; quarantined: number }>;
+}
+export interface SlowTest {
+  name: string;
+  medianMs: number;
+  maxMs: number;
+  runs: number;
+}
+export interface Metrics {
+  until: string;
+  windows: MetricsWindow[];
+  perDay: { day: string; merged: number }[] | null;
+  slowTests: Measure<{ days: number; budgetS: number; runs: number; slowest: SlowTest[]; overBudget: SlowTest[]; overBudgetTotal: number }>;
+  definitions: string[];
+}
+
+/**
  * Flaky tests (GET /api/flaky, src/flaky.ts; owners and writers): the quarantined checks, those released lately, and
  * the flake rate (flaky re-runs over red runs on the default branch) over 7 and 30 days.
  */

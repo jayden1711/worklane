@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// CI only (the "Claude sign-in probe (real users)" job in .github/workflows/ci.yml): the watchdog's `claude auth
+// CI only (the "Claude sign-in probe (real users)" job in .github/workflows/ci-slow.yml): the watchdog's `claude auth
 // status` probe, run as the instance's coordinator user through its real sudoers rule to its real agent user, as the
 // coordinator's service runs it. The stand-in claude (scripts/ci/claude-stand-in.cjs) says signed in only when a
 // login is stored under the HOME it is given, and only the agent user's home holds one.
