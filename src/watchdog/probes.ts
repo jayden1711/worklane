@@ -4,6 +4,7 @@
 // probe's scope that is no longer found is resolved (once). A probe that couldn't look (no systemd here, a disk it
 // couldn't read) reports nothing for what it didn't see, so nothing is resolved on a guess.
 import { BRAND } from '../brand.js';
+import { helperFix } from '../testrun/helper.js';
 import type { StoredEvent } from '../events/types.js';
 import type { UnitState } from '../os/stats.js';
 import type { UpdateEntry } from '../updates.js';
@@ -195,8 +196,14 @@ export function instanceFindings(f: InstanceFacts): Finding[] {
   if (sandbox && !sandbox.ok) {
     out.push({ kind: 'test_sandbox', key: i, instance: i, detail: `the test sandbox check failed: ${sandbox.detail}`, fix: "Re-run the machine's test-user setup (scripts/setup/test-user.sh) and restart the instance", tried: ['no test run starts until it passes; it is checked again when the instance starts'] });
   }
+
+  // The sandbox helper's protocol isn't this engine's (an engine update that didn't reinstall the root helper).
+  const helper = [...f.events].reverse().find((e) => e.type === 'testrun.helper')?.payload as { ok: boolean; have: number | null; need: number; detail: string } | undefined;
+  if (helper && !helper.ok) {
+    out.push({ kind: 'helper_outdated', key: i, instance: i, detail: helper.detail, fix: helperFix(i), tried: ['no test run starts; each PR gets a check that says so', 'asked again when the instance starts'] });
+  }
   return out;
 }
 
 /** The instance-level kinds: an instance's own probe answers for these, for itself only. */
-export const INSTANCE_KINDS = ['claude_auth', 'claude_login_expiring', 'github_auth', 'stalled', 'auto_merge_stopped', 'test_sandbox'] as const satisfies readonly WatchdogKind[];
+export const INSTANCE_KINDS = ['claude_auth', 'claude_login_expiring', 'github_auth', 'stalled', 'auto_merge_stopped', 'test_sandbox', 'helper_outdated'] as const satisfies readonly WatchdogKind[];

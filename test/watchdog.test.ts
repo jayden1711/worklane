@@ -164,6 +164,13 @@ const TRIGGERS: { kind: string; key: string; instance: string | null; bad: (w: R
     bad: (w) => w.events.push(ev('testrun.sandbox', { ok: false, detail: 'the test user can read the coordinator home' }, w.now.toISOString())),
     good: (w) => w.events.push(ev('testrun.sandbox', { ok: true, detail: 'ok' }, w.now.toISOString())),
   },
+  {
+    kind: 'helper_outdated',
+    key: 'alpha',
+    instance: 'alpha',
+    bad: (w) => w.events.push(ev('testrun.helper', { ok: false, have: null, need: 2, detail: 'the test sandbox helper is older than this engine' }, w.now.toISOString())),
+    good: (w) => w.events.push(ev('testrun.helper', { ok: true, have: 2, need: 2, detail: '' }, w.now.toISOString())),
+  },
 ];
 
 for (const t of TRIGGERS) {
