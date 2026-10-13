@@ -22,7 +22,7 @@ import type { EventPayload, StoredEvent } from './events/types.js';
 import { protectionView } from './main-watch.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
-import { backlogFor, instanceEnv, instanceTokens, siteForInstance, siteForRoot } from './service.js';
+import { backlogFor, instanceEnv, instanceId, instanceTokens, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { answerDecision, auditWrite } from './decide.js';
@@ -111,6 +111,11 @@ export interface DashboardOptions {
   journalReader?: JournalReader;
   /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
   slotsDir?: string;
+  /**
+   * Who this instance's coordinator is on the machine (its user@host, which starts its test slots' owner); this
+   * process's when unset (an instance's dashboard runs as its coordinator user). Tests set it.
+   */
+  actor?: string;
   /** The full-run lock whose holders the test-runs view shows (tests). */
   testRunLock?: string;
   /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
@@ -147,6 +152,25 @@ export function stopStatus(inForce: EmergencyStop | null, record: { lastStop: { 
 }
 
 export { mayAnswer };
+
+/** What a slot or lock held by anyone but this instance shows as: that it is held, never by whom or for what. */
+export const ELSEWHERE = 'another instance or job on this machine';
+
+/**
+ * The machine's slot and lock holders as one instance's dashboard may show them. The slots are shared by every
+ * instance on the machine, and a holder's owner names its project, issue or run; so only this instance's own
+ * holders keep it (its agent slots and land gate, `<cli> <project> ...`; its test slots, `<actor> ...`). Any
+ * other holder is counted, with its slot and since when, as held elsewhere: no owner, no pid. Fails closed: a
+ * holder that doesn't name this instance is someone else's.
+ */
+export function ownHolders(o: { project: string; actor: string }) {
+  const mine = (owner: string) => owner.startsWith(`${BRAND.cli} ${o.project} `) || owner.startsWith(`${o.actor} `);
+  return <T extends { owner: string; acquiredAt: string; pid?: number }>(h: T): T | { owner: string; acquiredAt: string; elsewhere: true } & Omit<T, 'owner' | 'pid'> => {
+    if (mine(h.owner)) return h;
+    const { owner: _owner, pid: _pid, ...rest } = h;
+    return { ...rest, owner: ELSEWHERE, elsewhere: true };
+  };
+}
 
 /** Who is asking: a signed-in person the hub named (their role read from the repo), or the owner's break-glass. */
 export interface Who {
@@ -644,12 +668,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
-  /** Each live-stream client, with its role: a viewer is told only of the event types it may see. */
-  const clients = new Map<ServerResponse, Role>();
+  /**
+   * Each live-stream client, with its role: a viewer is told only of the event types it may see. A signed-in
+   * person's role is read again (from the role cache) before each change goes out, so someone removed from the
+   * repo stops getting this instance's changes once the cache says so, even on a stream opened before.
+   */
+  const clients = new Map<ServerResponse, { role: Role; login: string | null }>();
   let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
 
   const owners = opts.cfg.project.owners;
   const repo = opts.cfg.project.project.repo;
+  /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
+  const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -693,7 +723,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       via: who.via,
       owners: opts.cfg.project.owners,
       budget: opts.cfg.agents.daily_budget_usd,
-      slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents, fullRun: slots.fullRun },
+      slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents.map(holder), fullRun: slots.fullRun ? holder(slots.fullRun) : null },
       ...p,
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
       activity: isWriter(who.role) ? p.activity : viewerActivity(events),
@@ -757,7 +787,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // The test runs (src/testrun/): everyone with a role reads them; a viewer gets tier pass or fail only.
         if (url.pathname === '/api/test-runs' && req.method === 'GET') {
           const held = testSlotsHeld(opts.slotsDir);
-          return json(res, 200, testRunsView({ events: readEvents(opts.eventsDb), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => ({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
+          return json(res, 200, testRunsView({ events: readEvents(opts.eventsDb), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
         }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
@@ -1020,7 +1050,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
           const since = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? lastId);
           res.write(`retry: 3000\nid: ${Math.max(since, lastId)}\nevent: hello\ndata: {}\n\n`);
-          clients.set(res, who.role);
+          clients.set(res, { role: who.role, login: who.via === 'session' ? who.login : null });
           req.on('close', () => clients.delete(res));
           return;
         }
@@ -1073,9 +1103,31 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const all = change(visible.map((e) => e.type));
     const forViewer = visible.filter((e) => viewerMaySee(e.type));
     const viewer = forViewer.length ? change(forViewer.map((e) => e.type)) : null;
-    for (const [c, role] of clients) {
+    const send = (c: ServerResponse, role: Role) => {
       if (isWriter(role)) c.write(all);
       else if (viewer) c.write(viewer);
+    };
+    for (const [c, k] of clients) {
+      if (!k.login) {
+        send(c, k.role);
+        continue;
+      }
+      // A person: their role now, or the stream ends (no role: nothing more of this instance reaches them).
+      void (opts.roleOf ? opts.roleOf(k.login) : Promise.resolve(null)).then(
+        (role) => {
+          if (!clients.has(c)) return;
+          if (!role) {
+            clients.delete(c);
+            return void c.end();
+          }
+          clients.set(c, { ...k, role });
+          send(c, role);
+        },
+        () => {
+          clients.delete(c);
+          c.end();
+        },
+      );
     }
   }, opts.pollMs ?? 1000);
   const ping = setInterval(() => {
