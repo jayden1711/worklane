@@ -820,3 +820,73 @@ export async function instanceStream(instance: string | null, path: string, scop
   if (instance !== null && !(await scope).instances.includes(instance)) throw new Error(`instance ${instance} isn't selected`);
   return streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));
 }
+
+/** An instance's health, as its sidebar dot shows it: green (nothing open), amber (needs a person soon), red (broken). */
+export type HealthStatus = 'green' | 'amber' | 'red';
+
+/**
+ * A watchdog incident (GET /api/health/incidents; src/watchdog/). A viewer gets id, kind, instance, severity, title,
+ * since and resolvedAt only; owners and writers also what broke, what was tried and the fix.
+ */
+export interface Incident {
+  id: string;
+  kind: string;
+  instance: string | null;
+  severity: 'red' | 'amber';
+  title: string;
+  since: string;
+  resolvedAt: string | null;
+  lastSeen?: string;
+  key?: string;
+  detail?: string;
+  fix?: string;
+  tried?: string[];
+}
+export interface IncidentsView {
+  instance: string | null;
+  status: HealthStatus;
+  open: Incident[];
+  resolved: Incident[];
+  detail: boolean;
+}
+/** One instance's incidents as the Health page read them (null name: this page's own server). */
+export interface InstanceIncidents {
+  name: string | null;
+  view: IncidentsView | null;
+  error: string | null;
+}
+
+/**
+ * Every instance's incidents this person may read: on a hub, each instance with a role on it, through its own server
+ * (the hub checks the role again); off a hub, this page's own server. One that can't be read says why.
+ */
+export async function loadIncidents(h: HubInfo | null, get: (name: string | null, path: string) => Promise<IncidentsView> = (n, p) => (n ? instanceApi<IncidentsView>(n, p) : api<IncidentsView>(p))): Promise<InstanceIncidents[]> {
+  const names: (string | null)[] = h?.instances.length ? h.instances.map((i) => i.name) : [null];
+  return Promise.all(
+    names.map(async (name) => {
+      if (name && h?.instances.find((i) => i.name === name)?.up === false) return { name, view: null, error: "its dashboard isn't answering" };
+      try {
+        return { name, view: await get(name, '/api/health/incidents'), error: null };
+      } catch (e) {
+        return { name, view: null, error: (e as Error).message };
+      }
+    }),
+  );
+}
+
+/** The machine's incidents once each (a machine-wide one is in every instance's answer), open oldest first, resolved newest first. */
+export function mergeIncidents(all: InstanceIncidents[]): { open: Incident[]; resolved: Incident[]; detail: boolean } {
+  const byId = new Map<string, Incident>();
+  for (const a of all) for (const x of [...(a.view?.open ?? []), ...(a.view?.resolved ?? [])]) if (!byId.has(x.id)) byId.set(x.id, x);
+  const xs = [...byId.values()];
+  return {
+    open: xs.filter((x) => !x.resolvedAt).sort((a, b) => a.since.localeCompare(b.since)),
+    resolved: xs.filter((x) => x.resolvedAt).sort((a, b) => b.resolvedAt!.localeCompare(a.resolvedAt!)),
+    detail: all.some((a) => a.view?.detail),
+  };
+}
+
+/** Each instance's dot: its own server's status; red when it isn't answering. */
+export function statusOf(all: InstanceIncidents[]): Record<string, HealthStatus> {
+  return Object.fromEntries(all.map((a) => [a.name ?? '', a.view?.status ?? 'red']));
+}
