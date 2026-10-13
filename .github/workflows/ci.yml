@@ -252,7 +252,7 @@ jobs:
     # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step.
     name: add-project (real systemd)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash
@@ -359,11 +359,89 @@ jobs:
           jq -se 'length == 18 and (map(select(.state=="done")) | length == 9) and (map(select(.state=="ask" or .state=="failed")) | length == 0)' "$F/run3.jsonl"
           sudo grep -q '"what":"add-project".*"to":"ci example/alpha"' /var/lib/worklane/machine-changes.jsonl
           if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
+      - name: "claude-account: a stand-in claude, and a second instance (beta, with an eval user) whose coordinator finishes its run on SIGTERM"
+        run: |
+          # claude auth status as each user: signed in when that user's own login holds a setup token (scripts/ci/).
+          sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
+          sudo bash scripts/setup/instance.sh beta --eval
+          sudo install -m 0755 scripts/ci/coordinator-stand-in.cjs /usr/local/lib/ci-coordinator-stand-in.cjs
+          printf '[Service]\nUser=wl-beta\nExecStart=/usr/local/bin/node /usr/local/lib/ci-coordinator-stand-in.cjs 5000\nRestart=on-failure\nKillMode=control-group\nTimeoutStopSec=60\n' | sudo tee /etc/systemd/system/worklane-beta.service >/dev/null
+          sudo systemctl daemon-reload && sudo systemctl start worklane-beta.service
+          # The machine helper's rule names both instances, as add-project.sh keeps it.
+          sudo bash scripts/setup/machine-helper.sh ci beta
+          sudo -n -l -U wl-beta "$HELPER" claude-account switch
+          if sudo -n -l -U wl-dash "$HELPER" claude-account switch 2>/dev/null; then echo "wl-dash may switch the account" >&2; exit 1; fi
+          # The new account's tokens: in files of the runner's only, masked; never in the env.
+          for n in 2 3; do t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token$n"); done; unset t
+          systemctl is-active worklane-ci.service worklane-beta.service
+      - name: "claude-account switch across both: paused (runs finish), the token for every agent and eval user at 0600, checked as each, resumed"
+        run: |
+          sudo bash scripts/setup/claude-account.sh switch --json --timeout 4 < "$F/claude-token2" > "$F/switch1.jsonl" 2> "$F/switch1.err" || { cat "$F/switch1.jsonl" "$F/switch1.err"; exit 1; }
+          cat "$F/switch1.jsonl"
+          for n in ci beta; do
+            jq -se --arg n "$n" 'map(select(.step=="pause" and .instance==$n and .state=="done")) | length == 1' "$F/switch1.jsonl"
+            # The coordinator drained (SIGTERM to its main process; its runs finished) rather than being stopped at the timeout.
+            jq -se --arg n "$n" 'map(select(.step=="wait" and .instance==$n and (.detail|test("its runs have finished")))) | length == 1' "$F/switch1.jsonl"
+            jq -se --arg n "$n" 'map(select(.step=="resume" and .instance==$n and .state=="done")) | length == 1' "$F/switch1.jsonl"
+            systemctl is-active "worklane-$n.service"
+          done
+          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="done") | .user]' "$F/switch1.jsonl")" = '["wl-beta-agent","wl-beta-eval","wl-ci-agent"]' ]
+          jq -se 'last | .step=="switch" and .state=="done"' "$F/switch1.jsonl"
+          sudo journalctl --no-pager -u worklane-beta.service | grep -q 'stand-in coordinator: SIGTERM, finishing the run in flight'
+          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do
+            c="$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json"
+            [ "$(sudo stat -c '%U %a' "$c")" = "$u 600" ] || { sudo stat -c '%U %a' "$c"; exit 1; }
+            sudo grep -qFf "$F/claude-token2" "$c"
+          done
+          s=/var/lib/worklane/claude-account
+          [ "$(sudo stat -c '%U %a' "$s/status.json")" = "root 644" ]
+          sudo jq -e '[.users[] | select(.logged_in)] | length == 3' "$s/status.json"
+          sudo jq -e '[.users[].token_id] | unique | length == 1' "$s/status.json"
+          # Never echoed: not in the output, the progress or status files, or any unit's journal.
+          if grep -qFf "$F/claude-token2" "$F/switch1.jsonl" "$F/switch1.err" || sudo grep -qFf "$F/claude-token2" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token2"; then echo "the token was echoed" >&2; exit 1; fi
+      - name: "claude-account: an instance whose check fails is not resumed; the rerun resumes it; status"
+        run: |
+          echo wl-beta-eval | sudo tee /etc/ci-claude-fail >/dev/null
+          set +e
+          sudo bash scripts/setup/claude-account.sh switch --json --timeout 2 beta < "$F/claude-token2" > "$F/switch2.jsonl" 2> "$F/switch2.err"
+          rc=$?
+          set -e
+          cat "$F/switch2.jsonl"
+          [ "$rc" = 1 ]
+          jq -se 'map(select(.step=="check" and .user=="wl-beta-eval" and .state=="failed")) | length == 1' "$F/switch2.jsonl"
+          jq -se 'map(select(.step=="resume" and .instance=="beta" and .state=="failed")) | length == 1' "$F/switch2.jsonl"
+          if systemctl is-active -q worklane-beta.service; then echo "beta was resumed with a failed check" >&2; exit 1; fi
+          [ "$(cat /var/lib/worklane/claude-account/paused)" = beta ]
+          sudo rm -f /etc/ci-claude-fail
+          sudo bash scripts/setup/claude-account.sh switch --json --timeout 2 beta < "$F/claude-token2" > "$F/switch3.jsonl" 2> "$F/switch3.err" || { cat "$F/switch3.jsonl" "$F/switch3.err"; exit 1; }
+          jq -se 'map(select(.step=="pause" and .instance=="beta" and (.detail|test("earlier switch")))) | length == 1' "$F/switch3.jsonl"
+          jq -se 'map(select(.step=="resume" and .instance=="beta" and .state=="done")) | length == 1' "$F/switch3.jsonl"
+          systemctl is-active worklane-beta.service
+          sudo bash scripts/setup/claude-account.sh status | tee "$F/status.txt"
+          [ "$(grep -c ' signed in ' "$F/status.txt")" = 3 ] && ! grep -q 'NOT signed in' "$F/status.txt"
+          if grep -qFf "$F/claude-token2" "$F/switch2.jsonl" "$F/switch2.err" "$F/switch3.jsonl" "$F/switch3.err" "$F/status.txt"; then echo "the token was echoed" >&2; exit 1; fi
+      - name: "claude-account from the dashboard: the coordinator starts it through the helper, in a unit of its own; the token from the instance's secrets"
+        run: |
+          sudo -u wl-ci sudo -n "$HELPER" claude-account switch < /dev/null | tee "$F/helper-switch.txt"
+          grep -q 'started the Claude account switch as worklane-claude-account.service' "$F/helper-switch.txt"
+          s=/var/lib/worklane/claude-account/switch.jsonl
+          for _ in $(seq 1 60); do grep -q '"step":"token","state":"ask"' "$s" 2>/dev/null && break; sleep 2; done
+          grep '"step":"token","state":"ask"' "$s" | grep -q "in ci's dashboard"
+          # What the dashboard does with a pasted token: the coordinator user's own file, 0400, renamed into place (src/console/secrets.ts).
+          sudo -H -u wl-ci sh -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/.t.tmp"; chmod 0400 "$d/.t.tmp"; mv "$d/.t.tmp" "$d/claude-account-token"' < "$F/claude-token3"
+          for _ in $(seq 1 150); do grep -q '"step":"switch","state":"\(done\|failed\)"' "$s" && break; sleep 2; done
+          cat "$s"
+          tail -n 1 "$s" | jq -e '.step=="switch" and .state=="done"'
+          sudo test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-account-token"
+          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do sudo grep -qFf "$F/claude-token3" "$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json"; done
+          systemctl is-active worklane-ci.service worklane-beta.service
+          if sudo grep -qFf "$F/claude-token3" "$s" /var/lib/worklane/claude-account/status.json /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token3"; then echo "the token was echoed" >&2; exit 1; fi
       - name: the units and the fake's log, on failure
         if: failure()
         run: |
-          sudo systemctl --no-pager status worklane-ci.service worklane-dashboard-ci.service worklane-dashboard-hub.service || true
-          sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service || true
+          sudo systemctl --no-pager status worklane-ci.service worklane-dashboard-ci.service worklane-dashboard-hub.service worklane-beta.service || true
+          sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service -u worklane-beta.service -u worklane-claude-account.service || true
+          sudo cat /var/lib/worklane/claude-account/switch.jsonl || true
           tail -n 80 "$F/requests.log" "$F/server.log" || true
           tail -n 80 "$F"/run*.err || true
 
