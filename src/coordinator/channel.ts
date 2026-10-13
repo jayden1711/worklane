@@ -119,6 +119,18 @@ export abstract class Channel extends ResearchOnDemand {
     return this.d.backlog.createIssue(title, `${body}\n\n${intakeMarker(id)}`, labels);
   }
 
+  // WHY: a github report is already an issue; filing it labels that issue. The draft goes on it as one marked
+  // comment, so a pass retried after a crash adds the labels again (idempotent) but never a second comment.
+  protected async intakeLabelOnce(n: number, id: string, body: string, labels: string[]): Promise<number> {
+    if (!(await this.intakeLabelled(n, id))) await this.d.backlog.comment(n, `${body}\n\n${intakeMarker(id)}`);
+    if (labels.length) await this.d.backlog.addLabels(n, labels);
+    return n;
+  }
+
+  protected async intakeLabelled(n: number, id: string): Promise<boolean> {
+    return (await this.d.backlog.comments(n)).some((c) => c.body.includes(intakeMarker(id)));
+  }
+
   /** The open issue filed for this report, if any, among issues with these labels. */
   protected async intakeIssueFor(id: string, labels: string[]): Promise<number | null> {
     for (const label of labels) {
