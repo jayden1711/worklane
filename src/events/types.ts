@@ -437,7 +437,7 @@ export const EventSchemas = {
    * or the commit's author when the push's isn't known). `alert`: whether it is posted to the ops channel
    * (config.yaml main_watch.direct_push_alert as committed before it).
    */
-  'main_watch.direct_push': z.strictObject({ sha, url: z.string(), kind: z.enum(['direct', 'rewrite']), pusher: z.string().nullable(), pusher_from: z.enum(['push', 'commit']).nullable(), subject: z.string(), alert: z.boolean() }),
+  'main_watch.direct_push': z.strictObject({ sha, url: z.string(), kind: z.enum(['direct', 'rewrite']), pusher: z.string().nullable(), pusher_from: z.enum(['activity', 'commit']).nullable(), subject: z.string(), alert: z.boolean() }),
   /** Its ops-channel post: sent (`ok`), how many owners it mentioned, and `note`: why nobody was, or why it wasn't sent. */
   'main_watch.direct_push_alert': z.strictObject({ sha, ok: z.boolean(), mentioned: z.number().int().nonnegative(), note: z.string().nullable() }),
   /** No more fix runs on this PR; the owner is asked to look. */

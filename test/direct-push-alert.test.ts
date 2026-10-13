@@ -69,7 +69,7 @@ function world(o: { owners?: string[]; alertOff?: boolean } = {}) {
     checkRuns: async () => (calls.push('runs'), []),
     statuses: async () => (calls.push('statuses'), []),
     role: async (login) => (calls.push('role'), roles.get(login) ?? null),
-    pusher: async () => (calls.push('pusher'), { login: 'example-pusher', from: 'push' }),
+    pusher: async () => (calls.push('pusher'), { login: 'example-pusher', from: 'activity' }),
   };
   const chat = fakeChat();
   const cfg = intakeConfig(o.owners ?? [OWNER_ID]);
@@ -226,7 +226,7 @@ test("direct-push alert: the pusher is the push's actor from the repo's activity
       return new Response('{}', { status: 404 });
     }) as unknown as typeof fetch;
   const viaPush = new GitHubMainWatchApi('x/y', async () => 't', answer([{ after: 'b'.repeat(40), activity_type: 'push', actor: { login: 'someone-else' } }, { after: sha, activity_type: 'push', actor: { login: 'example-pusher' } }]));
-  assert.deepEqual(await viaPush.pusher('main', sha), { login: 'example-pusher', from: 'push' });
+  assert.deepEqual(await viaPush.pusher('main', sha), { login: 'example-pusher', from: 'activity' });
   const viaCommit = new GitHubMainWatchApi('x/y', async () => 't', answer([]));
   assert.deepEqual(await viaCommit.pusher('main', sha), { login: 'example-author', from: 'commit' });
 });

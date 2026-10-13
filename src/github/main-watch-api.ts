@@ -68,14 +68,14 @@ export class GitHubMainWatchApi implements MainWatchApi {
    * Who pushed `sha`: the actor of the branch's push (or force-push) that ended at it, from the repo's activity;
    * else the commit's GitHub author. Logins only (an email is never read). Null when neither answers.
    */
-  async pusher(branch: string, sha: string): Promise<{ login: string; from: 'push' | 'commit' } | null> {
+  async pusher(branch: string, sha: string): Promise<{ login: string; from: 'activity' | 'commit' } | null> {
     const ok = (l: unknown): l is string => typeof l === 'string' && validLogin(l);
     try {
       const res = await this.get(`/repos/${this.repo}/activity?ref=${encodeURIComponent(`refs/heads/${branch}`)}&per_page=50`);
       if (res.ok) {
         const list = (await res.json()) as { after?: string; activity_type?: string; actor?: { login?: unknown } | null }[];
         const hit = Array.isArray(list) ? list.find((a) => a.after === sha && (a.activity_type === 'push' || a.activity_type === 'force_push')) : undefined;
-        if (ok(hit?.actor?.login)) return { login: hit.actor.login, from: 'push' };
+        if (ok(hit?.actor?.login)) return { login: hit.actor.login, from: 'activity' };
       }
     } catch {
       // the commit's author, below

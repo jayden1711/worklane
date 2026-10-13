@@ -679,7 +679,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   private async directPushNoted(sha: string, url: string, push: { kind: 'direct' | 'rewrite'; alert: boolean }) {
     if (this.d.log.read(0, ['main_watch.direct_push']).some((e) => (e.payload as EventPayload<'main_watch.direct_push'>).sha === sha)) return;
-    let who: { login: string; from: 'push' | 'commit' } | null = null;
+    let who: { login: string; from: 'activity' | 'commit' } | null = null;
     try {
       who = (await this.d.mainWatch?.api.pusher?.(this.branch, sha)) ?? null;
     } catch {

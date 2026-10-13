@@ -74,7 +74,7 @@ export interface MainWatchApi {
    * Who pushed `sha` to `branch`: the GitHub login of the push that made it the branch's tip (the repo's activity),
    * else the commit's own GitHub author (`from: 'commit'`); null when neither is known. A login only, never an email.
    */
-  pusher?(branch: string, sha: string): Promise<{ login: string; from: 'push' | 'commit' } | null>;
+  pusher?(branch: string, sha: string): Promise<{ login: string; from: 'activity' | 'commit' } | null>;
 }
 
 /** What is known about the commit being checked; each field is one API call's answer (harness: the log's). */

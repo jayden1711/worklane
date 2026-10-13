@@ -47,7 +47,7 @@ const oneLine = (s: string) => s.replace(/\s+/g, ' ').trim();
 export function directPushText(p: EventPayload<'main_watch.direct_push'>, o: { branch: string; dashboardUrl: string; secrets?: string[] }): string {
   const short = p.sha.slice(0, 12);
   const head = p.kind === 'rewrite' ? `**${o.branch} was force-pushed** (rewritten, not through a PR): its tip is now \`${short}\` ${p.url}` : `**Pushed to ${o.branch} without a PR**: \`${short}\` ${p.url}`;
-  const by = p.pusher ? (p.pusher_from === 'push' ? `Pushed by: ${p.pusher} (GitHub)` : `Pushed by: unknown; the commit's GitHub author is ${p.pusher}`) : 'Pushed by: unknown';
+  const by = p.pusher ? (p.pusher_from === 'activity' ? `Pushed by: ${p.pusher} (GitHub)` : `Pushed by: unknown; the commit's GitHub author is ${p.pusher}`) : 'Pushed by: unknown';
   const subject = oneLine(p.subject).slice(0, 300);
   const lines = [head, by, `Subject: ${subject || '(none)'}`, `Auto-merge is stopped; the main watch: ${mainWatchLink(o.dashboardUrl)}`];
   const text = scrub(lines.join('\n'), o.secrets ?? []);
