@@ -178,9 +178,9 @@ export class GitHubBacklog implements Backlog {
     };
   }
 
-  async mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
+  async mergePr(n: number, sha: string, title: string, body?: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
     try {
-      const r = await this.req<{ sha: string; merged: boolean; message?: string }>('PUT', `/repos/${this.repo}/pulls/${n}/merge`, { merge_method: 'merge', sha, commit_title: title });
+      const r = await this.req<{ sha: string; merged: boolean; message?: string }>('PUT', `/repos/${this.repo}/pulls/${n}/merge`, { merge_method: 'merge', sha, commit_title: title, ...(body !== undefined ? { commit_message: body } : {}) });
       return r.merged ? { ok: true, sha: r.sha } : { ok: false, why: r.message ?? 'not merged' };
     } catch (e) {
       // 405: not mergeable now; 409: the head moved off `sha`. Both are a "not now", never a merge of something else.
