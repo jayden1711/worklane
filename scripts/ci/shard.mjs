@@ -5,6 +5,8 @@
 //
 //   node scripts/ci/shard.mjs 2/4        the built test files shard 2 of 4 runs, one per line
 //   node scripts/ci/shard.mjs --plan 4   every shard's files and estimated seconds
+//   add --only <file> to split only the test files that file lists (scripts/ci/affected.mjs's selection, one
+//   source path per line), balanced the same way; an empty list leaves every shard empty
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,12 +54,26 @@ export function assign(files, ms, n) {
 /** The built file node --test runs for a source test file. */
 export const built = (f) => 'dist/' + f.replace(/\.ts$/, '.js');
 
+/** The test files `--only <file>` lists: each must be one of the suite's. */
+export function only(file, all = testFiles()) {
+  const known = new Set(all);
+  const list = readFileSync(file, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+  for (const f of list) if (!known.has(f)) throw new Error(`--only lists ${f}, which is not a test file of the suite`);
+  return [...new Set(list)];
+}
+
 function main(args) {
+  const at = args.indexOf('--only');
+  const selected = at < 0 ? null : args[at + 1];
+  if (at >= 0) {
+    if (!selected) throw new Error('--only needs a file');
+    args = [...args.slice(0, at), ...args.slice(at + 2)];
+  }
   const plan = args[0] === '--plan';
   const m = plan ? /^(\d+)$/.exec(args[1] ?? '') : /^(\d+)\/(\d+)$/.exec(args[0] ?? '');
   if (!m) throw new Error('usage: shard.mjs <k>/<n> | --plan <n>');
   const n = Number(plan ? m[1] : m[2]);
-  const shards = assign(testFiles(), timings(), n);
+  const shards = assign(selected ? only(selected) : testFiles(), timings(), n);
   if (plan) {
     shards.forEach((s, i) => console.log(`shard ${i + 1}/${n}: ${s.files.length} files, ~${Math.round(s.ms / 1000)} s`));
     return;

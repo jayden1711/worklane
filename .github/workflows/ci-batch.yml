@@ -1,0 +1,42 @@
+name: ci batch
+# The slow checks on main, in batches, and the bisect of a red batch (scripts/ci/batch.mjs has the logic): every
+# 30 minutes, it starts ci-slow.yml on main's newest commit when that commit has had no batch and none is running;
+# when the newest finished batch is red, it runs the failing job on the first-parent commits since the last green
+# batch, one at a time (binary search), and names the culprit in an issue and on its PR. It also looks whenever a
+# ci-slow.yml batch or bisect run ends, so a bisect moves on without waiting for the next half hour.
+#
+# This run's own check (ci batch) lands on main's newest commit, as every scheduled run's does; the script never
+# fails it (an error is an annotation), since the engine updater refuses a commit with any red check.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: [ci slow]
+    types: [completed]
+permissions:
+  contents: read
+jobs:
+  batch:
+    name: ci batch
+    # A ci-slow.yml run on a pull request ends here too (workflow_run can't filter by event): nothing to do then.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write # start ci-slow.yml runs
+      contents: write # make and delete the ci-bisect/<sha> branches a bisect step runs on
+      issues: write # the culprit's issue
+      pull-requests: write # the comment on the culprit's PR
+    steps:
+      # main's own copy of the script, whatever started this run (never a pull request's code).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: node scripts/ci/batch.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

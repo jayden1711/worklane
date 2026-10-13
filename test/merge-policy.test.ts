@@ -96,6 +96,7 @@ test('self-modification: every glob names real engine files (none dead), and the
   for (const [path, what] of [
     ['src/merge-policy.ts', 'the merge policy'],
     ['src/coordinator/merge-flow.ts', 'the merge policy'],
+    ['src/pr-rules.ts', 'the merge policy'],
     ['src/main-watch.ts', 'the main watch'],
     ['src/push-guard.ts', 'the push guard'],
     ['src/updates.ts', 'the updater'],
