@@ -1,0 +1,22 @@
+#!/bin/sh
+# CI and tests only: a stand-in GitHub CLI for a fresh-machine run of `init` in local mode. Nothing reaches GitHub.
+# It is signed in as example-owner (unless STANDIN_SIGNED_OUT is set), may push to every repo, and no branch is
+# protected (as on a private repo on GitHub Free). Anything else is refused, loudly.
+signed_in() { [ -z "${STANDIN_SIGNED_OUT:-}" ]; }
+case "$1 ${2:-}" in
+  "auth status")
+    if signed_in; then echo "github.com: Logged in to github.com account example-owner (stand-in)"; else echo "You are not logged into any GitHub hosts." >&2; exit 1; fi ;;
+  "auth login") echo "gh stand-in: would open the GitHub login" ;;
+  "auth token") echo "gh stand-in: no token here" >&2; exit 1 ;;
+  "api user")
+    signed_in || exit 1
+    echo example-owner ;;
+  "api repos/"*)
+    signed_in || { echo "gh: not signed in (HTTP 401)" >&2; exit 1; }
+    case "$2" in
+      */branches/*/protection) echo "gh: Branch not protected (HTTP 404)" >&2; exit 1 ;;
+      repos/*/*) case "$*" in *".permissions.push"*) echo true ;; *) echo '{"permissions":{"push":true}}' ;; esac ;;
+      *) echo "gh stand-in: api $2 is not something this stand-in does" >&2; exit 1 ;;
+    esac ;;
+  *) echo "gh stand-in: $* is not something this stand-in does" >&2; exit 1 ;;
+esac

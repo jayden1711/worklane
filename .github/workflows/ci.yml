@@ -52,16 +52,27 @@ jobs:
       - run: cargo test --locked --manifest-path desktop/Cargo.toml
 
   bootstrap:
-    # A fresh install, end to end (scripts/bootstrap.sh): on a clean runner, this commit's engine packed as a
-    # release ships it, set up in examples/basic, ending at doctor green; run twice, the second changing nothing;
-    # then the demo from the installed package. No GitHub: a stand-in gh that refuses, and no token.
+    # A fresh install in local mode, end to end (scripts/bootstrap.sh, then `worklane init --mode local`): on a clean
+    # runner, this commit's engine packed as a release ships it, set up in a scratch copy of examples/basic, through
+    # init's checklist and ending at doctor green, which shows that checklist and what local mode can't do; run twice,
+    # the second changing nothing; on macOS, the coordinator as a launchd service (worklane up / down); then the demo
+    # from the installed package. No GitHub: stand-in gh and claude (scripts/ci/stand-ins), and no token. macOS is
+    # not a required check (the owner decides).
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The Mac runner's own Node is older than 22.13; the bootstrap would take it from Homebrew, which is slow here.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: runner.os == 'macOS'
+        with:
+          node-version: '24'
       - name: pack this commit's engine (dist/ and the web UI built, as in a release)
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
@@ -74,25 +85,49 @@ jobs:
           docker build -t worklane-trial .
           docker run --rm worklane-trial worklane --version
           docker run --rm worklane-trial sh -c 'gitleaks version && claude --version && node --version'
-      - name: no GitHub from here on
-        run: |
-          mkdir -p "$RUNNER_TEMP/fake"
-          printf '#!/bin/sh\necho "gh: GitHub is not reachable in this job" >&2\nexit 1\n' > "$RUNNER_TEMP/fake/gh"
-          chmod +x "$RUNNER_TEMP/fake/gh"
-          echo "$RUNNER_TEMP/fake" >> "$GITHUB_PATH"
-      - name: bootstrap, twice
+      - name: no GitHub from here on (a stand-in gh, signed in, that reaches nothing; a stand-in claude, signed in)
+        run: echo "$GITHUB_WORKSPACE/scripts/ci/stand-ins" >> "$GITHUB_PATH"
+      - name: bootstrap in local mode, twice
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
         run: |
-          cp -r examples/basic "$RUNNER_TEMP/example" && git -C "$RUNNER_TEMP/example" init -q
+          ex="$RUNNER_TEMP/example"
+          cp -r examples/basic "$ex" && git -C "$ex" init -q
+          git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
           tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
-          bash scripts/bootstrap.sh --dry-run --engine "$tgz" "$RUNNER_TEMP/example"
-          bash scripts/bootstrap.sh --engine "$tgz" "$RUNNER_TEMP/example"
-          bash scripts/bootstrap.sh --engine "$tgz" "$RUNNER_TEMP/example" | tee "$RUNNER_TEMP/second.log"
-          # The second run installs nothing and keeps the repo's config.
-          if grep -E 'added [0-9]+ package|would download' "$RUNNER_TEMP/second.log"; then echo "the second run installed something" >&2; exit 1; fi
-          grep -q 'kept .worklane/' "$RUNNER_TEMP/second.log"
+          bash scripts/bootstrap.sh --dry-run --mode local --engine "$tgz" "$ex"
+          bash scripts/bootstrap.sh --mode local --yes --engine "$tgz" "$ex" | tee "$RUNNER_TEMP/first.log"
+          for step in 'Tools present' 'Claude login' 'GitHub' 'Repo config' 'Protection'; do grep -A1 "] $step" "$RUNNER_TEMP/first.log" | grep -Eq '^   done'; done
+          grep -q 'all 6 steps done or skipped' "$RUNNER_TEMP/first.log"
+          # The second run: no --mode and no terminal (local, said so); it installs nothing and redoes no step.
+          bash scripts/bootstrap.sh --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/second.log"
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          grep -q 'no --mode, and no terminal to ask on: local mode' "$RUNNER_TEMP/second.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/second.log"
+      - name: doctor shows the checklist, and what local mode can't do
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          worklane doctor --root "$RUNNER_TEMP/example" | tee "$RUNNER_TEMP/doctor.log"
+          for id in tools claude github repo-config protection discord; do grep -Eq "^ok +setup $id: " "$RUNNER_TEMP/doctor.log"; done
+          grep -Eq '^off +not in local mode: separate OS users: ' "$RUNNER_TEMP/doctor.log"
+          grep -Eq '^off +not in local mode: root-run add-project: ' "$RUNNER_TEMP/doctor.log"
+          # As a server would see it (its steps aren't done here, so it fails; only the list matters): nothing missing.
+          worklane doctor --root "$RUNNER_TEMP/example" --mode server > "$RUNNER_TEMP/doctor-server.log" || true
+          grep -q '^FAIL  setup github: ' "$RUNNER_TEMP/doctor-server.log"
+          if grep -E '^off ' "$RUNNER_TEMP/doctor-server.log"; then echo "server mode lists something it can't do" >&2; exit 1; fi
+      - name: the coordinator as a launchd service (worklane up, then down)
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          label=dev.worklane.example-shop
+          plist="$HOME/Library/LaunchAgents/$label.plist"
+          worklane up --root "$RUNNER_TEMP/example"
+          test -f "$plist"
+          launchctl print "gui/$(id -u)/$label" | head -n 20
+          worklane down --root "$RUNNER_TEMP/example"
+          if [ -e "$plist" ]; then echo "down left $plist" >&2; exit 1; fi
+          if launchctl print "gui/$(id -u)/$label" > /dev/null 2>&1; then echo "down left $label loaded" >&2; exit 1; fi
       - name: the demo, from the installed package
         run: |
           export PATH="$HOME/.local/bin:$PATH"

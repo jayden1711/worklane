@@ -296,6 +296,16 @@ export function detectOs(setting: OsSetting = 'auto'): OsKind {
   return 'linux';
 }
 
+/**
+ * The platform a downloaded tool must be built for (src/tool-pins.ts), or null where none is pinned: native Windows
+ * (local mode there runs inside WSL2, which is Linux) and anything but x64 and arm64.
+ */
+export function toolPlatform(platform: string = process.platform, arch: string = process.arch): { os: 'linux' | 'darwin'; arch: 'x64' | 'arm64' } | null {
+  const os = platform === 'linux' ? 'linux' : platform === 'darwin' ? 'darwin' : null;
+  const a = arch === 'x64' ? 'x64' : arch === 'arm64' ? 'arm64' : null;
+  return os && a ? { os, arch: a } : null;
+}
+
 /** Agents only run where Bash can be sandboxed; native Windows can't. */
 export function canRunAgents(os: OsKind): boolean {
   return os !== 'windows';
