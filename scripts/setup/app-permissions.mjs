@@ -2,7 +2,8 @@
 // setup script runs this as the coordinator user (who alone can read the key),
 // piped on stdin:
 //   node --input-type=module - <key.pem> <app-id> <installation-id> <owner/repo> < app-permissions.mjs
-// Imported by tests for the rules alone.
+// Imported by tests for the rules alone. WORKLANE_GITHUB_API points it at another API base (a fake GitHub in
+// tests); the setup console's manifest flow (src/setup/app-manifest.ts) runs this same file the same way.
 
 /** Needed for the coordinator to work at all. */
 export const REQUIRED = {
@@ -12,6 +13,9 @@ export const REQUIRED = {
   pull_requests: 'write', // open PRs
   checks: 'read', // the PR watcher reads CI results
 };
+
+/** More than REQUIRED that is still fine: the manifest the setup console posts asks for checks: write. */
+export const ALLOWED_UP_TO = { checks: 'write' };
 
 /** Not needed to start, but a feature can't work without it. */
 export const EXPECTED = {
@@ -45,7 +49,7 @@ export function permissionProblems(permissions) {
   const known = new Set([...Object.keys(REQUIRED), ...Object.keys(EXPECTED), ...Object.keys(REFUSED)]);
   for (const [name, level] of Object.entries(permissions)) {
     if (!known.has(name)) warnings.push(`${name}: ${level} is not needed; remove it`);
-    else if (REQUIRED[name] && rank(level) > rank(REQUIRED[name])) warnings.push(`${name}: ${level} is more than needed (${REQUIRED[name]})`);
+    else if (REQUIRED[name] && rank(level) > rank(ALLOWED_UP_TO[name] ?? REQUIRED[name])) warnings.push(`${name}: ${level} is more than needed (${REQUIRED[name]})`);
   }
   return { errors, warnings };
 }
@@ -58,13 +62,14 @@ async function main([key, appId, instId, repo]) {
   const head = b64(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const body = b64(JSON.stringify({ iat, exp: iat + 600, iss: appId }));
   const jwt = `${head}.${body}.${b64(createSign('RSA-SHA256').update(`${head}.${body}`).sign(readFileSync(key, 'utf8')))}`;
+  const api = (process.env.WORKLANE_GITHUB_API || 'https://api.github.com').replace(/\/+$/, '');
   const h = (auth) => ({ authorization: `Bearer ${auth}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' });
-  const app = await fetch('https://api.github.com/app', { headers: h(jwt) });
+  const app = await fetch(`${api}/app`, { headers: h(jwt) });
   if (!app.ok) throw new Error(`the key does not sign for App ${appId} (GitHub ${app.status})`);
-  const t = await fetch(`https://api.github.com/app/installations/${instId}/access_tokens`, { method: 'POST', headers: h(jwt) });
+  const t = await fetch(`${api}/app/installations/${instId}/access_tokens`, { method: 'POST', headers: h(jwt) });
   if (!t.ok) throw new Error(`could not mint a token for installation ${instId} (GitHub ${t.status})`);
   const { token, permissions } = await t.json();
-  const r = await fetch('https://api.github.com/installation/repositories?per_page=100', { headers: h(token) });
+  const r = await fetch(`${api}/installation/repositories?per_page=100`, { headers: h(token) });
   const repos = (await r.json()).repositories.map((x) => x.full_name.toLowerCase());
   console.log(`App ${appId} (${(await app.json()).slug}), installation ${instId}`);
   console.log(`reaches: ${repos.join(', ') || 'nothing'}`);
