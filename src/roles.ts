@@ -39,6 +39,12 @@ export const WORKER_SCHEMA = {
       },
     },
     raise_review: { type: 'string', enum: ['L1', 'L2', 'L3'], description: 'Ask for more review than the computed level, with your reason in summary.' },
+    intent: { type: 'string', description: "One paragraph for the top of the PR: what this change is for and what it changes, for a reviewer who hasn't read the issue." },
+    risk_class: {
+      type: 'string',
+      enum: ['docs-only', 'logic', 'protected'],
+      description: 'Your view of the risk: protected if it touches the money path, auth, secrets, rulesets, CI, setup scripts or the merge rules. The class is computed from the changed paths; yours can only raise it.',
+    },
     ...RESEARCH_REQUEST_FIELD,
   },
 } as const;
