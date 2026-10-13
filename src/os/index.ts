@@ -164,55 +164,6 @@ export function installOwnerOnlySecret(dir: string, name: string, value: string)
 }
 
 /**
- * Install a secret for `user` only, as credentials.sh does (`install -o user -m 0400` into a 0700 directory of
- * theirs): written to a fresh temp name (O_EXCL), owned by `user`, renamed over any old one. Run as root (setup),
- * the directory and file are given to `user`; run as anyone else, `user` must be this user. Refuses a symlinked
- * directory or file, and a directory someone else owns. POSIX only. Returns the path.
- */
-export function installSecretFor(user: string, dir: string, name: string, value: string): string {
-  if (process.platform === 'win32') throw new Error('installing a secret for another user needs macOS or Linux');
-  const root = process.getuid!() === 0;
-  if (!root && user !== currentUser()) throw new Error(`installing a secret for ${user} needs root (this is ${currentUser() || 'an unknown user'})`);
-  const uid = root ? userUid(user) : process.getuid!();
-  const gid = root ? userGid(user) : process.getgid!();
-  if (uid === null || gid === null) throw new Error(`no user ${user}`);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir} is a symlink; refusing`);
-  if (root) chownSync(dir, uid, gid);
-  if (statSync(dir).uid !== uid) throw new Error(`${dir} isn't owned by ${user}; refusing`);
-  chmodSync(dir, 0o700);
-  const file = join(dir, name);
-  if (existsSync(file) && lstatSync(file).isSymbolicLink()) throw new Error(`${file} is a symlink; refusing`);
-  const tmp = join(dir, `.${name}.${randomBytes(6).toString('hex')}.tmp`);
-  try {
-    writeFileSync(tmp, value, { mode: 0o400, flag: 'wx' });
-    chmodSync(tmp, 0o400);
-    if (root) chownSync(tmp, uid, gid);
-    renameSync(tmp, file);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
-  return file;
-}
-
-/** Whether this process runs as root (POSIX; never on native Windows). */
-export function isRoot(): boolean {
-  return typeof process.getuid === 'function' && process.getuid() === 0;
-}
-
-/** An OS user's primary group id (POSIX), or null if there is no such user (or on native Windows). */
-export function userGid(user: string): number | null {
-  if (process.platform === 'win32') return null;
-  try {
-    const out = execFileSync('id', ['-g', '--', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
-    return /^\d+$/.test(out) ? Number(out) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * How to run `argv` (a fixed command) in a pseudo-terminal, for the dashboard's owner terminal. Linux only:
  * util-linux `script` makes the PTY, so no native module is needed. `script -c` hands its command to a shell, so
  * every word must be plain (no shell metacharacters). Returns the [file, args] to spawn.

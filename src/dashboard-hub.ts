@@ -30,9 +30,6 @@ import { attachTerminal } from './console/terminal-server.js';
 import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
 import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
 import { currentUser } from './os/index.js';
-import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
-// Until the machine-owners module lands (built in parallel), its interface over the same file, failing closed.
-import { isMachineOwner } from './setup/machine-owner-stub.js';
 
 export interface HubInstance {
   name: string;
@@ -65,11 +62,6 @@ export interface HubOptions {
    * opens); whois and peerUid identify the device (src/console/terminal-devices.ts) and are injected in tests.
    */
   terminal?: { consoleUser?: string | null; devices?: string[]; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
-  /**
-   * GitHub Apps made through the manifest flow (src/setup/app-manifest.ts): who is a machine owner, and GitHub's
-   * bases (a fake GitHub in tests; the sign-in's, else GitHub's, by default).
-   */
-  appManifest?: { isMachineOwner?: (login: string) => boolean; api?: string; web?: string; fetch?: typeof fetch };
   now?: () => number;
 }
 
@@ -211,11 +203,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   const sessions = signIn ? new Sessions({ secret: signIn.sessionSecret, file: join(opts.stateDir, 'sessions.json'), now }) : null;
   const states = new SignInStates(now);
   const origin = signIn ? new URL(signIn.publicUrl).origin : null;
-  const am = opts.appManifest ?? {};
-  const appApi = am.api ?? signIn?.api;
-  const appWeb = am.web ?? signIn?.web;
-  const appFetch = am.fetch ?? signIn?.fetch;
-  const flows = new ManifestFlows({ isMachineOwner: am.isMachineOwner ?? ((l) => isMachineOwner(l)), signIn: !!signIn, publicUrl: origin, now, ...(appApi ? { api: appApi } : {}), ...(appWeb ? { web: appWeb } : {}), ...(appFetch ? { fetch: appFetch } : {}) });
 
   // Each person's role per instance, as that instance just read it from the repo (fresh, not from its cache),
   // kept no longer than the role cache allows.
@@ -279,8 +266,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
       }
       const sid = cookies[SESSION_COOKIE];
       const session = sessions?.get(sid) ?? null;
-      // A GitHub App's manifest flow: its start page and GitHub's redirect back, for a signed-in machine owner.
-      if (await handleManifestPublic(req, res, url, flows, session?.login ?? null)) return;
       const write = req.method !== 'GET' && req.method !== 'HEAD';
       // Every write: from this site (when the browser says where from) and with this session's CSRF token.
       if (write && (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/'))) {
@@ -328,8 +313,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (!breakGlassAllowed(req)) return json(res, 403, { error: "the break-glass is the owner's, on this machine only: refused through a proxy or from another address" });
         if (!tokenGiven(req, url, token)) return json(res, 401, { error: 'missing or wrong token; open the URL the hub setup printed' });
         if (url.pathname === '/api/me' && req.method === 'GET') return json(res, 200, { login: null, csrf: null, breakGlass: true });
-        // The manifest flow's runner (root, on this machine): register a flow, and collect its App once.
-        if (await handleManifestBreakGlass(req, res, url, flows)) return;
         if (url.pathname === '/api/hub' && req.method === 'GET') {
           const instances = await Promise.all(opts.instances.map(async (i) => ({ name: i.name, ...(await probe(i, null)) })));
           return json(res, 200, { instances });

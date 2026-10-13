@@ -39,7 +39,7 @@
 #
 # The App's permissions (checked by app-permissions.mjs): Contents read/write (fetch, push task branches,
 # lease refs), Issues read/write (the backlog), Pull requests read/write (open PRs; Worklane never merges),
-# Checks read (CI results on its PRs; write is accepted, and the manifest App asks for it), Metadata read; and Actions read, which CI fix runs need for job
+# Checks read (CI results on its PRs), Metadata read; and Actions read, which CI fix runs need for job
 # logs. Workflows is deliberately left out: GitHub refuses a push that changes .github/workflows without
 # it, so such a change can't go out through the coordinator. Administration and Actions write are refused
 # too. No webhook.

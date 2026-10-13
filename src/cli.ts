@@ -28,7 +28,6 @@ import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarnin
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
 import { parseDeviceList } from './console/terminal-devices.js';
-import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
@@ -36,7 +35,7 @@ import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, proj
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
-import { homeOf, openUrl, stateDir } from './os/index.js';
+import { openUrl, stateDir } from './os/index.js';
 import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
@@ -113,11 +112,6 @@ usage: ${BRAND.cli} <command> [options]
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
-  app-manifest <name> <owner/repo> [--signin] [--public-url https://<host>] [--timeout <minutes>]
-                                   (as root) make a GitHub App through the hub's manifest flow: prints the
-                                   approve links and waits. The agent App: its key for the coordinator only,
-                                   installed on <owner/repo> alone, checked, then credentials.yaml. --signin:
-                                   the dashboard's sign-in App, its client secret for the hub's user only
   prod-read '<SQL>'                one read-only query against production, through the
                                    read-only role (deploy.yaml prod_read); prints JSON
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
@@ -760,35 +754,6 @@ async function main(argv: string[]): Promise<number> {
       }
       console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name>');
       return 2;
-    }
-
-    case 'app-manifest': {
-      // The same flow the setup console runs, headless, for the setup scripts (src/setup/app-manifest.ts).
-      const opts = [...rest];
-      const signin = flag(opts, '--signin');
-      const publicUrl = option(opts, '--public-url');
-      const minutes = Number(option(opts, '--timeout') ?? 15);
-      const tokenFile = option(opts, '--hub-token-file') ?? join(homeOf(VIEWER_USER) ?? homeDir(), '.local', 'state', BRAND.cli, 'dashboard-hub', 'dashboard-token');
-      const port = Number(option(opts, '--break-glass-port') ?? HUB_BREAK_GLASS_PORT);
-      const [repo, ...extra] = opts;
-      if (!sub || !repo || extra.length || !Number.isFinite(minutes) || minutes <= 0 || !Number.isInteger(port)) {
-        console.error(`usage: ${BRAND.cli} app-manifest <name> <owner/repo> [--signin] [--public-url https://<host>] [--timeout <minutes>] [--hub-token-file <file>] [--break-glass-port <n>]`);
-        return 2;
-      }
-      let token: string;
-      try {
-        token = readFileSync(tokenFile, 'utf8').trim();
-      } catch {
-        console.error(`can't read the hub's token (${tokenFile}): is the dashboard hub running (dashboards.sh), and is this root?`);
-        return 1;
-      }
-      const r = await runAppManifest({ instance: sub, repo, kind: signin ? 'signin' : 'agent', ...(publicUrl ? { publicUrl } : {}) }, { hub: breakGlassHub({ base: `http://127.0.0.1:${port}`, token }), timeoutMs: minutes * 60_000, log: (l) => console.log(l) });
-      if (!r.ok) {
-        console.error(`FAILED at "${r.step}": ${r.error}`);
-        return 1;
-      }
-      console.log(`OK: App ${r.slug} (id ${r.appId})${r.installationId ? `, installation ${r.installationId}` : ''}`);
-      return 0;
     }
 
     case 'labels': {

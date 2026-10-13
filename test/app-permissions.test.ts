@@ -42,13 +42,9 @@ test('workflows, administration and actions write are refused', () => {
 });
 
 test('permissions beyond what the harness needs are flagged', () => {
-  const p = permissionProblems({ ...base, actions: 'read', statuses: 'read', issues: 'admin' });
+  const p = permissionProblems({ ...base, actions: 'read', statuses: 'read', checks: 'write' });
   assert.deepEqual(p.errors, []);
-  assert.deepEqual(p.warnings, ['issues: admin is more than needed (write)', 'statuses: read is not needed; remove it']);
-});
-
-test('checks: write, which the manifest App asks for, passes without a warning', () => {
-  assert.deepEqual(permissionProblems({ ...base, actions: 'read', checks: 'write' }), { errors: [], warnings: [] });
+  assert.deepEqual(p.warnings, ['checks: write is more than needed (read)', 'statuses: read is not needed; remove it']);
 });
 
 test('credentials.sh checks permissions only through app-permissions.mjs, at install and in verify-app', () => {
