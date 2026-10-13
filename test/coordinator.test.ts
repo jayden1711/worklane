@@ -31,13 +31,17 @@ const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refu
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /** A "GitHub" remote, the coordinator's clone of the example project, a file backlog and a log. */
-function fixture(opts: { redMain?: boolean } = {}) {
+function fixture(opts: { redMain?: boolean; files?: Record<string, string> } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'coord-'));
   const remote = join(base, 'remote.git');
   const seed = join(base, 'seed');
   cpSync(join(repoRoot, 'examples', 'basic'), seed, { recursive: true });
   writeFileSync(join(seed, '.gitignore'), '.claude/worktrees/\n');
   // A main that is already red, the common real-world case.
+  for (const [p, text] of Object.entries(opts.files ?? {})) {
+    mkdirSync(dirname(join(seed, p)), { recursive: true });
+    writeFileSync(join(seed, p), text);
+  }
   if (opts.redMain) writeFileSync(join(seed, 'test', 'known-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('legacy flake', () => { assert.equal(1, 2); });\n");
   git(base, 'init', '-q', '--bare', '-b', 'main', remote);
   git(seed, 'init', '-q', '-b', 'main');
@@ -81,6 +85,7 @@ function agents(over: Partial<Record<string, (r: RunRequest) => object>> = {}) {
   return new FakeRunner((req) => {
     const custom = over[req.role];
     if (custom) return { structured: custom(req) };
+    if (req.role === 'plan-reviewer') return { structured: { contradictions: [], summary: 'contradicts nothing recorded' } };
     if (req.role === 'evaluator-repro') {
       writeFileSync(join(req.cwd, 'test', 'repro-qty.test.js'), REPRO);
       commitAll(req.cwd, 'repro');
@@ -416,13 +421,13 @@ test('with separate users, task files go to the agents\' read-only task director
 
 // ---- plan mode (size:M/L)
 
-const PLAN = { approach: 'Guard totals against non-positive quantities.', steps: ['Change the totals reducer', 'Run the price tests'], files: ['src/price.js'], risks: ['Callers relying on negative totals'], design_change: false };
+const PLAN = { approach: 'Guard totals against non-positive quantities.', steps: ['Change the totals reducer', 'Run the price tests'], files: ['src/price.js'], risks: ['Callers relying on negative totals'], design_change: false, decisions: 'nothing recorded on this' };
 
-/** A size:M issue with a scripted planner; `worker` decides each build attempt. */
-function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequest) => object) {
-  const f = fixture();
+/** A size:M issue with a scripted planner; `worker` decides each build attempt; `reviewer` the plan review. */
+function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequest) => object, o: { files?: Record<string, string>; reviewer?: (req: RunRequest) => object } = {}) {
+  const f = fixture({ files: o.files ?? {} });
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready', 'size:M'] });
-  const runner = agents({ planner: planOf, ...(worker ? { worker } : {}) });
+  const runner = agents({ planner: planOf, ...(worker ? { worker } : {}), ...(o.reviewer ? { 'plan-reviewer': o.reviewer } : {}) });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   const run = async () => {
     await c.tick();
@@ -458,7 +463,7 @@ test('plan mode: the planner is told the decisions already made, each with the a
   t.f.log.append('decision.answered', { id: 'd-fmt', by: 'example-collaborator', answer: 'json' }, 'example-collaborator', 'human');
   await t.run();
   const planner = t.runner.calls.find((r) => r.role === 'planner')!;
-  assert.match(planner.prompt, /Decisions already made on this project[^\n]*\n- Which format do exports use\? -> csv/);
+  assert.match(planner.prompt, /Decisions already made on this project[^\n]*\n- \[decision d-fmt\] Which format do exports use\? -> csv/);
   assert.doesNotMatch(planner.prompt, /-> json/, 'only the first answer, the one that stands');
 });
 
@@ -495,6 +500,67 @@ test("plan mode: a design-level plan is held; revise plans again with the owner'
   await u.run();
   assert.equal((lastOf(u.f.log, 'plan.decided') as { answer: string }).answer, 'reject');
   assert.ok(!u.roles().includes('worker'), 'rejected: nothing built');
+});
+
+test('plan mode: the plan contract check sends back a plan with no Decisions section; refused twice, the task is blocked', { skip }, async () => {
+  let planned = 0;
+  const t = plannedTask((req) => {
+    planned++;
+    if (planned === 2) assert.match(req.prompt, /Your previous plan was sent back: the plan's Decisions section is missing/);
+    const { decisions: _, ...without } = PLAN;
+    return planned === 1 ? without : PLAN;
+  });
+  await t.run();
+  const sent = t.f.log.read(0, ['plan.sent_back']).map((e) => e.payload as { by: string; round: number });
+  assert.deepEqual(sent.map((x) => [x.by, x.round]), [['contract', 1]]);
+  assert.ok(t.roles().includes('worker'), 'the second plan had its section: built');
+
+  const u = plannedTask(() => ({ ...PLAN, decisions: 'Rests on:\n- [D-9] a decision nobody recorded\nArgues against:\n- none' }));
+  await u.run();
+  assert.equal(u.f.log.read(0, ['plan.sent_back']).length, 2);
+  assert.ok(!u.roles().includes('worker'), 'nothing built on a plan citing what is not recorded');
+  assert.ok((await u.f.backlog.comments(u.n)).some((x) => /cites what isn't recorded: \[D-9\]/.test(x.body)));
+});
+
+test('plan mode: a plan contradicting a recorded decision is caught at plan review and sent back; arguing against it with a reason holds it for the owner', { skip }, async () => {
+  const files = { 'decisions.md': '# Decisions\n\n## D-2: Totals reject negative quantities\nAn order with a negative quantity is rejected with an error, never silently dropped from totals.\n' };
+  const DROP = { ...PLAN, approach: 'Silently drop orders with a negative quantity from totals.' };
+  let planned = 0;
+  const reviews: string[] = [];
+  const t = plannedTask(
+    (req) => {
+      planned++;
+      // The planner sees the record in its index, with the exact way to cite it.
+      assert.match(req.prompt, /- \[decisions\.md § D-2: Totals reject negative quantities\]/);
+      if (planned === 1) return DROP;
+      assert.match(req.prompt, /Your previous plan was sent back: plan review found it contradicts recorded decisions[^\n]*\[decisions\.md § D-2: Totals reject negative quantities\]/);
+      return { ...DROP, decisions: 'Rests on:\n- none\nArgues against:\n- [D-2] the issue asks for totals to ignore them, not to reject the order' };
+    },
+    undefined,
+    {
+      files,
+      // A reviewer that reads what it is given: the plan, the decisions index, and the records in its checkout.
+      reviewer: (req) => {
+        reviews.push(req.prompt);
+        const listed = /- \[decisions\.md § D-2: Totals reject negative quantities\]/.test(req.prompt);
+        const records = readFileSync(join(req.cwd, 'decisions.md'), 'utf8').includes('never silently dropped');
+        const drops = /Approach: Silently drop orders with a negative quantity/.test(req.prompt);
+        const named = /Argues against:\n- \[decisions\.md § D-2: Totals reject negative quantities\] \S/.test(req.prompt);
+        return { contradictions: listed && records && drops && !named ? [{ ref: 'D-2', why: 'the plan drops what D-2 says is rejected' }] : [], summary: '' };
+      },
+    },
+  );
+  await t.run();
+  assert.equal(reviews.length, 2, 'each plan was reviewed');
+  assert.match(reviews[0]!, /Decisions index[^\n]*\n- \[decisions\.md § D-2: Totals reject negative quantities\]/, 'the reviewer gets the decisions index');
+  const sent = t.f.log.read(0, ['plan.sent_back']).map((e) => e.payload as { by: string; why: string });
+  assert.deepEqual(sent.map((x) => x.by), ['review']);
+  assert.match(sent[0]!.why, /\[decisions\.md § D-2: Totals reject negative quantities\] the plan drops what D-2 says is rejected/);
+  assert.deepEqual(t.f.log.read(0, ['plan.reviewed']).map((e) => (e.payload as { contradictions: unknown[] }).contradictions.length), [1, 0]);
+  const posted = lastOf(t.f.log, 'plan.posted') as { held: boolean; reasons: string[] };
+  assert.deepEqual([posted.held, posted.reasons], [true, ['decisions: the plan goes against decisions.md § D-2: Totals reject negative quantities']]);
+  assert.ok(!t.roles().includes('worker'), 'nothing built: the contradicting plan went back, the arguing one waits for the owner');
+  assert.ok((await t.f.backlog.comments(t.n)).some((x) => /\*\*Decisions\*\*\nRests on:\n- none\nArgues against:\n- \[decisions\.md § D-2: Totals reject negative quantities\] the issue asks/.test(x.body)));
 });
 
 test("plan mode: the owner's objection to a plan being built stops the task before its next attempt", { skip }, async () => {

@@ -30,7 +30,7 @@ export const COLUMN_LABEL: Record<BoardColumn, string> = {
 const ONLY_THE_OWNER: ReadonlySet<WaitKind> = new Set<WaitKind>(['merge_stopped', 'main_checks_timed_out', 'awaiting_decision', 'plan_held', 'needs_owner', 'ci_fix_gave_up', 'blocked', 'landing_failed']);
 
 /** Run roles that plan or research before anything is built: their task is still being planned. */
-const PLANNING_ROLES = new Set(['planner', 'researcher']);
+const PLANNING_ROLES = new Set(['planner', 'plan-reviewer', 'researcher']);
 
 export type CheckState = 'failing' | 'pending' | 'passing' | 'none';
 
