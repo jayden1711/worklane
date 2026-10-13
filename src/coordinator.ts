@@ -108,6 +108,7 @@ export class Coordinator extends Gardener {
     await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('main watch', () => this.watchMain(), undefined);
+    await step('deploy gate', () => this.d.deployGate?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);
@@ -122,6 +123,7 @@ export class Coordinator extends Gardener {
   async idle(): Promise<void> {
     while (this.active.size) await Promise.all([...this.active.values()]);
     await this.d.prTestRuns?.idle();
+    await this.d.deployGate?.idle();
     await this.chatQueue;
     await this.intakeQueue;
     await this.quickIdle();
@@ -159,6 +161,7 @@ export class Coordinator extends Gardener {
     if (!this.halt.signal.aborted) this.halt.abort();
     // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
     this.d.prTestRuns?.stop();
+    this.d.deployGate?.stop();
     this.prBatchStop();
   }
 

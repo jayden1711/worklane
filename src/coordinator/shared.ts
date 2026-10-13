@@ -15,6 +15,7 @@ import type { PrTestRuns } from './test-runs.js';
 import type { TestRuns } from './pr-batch.js';
 import type { RoleOf } from '../dashboard-auth.js';
 import type { MainWatchApi } from '../main-watch.js';
+import type { DeployGate } from '../deploy-gate/gate.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -106,6 +107,8 @@ export interface CoordinatorDeps {
   protection?: Pick<MainWatchApi, 'protection'>;
   /** A person's role on the repo, from their permission (dashboard-auth.ts): whose PRs get the full run. Absent: nobody's. */
   roleOf?: RoleOf;
+  /** The pre-deploy gate (src/deploy-gate/, tests.yaml deploy_gate); absent: off. */
+  deployGate?: DeployGate;
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */

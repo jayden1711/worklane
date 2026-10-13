@@ -6,6 +6,7 @@ import { providerOf, providerRefusal } from '../providers.js';
 import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
+import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -499,6 +500,10 @@ export const TestsConfig = z.strictObject({
     .default([]),
   /** The coordinator's own test runs of PRs (src/testrun/, docs/test-runs.md); absent: none. */
   test_run: TestRunConfig.optional(),
+  /** The pre-deploy gate (src/deploy-gate/, docs/deploy-gate.md); absent: off. */
+  deploy_gate: DeployGateConfig.optional(),
+}).superRefine((t, ctx) => {
+  for (const p of deployGateProblems(t.deploy_gate, t.test_run ? t.test_run.tiers.map((x) => x.name) : null)) ctx.addIssue({ code: 'custom', path: p.path, message: p.message });
 });
 
 // ---------- review.yaml ----------
