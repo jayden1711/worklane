@@ -527,7 +527,25 @@ export function protectionState(o: { stateDir: string; repo: string; events: Sto
   // Each acceptance, and the commit the watch applied it to (main_watch.accepted), if it has yet.
   const applied = new Map(o.events.filter((e) => e.type === 'main_watch.accepted').map((e) => [(e.payload as EventPayload<'main_watch.accepted'>).id, (e.payload as EventPayload<'main_watch.accepted'>).sha]));
   const accepted = view.accepted.map((a) => ({ id: a.id, sha: a.sha, pr: a.pr, head: a.head, by: a.by, reason: a.reason, at: a.at, appliedTo: applied.get(a.id) ?? null }));
-  return { ...view, accepted, alert, stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop, canAccept: isOwner(o.role) && view.mode === 'main_watch' };
+  return { ...view, accepted, alert, directPush: lastDirectPush(o.events), stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop, canAccept: isOwner(o.role) && view.mode === 'main_watch' };
+}
+
+/**
+ * The last commit that landed without a PR, and its ops-channel alert (src/direct-push-alert.ts): posted, how many
+ * owners it mentioned, and why nobody was (or why it wasn't posted, or that the alert is off); null when none.
+ */
+export function lastDirectPush(events: StoredEvent[]) {
+  const e = events.filter((x) => x.type === 'main_watch.direct_push').at(-1);
+  if (!e) return null;
+  const p = e.payload as EventPayload<'main_watch.direct_push'>;
+  const a = events
+    .filter((x) => x.type === 'main_watch.direct_push_alert')
+    .map((x) => x.payload as EventPayload<'main_watch.direct_push_alert'>)
+    .filter((x) => x.sha === p.sha)
+    .at(-1);
+  const status = !p.alert ? 'off' : !a ? 'pending' : a.ok ? 'posted' : 'not_posted';
+  const note = !p.alert ? 'the direct-push alert is off (config.yaml main_watch.direct_push_alert: false)' : (a?.note ?? null);
+  return { at: e.ts, sha: p.sha, url: p.url, kind: p.kind, pusher: p.pusher, status, mentioned: a?.mentioned ?? 0, note };
 }
 
 /** The PRs whose merge the main watch has judged already (accounted, accepted or not): none of them can be accepted. */

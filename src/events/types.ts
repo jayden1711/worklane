@@ -438,6 +438,15 @@ export const EventSchemas = {
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
    */
   'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable() }),
+  /**
+   * An unaccounted commit that landed without a PR (src/direct-push-alert.ts): `direct`, GitHub's commit-to-PR link
+   * has no merged PR for it; `rewrite`, a force-push. `pusher`: a GitHub login only (`pusher_from`: the push's actor,
+   * or the commit's author when the push's isn't known). `alert`: whether it is posted to the ops channel
+   * (config.yaml main_watch.direct_push_alert as committed before it).
+   */
+  'main_watch.direct_push': z.strictObject({ sha, url: z.string(), kind: z.enum(['direct', 'rewrite']), pusher: z.string().nullable(), pusher_from: z.enum(['activity', 'commit']).nullable(), subject: z.string(), alert: z.boolean() }),
+  /** Its ops-channel post: sent (`ok`), how many owners it mentioned, and `note`: why nobody was, or why it wasn't sent. */
+  'main_watch.direct_push_alert': z.strictObject({ sha, ok: z.boolean(), mentioned: z.number().int().nonnegative(), note: z.string().nullable() }),
   /** No more fix runs on this PR; the owner is asked to look. */
   /** The combined-state check started: the default branch moved and touched what this PR touches (overlap). */
   'light_check.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()) }),
