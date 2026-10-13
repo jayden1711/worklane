@@ -598,6 +598,56 @@ export const pasteSecret = (id: string, value: string) => api<{ ok: boolean }>(`
 export const openSetupLink = (token: string) => api<{ ok: boolean; ask: string }>('/api/asks/link', { method: 'POST', body: JSON.stringify({ token }) });
 export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}/run`, { method: 'POST', body: '{}' });
 
+/** The setup console's Add project (src/console/add-project.ts), as GET /api/add-project serves it. */
+export interface AddProjectStep {
+  step: string;
+  state: 'pending' | 'started' | 'done' | 'failed' | 'ask';
+  detail: string;
+  /** A failed step: how to try again (absent from older servers). */
+  retry?: string | null;
+  at: string | null;
+}
+export interface AddProjectRun {
+  id: string;
+  name: string;
+  repo: string;
+  by: string;
+  at: string;
+  /** The machine request's status: pending (for the coordinator), running, done, failed, refused, interrupted. */
+  status: string;
+  detail: string;
+  /** add-project.sh's steps, in its order. */
+  steps: AddProjectStep[];
+  failedStep: string | null;
+  /** The asks it raised: GitHub's approve links and the Claude token. */
+  asks: Ask[];
+}
+export interface AddProjectData {
+  /** Whether this person may add a project now (the server checks again on submit). */
+  allowed: boolean;
+  /** Why not, when not. */
+  why: string | null;
+  login: string;
+  machineOwners: string[];
+  /** Newest first. */
+  runs: AddProjectRun[];
+}
+export const getAddProject = () => api<AddProjectData>('/api/add-project');
+export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
+/**
+ * The name and repo add-project takes: the same rules as the server's and the machine helper's (addProjectNameOk and
+ * addProjectRepoOk in src/machine.ts; test/web-render.test.ts holds the two to the same answers).
+ */
+export const PROJECT_NAME = /^[a-z][a-z0-9-]{0,20}$/;
+export const PROJECT_REPO = /^([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})\/([A-Za-z0-9_.-]{1,100})$/;
+/** Why this name and repo won't be accepted; null when they will. */
+export function addProjectInvalid(name: string, repo: string): string | null {
+  if (!PROJECT_NAME.test(name) || name === 'dash' || /-(agent|eval|work)$/.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters, not "dash" and not ending in -agent, -eval or -work.';
+  const m = PROJECT_REPO.exec(repo);
+  if (!m || m[2] === '.' || m[2] === '..') return 'The repo is owner/name, as on GitHub.';
+  return null;
+}
+
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
 

@@ -33,8 +33,8 @@ test('no setup script hands a shell script to sudo -i (its login-shell quoting m
   }
 });
 
-/** Each `run_as "$coord" '<script>' args` section of a setup script. */
-const sections = (f: string) => [...readFileSync(join(dir, f), 'utf8').matchAll(/run_as "\$coord" '\n([\s\S]*?)\n\s*' /g)].map((m) => m[1]!);
+/** Each `run_as "$coord" '<script>' args` section of a setup script (in lib.sh's helpers, `run_as "wl-$name" ...`). */
+const sections = (f: string) => [...readFileSync(join(dir, f), 'utf8').matchAll(/run_as "(?:\$coord|wl-\$name)" '\n([\s\S]*?)\n\s*' /g)].map((m) => m[1]!);
 
 // A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password).
 const other = 'nobody';
@@ -45,10 +45,12 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
   const stubs = 'worklane() { echo "worklane $*"; }\ngit() { echo "git $*"; case "$1" in rev-parse) echo main;; esac; }\n';
   const runAs = (body: string, args: string[]) =>
     spawnSync('bash', ['-c', `source "${join(dir, 'lib.sh')}"; run_as ${other} "$@"`, '_', stubs + body, ...args], { encoding: 'utf8' });
-  const engine = sections('engine.sh');
+  // The instance home (engine.sh and add-project.sh, through lib.sh's ensure_instance_home).
+  const engine = sections('lib.sh');
   const checkout = sections('checkout.sh');
   const service = sections('service.sh');
   assert.equal(engine.length, 1);
+  assert.match(readFileSync(join(dir, 'engine.sh'), 'utf8'), /^ {2}ensure_instance_home "\$name" "\$repo"$/m, 'engine.sh makes the instance home with it');
   assert.equal(checkout.length, 2);
   assert.equal(service.length, 1);
   const dest = mkdtempSync('/tmp/wl-setup-');
@@ -72,7 +74,7 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.match(readFileSync(yaml, 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: \/var\/lib\/wl-site-agent$/m);
     r = runAs(listed + engine[0]!, ['site', `/srv/worklane/site/example shop`, repo, '/var/lib/wl-site-agent']);
     assert.equal(r.stdout, 'instance site exists; agents run as wl-site-agent\n');
-    r = runAs(checkout[0]!, ['site', dest, repo]);
+    r = runAs(checkout[0]!, ['site', dest, repo, 'https://github.com']);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^git -c credential.helper= -c credential.helper=!\/usr\/local\/bin\/worklane git-credential --instance site clone -q https:\/\/github.com\/example-org\/example shop.git /m);
     assert.match(r.stdout, /^git config core.sharedRepository group$/m);

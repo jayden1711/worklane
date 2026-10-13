@@ -17,6 +17,7 @@ import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { checkRootStep } from './console/root-steps.js';
 import { MACHINE_OWNERS_FILE, machineChangeRefusal, type MachineRequester } from './machine-owners.js';
+import { addProjectNameOk, addProjectRepoOk } from './machine.js';
 
 export const MACHINE_EVENTS = ['machine.requested', 'machine.started', 'machine.finished'] as const;
 
@@ -24,10 +25,10 @@ export type MachineRequestStatus = 'pending' | 'running' | 'done' | 'failed' | '
 
 export interface MachineRequest {
   id: string;
-  /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>. */
+  /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>, add-project <name> <owner/repo>. */
   args: string[];
   by: string;
-  via: 'settings' | 'ask';
+  via: 'settings' | 'ask' | 'add-project';
   ask: string | null;
   /** Asked for on the owner's break-glass (no person named), which needs no machine owner. */
   breakGlass: boolean;
@@ -93,7 +94,7 @@ const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'runn
  * (src/machine-owners.ts), the helper's allowlist, and that a root-step ask doesn't already have one pending.
  * Never runs anything.
  */
-export function requestMachineChange(log: EventLog, r: { args: string[]; requester: MachineRequester; via: 'settings' | 'ask'; ask?: string | null; ownersFile?: string; now?: number }): MachineRequest {
+export function requestMachineChange(log: EventLog, r: { args: string[]; requester: MachineRequester; via: 'settings' | 'ask' | 'add-project'; ask?: string | null; ownersFile?: string; now?: number }): MachineRequest {
   const who = machineChangeRefusal(r.requester, { file: r.ownersFile ?? MACHINE_OWNERS_FILE, ...(r.now !== undefined ? { now: r.now } : {}) });
   if (who) throw new MachineRequestError(who, 403);
   const why = machineRefusal(r.args);
@@ -110,4 +111,19 @@ export function requestMachineChange(log: EventLog, r: { args: string[]; request
     throw e;
   }
   return machineRequests(log.read(0, [...MACHINE_EVENTS])).find((x) => x.id === id)!;
+}
+
+/**
+ * Record an add-project (the helper's `add-project <name> <owner/repo>`) for the coordinator to run: the same gate as
+ * any machine change (requestMachineChange), with the name and the repo checked as strictly as the helper checks
+ * them, and one at a time per instance's log.
+ */
+export function requestAddProject(log: EventLog, r: { name: unknown; repo: unknown; requester: MachineRequester; ownersFile?: string; now?: number }): MachineRequest {
+  const who = machineChangeRefusal(r.requester, { file: r.ownersFile ?? MACHINE_OWNERS_FILE, ...(r.now !== undefined ? { now: r.now } : {}) });
+  if (who) throw new MachineRequestError(who, 403);
+  if (!addProjectNameOk(r.name)) throw new MachineRequestError("the project's name: lowercase letters, digits and dashes, starting with a letter, at most 21 (not dash, and not ending in -agent, -eval or -work)");
+  if (!addProjectRepoOk(r.repo)) throw new MachineRequestError('the repo: a GitHub owner/name');
+  const open = machineRequests(log.read(0, [...MACHINE_EVENTS])).find((x) => x.args[0] === 'add-project' && (x.status === 'pending' || x.status === 'running'));
+  if (open) throw new MachineRequestError(`an add-project (${open.args[1]}) is already ${open.status}; wait for it to finish`, 409);
+  return requestMachineChange(log, { args: ['add-project', r.name, r.repo], requester: r.requester, via: 'add-project', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}), ...(r.now !== undefined ? { now: r.now } : {}) });
 }

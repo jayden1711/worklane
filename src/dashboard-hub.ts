@@ -31,8 +31,7 @@ import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js
 import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
 import { currentUser } from './os/index.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
-// Until the machine-owners module lands (built in parallel), its interface over the same file, failing closed.
-import { isMachineOwner } from './setup/machine-owner-stub.js';
+import { isMachineOwner } from './machine-owners.js';
 
 export interface HubInstance {
   name: string;
@@ -308,8 +307,9 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (m) {
           const inst = byName.get(m[1]!);
           if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${m[1]}` });
-          // A write says whether it came from an allowed console device (asked of Tailscale only for writes: they're rare).
-          const deviceOk = write && deviceRefusal(req, devices).why === null;
+          // A write says whether it came from an allowed console device (asked of Tailscale only for writes: they're
+          // rare), and so does the Add project view, which says before the form is filled whether a submit would pass.
+          const deviceOk = (write || m[2] === 'add-project') && deviceRefusal(req, devices).why === null;
           return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, session.created, deviceOk);
         }
         return json(res, 404, { error: 'not found: the hub serves /api/me, /api/hub and /api/i/<instance>/...' });

@@ -113,7 +113,7 @@ usage: ${BRAND.cli} <command> [options]
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
-  app-manifest <name> <owner/repo> [--signin] [--public-url https://<host>] [--timeout <minutes>]
+  app-manifest <name> <owner/repo> [--signin] [--public-url https://<host>] [--timeout <minutes>] [--ask-lines]
                                    (as root) make a GitHub App through the hub's manifest flow: prints the
                                    approve links and waits. The agent App: its key for the coordinator only,
                                    installed on <owner/repo> alone, checked, then credentials.yaml. --signin:
@@ -766,6 +766,8 @@ async function main(argv: string[]): Promise<number> {
       // The same flow the setup console runs, headless, for the setup scripts (src/setup/app-manifest.ts).
       const opts = [...rest];
       const signin = flag(opts, '--signin');
+      // --ask-lines: each approve link also as one `ask: {json}` line, for add-project.sh to pass on as an ask.
+      const askLines = flag(opts, '--ask-lines');
       const publicUrl = option(opts, '--public-url');
       const minutes = Number(option(opts, '--timeout') ?? 15);
       const tokenFile = option(opts, '--hub-token-file') ?? join(homeOf(VIEWER_USER) ?? homeDir(), '.local', 'state', BRAND.cli, 'dashboard-hub', 'dashboard-token');
@@ -782,7 +784,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(`can't read the hub's token (${tokenFile}): is the dashboard hub running (dashboards.sh), and is this root?`);
         return 1;
       }
-      const r = await runAppManifest({ instance: sub, repo, kind: signin ? 'signin' : 'agent', ...(publicUrl ? { publicUrl } : {}) }, { hub: breakGlassHub({ base: `http://127.0.0.1:${port}`, token }), timeoutMs: minutes * 60_000, log: (l) => console.log(l) });
+      const r = await runAppManifest({ instance: sub, repo, kind: signin ? 'signin' : 'agent', ...(publicUrl ? { publicUrl } : {}) }, { hub: breakGlassHub({ base: `http://127.0.0.1:${port}`, token }), timeoutMs: minutes * 60_000, log: (l) => console.log(l), ...(askLines ? { onAsk: (a) => void console.log(`ask: ${JSON.stringify({ kind: 'approve_link', title: a.title, detail: a.detail, url: a.url })}`) } : {}) });
       if (!r.ok) {
         console.error(`FAILED at "${r.step}": ${r.error}`);
         return 1;

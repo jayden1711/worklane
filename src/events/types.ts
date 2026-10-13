@@ -300,11 +300,29 @@ export const EventSchemas = {
   'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
   // machine changes (src/machine-requests.ts): the dashboard asks, the coordinator runs the machine helper
   /** A machine helper command the owner asked for from the dashboard (Settings, or a root-step ask), for the coordinator to run. */
-  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask']), ask: z.string().nullable(), breakGlass: z.boolean().optional() }),
+  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask', 'add-project']), ask: z.string().nullable(), breakGlass: z.boolean().optional() }),
   /** The coordinator took a request (once: claimed in a write transaction). */
   'machine.started': z.strictObject({ id: z.string(), instance: z.string() }),
   /** How it ended: done (detail: the helper's output), failed, refused (off the allowlist), interrupted (not re-run). */
   'machine.finished': z.strictObject({ id: z.string(), outcome: z.enum(['done', 'failed', 'refused', 'interrupted']), detail: z.string() }),
+  /**
+   * One step of add-project.sh, as the coordinator relays its line (src/console/add-project.ts): the machine
+   * request it belongs to, the step (instance, app, claude-token, checkout, policy, service, test-user,
+   * machine-helper, dashboards) and how it stands: started, done (or skipped as done already), failed (detail: why,
+   * and the retry), or ask (waiting on the owner). Never a key or a token: the script prints none.
+   */
+  'add_project.step': z.strictObject({
+    request_id: z.string(),
+    name: z.string(),
+    repo: z.string(),
+    step: z.enum(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards']),
+    state: z.enum(['started', 'done', 'failed', 'ask']),
+    detail: z.string(),
+    /** An ask line: the setup-console ask the coordinator made of it. */
+    ask: z.string().optional(),
+    /** A failed line: how to try again. */
+    retry: z.string().optional(),
+  }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),

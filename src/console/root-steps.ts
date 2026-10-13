@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -17,6 +17,8 @@ export interface RootStepRule {
   /** Whether these exact arguments are on the helper's sudoers list. */
   allows: (args: string[]) => boolean;
   run: (args: string[], exec?: Exec) => MachineResult;
+  /** Long-running, with progress: the coordinator streams it instead of calling run. */
+  streams?: boolean;
 }
 
 /**
@@ -28,7 +30,7 @@ export function slotCeiling(): number {
   return typeof max === 'function' ? max() : max;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8. Nothing else. */
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, add-project <name> <owner/repo>. Nothing else. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -53,6 +55,15 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     usage: `set-test-slots <${TEST_SLOTS_MIN}..${TEST_SLOTS_MAX}>`,
     allows: (a) => a.length === 1 && /^[1-9][0-9]*$/.test(a[0]!) && Number(a[0]) >= TEST_SLOTS_MIN && Number(a[0]) <= TEST_SLOTS_MAX,
     run: (a, exec) => setTestSlotCap(Number(a[0]), exec),
+  },
+  {
+    command: 'add-project',
+    what: 'add a project to this machine (the installed engine\'s scripts/setup/add-project.sh, as root)',
+    usage: 'add-project <name> <owner/repo>',
+    allows: (a) => a.length === 2 && addProjectNameOk(a[0]) && addProjectRepoOk(a[1]),
+    // It runs for minutes and asks for things on the way: the coordinator streams it (src/coordinator/add-project.ts).
+    streams: true,
+    run: () => ({ ok: false, error: 'add-project streams its steps: the coordinator runs it with its own runner' }),
   },
 ];
 

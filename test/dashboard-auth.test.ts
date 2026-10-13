@@ -673,6 +673,11 @@ test('a machine change through the hub: only a machine owner, signed in in the l
     const seen = (await (await ivy.get('/api/i/a/machine')).json()) as { canChange: boolean; machineOwner: boolean; machineOwners: string[] };
     assert.deepEqual([seen.canChange, seen.machineOwner, seen.machineOwners], [false, false, ['ada', 'olu']]);
     assert.equal(((await (await ada.get('/api/i/a/machine')).json()) as { canChange: boolean }).canChange, true);
+    // Add project says before the form is filled whether a submit would pass: the hub tells it the device on a read too.
+    const adding = async (p: typeof ada, headers: Record<string, string>) => (await (await p.get('/api/i/a/add-project', headers)).json()) as { allowed: boolean; why: string | null };
+    assert.equal((await adding(ada, laptop)).allowed, true, 'a machine owner on an allowed device');
+    assert.match((await adding(ada, stranger)).why ?? '', /allowed devices/, 'a device off the list');
+    assert.match((await adding(ivy, laptop)).why ?? '', /@ivy isn't one/, 'an instance-only owner');
 
     // A sign-in more than 5 minutes ago is stale for a machine change, though the session itself is still good.
     s.clock.t = Date.now() - 6 * 60_000;
