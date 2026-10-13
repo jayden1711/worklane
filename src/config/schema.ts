@@ -96,6 +96,20 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
   /**
+   * Fix-forward (src/fix-forward.ts): when the default branch goes red after an auto-merge (and the flaky re-run says
+   * the failure is real), the culprit is found first (several PRs merged since the last green: each first-parent
+   * commit tested on its own, binary search), then a fix task (an agent with the failing logs, the culprit's diff and
+   * the merged PRs) whose PR goes through the normal gates. The revert PR of the culprit is opened only when no fix is
+   * green within `max_attempts` (0: revert at once), or at once when the culprit touches `revert_first_paths` (globs)
+   * or the money path, auth or secrets (the money-path list and review.yaml's categories).
+   */
+  fix_forward: z
+    .strictObject({
+      max_attempts: z.number().int().min(0).max(5).default(2),
+      revert_first_paths: z.array(z.string().min(1)).default([]),
+    })
+    .prefault({}),
+  /**
    * The main watch (src/main-watch.ts), where GitHub doesn't protect the default branch. `direct_push_alert`: a
    * commit that lands there without a PR (a direct push, a force-push) is posted to the Discord ops channel at once,
    * mentioning the Discord owners. On by default; read as committed just before the push, so a push can't turn it off.

@@ -59,10 +59,10 @@ import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
 import { localDoneWhen } from './testrun/local.js';
 import { repoGit } from './main-watch.js';
-import { MergePosts, takeOpsSlot } from './merge-posts.js';
+import { MergePosts } from './merge-posts.js';
 import { CiMetrics } from './ci-metrics.js';
 import { redactPii } from './intake/redact.js';
-import { scrub } from './watchdog/post.js';
+import { scrub, takeOpsPost } from './watchdog/post.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -116,6 +116,7 @@ export class Coordinator extends Optimizer {
     await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('main watch', () => this.watchMain(), undefined);
+    await step('fix forward', () => this.fixForwardStep(), undefined);
     await step('merge posts', () => this.postMerges(), undefined);
     await step('ci metrics', () => this.measureCi(), undefined);
     await step('deploy gate', () => this.d.deployGate?.step(), undefined);
@@ -181,7 +182,7 @@ export class Coordinator extends Optimizer {
         if (this.postedKeys().has(key)) return 'sent';
         const channel = intake()?.discord.ops_channel;
         const src = this.chatSource();
-        if (!channel || !src || !takeOpsSlot({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}), now: m.now?.() ?? Date.now() })) return 'limited';
+        if (!channel || !src || !takeOpsPost({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}), now: m.now?.() ?? Date.now() })) return 'limited';
         await this.channelSend(src, key, { channel }, { kind: 'notice', text });
         return 'sent';
       },
@@ -475,7 +476,8 @@ export class Coordinator extends Optimizer {
       return 0;
     }
     let started = 0;
-    const ready = await this.d.backlog.list('ready');
+    // Fix-forward's fix task for a red default branch goes first: until it is green, only its PR merges.
+    const ready = (await this.d.backlog.list('ready')).sort((a, b) => Number(this.fixForward.isFixTask(b.number)) - Number(this.fixForward.isFixTask(a.number)));
     // Hotspots: a task that would change a file a running task changes too waits; the loop goes on to the
     // next ready task, so the slot is used meanwhile. The files come from a cheap guess, never an agent run.
     const globs = this.d.cfg.project.hotspots ?? DEFAULT_HOTSPOTS;
@@ -488,7 +490,9 @@ export class Coordinator extends Optimizer {
       if (hold) break;
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
-      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      // Fix-forward's fix task: this instance filed it (its own event log says so), so it is worked whoever the tracker says opened it.
+      const fixTask = issue.state === 'open' && issue.labels.includes('ready') && this.fixForward.isFixTask(issue.number) ? { actionable: true, why: 'fix-forward: the fix task for a red default branch' } : null;
+      const act = fixTask ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };

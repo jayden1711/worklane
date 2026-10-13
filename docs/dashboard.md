@@ -287,8 +287,8 @@ value under each. A figure whose source has recorded nothing yet says **not meas
 - **Main red** and **time to green**: from the check of the default branch after each auto-merge
   (`merge.main_result`): the times it went red, and the median minutes from red to its next green.
 - **Fix-forward versus revert**: revert PRs opened (on a red default branch, or for a commit the main watch couldn't
-  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward isn't built
-  yet; its slot fills from its `fix_forward.finished` events once it is.
+  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward success:
+  fixed over every red default branch fix-forward took on, from its `fix_forward.finished` events.
 - **PR CI wall-clock**: on each merged PR's head, from the first check run starting to the last required check
   (config.yaml `required_checks`; every check when none) completing. Read from GitHub's check runs once per PR
   (`ci.pr_timing`, src/ci-metrics.ts), at most one read-only call a minute.
