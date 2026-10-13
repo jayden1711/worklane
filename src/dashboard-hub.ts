@@ -31,8 +31,7 @@ import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js
 import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
 import { currentUser } from './os/index.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
-// Until the machine-owners module lands (built in parallel), its interface over the same file, failing closed.
-import { isMachineOwner } from './setup/machine-owner-stub.js';
+import { isMachineOwner } from './machine-owners.js';
 
 export interface HubInstance {
   name: string;
