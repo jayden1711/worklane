@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IntakeConfig, type IntakeSource } from '../src/intake/report.js';
 import { CliRunner, FakeRunner, type RunRequest } from '../src/runner.js';
+import { usageByDay } from '../src/health.js';
 import { DEFAULT_PAUSE_MS, limitHit, MIN_PAUSE_MS, pauseOf, resetInText, usageView } from '../src/usage-limit.js';
 import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { coordinator, easyIssue, fixture, readAll, realFix, skip } from './repro-state-graph/harness.js';
@@ -53,6 +54,15 @@ test('the pause in force is the last usage.paused with no usage.resumed after it
   assert.deepEqual(v.today, { runs: 1, limitHits: 1 });
   assert.equal(v.lastHit, hit.ts);
   assert.equal(v.paused?.id, 2);
+});
+
+test("health's \"Usage limit hits\" counts a hit recorded as usage.limit_hit (the run's caller requeues; there's no run.finished), and older logs' run.finished rate_limited", () => {
+  const ev = (id: number, type: string, payload: object) => ({ id, ts: '2026-10-13T10:00:00.000Z', type, actor: 'c', source: 'coordinator', payload }) as unknown as StoredEvent;
+  const days = usageByDay([
+    ev(1, 'usage.limit_hit', { issue: 4, role: 'worker', model: 'sonnet', provider: null, reset_at: 'x', source: 'claude', kind: null, detail: 'x' }),
+    ev(2, 'run.finished', { issue: 5, role: 'worker', reason: 'rate_limited', detail: 'older engine' }),
+  ]);
+  assert.equal(days[0]!.rateLimited, 2);
 });
 
 // ---- the runner: a run that hits the limit is one try
