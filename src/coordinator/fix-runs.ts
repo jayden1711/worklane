@@ -50,12 +50,12 @@ export abstract class FixRuns extends Landing {
     return this.d.log.read(0, ['ci_fix.gave_up']).some((e) => (e.payload as { number: number }).number === number);
   }
 
-  /** The last commit the harness itself put on a PR's branch: the head it opened with, or its latest pushed fix. */
+  /** The last commit the harness itself put on a PR's branch: the head it opened with, its latest pushed fix, or a stale-PR merge-in. */
   protected ourHead(number: number): string | null {
     let head: string | null = null;
-    for (const e of this.d.log.read(0, ['pr.opened', 'ci_fix.finished', 'conflict_fix.finished'])) {
+    for (const e of this.d.log.read(0, ['pr.opened', 'ci_fix.finished', 'conflict_fix.finished', 'pr_hygiene.merged_in'])) {
       const p = e.payload as { number: number; head: string | null; outcome?: string };
-      if (p.number === number && (e.type === 'pr.opened' || p.outcome === 'pushed')) head = p.head;
+      if (p.number === number && (e.type === 'pr.opened' || e.type === 'pr_hygiene.merged_in' || p.outcome === 'pushed')) head = p.head;
     }
     return head;
   }

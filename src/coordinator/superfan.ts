@@ -21,15 +21,15 @@ import { superfanPass, SUPERFAN_SYSTEM, VERDICT_SCHEMA, type SuperfanDeps } from
 import { updateLog } from '../updates.js';
 import { readIncidents } from '../watchdog/incidents.js';
 import { scrub } from '../watchdog/post.js';
-import { Gardener } from './gardener.js';
 import { runRoute } from './model-routing.js';
+import { PrHygiene } from './pr-hygiene.js';
 
 export const SUPERFAN_ROLE = 'superfan';
 /** The machine's superfan's lock and state, in the slot directory every coordinator shares. */
 export const MACHINE_LOCK = 'superfan-machine.lock';
 export const MACHINE_STATE = 'superfan-machine.json';
 
-export abstract class SuperfanWatch extends Gardener {
+export abstract class SuperfanWatch extends PrHygiene {
   /** The superfan pass in flight. */
   protected superfanRun: Promise<void> = Promise.resolve();
   private superfanBusy = false;
