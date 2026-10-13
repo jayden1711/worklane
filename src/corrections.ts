@@ -124,7 +124,8 @@ export type FixKind = (typeof FIX_KINDS)[number];
 export const FIX_RANK: Record<Exclude<FixKind, 'none'>, string> = {
   impossible: 'make the wrong thing impossible (code or config)',
   check: 'a lint, test or CI check that fails on it',
-  rule: 'a skill or AGENTS.md rule',
+  // WHY: item 33; agents may not write AGENTS.md (guardrails), so a rule a worker builds goes in a skill.
+  rule: 'a skill rule (not AGENTS.md: only an owner adds lines there, by promoting a learning)',
   style: 'a style-guide line',
 };
 
