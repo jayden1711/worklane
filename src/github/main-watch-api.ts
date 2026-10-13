@@ -1,7 +1,7 @@
 // The GitHub calls the main watch makes (src/main-watch.ts), one REST request each, with the instance's own token.
 // The watch decides when to call: at most one of these a minute.
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
-import type { CheckRunAt, MainWatchApi, MergedPull, StatusAt } from '../main-watch.js';
+import type { CheckRunAt, Compared, MainWatchApi, MergedPull, StatusAt } from '../main-watch.js';
 
 type Fetch = typeof fetch;
 
@@ -40,6 +40,12 @@ export class GitHubMainWatchApi implements MainWatchApi {
 
   async pull(n: number): Promise<MergedPull> {
     return toPull(await this.json<GhPull>(`/repos/${this.repo}/pulls/${n}`, `PR #${n}`));
+  }
+
+  /** How far `head` is ahead of and behind `base` (one commit listed at most: only the counts are read). */
+  async compare(base: string, head: string): Promise<Compared> {
+    const r = await this.json<{ status: string; ahead_by: number; behind_by: number }>(`/repos/${this.repo}/compare/${base}...${head}?per_page=1`, `the compare of ${base.slice(0, 8)}...${head.slice(0, 8)}`);
+    return { status: r.status, aheadBy: r.ahead_by, behindBy: r.behind_by };
   }
 
   async checkRuns(sha: string): Promise<CheckRunAt[]> {
@@ -100,6 +106,7 @@ interface GhPull {
   merged_by?: { login?: string; type?: string } | null;
   head: { sha: string };
   base: { ref: string };
+  commits?: number;
 }
 
 const toPull = (p: GhPull): MergedPull => ({
@@ -111,4 +118,5 @@ const toPull = (p: GhPull): MergedPull => ({
   mergedByBot: p.merged_by?.type === 'Bot' || /\[bot\]$/.test(p.merged_by?.login ?? ''),
   head: p.head.sha,
   base: p.base.ref,
+  ...(typeof p.commits === 'number' ? { commits: p.commits } : {}),
 });
