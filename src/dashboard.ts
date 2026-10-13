@@ -830,8 +830,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       prCounts: prCounts(prsView(events).prs),
       // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
       protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
-      // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why.
-      ...(opts.cfg.tests.deploy_gate ? { deployGate: deployGateView(opts.stateDir, events, repo, opts.cfg.tests.deploy_gate.branch) } : {}),
+      // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why; and
+      // whether it is on, with what turning it on would do while it is off.
+      ...(opts.cfg.tests.deploy_gate
+        ? {
+            deployGate: {
+              ...deployGateView(opts.stateDir, events, repo, opts.cfg.tests.deploy_gate.branch),
+              enabled: opts.cfg.tests.deploy_gate.enabled,
+              tiers: opts.cfg.tests.deploy_gate.tiers,
+              postDeploy: !!opts.cfg.tests.deploy_gate.post_deploy,
+            },
+          }
+        : {}),
     };
     // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
     return isWriter(who.role) ? full : stateForViewer(full);
