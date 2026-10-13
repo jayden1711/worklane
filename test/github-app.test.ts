@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { appBotIdentity, appJwt, installationTokens, mintInstallationToken } from '../src/github-app.js';
-import { initInstance } from '../src/instance.js';
+import { appOriginText, CredentialsFile, initInstance, readAppOrigin, setGithubApp } from '../src/instance.js';
+import { parse } from 'yaml';
 import { childEnv } from '../src/os/index.js';
 import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
 
@@ -184,6 +185,50 @@ test('regression: under sudo -u (no instance in the environment) the helper stil
   } finally {
     await gh.close();
   }
+});
+
+test('regression (audit B3): no App in credentials.yaml yet, or no instance at all: git is stopped with what to do, never left to prompt (rc 128)', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'instances-'));
+  const { dir: repo } = exampleProject();
+  initInstance('site', repo, 'example-org/example-shop', dir); // credentials.yaml: instance init's placeholder (a gh dir that isn't there)
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
+  const ask = 'protocol=https\nhost=github.com\n\n';
+  const placeholder = await run(['git-credential', '--instance', 'site', 'get'], env, ask);
+  assert.equal(placeholder.stdout, 'quit=1\n', 'git stops here: before, nothing was answered and git asked for a password it could not read');
+  assert.match(placeholder.stderr, /instance site: credentials\.yaml has no GitHub App, and no gh login at .*; set its GitHub App up first \(credentials\.sh site github-app/);
+  // No instance home at all (the audit's first run): every missing file named, not the repo config's heading.
+  const none = await run(['git-credential', '--instance', 'gone', 'get'], env, ask);
+  assert.equal(none.stdout, 'quit=1\n');
+  assert.match(none.stderr, /instance gone: .*instance\.yaml: missing; .*credentials\.yaml: missing; set its GitHub App up first/);
+  assert.doesNotMatch(none.stderr, /\.worklane\/ is invalid/);
+});
+
+test('regression (audit B3): instance set-github-app writes the App into credentials.yaml itself, validated, keeping the rest, and records it was made by hand', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'instances-'));
+  const { dir: repo } = exampleProject();
+  const home = initInstance('site', repo, 'example-org/example-shop', dir);
+  const creds = join(home, 'credentials.yaml');
+  writeFileSync(creds, `${readFileSync(creds, 'utf8')}intake: { discord_token: /keys/discord-token }\n`);
+  const key = keyFile();
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir };
+  const r = await run(['instance', 'set-github-app', 'site', '--app-id', '91', '--installation-id', '4242', '--key', key], env);
+  assert.equal(r.status, 0, r.stderr);
+  const c = CredentialsFile.parse(parse(readFileSync(creds, 'utf8')));
+  assert.deepEqual(c.github, { kind: 'app', app_id: 91, installation_id: 4242, key_path: key });
+  assert.equal(c.intake?.discord_token, '/keys/discord-token', 'its other settings kept');
+  assert.equal(statSync(creds).mode & 0o777, 0o600);
+  assert.equal(readAppOrigin(key), 'by-hand');
+  assert.equal(appOriginText(readAppOrigin(key)), 'made by hand (credentials.sh github-app)');
+  // Never a half-written file: a bad value is refused before anything is written.
+  const bad = await run(['instance', 'set-github-app', 'site', '--app-id', '0', '--installation-id', '4242', '--key', key], env);
+  assert.equal(bad.status, 2);
+  // The manifest flow's own record, through the same writer.
+  setGithubApp(creds, { appId: 92, installationId: 4243, keyPath: key }, 'manifest');
+  assert.equal(appOriginText(readAppOrigin(key)), 'made through the manifest flow');
+  // No instance here: said, nothing written.
+  const missing = await run(['instance', 'set-github-app', 'other', '--app-id', '91', '--installation-id', '4242', '--key', key], env);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /no instance "other" for this user/);
 });
 
 test('instance show: an App instance reports a short-lived token and its key age, never "expires never"', { skip: process.platform === 'win32' && 'POSIX' }, async () => {

@@ -2,8 +2,9 @@
 // host (scripts/ci/fake-github.mjs, in CI): sign-in, users, App names, manifest conversions (each code once), the
 // App's installation and its token, the installation's repositories, and, with a git root, the repo itself over
 // git's smart HTTP (git http-backend), which takes only the installation token, as GitHub takes it from the App's
-// credential helper. Each git request's user is recorded, so a test can tell the clone went through the helper.
-import { spawn } from 'node:child_process';
+// credential helper. Each git request's user is recorded, so a test can tell the clone went through the helper. Pull
+// requests too (auto-config's setup PR, on a server): opened, listed and viewed; merged once a test merges the branch.
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 
@@ -27,11 +28,20 @@ export interface FakeGitHubOptions {
   log?: (line: string) => void;
 }
 
+/** A pull request the fake holds. */
+export interface FakePull {
+  number: number;
+  head: string;
+  base: string;
+  title: string;
+  html_url: string;
+}
+
 export async function fakeGitHub(o: FakeGitHubOptions) {
   const codes = new Map<string, { slug: string; id: number }>(); // manifest codes
   const signins = new Map<string, string>(); // oauth codes -> login
   const takenNames = new Set<string>();
-  const state = { installed: o.installed ?? false, reaches: [o.repo], permissions: { ...o.permissions }, conversions: 0, gitUsers: [] as string[], tokens: 0 };
+  const state = { installed: o.installed ?? false, reaches: [o.repo], permissions: { ...o.permissions }, conversions: 0, gitUsers: [] as string[], tokens: 0, pulls: [] as FakePull[] };
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const auth = req.headers.authorization ?? '';
@@ -79,6 +89,32 @@ export async function fakeGitHub(o: FakeGitHubOptions) {
       }
       if (req.method === 'GET' && url.pathname === '/installation/repositories') {
         return auth === `Bearer ${FAKE_INSTALLATION_TOKEN}` || auth === `token ${FAKE_INSTALLATION_TOKEN}` ? send(200, { total_count: state.reaches.length, repositories: state.reaches.map((full_name) => ({ full_name })) }) : send(401, {});
+      }
+      // Pull requests on the repo (auto-config's setup PR), to the installation token. One is merged once its head
+      // branch is in its base branch on the git root (a test merges it by pushing the one into the other).
+      const pullsPath = `/repos/${o.repo}/pulls`;
+      if (url.pathname === pullsPath || url.pathname.startsWith(`${pullsPath}/`)) {
+        if (auth !== `Bearer ${FAKE_INSTALLATION_TOKEN}` && auth !== `token ${FAKE_INSTALLATION_TOKEN}`) return send(401, { message: 'Bad credentials' });
+        const view = (p: FakePull) => {
+          const merged = Boolean(o.gitRoot) && spawnSync('git', ['--git-dir', join(o.gitRoot!, `${o.repo}.git`), 'merge-base', '--is-ancestor', `refs/heads/${p.head}`, `refs/heads/${p.base}`]).status === 0;
+          return { number: p.number, html_url: p.html_url, state: merged ? 'closed' : 'open', merged, head: { ref: p.head }, base: { ref: p.base }, title: p.title };
+        };
+        if (req.method === 'POST' && url.pathname === pullsPath) {
+          const b = JSON.parse(body) as { head: string; base: string; title: string };
+          if (state.pulls.some((p) => p.head === b.head && view(p).state === 'open')) return send(422, { message: 'Validation Failed', errors: [{ message: `A pull request already exists for ${b.head}.` }] });
+          const p: FakePull = { number: state.pulls.length + 1, head: b.head, base: b.base, title: b.title, html_url: `http://${req.headers.host}/${o.repo}/pull/${state.pulls.length + 1}` };
+          state.pulls.push(p);
+          return send(201, view(p));
+        }
+        if (req.method === 'GET' && url.pathname === pullsPath) {
+          const head = url.searchParams.get('head')?.split(':')[1];
+          const want = url.searchParams.get('state') ?? 'open';
+          return send(200, state.pulls.map(view).filter((p) => (!head || p.head.ref === head) && (want === 'all' || p.state === want)));
+        }
+        const n = /^\/(\d+)$/.exec(url.pathname.slice(pullsPath.length))?.[1];
+        const p = n ? state.pulls.find((x) => x.number === Number(n)) : undefined;
+        if (req.method === 'GET' && p) return send(200, view(p));
+        return send(404, { message: 'Not Found' });
       }
       if (o.lenient && req.method === 'GET') return send(200, []);
       send(404, { message: 'Not Found' });

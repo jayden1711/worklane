@@ -24,12 +24,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseDocument } from 'yaml';
 import { BRAND } from '../brand.js';
 import type { Asks } from '../console/asks.js';
 import { CALLBACK_PATH } from '../dashboard-auth.js';
 import { appJwt } from '../github-app.js';
-import { asUser, currentUser, homeOf, installSecretFor, replaceFileAtomically } from '../os/index.js';
+import { setGithubApp } from '../instance.js';
+import { asUser, currentUser, homeOf, installSecretFor } from '../os/index.js';
 
 type Fetch = typeof fetch;
 export type AppKind = 'agent' | 'signin';
@@ -631,14 +631,9 @@ export async function runAppManifest(o: { instance: string; repo: string; kind: 
 
   // 5. credentials.yaml, as credentials.sh writes it, keeping its other settings.
   const creds = credentialsFile(userHome, o.instance);
-  const github = { kind: 'app', app_id: app.id, installation_id: installationId, key_path: keyPath };
   if (existsSync(creds)) {
     try {
-      const doc = parseDocument(readFileSync(creds, 'utf8'));
-      if (doc.errors.length) throw new Error(`${creds} isn't valid YAML`);
-      if (!doc.has('version')) doc.set('version', 1);
-      doc.set('github', github);
-      replaceFileAtomically(creds, String(doc), 0o600);
+      setGithubApp(creds, { appId: app.id, installationId, keyPath }, 'manifest');
     } catch (e) {
       return fail('write credentials.yaml', String((e as Error).message).split('\n')[0]!);
     }

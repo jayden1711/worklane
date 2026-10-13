@@ -11,3 +11,12 @@ test("marksOf: a marker number inside a larger number (a byte count) isn't a lea
   assert.doesNotMatch('{"pid":192013}', leak, 'b\'s issue 9201 inside a larger number');
   for (const hit of ['#9270', '"pr":9270,', 'issue 9201', '9202', '[9203]', 'tr-beta-1', 'beta-proj', 'wl-beta@host', 'Beta-only']) assert.match(hit, leak, hit);
 });
+
+test('exampleProject repos run no background git maintenance or auto-gc, so tree walks never race a vanishing lock file', async () => {
+  const { exampleProject } = await import('./helpers.js');
+  const { execFileSync } = await import('node:child_process');
+  const { dir } = exampleProject();
+  const get = (k: string) => execFileSync('git', ['config', '--get', k], { cwd: dir, encoding: 'utf8' }).trim();
+  assert.equal(get('maintenance.auto'), 'false');
+  assert.equal(get('gc.auto'), '0');
+});

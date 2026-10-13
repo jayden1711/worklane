@@ -339,7 +339,8 @@ export const EventSchemas = {
     name: z.string(),
     repo: z.string(),
     step: z.enum(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards']),
-    state: z.enum(['started', 'done', 'failed', 'ask']),
+    /** waiting: the step waits for what only time or someone else settles (the service: its setup PR's merge). */
+    state: z.enum(['started', 'done', 'failed', 'ask', 'waiting']),
     detail: z.string(),
     /** An ask line: the setup-console ask the coordinator made of it. */
     ask: z.string().optional(),
@@ -441,6 +442,15 @@ export const EventSchemas = {
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
    */
   'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable() }),
+  /**
+   * An unaccounted commit that landed without a PR (src/direct-push-alert.ts): `direct`, GitHub's commit-to-PR link
+   * has no merged PR for it; `rewrite`, a force-push. `pusher`: a GitHub login only (`pusher_from`: the push's actor,
+   * or the commit's author when the push's isn't known). `alert`: whether it is posted to the ops channel
+   * (config.yaml main_watch.direct_push_alert as committed before it).
+   */
+  'main_watch.direct_push': z.strictObject({ sha, url: z.string(), kind: z.enum(['direct', 'rewrite']), pusher: z.string().nullable(), pusher_from: z.enum(['activity', 'commit']).nullable(), subject: z.string(), alert: z.boolean() }),
+  /** Its ops-channel post: sent (`ok`), how many owners it mentioned, and `note`: why nobody was, or why it wasn't sent. */
+  'main_watch.direct_push_alert': z.strictObject({ sha, ok: z.boolean(), mentioned: z.number().int().nonnegative(), note: z.string().nullable() }),
   /** No more fix runs on this PR; the owner is asked to look. */
   /** The combined-state check started: the default branch moved and touched what this PR touches (overlap). */
   'light_check.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()) }),
@@ -570,6 +580,29 @@ export const EventSchemas = {
   'deploy_gate.refused': z.strictObject({ branch: z.string(), deploy: sha.nullable(), main: sha, target: sha.nullable(), reason: z.string().max(2000) }),
   /** An owner's `deploy <sha>` from Discord: asked (waiting on their confirm), confirmed, cancelled or refused. */
   'deploy_gate.override': z.strictObject({ id: z.string(), thread: z.string().nullable(), sha: z.string().max(64), by: z.string(), stage: z.enum(['asked', 'confirmed', 'cancelled', 'refused']), detail: z.string().max(1000) }),
+  /**
+   * The post-deploy check of a commit the deploy branch moved to: passed; failed (a smoke check failed: `rollback` says
+   * what was rolled back); timed_out (the host didn't deploy it in time); deploy_failed (the host's deploy of it failed).
+   * `snippet` is a redacted piece of a failing response's body; no header or cookie is ever kept. `token`: whether the
+   * host's token was stored.
+   */
+  'deploy_gate.post_deploy': z.strictObject({
+    sha,
+    prev: sha.nullable(),
+    outcome: z.enum(['passed', 'failed', 'timed_out', 'deploy_failed']),
+    detail: z.string().max(2000),
+    checks: z.array(z.strictObject({ name: z.string().max(40), ok: z.boolean(), status: z.number().int().nullable(), ms: z.number().int().nonnegative(), error: z.string().max(300).nullable(), snippet: z.string().max(300) })).max(20),
+    rollback: z
+      .strictObject({
+        attempted: z.boolean(),
+        ok: z.boolean(),
+        detail: z.string().max(2000),
+        services: z.array(z.strictObject({ service: z.string().max(40), to: z.string().max(100).nullable(), via: z.enum(['rollback', 'redeploy']).nullable(), ok: z.boolean(), detail: z.string().max(500) })).max(20),
+      })
+      .nullable(),
+    github: z.strictObject({ total: z.number().int().nonnegative(), success: z.number().int().nonnegative() }).nullable(),
+    token: z.boolean(),
+  }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
   // flaky tests (src/flaky.ts, coordinator/flaky.ts): before the default branch counts as red, its failing checks re-run on the same commit

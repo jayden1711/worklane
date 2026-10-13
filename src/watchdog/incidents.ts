@@ -18,7 +18,7 @@ import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
 import { USAGE_INCIDENT } from '../usage-limit.js';
 import { CONFIG_INCIDENT } from '../config/live.js';
-import { DEPLOY_GATE_INCIDENT } from '../deploy-gate/config.js';
+import { DEPLOY_GATE_INCIDENT, POST_DEPLOY_INCIDENT, POST_DEPLOY_WAIT_INCIDENT } from '../deploy-gate/config.js';
 
 export const INCIDENTS_FILE = 'incidents.json';
 const LOCK_FILE = 'incidents.lock';
@@ -49,6 +49,10 @@ export const KINDS = {
   [CONFIG_INCIDENT]: { title: 'The config on the default branch is invalid', severity: 'amber' },
   // Raised by the coordinator (src/deploy-gate/gate.ts): someone moved the deploy branch; the gate refuses to move it.
   [DEPLOY_GATE_INCIDENT]: { title: 'The deploy branch moved outside the gate', severity: 'red' },
+  // Raised by the coordinator (src/deploy-gate/post-deploy.ts): production failed its smoke check after a deploy.
+  [POST_DEPLOY_INCIDENT]: { title: 'Production failed its post-deploy check', severity: 'red' },
+  // Raised by the coordinator (src/deploy-gate/post-deploy.ts): the host didn't deploy the deploy branch's commit in time.
+  [POST_DEPLOY_WAIT_INCIDENT]: { title: "Production didn't deploy the deploy branch's commit", severity: 'amber' },
 } as const satisfies Record<string, { title: string; severity: Severity }>;
 export type WatchdogKind = keyof typeof KINDS;
 
