@@ -3,7 +3,7 @@
 // (audited); a writer's PR gets the full run and check on its head, is never auto-merged, and merging it trips nothing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -11,7 +11,7 @@ import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { startDashboard } from '../src/dashboard.js';
 import type { EventPayload } from '../src/events/types.js';
-import type { CheckRunAt, MainWatchApi, MergedPull } from '../src/main-watch.js';
+import { CONFIG_PATH, type CheckRunAt, type MainWatchApi, type MergedPull } from '../src/main-watch.js';
 import type { PrTestRuns, OpenPr } from '../src/coordinator/test-runs.js';
 import type { TestRunRequest, TestRuns } from '../src/coordinator/pr-batch.js';
 import { FakeRunner } from '../src/runner.js';
@@ -71,6 +71,11 @@ function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: Tes
   // Someone else's clone of the repo, to push and merge from.
   const person = join(mkdtempSync(join(tmpdir(), 'person-')), 'p');
   git(f.base, 'clone', '-q', f.remote, person);
+  // The watch judges a merge by the required_checks committed at its parent, so the default branch carries them too.
+  appendFileSync(join(person, CONFIG_PATH), `\nrequired_checks: ${JSON.stringify(f.cfg.project.required_checks)}\n`);
+  git(person, 'add', CONFIG_PATH);
+  git(person, ...ident, 'commit', '-q', '-m', 'required_checks');
+  git(person, 'push', '-q', 'origin', 'main');
   const commit = (file: string) => {
     writeFileSync(join(person, file), `${file}\n`);
     git(person, 'add', '-A');
