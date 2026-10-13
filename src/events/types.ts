@@ -300,7 +300,7 @@ export const EventSchemas = {
   'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
   // machine changes (src/machine-requests.ts): the dashboard asks, the coordinator runs the machine helper
   /** A machine helper command the owner asked for from the dashboard (Settings, or a root-step ask), for the coordinator to run. */
-  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask']), ask: z.string().nullable() }),
+  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask']), ask: z.string().nullable(), breakGlass: z.boolean().optional() }),
   /** The coordinator took a request (once: claimed in a write transaction). */
   'machine.started': z.strictObject({ id: z.string(), instance: z.string() }),
   /** How it ended: done (detail: the helper's output), failed, refused (off the allowlist), interrupted (not re-run). */
