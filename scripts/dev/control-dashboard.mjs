@@ -180,7 +180,11 @@ async function seedPrs(root, issues) {
     ['ci_fix.started', { issue: b, number: 102, head: h(2), checks: ['test'], attempt: 1, lease: h(9) }],
     ['ci_fix.finished', { issue: b, number: 102, outcome: 'no_push', head: null, detail: 'the failure is in a test this change does not touch' }],
     ['ci_fix.gave_up', { issue: b, number: 102, head: h(2), reason: 'the worker showed the failure is not caused by this change' }],
-    ['merge.decided', { issue: b, number: 102, head: h(2), auto: false, reasons: ['a CI fix run happened on this PR', 'high-risk: migrations'] }],
+    ['merge.decided', {
+      issue: b, number: 102, head: h(2), auto: false,
+      reasons: ['a CI fix run happened on this PR', 'high-risk: migration (db/migrations/002_orders.sql)', 'high-risk: self-modification (src/merge-policy.ts)'],
+      why: [{ category: 'migration', text: 'changes a database migration: db/migrations/002_orders.sql' }, { category: 'self-modification', text: 'changes the merge policy: src/merge-policy.ts' }],
+    }],
     ['pr.opened', { issue: c, number: 103, url: url(103), head: h(3), draft: true }],
     ['pr.status', { issue: c, number: 103, head: h(3), ready: true, reasons: [], checks: [{ name: 'lint', outcome: 'pass' }, { name: 'test', outcome: 'pass' }] }],
     ['pr.ready', { issue: c, number: 103, head: h(3) }],

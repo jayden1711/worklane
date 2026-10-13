@@ -945,6 +945,27 @@ test('a research run on its page: each search, each page fetched or refused (lin
   assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
 });
 
+test('waiting on you: a high-risk PR says plainly why it waits, naming the category and its first file', () => {
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  const item = {
+    kind: 'needs_owner', since: new Date(now - 3_600_000).toISOString(), issue: 3, pr: 31, title: 'Tighten the merge rule',
+    detail: 'high-risk: self-modification (src/merge-policy.ts, src/review.ts)',
+    why: [
+      { category: 'self-modification', text: 'changes the merge policy: src/merge-policy.ts and 1 more' },
+      { category: 'migration', text: 'changes a database migration: db/migrations/002.sql' },
+    ],
+  };
+  const w = { at: new Date(now).toISOString(), items: [item], markdown: '', mergedSince: new Date(now).toISOString(), merged: [] };
+  const html = r.renderWaiting(w, now);
+  const whys = [...html.matchAll(/data-testid="waiting-why" data-category="([a-z-]+)"[\s\S]*?<\/li>/g)];
+  assert.deepEqual(whys.map((m) => m[1]), ['self-modification', 'migration']);
+  assert.match(whys[0]![0], />self-modification<[\s\S]*?>changes the merge policy: src\/merge-policy\.ts and 1 more</);
+  assert.match(whys[1]![0], />migration<[\s\S]*?>changes a database migration: db\/migrations\/002\.sql</);
+  assert.match(html, /PR #31[\s\S]*?data-testid="waiting-why"[\s\S]*?data-testid="waiting-detail"/, 'the plain reason first, then the detail');
+  // Nothing high-risk (or a decision recorded before the reason was): no reason line.
+  assert.doesNotMatch(r.renderWaiting({ ...w, items: [{ ...item, why: undefined }] }, now), /waiting-why/);
+});
+
 test('waiting on you: every owner-held state grouped in the digest\'s order, each with its issue or PR and how long it has waited; the digest\'s Markdown; refused to anyone else without asking', () => {
   const now = Date.parse('2026-10-15T12:00:00Z');
   const ago = (h: number) => new Date(now - h * 3_600_000).toISOString();

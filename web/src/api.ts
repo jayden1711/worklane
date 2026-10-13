@@ -798,6 +798,8 @@ export interface WaitItem {
   title: string | null;
   detail: string;
   sha?: string;
+  /** A PR left to the owner as high-risk: each category it touches, plainly, with its first file ("changes the merge policy: src/merge-policy.ts"). */
+  why?: { category: string; text: string }[];
 }
 /** A PR merged on its own since the last digest, for sampling: its review level and the evaluator's confidence. */
 export interface MergedItem {
