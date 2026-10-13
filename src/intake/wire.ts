@@ -47,6 +47,21 @@ export async function ownersProblem(cfg: IntakeConfig, repo: string, roleOf: Rol
   return null;
 }
 
+/** The Discord bot as the coordinator's chat source: what it takes, how it answers, and its wake-up on arrival. */
+export function discordSource(bot: DiscordIntake): IntakeSource {
+  return {
+    name: 'discord',
+    take: async () => bot.take(),
+    takeNow: async (which) => bot.takeWhere(which),
+    onArrival: (fn) => bot.onArrival(fn),
+    typing: (where) => bot.typing(where),
+    reply: (t, text, opts) => bot.reply(t.id, text, opts?.mentions),
+    openThread: (c, text, name, from) => bot.openThread(c, text, name, from),
+    watch: (t) => bot.watch(t),
+    dm: (user, text) => bot.dm(user, text),
+  };
+}
+
 /**
  * The intake deps for one instance, or null when it has no intake.yaml (intake off). A config that is refused
  * (unsafe permissions, invalid) is reported and leaves intake off. Discord connects only on start(), when its
@@ -100,7 +115,7 @@ export function intakeForInstance(o: {
       const { now: _now, sleep: _sleep, alive: _alive, ...adapter } = o.discord ?? {};
       const gate = identifyGate({ dir: machine, token, owner: `discord identify ${name}`, ...(o.discord?.now ? { now: o.discord.now } : {}), ...(o.discord?.sleep ? { sleep: o.discord.sleep } : {}), limit: () => sessionStartLimit(token, f ?? fetch) });
       const bot = new DiscordIntake({ token, guild: d.guild, channels: d.channels, chatChannels: d.chat_channels, allowedSenders: d.allowed_senders, prefixes: d.prefixes, owners: d.owners, gate, log: say, ...adapter });
-      const source: IntakeSource = { name: 'discord', take: async () => bot.take(), reply: (t, text, opts) => bot.reply(t.id, text, opts?.mentions), openThread: (c, text, n, from) => bot.openThread(c, text, n, from), watch: (t) => bot.watch(t), dm: (user, text) => bot.dm(user, text) };
+      const source = discordSource(bot);
       sources.push(source);
       let release = () => {};
       start = async () => {

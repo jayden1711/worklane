@@ -15,7 +15,7 @@ import { acceptTriage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
-import { ChannelChat } from './channel-chat.js';
+import { QuickReplies } from './quick-replies.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';
 
@@ -28,7 +28,7 @@ const INTAKE_OUTCOMES = ['intake.filed', 'intake.awaiting', 'intake.commented', 
 /** What a sender is told when a restart cut off their report. */
 const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Could you send it again?";
 
-export abstract class Intake extends ChannelChat {
+export abstract class Intake extends QuickReplies {
   // ---------------------------------------------------------------- intake
 
   /**
@@ -38,6 +38,8 @@ export abstract class Intake extends ChannelChat {
    * returns, can file `ready`, answer a decision or change config. One pass at a time; returns the pass in flight.
    */
   checkIntake(): Promise<void> {
+    // Replies a person waits on are woken by their arrival; the timer is the fallback for one that was missed.
+    void this.wakeQuick();
     const it = this.d.intake;
     if (!it || this.intakeRunning || this.halt.signal.aborted || this.stopped) return this.intakeQueue;
     const now = (this.d.now?.() ?? new Date()).getTime();
@@ -115,7 +117,8 @@ export abstract class Intake extends ChannelChat {
       if (!cfg[src.name].enabled) continue;
       let got: IncomingReport[];
       try {
-        got = await src.take();
+        // Replies a person waits on aren't taken here: src/coordinator/quick-replies.ts answers them as they arrive.
+        got = await this.intakeTake(src);
       } catch (e) {
         error(`intake ${src.name}`, e);
         continue;

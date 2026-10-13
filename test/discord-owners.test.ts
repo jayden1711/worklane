@@ -22,7 +22,7 @@ import { identifyGate, IDENTIFY_SPACING_MS } from '../src/intake/discord-gate.js
 import { DiscordIntake, type Socket } from '../src/intake/discord.js';
 import { mayApproveHighRisk } from '../src/intake/people.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource, type ReplyOptions } from '../src/intake/report.js';
-import { intakeForInstance } from '../src/intake/wire.js';
+import { discordSource, intakeForInstance } from '../src/intake/wire.js';
 import { FakeRunner } from '../src/runner.js';
 import { asPerson, repoRoot } from './helpers.js';
 
@@ -159,9 +159,9 @@ async function waitingPr(t: ReturnType<typeof setup>) {
   t.backlog.setChecks(head, [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'success', id: 1 }]);
   t.log.append('merge.decided', { issue, number: pr.number, head, auto: false, reasons: ['high-risk: money path (src/payout.js)'] }, 'coordinator');
   await t.pass();
-  const thread = t.chat.threads.find((x) => x.name === `merge #${pr.number}`);
+  const thread = (of(t.log, 'discord.posted').find((p) => p.key === `merge:${pr.number}@${head}`) as { thread: string | null } | undefined)?.thread;
   assert.ok(thread, 'the waiting PR has its own thread');
-  return { issue, number: pr.number, head, thread: thread.id };
+  return { issue, number: pr.number, head, thread };
 }
 
 // ---------------------------------------------------------------- 1. high-risk approvals
@@ -283,7 +283,8 @@ function adapter(owners: string[]) {
   const net = (async (url: string, init: RequestInit) => (sent.push({ url, body: String(init.body ?? '') }), { ok: true, json: async () => ({ id: String(++id) }) })) as unknown as typeof fetch;
   const d = new DiscordIntake({ token: 'tok', guild: GUILD_A, channels: ['111111'], allowedSenders: [OWNER_ID, COFOUNDER_ID, ADMIN_ID], prefixes: [], owners, connect: () => sock, fetch: net, setInterval: () => 1, clearInterval: () => {} });
   d.start();
-  const source: IntakeSource = { name: 'discord', take: async () => d.take(), reply: (t, text, o) => d.reply(t.id, text, o?.mentions), openThread: (c, text, name, from) => d.openThread(c, text, name, from), watch: (t) => d.watch(t), dm: (u, text) => d.dm(u, text) };
+  // The coordinator's own source over the adapter: its fast path (takeNow, onArrival) included.
+  const source = discordSource(d);
   const say = (from: string, channel: string, content: string, guild: string | null = GUILD_A) => sock.frame({ op: 0, s: ++seq, t: 'MESSAGE_CREATE', d: { id: String(700000 + ++seq), channel_id: channel, ...(guild ? { guild_id: guild } : {}), content, author: { id: from } } });
   return { d, sock, sent, source, say };
 }
@@ -301,7 +302,8 @@ test('owners: a secret ask never posts its content to Discord; an owner who repl
   a.say(OWNER_ID, thread, SECRET);
   a.say(ADMIN_ID, thread, 'link');
   a.say(OWNER_ID, thread, 'link');
-  await t.pass();
+  // Answered as they arrive (the fast path), not on the intake pass.
+  await t.c.quickIdle();
   const dms = a.sent.filter((s) => s.url.endsWith('/users/@me/channels'));
   assert.deepEqual(dms.map((s) => JSON.parse(s.body).recipient_id), [OWNER_ID], 'one DM, to the owner who asked');
   const dm = JSON.parse(a.sent[a.sent.indexOf(dms[0]!) + 1]!.body) as { content: string; allowed_mentions: unknown };
@@ -350,6 +352,29 @@ test('owners: a used, expired or someone else\'s DM link is refused', () => {
   const d = issueSetupLink(log, { ask: ask.id, login: 'example-owner', now });
   assert.equal((useSetupLink(log, { token: d.token, login: 'example-owner', role: 'writer', now }) as { status: number }).status, 403, 'not an owner now');
   assert.equal((useSetupLink(log, { token: 'x'.repeat(43), login: 'example-owner', role: 'owner', now }) as { status: number }).status, 404, 'unknown');
+});
+
+test('owners: L3 and owner-merge replies are answered on the fast path as they arrive, exactly once; the intake pass never takes them again', async () => {
+  const a = adapter(CONFIG.discord.owners);
+  const t = setup({ source: a.source });
+  landAsk(t.log, 'd-land', 7);
+  const w = await waitingPr(t);
+  const posted = (key: string) => (of(t.log, 'discord.posted').find((p) => p.key === key) as { thread: string }).thread;
+  const landThread = posted('decision:d-land');
+  const mergeThread = posted(`merge:${w.number}@${w.head}`);
+  // The gateway queues them; the arrival wakes the quick path at once, with no intake pass.
+  a.say(ADMIN_ID, landThread, 'approve 7');
+  a.say(OWNER_ID, landThread, 'approve 7');
+  a.say(OWNER_ID, mergeThread, `approve ${w.number}`);
+  await t.c.quickIdle();
+  assert.deepEqual(of(t.log, 'decision.answered').map((p) => [p.id, p.by]), [['d-land', 'example-owner']]);
+  assert.deepEqual(of(t.log, 'merge.approved').map((p) => [p.number, p.by]), [[w.number, 'example-owner']]);
+  assert.deepEqual(of(t.log, 'discord.reply').map((p) => [p.by, p.outcome]), [['example-admin', 'comment'], ['example-owner', 'answered'], ['example-owner', 'answered']]);
+  // A later intake pass finds nothing left to take: nothing is handled twice.
+  await t.pass();
+  await t.c.quickIdle();
+  assert.equal(of(t.log, 'discord.reply').length, 3);
+  assert.equal(of(t.log, 'decision.answered').length, 1);
 });
 
 test('owners: the DM is outbound only; an incoming DM (a reply to it) is dropped on receipt', async () => {

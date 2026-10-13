@@ -83,6 +83,8 @@ export class DiscordIntake {
    * gateway has no acknowledgement to hold them. A replay of a message already taken is deduped by its id.
    */
   private queue: IncomingReport[] = [];
+  /** Told of each chat-channel message and thread reply as it is queued: the coordinator answers those at once. */
+  private arrival: ((r: IncomingReport) => void)[] = [];
   /** The bot's own threads (decisions, asks, conversations) whose replies it takes. */
   private threads = new Set<string>();
   /** Messages seen and dropped (not addressed, another server or channel, a DM, from a bot), counted only. */
@@ -174,6 +176,24 @@ export class DiscordIntake {
     return out;
   }
 
+  /** Reports received and not yet taken that match `which`, taken now; the rest stay queued. */
+  takeWhere(which: (r: IncomingReport) => boolean): IncomingReport[] {
+    const out = this.queue.filter(which);
+    this.queue = this.queue.filter((r) => !out.includes(r));
+    return out;
+  }
+
+  /** Call `fn` for each chat-channel message and thread reply once it is queued (an in-process wake-up, no I/O). */
+  onArrival(fn: (r: IncomingReport) => void) {
+    this.arrival.push(fn);
+  }
+
+  /** Discord's typing indicator in `channel` (shown about 10 s, or until the bot posts). False on any failure. */
+  async typing(channel: string): Promise<boolean> {
+    const r = await (this.o.fetch ?? fetch)(`${API}/channels/${encodeURIComponent(channel)}/typing`, { method: 'POST', headers: { authorization: `Bot ${this.o.token}` } });
+    return r.ok;
+  }
+
   private stopHeartbeat() {
     if (this.heartbeat !== null) (this.o.clearInterval ?? clearInterval)(this.heartbeat as ReturnType<typeof setInterval>);
     this.heartbeat = null;
@@ -259,14 +279,24 @@ export class DiscordIntake {
     // mention, if any, removed); in a channel, only an addressed one counts.
     const text = inThread ? m.content.trim() || null : inChat ? addressed(m.content, [], mentions) ?? (m.content.trim() || null) : addressed(m.content, this.o.prefixes, mentions);
     if (!text) return drop('unaddressed');
-    this.queue.push({
+    const r: IncomingReport = {
       source: 'discord',
       sourceId: m.id,
       sender: { source: 'discord', id: m.author.id, ...(m.author.global_name || m.author.username ? { name: m.author.global_name ?? m.author.username! } : {}) },
       text,
       receivedAt: (this.o.now ?? (() => new Date()))().toISOString(),
       thread: { kind: inThread ? 'thread' : inChat ? 'chat' : 'channel', id: m.channel_id },
-    });
+    };
+    this.queue.push(r);
+    if (inThread || inChat) {
+      for (const fn of this.arrival) {
+        try {
+          fn(r);
+        } catch {
+          // a listener's failure never loses the message: it stays queued for the next pass
+        }
+      }
+    }
   }
 
   /** Take replies in this thread of the bot's. */

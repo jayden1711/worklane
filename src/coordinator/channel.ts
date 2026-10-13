@@ -39,7 +39,7 @@ import { ResearchOnDemand } from './research-on-demand.js';
 const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 
 /** What a thread is for: `decision:<id>`, `ask:<id>`, `merge:<number>@<head>` or `idea:<id>` (the key of the post that opened it). */
-type Target = string;
+export type Target = string;
 
 /** A decision's or ask's thread, as a reply in it is handled (Channel.threadTarget). */
 /** What a high-risk approval (or rejection) from a thread did. */
@@ -199,27 +199,33 @@ export abstract class Channel extends ResearchOnDemand {
     const ignored: IncomingReport[] = [];
     const meter = () => new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
     for (const r of reports) {
-      const person = await personOf(cfg, r.sender.id, this.d.intake?.roleOf);
-      if (!person) {
-        // Unmapped: ignored entirely, before anything of the message is stored.
-        meter().countDrop('unmapped');
-        ignored.push(r);
-        continue;
-      }
-      const target = r.thread?.kind === 'thread' ? threads.get(r.thread.id) : undefined;
-      if (!target) {
-        // A reply in a thread that isn't one of this instance's: never an answer here, and never a report.
-        // A chat-channel message is never a report either (src/coordinator/channel-chat.ts takes those first).
-        if (r.thread?.kind === 'thread' || r.thread?.kind === 'chat') ignored.push(r);
-        else rest.push(r);
-        continue;
-      }
-      // Each message is taken once (the seen ledger), however often the gateway delivers it. In a setup step's thread
-      // nothing of the message is kept, not even privately: a secret might be typed there by mistake.
-      if (!(this.isSetupStep(target) ? markSeen(this.d.stateDir, r) : storeRaw(this.d.stateDir, r))) continue;
-      await this.threadReply(cfg, src, r, person, r.thread!.id, target);
+      const got = await this.acceptThreadReply(cfg, r, threads, meter);
+      if (got === 'ignored') ignored.push(r);
+      else if (got === 'rest') rest.push(r);
+      else if (got) await this.threadReply(cfg, src, r, got.person, r.thread!.id, got.target);
     }
     return { rest, ignored };
+  }
+
+  /**
+   * A message from the chat source, before it is handled: a reply in one of the bot's threads, taken (stored, once),
+   * with who sent it and what the thread is for; `ignored` (unmapped, or a reply in a thread that isn't ours, or a
+   * chat-channel one: nothing stored); `rest` for intake; null when it was taken before.
+   */
+  protected async acceptThreadReply(cfg: IntakeConfig, r: IncomingReport, threads: Map<string, Target>, meter: () => IntakeMeter): Promise<{ person: ChatPerson; target: Target } | 'ignored' | 'rest' | null> {
+    const person = await personOf(cfg, r.sender.id, this.d.intake?.roleOf);
+    if (!person) {
+      // Unmapped: ignored entirely, before anything of the message is stored.
+      meter().countDrop('unmapped');
+      return 'ignored';
+    }
+    const target = r.thread?.kind === 'thread' ? threads.get(r.thread.id) : undefined;
+    // A reply in a thread that isn't one of this instance's: never an answer here, and never a report.
+    // A chat-channel message is never a report either (src/coordinator/channel-chat.ts takes those first).
+    if (!target) return r.thread?.kind === 'thread' || r.thread?.kind === 'chat' ? 'ignored' : 'rest';
+    // Each message is taken once (the seen ledger), however often the gateway delivers it. In a setup step's thread
+    // nothing of the message is kept, not even privately: a secret might be typed there by mistake.
+    return (this.isSetupStep(target) ? markSeen(this.d.stateDir, r) : storeRaw(this.d.stateDir, r)) ? { person, target } : null;
   }
 
   /**
@@ -412,7 +418,8 @@ export abstract class Channel extends ResearchOnDemand {
   private async threadModelRun(cfg: IntakeConfig, spec: ReturnType<typeof summaryRun>, kind: 'intake_summary' | 'intake_thread'): Promise<unknown> {
     const left = this.intakeSpendLeft(cfg);
     if (left <= 0) return undefined;
-    const run = await this.d.runner.run({ ...spec, stateDir: this.d.stateDir, ...runRoute(this.d.cfg, kind), maxBudgetUsd: Math.max(0.05, Math.min(0.25, left)), stallMs: 2 * 60_000, timeoutMs: 5 * 60_000 });
+    // A question in a thread has a person waiting: it doesn't queue behind agent runs (src/runner.ts loginStartLock).
+    const run = await this.d.runner.run({ ...spec, stateDir: this.d.stateDir, ...runRoute(this.d.cfg, kind), ...(kind === 'intake_thread' ? { interactive: true } : {}), maxBudgetUsd: Math.max(0.05, Math.min(0.25, left)), stallMs: 2 * 60_000, timeoutMs: 5 * 60_000 });
     this.cost(null, spec.role, run);
     new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime()).recordSpend(run.costUsd);
     return run.reason === 'succeeded' ? (run.structured ?? null) : undefined;
@@ -423,7 +430,7 @@ export abstract class Channel extends ResearchOnDemand {
    * plain-language pick is asked back ("Confirm: approve?") and recorded only on the same person's following yes; a
    * question is answered from the record and never answers anything.
    */
-  private async threadReply(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: ChatPerson, thread: string, target: Target) {
+  protected async threadReply(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: ChatPerson, thread: string, target: Target) {
     const t0 = this.threadTarget(target, cfg);
     if (!t0) return;
     // A setup step's thread: before anything of the message is read further (nothing of it is kept).
