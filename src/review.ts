@@ -27,7 +27,7 @@ export const AGENT_INSTRUCTIONS = 'agent-instructions';
  */
 export const SELF_MODIFICATION = 'self-modification';
 export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
-  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*'] },
+  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },

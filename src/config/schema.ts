@@ -508,6 +508,9 @@ export const TestsConfig = z.strictObject({
 
 // ---------- review.yaml ----------
 
+/** Generated files not counted toward review.yaml max_pr_lines, unless a repo lists its own. */
+export const DEFAULT_GENERATED = ['**/*.min.js', '**/*.min.css', '**/*.map', '**/dist/**', '**/__generated__/**', '**/*.generated.*', '**/*.snap'];
+
 export const ReviewConfig = z.strictObject({
   version: z.literal(1),
   money_path_source: z.strictObject({ file: z.string().min(1), pattern: regex.optional() }).optional(),
@@ -543,6 +546,20 @@ export const ReviewConfig = z.strictObject({
       loosened: z.array(z.string()).default([]),
     })
     .prefault({}),
+  /**
+   * The size limit for an agent's change (src/pr-rules.ts): over this many changed lines, lockfiles and `generated`
+   * files not counted, it is sent back to the worker with "split it", unless it is mechanical (only renames,
+   * moves and formatting: whitespace ignored, the added lines are exactly the removed ones).
+   */
+  max_pr_lines: z.number().int().positive().default(600),
+  /** Generated files (globs): not counted toward max_pr_lines. */
+  generated: z.array(z.string().min(1)).default(DEFAULT_GENERATED),
+  /**
+   * The light checks: for a docs-only PR (only *.md and docs/**), the harness's own merge call waits on just these
+   * of the required_checks. Empty (the default): no fast path, every required check. GitHub's ruleset still
+   * requires every required check before it lets a merge through.
+   */
+  docs_only_checks: z.array(z.string().min(1)).default([]),
   /**
    * Gradual delegation, suggest-only: a waiting category whose last `min_clean` PRs were approved unchanged, with
    * no revert, red main or later fix, is put to the owner for loosening, with the evidence. Never automatic.

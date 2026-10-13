@@ -16,6 +16,7 @@ import type { EventPayload } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
@@ -909,7 +910,7 @@ export class Coordinator extends Gardener {
     void pid;
     this.cost(n, 'worker', r);
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown; intent?: string; risk_class?: RiskClass };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
@@ -949,7 +950,10 @@ export class Coordinator extends Gardener {
       return { stop: true as const };
     }
     // What the worker says it verified: checked against the record at evaluation, listed in the PR's receipts.
-    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? '') });
+    // And its intent (the summary's first paragraph when it gave none) and risk class: the top of the PR body.
+    const intent = oneParagraph(s.intent || (s.summary ?? '').split(/\n\s*\n/)[0]).slice(0, 4000);
+    const riskClass = s.risk_class && RISK_CLASSES.includes(s.risk_class) ? s.risk_class : undefined;
+    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? ''), ...(intent ? { intent } : {}), ...(riskClass ? { risk_class: riskClass } : {}) });
     return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}), ...(r.provider ? { provider: r.provider } : {}) };
   }
 
@@ -1067,6 +1071,10 @@ export class Coordinator extends Gardener {
       this.emit('push.refused', { issue: n, head, stage: 'change', reasons: limits });
       return { rejected: `it can't be pushed: ${limits.join('; ')}`, refused: limits };
     }
+    // The size limit: over review.yaml max_pr_lines and not mechanical, sent back to be split (src/pr-rules.ts).
+    const review = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const size = sizeVerdict(sizeFiles(path, base, head), { maxLines: review.max_pr_lines, generated: review.generated });
+    if (!size.ok) return { rejected: `${size.why}. Make this change one self-contained part under ${review.max_pr_lines} lines, and say in your summary what is left for follow-up issues` };
     const files = this.changeFiles(path, base, head);
     // Tamper guard: tests deleted, skipped, focused, or with fewer assertions.
     const tampered: string[] = [];

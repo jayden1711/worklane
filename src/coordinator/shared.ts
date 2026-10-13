@@ -17,6 +17,7 @@ import type { RoleOf } from '../dashboard-auth.js';
 import type { MainWatchApi } from '../main-watch.js';
 import type { MergePostsApi } from '../merge-posts.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
+import { DEFAULT_GENERATED } from '../config/schema.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -240,6 +241,9 @@ export const DEFAULT_REVIEW = {
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
   merge: { auto: true, max_lines: 800, max_files: 20, wait_categories: [] as string[], loosened: [] as string[] },
+  max_pr_lines: 600,
+  generated: DEFAULT_GENERATED,
+  docs_only_checks: [] as string[],
   delegation: { enabled: false, min_clean: 10 },
 };
 
