@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics } from './api';
+import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -17,6 +17,7 @@ import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
 import { TrustView } from './components/TrustPanel';
 import { MetricsPanel, MetricsView } from './components/MetricsPanel';
 import { FlakyView } from './components/FlakyPanel';
+import { LearningsView } from './components/LearningsPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -102,6 +103,7 @@ export const renderTrust = (t: Trust) => renderToStaticMarkup(<TrustView t={t} /
 export const renderMetrics = (m: Metrics) => renderToStaticMarkup(<MetricsView m={m} />);
 export const renderMetricsPanel = (state: State) => renderToStaticMarkup(<MetricsPanel state={state} />);
 export const renderFlaky = (f: Flaky) => renderToStaticMarkup(<FlakyView f={f} />);
+export const renderLearnings = (l: Learnings) => renderToStaticMarkup(<LearningsView l={l} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);

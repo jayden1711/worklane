@@ -55,6 +55,7 @@ import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
+import { learningsView, promoteRefusal } from './learnings.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
@@ -1159,6 +1160,26 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const r = releaseByOwner(log, body.test, who.login);
             if (!r.ok) return json(res, r.status, { error: r.error });
             audit(who, 'flaky.cleared', { test: body.test });
+            return json(res, 200, { ok: true });
+          } finally {
+            log.close();
+          }
+        }
+        // WHY: item 33 (src/learnings.ts). Read like the flaky tests; a promote is the owner's alone, by the same
+        // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
+        if (url.pathname === '/api/learnings' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the learnings are', who) });
+          return json(res, 200, { ...learningsView(readEvents(opts.eventsDb)), canPromote: isOwnerHere });
+        }
+        if (url.pathname === '/api/learnings/promote' && req.method === 'POST') {
+          const body = (await readBody(req)) as { fingerprint?: unknown; line?: unknown };
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may promote a learning to AGENTS.md; @${who.login} is a ${who.role}` });
+          const log = new EventLog(opts.eventsDb);
+          try {
+            const refused = promoteRefusal(learningsView(log.read()), body.fingerprint, body.line);
+            if (refused) return json(res, refused.status, { error: refused.error });
+            log.append('learning.promote_requested', { fingerprint: body.fingerprint as string, line: (body.line as string).trim(), by: who.login }, who.login, 'human');
+            audit(who, 'learning.promoted', { fingerprint: body.fingerprint });
             return json(res, 200, { ok: true });
           } finally {
             log.close();
