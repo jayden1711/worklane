@@ -2,7 +2,7 @@
 // progress, where it stopped and how to pick up, and what this mode can't do (each with why). The same checklist
 // `doctor` shows. Read-only: the steps run in the terminal (logins and installs need it), not from here.
 import { useEffect, useState } from 'react';
-import { getFirstRun, type FirstRun, type FirstRunStatus, type State } from '../api';
+import { getFirstRun, type FirstRun, type FirstRunAutoConfig, type FirstRunStatus, type FirstRunVerification, type State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, cx } from '../components/ui';
 import { Header } from './Overview';
@@ -15,6 +15,62 @@ const MODE_LINE = {
   local: 'Local mode: on this machine, as you. No server, no ssh, no root.',
   server: 'Server mode: the hardened multi-user Linux setup, each project as users of its own.',
 };
+
+const SLOT_LABEL: Record<FirstRunVerification['slot'], string> = { setup: 'worktree setup', full: 'runner.full', changed: 'runner.changed', one: 'runner.one' };
+
+/** Auto-config's part of the Repo config step: the questions it can't settle alone, with their choices, and each command's run on the default branch. */
+function AutoConfigView({ a }: { a: FirstRunAutoConfig }) {
+  if (!a.questions.length && !a.verified.length && !a.pr) return null;
+  return (
+    <section aria-label="Repo config" className="space-y-3" data-testid="first-run-auto-config">
+      <div className="text-[13px] font-medium text-ink">Repo config</div>
+      {a.pr && (
+        <p className="text-[12.5px] text-ink-2" data-testid="first-run-auto-config-pr">
+          Proposed as{' '}
+          <a href={a.pr.url} className="text-blue-ink hover:underline" target="_blank" rel="noreferrer">
+            {a.pr.number ? `PR #${a.pr.number}` : 'a PR'}
+          </a>
+          : review and merge it, then run init again.
+        </p>
+      )}
+      {!!a.questions.length && (
+        <Card className="space-y-3 p-4" data-testid="first-run-questions">
+          <p className="text-[12.5px] text-ink-2">Nothing is guessed: answer these in the terminal (init asks them), or give each answer to init.</p>
+          <ol className="space-y-3">
+            {a.questions.map((q) => (
+              <li key={q.id} className="space-y-1.5" data-testid="first-run-question" data-question={q.id}>
+                <div className="break-words text-[13px] text-ink">{q.ask}</div>
+                <ul className="space-y-1">
+                  {q.choices.map((c) => (
+                    <li key={c.id} className="flex min-w-0 gap-2 text-[12.5px] text-ink-2" data-testid="first-run-choice" data-choice={c.id}>
+                      <code className="shrink-0 rounded bg-inset px-1.5 font-mono text-[11.5px] text-ink shadow-hairline">{c.id}</code>
+                      <span className="min-w-0 break-words">{c.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ol>
+          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline">{a.answer}</code>
+        </Card>
+      )}
+      {!!a.verified.length && (
+        <Card className="overflow-hidden">
+          <ul className="divide-y divide-line" data-testid="first-run-verified">
+            {a.verified.map((v) => (
+              <li key={`${v.slot} ${v.command}`} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-2.5" data-testid="first-run-verified-item" data-passed={v.passed}>
+                <span className="text-[12.5px] text-ink-3">{SLOT_LABEL[v.slot]}</span>
+                <code className="min-w-0 break-all font-mono text-[12px] text-ink">{v.command}</code>
+                <Badge tone={v.passed ? 'ok' : 'danger'}>{v.passed ? 'passes on main' : `fails on main (exit ${v.code ?? 'none'})`}</Badge>
+                <span className="text-[11.5px] text-ink-3">{Math.round(v.ms / 1000)} s</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+    </section>
+  );
+}
 
 /** The checklist from its data (also what the render checks render). */
 export function FirstRunView({ f }: { f: FirstRun }) {
@@ -64,6 +120,7 @@ export function FirstRunView({ f }: { f: FirstRun }) {
           ))}
         </ol>
       </Card>
+      {f.autoConfig && <AutoConfigView a={f.autoConfig} />}
       {stopped && (
         <Card className="space-y-2 p-4" data-testid="first-run-resume">
           <div className="text-[13px] font-medium text-red">Stopped at {stopped.title}</div>

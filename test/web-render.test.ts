@@ -1084,6 +1084,34 @@ test("the first-run page: init's checklist in order with each status, where it s
   assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
 });
 
+test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'web-render-init-')), 'init.json');
+  const at = '2026-10-13T10:00:00.000Z';
+  const verified = [
+    { slot: 'setup', command: 'npm ci', base: 'b1', code: 0, passed: true, ms: 12_000, tail: '', at },
+    { slot: 'full', command: 'npm test', base: 'b1', code: 1, passed: false, ms: 3_000, tail: 'boom', at },
+    { slot: 'full', command: 'make test', base: 'old', code: 0, passed: true, ms: 1, tail: '', at },
+  ];
+  const question = { id: 'full-fails', ask: 'The full test run `npm test` fails on the default branch: use it anyway, pick another, or skip?', about: 'npm test', custom: true, choices: [{ id: 'use', label: 'use it anyway', command: 'npm test' }, { id: '1', label: 'make test   (Makefile target test)', command: 'make test' }, { id: 'custom', label: 'pick another: type a command (custom:<command>)' }, { id: 'skip', label: 'skip: leave it out' }] };
+  const autoConfig = { answers: {}, overrides: {}, accepted: [], questions: [question], verified, base: 'b1', pr: null };
+  writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: { 'repo-config': { status: 'failed', detail: '1 question to answer', at } }, handoff: {}, autoConfig, updatedAt: at, finishedAt: null }));
+  const html = r.renderFirstRun(firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null, has: () => false }));
+  assert.match(html, /data-testid="first-run-question" data-question="full-fails"[\s\S]*?`npm test` fails on the default branch: use it anyway, pick another, or skip\?/);
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-choice" data-choice="([^"]+)"/g)].map((m) => m[1]), ['use', '1', 'custom', 'skip'], 'every choice shown');
+  assert.match(html, /<code[^>]*>worklane init \/r --answer &lt;id&gt;=&lt;choice&gt;<\/code>/);
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-verified-item" data-passed="(true|false)"/g)].map((m) => m[1]), ['true', 'false'], 'only the runs on the current main');
+  assert.match(html, /npm test<\/code>[\s\S]*?fails on main \(exit 1\)/);
+  assert.doesNotMatch(html, /first-run-auto-config-pr/);
+  // Proposed: the PR, no questions.
+  writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: {}, handoff: {}, autoConfig: { ...autoConfig, questions: [], pr: { number: 7, url: 'https://github.com/example-org/example-shop/pull/7', branch: 'worklane/setup' } }, updatedAt: at, finishedAt: null }));
+  const proposed = r.renderFirstRun(firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null }));
+  assert.match(proposed, /data-testid="first-run-auto-config-pr"[\s\S]*?href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"[\s\S]*?PR #7/);
+  assert.doesNotMatch(proposed, /first-run-question"/);
+  // No auto-config yet (a config folder already there): nothing extra.
+  writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'o/r', instance: null, steps: {}, handoff: {}, updatedAt: at, finishedAt: null }));
+  assert.doesNotMatch(r.renderFirstRun(firstRunView(file, { root: '/r', repo: 'o/r', instance: null })), /first-run-auto-config/);
+});
+
 test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
   assert.equal((asOther as unknown as { canReadReports: boolean }).canReadReports, false);
   assert.match(r.renderPage('reports', asOther), /data-testid="report-preview"[\s\S]*?data-testid="report-refused"[^>]*>The report preview is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
