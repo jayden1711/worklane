@@ -49,9 +49,9 @@ if [ "${1:-}" = dashboard-signin ]; then
   viewer=wl-dash
   # Write one secret for the viewer only: 0400, in a 0700 directory of its own, never echoed.
   put_secret() { sudo -u "$viewer" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$1"; }
-  say "the dashboard sign-in App's secrets, for $viewer only ($dir, 0400)"
   ensure_user "$viewer"
   dir="$(home_of "$viewer")/.config/dashboard-signin"
+  say "the dashboard sign-in App's secrets, for $viewer only ($dir, 0400)"
   read -rsp "Paste the sign-in App's client secret, then Enter (it is not shown): " secret; echo
   [[ "$secret" =~ ^[A-Za-z0-9_]{20,100}$ ]] || { unset secret; echo "that doesn't look like a GitHub App client secret; nothing installed" >&2; exit 1; }
   printf '%s' "$secret" | put_secret "$dir/client-secret"; unset secret
