@@ -193,6 +193,26 @@ A submit is recorded as the machine request `add-project <name> <owner/repo>` (`
 
 The view then follows the run live, step by step, in the script's order: instance, app, claude-token, checkout, policy, service, test-user, machine-helper, dashboards. Each step's line from the script is an `add_project.step` event in the instance's log, so every step is on record. What it needs from you shows in the same view, as asks: GitHub's two approve links (create the App, then install it on exactly that repo), and the agent's Claude token (from `claude setup-token`), pasted into the dashboard's password box. The coordinator hands the token to the script once, on its input, for the agent user only, and deletes its copy; it's never in an event or a log, and never shown again. If a step fails, the view names it and the command to retry it. Fix what it says and add the same project again: the steps already done are skipped.
 
+## Switching the agents' Claude account
+
+Every agent on a machine uses one Claude login, stored for each agent user (each instance's agent user, which channel chat runs as too, and its eval user). To move them all to another account, on the machine:
+
+```
+sudo bash scripts/setup/claude-account.sh switch          # every instance; or name some
+sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry
+```
+
+The switch:
+
+1. **Pauses** every running instance. Its coordinator gets SIGTERM, the per-instance stop, on its main process only: it starts no more runs, lets the ones it has going finish, then exits. An instance that wasn't running is left stopped.
+2. **Takes the token** that `claude setup-token` prints on a machine signed in to the new account, pasted once and not shown.
+3. **Waits** for the runs to finish, 30 minutes at most (`--timeout <minutes>`). An instance still busy then is stopped, and its unfinished runs are requeued when it starts again.
+4. **Installs** the token in each agent user's own `~/.claude/.credentials.json`, mode 0600. The token is never an argument, a log line or an output.
+5. **Checks** each agent user with `claude auth status`, run as that user.
+6. **Resumes** each instance whose users all passed, and reports each instance's result. An instance whose check failed stays paused. The script remembers it, so once you've fixed the problem a rerun resumes it. Rerunning is always safe. A resumed instance on the new login also ends its Claude usage-limit pause, if it had one (`usage.resumed`, reason "account switched", and its watchdog incident resolved), since the old account's limit no longer applies; one resumed on its current login (no token came) stays paused until the reset.
+
+From the dashboard, the Machine page's **Claude account** card shows the same status. It's visible only to machine owners: the server refuses everyone else its data (`GET /api/claude-account`, `src/claude-account.ts`). **Refresh** and **Switch account** are the machine requests `claude-account status` and `claude-account switch`, gated like any machine change (an owner here who is a machine owner, freshly signed in, on an allowed device). The machine helper starts the switch as its own unit, `worklane-claude-account.service`, because the switch stops that coordinator too. The card follows the switch step by step from the script's progress file, `/var/lib/worklane/claude-account/switch.jsonl`. When the switch asks for the token, a password box appears in the dashboard of the instance that started it. The pasted token is stored for that instance's coordinator user only (0400). The script reads it once, as root, and deletes it. The token is never in an event, a response or the audit, which records only that a token was stored. The machine helper's sudoers rule needs rerunning once to allow `claude-account` (`machine-helper.sh` with every instance).
+
 ## The Board
 
 The home page (`/`, `g b`) shows every task in flight, one column per stage: **Planning** (ready, claimed, a plan or research run), **Building**, **Verifying** (the coordinator's checks and the evaluator; in PR mode, a PR whose checks are running or being fixed), **Waiting on you** (the holds only the owner ends, as on the Waiting page: a decision, a held plan, a PR left to you, a CI fix that gave up, a block, a failed landing) and **Landing** (queued to land, or a PR the merge rules are merging). On a hub it shows every instance you have a role on, with a filter to pick one; an instance's own dashboard shows its own. It follows each instance's live stream.

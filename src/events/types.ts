@@ -203,7 +203,7 @@ export const EventSchemas = {
   /** The instance paused on the Claude usage limit: no run starts until `reset_at`; the run's task (if any) was requeued. */
   'usage.paused': z.strictObject({ reset_at: z.string(), source: z.enum(['claude', 'default']), kind: z.string().nullable(), issue: issue.nullable(), role: z.string(), detail: z.string() }),
   /** The pause ended: its reset time passed. */
-  'usage.resumed': z.strictObject({ reset_at: z.string(), paused_ms: z.number().int().nonnegative() }),
+  'usage.resumed': z.strictObject({ reset_at: z.string(), paused_ms: z.number().int().nonnegative(), reason: z.enum(['reset', 'account switched']).optional() }),
   /**
    * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
    * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.
@@ -310,7 +310,7 @@ export const EventSchemas = {
   'ask.cancelled': z.strictObject({ id: z.string(), by: z.string(), why: z.string() }),
   // machine changes (src/machine-requests.ts): the dashboard asks, the coordinator runs the machine helper
   /** A machine helper command the owner asked for from the dashboard (Settings, or a root-step ask), for the coordinator to run. */
-  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask', 'add-project']), ask: z.string().nullable(), breakGlass: z.boolean().optional() }),
+  'machine.requested': z.strictObject({ id: z.string(), args: z.array(z.string()), by: z.string(), via: z.enum(['settings', 'ask', 'add-project', 'claude-account']), ask: z.string().nullable(), breakGlass: z.boolean().optional() }),
   /** The coordinator took a request (once: claimed in a write transaction). */
   'machine.started': z.strictObject({ id: z.string(), instance: z.string() }),
   /** How it ended: done (detail: the helper's output), failed, refused (off the allowlist), interrupted (not re-run). */

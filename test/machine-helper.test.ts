@@ -75,12 +75,12 @@ test('a refused argument list writes and logs nothing', () => {
 const setup = join(repoRoot, 'scripts', 'setup');
 const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), ...users], { encoding: 'utf8' });
 
-test('the sudoers rule lists exactly the 26 commands, no patterns but add-project\'s one, for the named coordinators only', { skip: !posix && 'bash' }, () => {
+test('the sudoers rule lists exactly the 28 commands, no patterns but add-project\'s one, for the named coordinators only', { skip: !posix && 'bash' }, () => {
   const r = sudoers('wl-alpha', 'wl-beta');
   assert.equal(r.status, 0, r.stderr);
   const cmds = [...r.stdout.matchAll(new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
   const addProject = `${MACHINE_HELPER} ^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`;
-  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${MACHINE_HELPER} set-test-slots ${i + 1}`), addProject];
+  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${MACHINE_HELPER} set-test-slots ${i + 1}`), `${MACHINE_HELPER} claude-account status`, `${MACHINE_HELPER} claude-account switch`, addProject];
   assert.deepEqual(cmds, want);
   // add-project's arguments are one anchored pattern (test/add-project.test.ts); nothing else has any.
   assert.doesNotMatch(r.stdout.replace(addProject, ''), /[*?[\]^$]|ALL\s*$|\bsh\b|bash/m, 'no wildcards, patterns or shells');
@@ -131,4 +131,15 @@ test('the change log reader skips torn lines and keeps the newest', () => {
   assert.deepEqual(machineChanges(f).map((c) => c.from), [1, 2, 3]);
   assert.deepEqual(machineChanges(f, 2).map((c) => c.from), [2, 3]);
   assert.deepEqual(machineChanges(join(tmpdir(), 'no-such-log.jsonl')), []);
+});
+
+test('the helper takes claude-account status|switch and nothing more; a switch only for a coordinator, its instance from sudo', () => {
+  const { parseClaudeAccount, coordinatorInstance } = createRequire(import.meta.url)(helperSrc) as { parseClaudeAccount: (a: string[]) => string | null; coordinatorInstance: (u: string | undefined) => string | null };
+  assert.equal(parseClaudeAccount(['claude-account', 'status']), 'status');
+  assert.equal(parseClaudeAccount(['claude-account', 'switch']), 'switch');
+  for (const a of [['claude-account'], ['claude-account', 'switch', '--token-from', 'x'], ['claude-account', 'Switch'], ['claude-account', 'status', 'x'], ['claude-accounts', 'status']]) assert.equal(parseClaudeAccount(a), null, JSON.stringify(a));
+  assert.equal(coordinatorInstance('wl-alpha'), 'alpha');
+  for (const u of [undefined, '', 'root', 'admin', 'wl-dash', 'wl-alpha-agent', 'wl-Alpha', 'wl-', 'wl-a;b']) assert.equal(coordinatorInstance(u), null, String(u));
+  // The script it runs is a fixed path in the helper's own source, like add-project's.
+  assert.match(readFileSync(helperSrc, 'utf8'), /^const CLAUDE_ACCOUNT = '\/opt\/worklane\/current\/scripts\/setup\/claude-account\.sh';$/m);
 });

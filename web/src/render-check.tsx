@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AddProjectData, AsksView, ChatAnswerFile, CheckRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
+import type { AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -34,6 +34,7 @@ import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages
 import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
+import { ClaudeAccountView } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
@@ -112,6 +113,7 @@ export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsol
 export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<AddProjectView data={data} />);
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
+export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);

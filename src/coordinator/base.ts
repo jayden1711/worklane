@@ -289,11 +289,17 @@ export abstract class CoordinatorBase {
     this.d.incidents?.raiseIncident(USAGE_INCIDENT, this.d.instance, `Claude usage limit reached; no new runs until ${when}${hit.source === 'default' ? " (claude gave no reset time: the default wait)" : ''}`, 'Nothing to do: it resumes on its own at the reset. To resume sooner, switch the Claude account.');
   }
 
-  /** The pause's reset time has passed: it ends, and the next dispatch starts runs again. */
+  /**
+   * The pause ends, and the next dispatch starts runs again: at its reset time, or once a Claude account switch put
+   * this instance on a new login after it began (the old account's limit no longer applies).
+   */
   protected resumeIfDue(): boolean {
     const p = this.usagePause();
-    if (!p || Date.parse(p.resetAt) > this.nowMs()) return false;
-    this.emit('usage.resumed', { reset_at: p.resetAt, paused_ms: Math.max(0, Math.round(this.nowMs() - Date.parse(p.since))) });
+    if (!p) return false;
+    const switched = this.d.accountSwitched?.() ?? null;
+    const reason = Date.parse(p.resetAt) <= this.nowMs() ? 'reset' : switched !== null && Date.parse(switched) >= Date.parse(p.since) ? 'account switched' : null;
+    if (!reason) return false;
+    this.emit('usage.resumed', { reset_at: p.resetAt, paused_ms: Math.max(0, Math.round(this.nowMs() - Date.parse(p.since))), reason });
     this.d.incidents?.resolveIncident(USAGE_INCIDENT, this.d.instance);
     return true;
   }

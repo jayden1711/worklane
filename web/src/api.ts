@@ -681,6 +681,66 @@ export function addProjectInvalid(name: string, repo: string): string | null {
   return null;
 }
 
+/** The agents' Claude account (src/claude-account.ts), as GET /api/claude-account serves it to a machine owner. */
+export interface AccountUser {
+  instance: string;
+  kind: string;
+  user: string;
+  stored: boolean;
+  loggedIn: boolean;
+  authMethod: string | null;
+  account: string | null;
+  org: string | null;
+  subscription: string | null;
+  tokenId: string | null;
+  expiresAt: string | null;
+  installedAt: string | null;
+  error: string | null;
+}
+export interface SwitchLine {
+  at: string;
+  step: 'switch' | 'pause' | 'token' | 'wait' | 'install' | 'check' | 'resume';
+  state: 'started' | 'done' | 'failed' | 'ask' | 'skipped';
+  instance: string | null;
+  user: string | null;
+  detail: string;
+}
+export interface SwitchInstance {
+  name: string;
+  pause: SwitchLine | null;
+  wait: SwitchLine | null;
+  users: { user: string; install: SwitchLine | null; check: SwitchLine | null }[];
+  check: SwitchLine | null;
+  resume: SwitchLine | null;
+}
+export interface SwitchView {
+  startedAt: string;
+  status: 'running' | 'done' | 'failed' | 'stalled';
+  detail: string;
+  tokenFrom: string | null;
+  waitingForToken: boolean;
+  token: SwitchLine | null;
+  instances: SwitchInstance[];
+}
+export interface ClaudeAccountData {
+  machineOwner: boolean;
+  machineOwners: string[];
+  login: string;
+  instance: string;
+  /** Whether this person may refresh or switch (the server checks again). */
+  allowed: boolean;
+  why: string | null;
+  canSwitch: boolean;
+  busy: string | null;
+  canPasteToken: boolean;
+  status: { at: string; users: AccountUser[] } | null;
+  switch: SwitchView | null;
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+}
+export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
+export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
+export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
+
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
 

@@ -3,7 +3,7 @@
 // data; decisions are still answerable only where the server says so.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -20,6 +20,7 @@ import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFi
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
+import { claudeAccountView } from '../src/claude-account.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { trustForViewer, trustView } from '../src/trust.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
@@ -41,6 +42,7 @@ interface Render {
   renderWaitingPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
+  renderClaudeAccount(data: unknown, now?: number): string;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
@@ -1357,6 +1359,38 @@ test("two instances on one machine: with one selected, no page shows any of the 
   } finally {
     for (const d of Object.values(servers)) await d.close();
   }
+});
+
+test('Claude account: a machine owner sees each agent user and the switch step by step, with the token box only where it is taken; anyone else nothing', () => {
+  const ownersFile = machineOwnersFile('ada');
+  const dir = mkdtempSync(join(tmpdir(), 'claude-account-render-'));
+  const at = new Date().toISOString();
+  writeFileSync(join(dir, 'status.json'), JSON.stringify({ at, users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: new Date(Date.now() + 200 * 86_400_000).toISOString() }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: false, logged_in: false, auth_method: 'none', error: 'claude auth status says it is not logged in' }] }));
+  const lines = (more: object[]) =>
+    writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from the dashboard of shop' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+  const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: freshRequester(login) }, instance, ownersFile });
+  lines([]);
+  const html = r.renderClaudeAccount(view('ada'));
+  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-account-switch', 'claude-switch', 'claude-switch-token']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="claude-account-user" data-user="wl-shop-agent" data-signed-in="yes"/);
+  assert.match(html, /agents@example\.com/);
+  assert.match(html, /token 0123abcd/);
+  assert.match(html, /data-user="wl-shop-eval" data-signed-in="no"[\s\S]*not logged in/);
+  assert.deepEqual([...html.matchAll(/data-testid="claude-switch-step" data-phase="([a-z]+)"/g)].map((m) => m[1]), ['running', 'running', 'pending', 'pending'], 'pause (runs finishing), token waiting, check, resume');
+  assert.match(html, /<button[^>]*disabled=""[^>]*data-testid="claude-account-switch"/, 'no second switch while one runs');
+  // In another instance's dashboard the box isn't there: it says where to paste it.
+  const elsewhere = r.renderClaudeAccount(view('ada', 'web'));
+  assert.doesNotMatch(elsewhere, /data-testid="claude-switch-token"/);
+  assert.match(elsewhere, /data-testid="claude-switch-token-elsewhere">Paste it in shop&#x27;s dashboard/);
+  // Each instance's result as it comes: one resumed, one left paused.
+  lines([{ step: 'token', state: 'done', detail: 'received' }, { step: 'wait', state: 'done', instance: 'shop', detail: 'finished' }, { step: 'wait', state: 'done', instance: 'web', detail: 'finished' }, { step: 'install', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'stored' }, { step: 'check', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'signed in' }, { step: 'check', state: 'failed', instance: 'web', user: 'wl-web-agent', detail: 'not logged in' }, { step: 'resume', state: 'done', instance: 'shop', detail: 'running again' }, { step: 'resume', state: 'failed', instance: 'web', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: web' }]);
+  const done = r.renderClaudeAccount(view('ada'));
+  assert.match(done, /data-testid="claude-switch" data-status="failed"/);
+  assert.deepEqual([...done.matchAll(/data-testid="claude-switch-resume" data-instance="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['shop:done', 'web:failed']);
+  assert.match(done, /data-testid="claude-switch-result">not resumed: web/);
+  assert.doesNotMatch(done, /data-testid="claude-switch-token"/);
+  // Not a machine owner: nothing at all (the server refuses them the data too).
+  assert.equal(r.renderClaudeAccount(view('ivy')), '');
 });
 
 test('Health: open incidents with what broke, since when, what was tried and the fix; resolved ones folded into a history; a viewer sees no detail; each instance has its dot', async () => {
