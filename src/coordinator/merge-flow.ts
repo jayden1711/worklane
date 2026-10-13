@@ -19,6 +19,9 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { MainWatch, repoGit } from '../main-watch.js';
+import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
+import { redactString } from '../events/redact.js';
+import { takeOpsPost } from '../watchdog/post.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
 import type { ChatPerson } from '../intake/people.js';
@@ -712,6 +715,8 @@ export abstract class MergeFlow extends FixRuns {
       accepted: (sha, number, a) => this.emit('main_watch.accepted', { sha, how: 'accepted', number, id: a.id, by: a.by, reason: a.reason.slice(0, 500) }),
       unaccounted: (o) => this.mainUnaccounted(o),
     });
+    // A direct push's alert that couldn't go yet (the ops posts' limit was reached): try again.
+    await this.directPushOutbound();
     if (this.d.cfg.project.land_mode !== 'pr') return this.mainWatcher.off(`land_mode direct: the harness lands by pushing ${this.branch} itself`);
     if ((w.setting?.() ?? 'auto') === 'off') return this.mainWatcher.off('turned off in the instance policy (main_watch: off)');
     await this.mainWatcher.step();
@@ -722,12 +727,14 @@ export abstract class MergeFlow extends FixRuns {
    * it on the dashboard), then alert (main_watch.unaccounted: the dashboard; the asks channel posts it) and open a revert
    * PR for a human. Once per commit, even across a restart.
    */
-  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean }) {
+  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null }) {
     if (this.d.log.read(0, ['main_watch.unaccounted']).some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
     const reason = `main watch: ${o.reason}`;
     if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
     this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null });
+    // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
+    if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;
     if (o.revert) {
       const body = `Reverts \`${o.sha.slice(0, 8)}\` on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
@@ -742,6 +749,53 @@ export abstract class MergeFlow extends FixRuns {
       }
     }
     this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null });
+  }
+
+  /**
+   * A commit that landed without a PR (src/direct-push-alert.ts): who pushed it (one API call: a GitHub login, never
+   * an email) and its subject (git), recorded once (main_watch.direct_push); then its ops post, unless turned off.
+   */
+  private async directPushNoted(sha: string, url: string, push: { kind: 'direct' | 'rewrite'; alert: boolean }) {
+    if (this.d.log.read(0, ['main_watch.direct_push']).some((e) => (e.payload as EventPayload<'main_watch.direct_push'>).sha === sha)) return;
+    let who: { login: string; from: 'activity' | 'commit' } | null = null;
+    try {
+      who = (await this.d.mainWatch?.api.pusher?.(this.branch, sha)) ?? null;
+    } catch {
+      who = null;
+    }
+    const s = spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: this.d.repo, encoding: 'utf8' });
+    const subject = redactString(s.status === 0 ? s.stdout.trim() : '').slice(0, 300);
+    this.emit('main_watch.direct_push', { sha, url, kind: push.kind, pusher: who?.login ?? null, pusher_from: who?.from ?? null, subject, alert: push.alert });
+    await this.directPushOutbound();
+  }
+
+  /**
+   * Post each direct push's alert not posted yet to the ops channel, once per commit, mentioning the Discord owners,
+   * within the machine-wide limit of ops posts (what is over it waits for a later pass). Turned off (`alert` false):
+   * never posted. No ops channel: not posted, and the dashboard says why (recorded once).
+   */
+  protected async directPushOutbound() {
+    const pushes = this.d.log.read(0, ['main_watch.direct_push']).map((e) => e.payload as EventPayload<'main_watch.direct_push'>).filter((p) => p.alert);
+    if (!pushes.length) return;
+    const posted = this.postedKeys();
+    const noted = new Set(this.d.log.read(0, ['main_watch.direct_push_alert']).map((e) => (e.payload as EventPayload<'main_watch.direct_push_alert'>).sha));
+    const cfg = this.d.intake?.config() ?? null;
+    const target = alertTarget(cfg);
+    const src = this.chatSource();
+    for (const p of pushes) {
+      if (posted.has(directPushKey(p.sha))) continue;
+      if ('why' in target || !src || !cfg) {
+        const why = 'why' in target ? target.why : 'the Discord bot is not connected';
+        if (!noted.has(p.sha)) this.emit('main_watch.direct_push_alert', { sha: p.sha, ok: false, mentioned: 0, note: `not posted: ${why}` });
+        noted.add(p.sha);
+        continue;
+      }
+      if (!takeOpsPost({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}) })) return;
+      const { mentions, note } = ownerMentions(cfg);
+      await this.channelSend(src, directPushKey(p.sha), { channel: target.channel }, { kind: 'notice', text: directPushText(p, { branch: this.branch, dashboardUrl: target.dashboardUrl }), ...(mentions.length ? { mentions } : {}) });
+      const ok = this.d.log.read(0, ['discord.posted']).some((e) => (e.payload as EventPayload<'discord.posted'>).key === directPushKey(p.sha) && (e.payload as EventPayload<'discord.posted'>).ok);
+      this.emit('main_watch.direct_push_alert', { sha: p.sha, ok, mentioned: ok ? mentions.length : 0, note: ok ? note : 'not posted: Discord refused the post (it is not sent again)' });
+    }
   }
 
   /** Merge the default branch into the PR head in a scratch worktree and run the fast tier there. Nothing is pushed. */

@@ -14,9 +14,10 @@ import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { findTool, toolBin } from './tool-path.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
-import { liveChecklist, localInitFile, localRepo, newState, readInitState, serverInitFile, systemIo, unavailableIn, type InitIo, type Mode } from './init.js';
+import { initStateUnreadable, liveChecklist, localInitFile, localRepo, newState, readInitState, serverInitFile, systemIo, unavailableIn, type InitIo, type Mode } from './init.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -159,8 +160,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   // Secret scanning
-  const gl = which('gitleaks');
-  if (!gl) add('gitleaks', 'fail', 'not on PATH: commit and transcript scans cannot run');
+  const gl = findTool('gitleaks');
+  if (!gl) add('gitleaks', 'fail', `not on PATH or in ${toolBin()}: commit and transcript scans cannot run`);
   else add('gitleaks', 'ok', execFileSync(gl, ['version'], { encoding: 'utf8' }).trim());
   try {
     const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
@@ -172,8 +173,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   // Agent runtime
-  const claude = which('claude');
-  if (!claude) add('claude', cfg?.project.agent_runtime.kind === 'cli' ? 'fail' : 'warn', 'Claude Code CLI not on PATH');
+  const claude = findTool('claude');
+  if (!claude) add('claude', cfg?.project.agent_runtime.kind === 'cli' ? 'fail' : 'warn', `Claude Code CLI not on PATH or in ${toolBin()}`);
   else {
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
@@ -207,7 +208,11 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
  * except a line saying how to get the checklist.
  */
 export function setupChecks(root: string, opts: { instance?: string; mode?: Mode; initIo?: InitIo }): DoctorCheck[] {
-  const state = opts.instance && opts.mode === 'server' ? readInitState(serverInitFile(opts.instance)) : readInitState(localInitFile(root));
+  const file = opts.instance && opts.mode === 'server' ? serverInitFile(opts.instance) : localInitFile(root);
+  // A record this user can't read is said plainly, never shown as every step "not reached yet".
+  const unreadable = initStateUnreadable(file);
+  if (unreadable) return [{ name: 'setup', level: 'fail', detail: `${unreadable}: init writes it readable by the instance's coordinator group; run \`sudo ${BRAND.cli} init --mode server <owner/repo> --instance ${opts.instance ?? '<name>'}\` again with this engine to fix its access` }];
+  const state = readInitState(file);
   const mode = opts.mode ?? state?.mode;
   if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
   const io = opts.initIo ?? systemIo({ interactive: false });

@@ -129,6 +129,8 @@ hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a
 # Where the instances' checkouts live (instance.sh makes $SRV_ROOT/<name>), and the engine's command.
 SRV_ROOT=/srv/worklane
 ENGINE_CLI=/usr/local/bin/worklane
+# add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
+SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
 ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
 user_exists() { id -u "$1" >/dev/null 2>&1; }
 unit_active() { systemctl is-active -q "$1"; }

@@ -10,18 +10,21 @@
 #                   manual way; once it has run, this step is done.
 #   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted (or on stdin), stored for
 #                   wl-<name>-agent only. Never echoed or logged.
-#   checkout        checkout.sh <name> <owner/repo>
+#   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
 #   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change
-#   service         service.sh <name>
-#   test-user       test-user.sh install <name>, when the repo's tests.yaml has test_run
+#   service         service.sh <name>, once the checkout has its config: for a setup PR, it waits (up to --timeout
+#                   minutes) for the PR to merge, then brings the checkout up to it; still open then, it stops as
+#                   "waiting" (exit 3), saying for what, and a rerun picks up here
+#   test-user      test-user.sh install <name>, when the repo's tests.yaml has test_run
 #   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this)
 #   dashboards      dashboards.sh with every instance, keeping the hub's settings (its unit has them); the first
 #                   project on a machine gives --client-id and --public-url instead
 #
 # Output: stdout is one JSON line per step change, and nothing else:
-#   {"step":"checkout","state":"started|done|failed|ask","detail":"...","ask":{...},"retry":"..."}
+#   {"step":"checkout","state":"started|done|failed|ask|waiting","detail":"...","ask":{...},"retry":"..."}
 # "ask" lines carry what the step waits for (a GitHub link to approve, the Claude token); a "failed" line names the
-# exact retry. The steps' own output goes to stderr. It stops at the first failure, exit 1.
+# exact retry; a "waiting" line what it waits for that only time or someone else settles (the setup PR's merge). The
+# steps' own output goes to stderr. It stops at the first failure, exit 1, or at a step still waiting, exit 3.
 #
 # The machine helper runs this (`worklane-machine add-project <name> <owner/repo>`) for the dashboard's Add project.
 source "$(dirname "$0")/lib.sh"
@@ -78,6 +81,13 @@ run_step() {
   ( set -e; "do_$fn" ) 2>&1 | tee "$log" >&2
   rc="${PIPESTATUS[0]}"
   set -e
+  # 3: the step waits for something that isn't a failure (the service: the repo's setup PR not merged yet). It stops
+  # here too, as "waiting", saying what for; a rerun picks up at this step.
+  if [ "$rc" -eq 3 ]; then
+    why="$(sed -n 's/^waiting: //p' "$log" | tail -n 1 | cut -c1-400)"
+    emit "$step" waiting "${why:-waiting}" "" "$again, once that is done (it skips the steps already done)"
+    exit 3
+  fi
   if [ "$rc" -ne 0 ]; then
     why="$(grep -v '^[[:space:]]*$' "$log" | tail -n 1 | cut -c1-400)"
     alone="$("alone_$fn" 2>/dev/null || true)"
@@ -104,7 +114,14 @@ creds() { echo "$(inst_dir)/credentials.yaml"; }
 app_key() { echo "$(home_of "$coord")/.config/$name-app/private-key.pem"; }
 done_app() {
   [ -f "$(creds)" ] && grep -Eq '^github: *\{ *kind: *app|^  kind: *app' "$(creds)" && [ -s "$(app_key)" ] || return 1
-  echo "the instance's GitHub App is set up (credentials.yaml github: kind app)"
+  # How it was made, as its setup recorded it beside the key (the manifest flow, or credentials.sh by hand).
+  local how
+  case "$(cat "$(dirname "$(app_key)")/made-by" 2>/dev/null || true)" in
+    manifest) how="made through the manifest flow" ;;
+    by-hand) how="made by hand (credentials.sh github-app)" ;;
+    *) how="how it was made is not recorded" ;;
+  esac
+  echo "the instance's GitHub App is set up (credentials.yaml github: kind app), $how"
 }
 do_app() {
   local hub_token line rc
@@ -184,7 +201,37 @@ done_service() {
   unit_active "worklane-$name.service" || return 1
   echo "worklane-$name.service is running"
 }
-do_service() { bash "$here/service.sh" "$name"; }
+do_service() {
+  wait_for_config
+  bash "$here/service.sh" "$name"
+}
+# One field of a JSON line, through node (no jq on a fresh server).
+json_field() { node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>{try{const v=JSON.parse(s)[process.argv[1]];process.stdout.write(v==null?"":String(v))}catch{}})' "$1"; }
+# The coordinator needs the repo's config on its checkout. A repo without one has auto-config's setup PR (the checkout
+# step drafted it): wait for it to merge, up to --timeout minutes, checking every SETUP_POLL_SECONDS (auto-config
+# itself, as the coordinator: it fetches the default branch and asks GitHub about the PR); once merged, bring the
+# checkout up to it. Still open at the timeout: exit 3, "waiting", never a failure.
+wait_for_config() {
+  local line kind detail pr msg shown="" deadline
+  deadline=$(( $(date +%s) + ${SETUP_WAIT_SECONDS:-$(( timeout * 60 ))} ))
+  while [ ! -d "$checkout/.worklane" ]; do
+    line="$(run_as "$coord" 'umask 0002; [ -z "${3:-}" ] || export WORKLANE_GITHUB_API="$3"; "$2" instance auto-config "$1"' "$name" "$ENGINE_CLI" "${WORKLANE_GITHUB_API:-}" || true)"
+    kind="$(printf '%s' "$line" | json_field kind)"; detail="$(printf '%s' "$line" | json_field detail)"; pr="$(printf '%s' "$line" | json_field pr)"
+    case "$kind" in
+      merged)
+        echo "the setup PR merged: bringing the checkout up to it"
+        bash "$here/checkout.sh" "$name" "$repo"
+        [ -d "$checkout/.worklane" ] || { echo "the config merged, but $checkout still has no .worklane/"; return 1; }
+        return 0 ;;
+      proposed) msg="waiting for the setup PR ${pr:-(no link)} to merge: review it, merge it, and the coordinator starts" ;;
+      questions) msg="waiting for answers to the repo config's questions: $detail" ;;
+      *) echo "auto-config: ${detail:-no answer}"; return 1 ;;
+    esac
+    if [ "$msg" != "$shown" ]; then emit service waiting "$msg"; shown="$msg"; fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then echo "waiting: $msg (still so after $timeout minutes)"; return 3; fi
+    sleep "$SETUP_POLL_SECONDS"
+  done
+}
 detail_service() { done_service; }
 alone_service() { echo "sudo bash $here/service.sh $name"; }
 

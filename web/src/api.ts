@@ -278,6 +278,20 @@ export interface Protection {
   accepted?: AcceptedMerge[];
   /** Whether this person may accept one (an admin, while the main watch guards the branch). */
   canAccept?: boolean;
+  /** The last commit that landed without a PR, and its ops-channel alert (owners and writers). */
+  directPush?: DirectPush | null;
+}
+
+export interface DirectPush {
+  at: string;
+  sha: string;
+  url: string;
+  kind: 'direct' | 'rewrite';
+  pusher: string | null;
+  /** posted; pending (the ops posts' limit); not_posted (with `note` saying why); off (turned off). */
+  status: 'posted' | 'pending' | 'not_posted' | 'off';
+  mentioned: number;
+  note: string | null;
 }
 
 export interface AcceptedMerge {
@@ -660,7 +674,7 @@ export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}
 /** The setup console's Add project (src/console/add-project.ts), as GET /api/add-project serves it. */
 export interface AddProjectStep {
   step: string;
-  state: 'pending' | 'started' | 'done' | 'failed' | 'ask';
+  state: 'pending' | 'started' | 'done' | 'failed' | 'ask' | 'waiting';
   detail: string;
   /** A failed step: how to try again (absent from older servers). */
   retry?: string | null;

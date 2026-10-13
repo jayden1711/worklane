@@ -3,8 +3,10 @@
 # permissions that let agents write the code but not the repo's git config
 # or hooks. Install the guardrail hooks for the instance's agent runs, every
 # time, in the coordinator's own instance home. If the repo has no Worklane
-# config yet, scaffold it on a worklane/setup branch and push only that
-# branch, for a PR you review and merge. Never pushes the default branch.
+# config yet, auto-config drafts it (`worklane instance auto-config`: the
+# project's commands detected and run as the agent user on the default
+# branch) and proposes it as a PR from worklane/setup, through the App, for
+# you to review and merge; a rerun finds that PR. Never pushes the default branch.
 # Re-running it fast-forwards an existing checkout (e.g. after that PR merges). Its pre-push hook (install
 # --git-hooks-only) refuses any push to the default branch from the checkout, by anyone.
 #   bash scripts/setup/checkout.sh <name> <owner/repo>
@@ -55,6 +57,7 @@ say "Worklane config in the repo, and the guardrail hooks for $name's agent runs
 # rewrites them from the current config.
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
+  [ -z "${3:-}" ] || export WORKLANE_GITHUB_API="$3"
   cd "$2"
   engine=/opt/worklane/current/dist/src/cli.js
   if [ -d .worklane ]; then
@@ -62,13 +65,21 @@ run_as "$coord" '
     worklane install --root . --instance "$1" --engine "$engine"
     exit 0
   fi
-  git switch -q -c worklane/setup
-  worklane install --root . --instance "$1" --engine "$engine"
-  git add .worklane
-  git -c user.name="$1 coordinator" -c user.email="noreply@localhost" commit -q -m "Add Worklane config (to review before the first task)"
-  git push -q origin HEAD:refs/heads/worklane/setup
-  git switch -q -
-  echo "pushed branch worklane/setup. Open its PR, review and adjust the config, and merge it yourself:"
-  echo "  https://github.com/$3/compare/worklane/setup?expand=1"
-  echo "until it merges, the agent hooks carry the template config rules; run this again after it does"
-' "$name" "$dest" "$repo"
+  # No config on the default branch yet: auto-config (as local mode has it) detects the commands, runs them as the
+  # agent user in a scratch worktree beside the checkout (group-writable, hence the umask), and proposes the config
+  # as a PR from worklane/setup through the App. Nothing is branched or committed in this checkout, so a rerun finds
+  # the PR it opened (or the one still open from before) rather than a branch in its way.
+  umask 0002
+  set +e
+  line="$(worklane instance auto-config "$1")"
+  rc=$?
+  set -e
+  kind="$(printf "%s" "$line" | sed -n "s/^{\"kind\":\"\([a-z]*\)\".*/\1/p")"
+  echo "auto-config: ${line:-no answer (exit $rc)}"
+  case "$kind" in
+    merged) echo "the config is on the default branch now: run this again to bring the checkout up to it" ;;
+    proposed) echo "the config is proposed in its setup PR: review and merge it; the coordinator starts once it has merged (add-project waits for it; or run this, then service.sh, again)" ;;
+    questions) echo "auto-config has questions to answer before it proposes the config (the line above says how)" ;;
+    *) echo "auto-config failed: the line above says why" >&2; exit 1 ;;
+  esac
+' "$name" "$dest" "$api"

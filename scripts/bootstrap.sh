@@ -222,8 +222,17 @@ if [ "$HARDENED" = 1 ]; then
       read -r answer </dev/tty
       [ "$answer" = y ] || die "stopped before $script; nothing after it ran"
     fi
+    rc=0
     # shellcheck disable=SC2086 # the step's arguments are words
-    run bash "$setup/$script" ${step#"$script"}
+    run bash "$setup/$script" ${step#"$script"} || rc=$?
+    # 3 is a setup script's "waiting" (service.sh: the repo's setup PR isn't merged yet): not done, and not a failure.
+    if [ "$rc" = 3 ]; then
+      echo
+      echo "waiting: scripts/setup/$script waits for what it says above; once that's done, run this again (it picks up there):"
+      echo "   sudo bash scripts/bootstrap.sh --hardened --after-credentials $NAME $GITHUB"
+      exit 3
+    fi
+    [ "$rc" = 0 ] || exit "$rc"
   done
   if [ "$AFTER_CREDENTIALS" = 0 ]; then
     say "next, by hand: the instance's credentials"

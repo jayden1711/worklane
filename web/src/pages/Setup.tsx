@@ -148,8 +148,8 @@ const STEP_LABEL: Record<string, string> = {
   'machine-helper': 'Machine helper',
   dashboards: 'Dashboards',
 };
-const STEP_TONE: Record<AddProjectStep['state'], 'neutral' | 'ok' | 'warn' | 'danger' | 'info'> = { pending: 'neutral', started: 'info', done: 'ok', failed: 'danger', ask: 'warn' };
-const STEP_STATE: Record<AddProjectStep['state'], string> = { pending: 'not yet', started: 'running', done: 'done', failed: 'failed', ask: 'waiting on you' };
+const STEP_TONE: Record<AddProjectStep['state'], 'neutral' | 'ok' | 'warn' | 'danger' | 'info'> = { pending: 'neutral', started: 'info', done: 'ok', failed: 'danger', ask: 'warn', waiting: 'warn' };
+const STEP_STATE: Record<AddProjectStep['state'], string> = { pending: 'not yet', started: 'running', done: 'done', failed: 'failed', ask: 'waiting on you', waiting: 'waiting' };
 const RUN_STATUS: Record<string, string> = { pending: 'waiting for the coordinator', running: 'running', done: 'done', failed: 'failed', refused: 'refused', interrupted: 'interrupted' };
 
 /** One add-project run: its steps in the script's order, then what it's waiting on you for (in this same view). */
