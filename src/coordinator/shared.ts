@@ -134,8 +134,10 @@ export const CLAIM_HELD_GIVE_UP_MS = 3600_000;
  * in flight, a blocking test run would starve their output streams and trip
  * their stall timers. Output is capped; the tail is kept for reports.
  */
-export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs, projectEnv: Record<string, string> = {}): Promise<{ code: number | null; tail: string; out: string }> {
+export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
+    // Aborted (the coordinator shutting down): never started, or killed like a timed-out command.
+    if (signal?.aborted) return resolveRun({ code: null, tail: 'not run: the coordinator is shutting down', out: '' });
     const { file, args, env } = projectCommand(command, runAs, projectEnv);
     const child = spawn(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
     let out = '';
@@ -146,13 +148,16 @@ export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS,
     child.stdout.on('data', take);
     child.stderr.on('data', take);
     let timedOut = false;
-    const timer = setTimeout(() => {
+    const kill = () => {
       timedOut = true;
       if (runAs) killTreeAs(runAs.user, child.pid);
       else killTree(child.pid, () => child.kill('SIGKILL'));
-    }, timeoutMs);
+    };
+    const timer = setTimeout(kill, timeoutMs);
+    signal?.addEventListener('abort', kill, { once: true });
     const finish = (code: number | null) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', kill);
       resolveRun({ code: timedOut ? null : code, tail: out.trim().split('\n').slice(-20).join('\n'), out });
     };
     child.on('error', () => finish(null));
@@ -193,6 +198,16 @@ export interface LiveEntry {
 export class Halted extends Error {
   constructor(message = 'emergency stop') {
     super(message);
+  }
+}
+
+/**
+ * The coordinator is shutting down (SIGTERM or SIGINT: a restart, an update, a stop): its runs are aborted and their
+ * tasks requeued to start again after the restart. A kind of halt, so every caller that requeues on a halt does here too.
+ */
+export class ShuttingDown extends Halted {
+  constructor() {
+    super('the coordinator is shutting down');
   }
 }
 

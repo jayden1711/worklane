@@ -51,7 +51,7 @@ import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { Gardener } from './coordinator/gardener.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
-import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
@@ -73,12 +73,17 @@ export class Coordinator extends Gardener {
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
   async tick(): Promise<void> {
     // Each step is guarded on its own: a GitHub hiccup in reconcile must not stop landing or dispatch.
+    // Once stopping (stop()), no further step starts: the one running finishes or is aborted, and the tick ends.
     const step = async <T>(where: string, fn: () => Promise<T> | T, fallback: T): Promise<T> => {
+      if (this.stopped) return fallback;
+      this.inStep = where;
       try {
         return await fn();
       } catch (e) {
         this.emit('coordinator.error', { instance: this.d.instance, where, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
         return fallback;
+      } finally {
+        this.inStep = null;
       }
     };
     this.checkEmergency();
@@ -109,6 +114,7 @@ export class Coordinator extends Gardener {
     await step('gardener', () => this.checkGardener(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
+    if (this.stopped) return;
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
 
@@ -131,6 +137,8 @@ export class Coordinator extends Gardener {
    * is lifted. Called every tick and on a short timer by the service.
    */
   checkEmergency(): void {
+    // Shutting down: the halt stays (stop() set it), whatever the emergency stop file says.
+    if (this.stopped) return;
     const stop = emergencyStop(this.d.slotsDir);
     if (stop && !this.halt.signal.aborted) {
       this.emit('emergency.stop', { by: stop.by, reason: stop.reason, running: this.active.size });
@@ -141,11 +149,27 @@ export class Coordinator extends Gardener {
     }
   }
 
+  /**
+   * Shut down (SIGTERM, SIGINT): nothing new starts, and everything in flight is aborted rather than waited for.
+   * Agent runs and project commands are aborted; their tasks requeue (runTask) and start again after the restart.
+   */
   stop() {
     this.stopped = true;
+    this.shutdown.abort();
+    if (!this.halt.signal.aborted) this.halt.abort();
     // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
     this.d.prTestRuns?.stop();
     this.prBatchStop();
+  }
+
+  /** What a shutdown still waits on: the tick step, tasks and live runs (named in the log when it runs out of time). */
+  pending(): string[] {
+    return [
+      ...(this.inStep ? [`tick step: ${this.inStep}`] : []),
+      ...[...this.active.keys()].map((n) => `task #${n}`),
+      ...[...this.live.values()].map((l) => `${l.role} run${l.issue !== null ? ` for #${l.issue}` : ''}`),
+      ...(this.poolBusy ? ['worktree pool refill'] : []),
+    ];
   }
 
   /**
@@ -678,6 +702,15 @@ export class Coordinator extends Gardener {
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['ready']);
         await this.d.backlog.comment(n, `[${BRAND.cli}] Paused on the Claude usage limit until ${resetWords(e.resetAt, this.nowMs())}: requeued, and it starts again on its own after the reset. Nothing to do.`);
+        return;
+      }
+      // Shutting down (a restart or an update): requeued, and it starts again after the restart. Nothing is lost:
+      // a shutdown that runs out of time before this leaves the claim, and the next start's recovery requeues it.
+      if (e instanceof ShuttingDown) {
+        this.releaseClaim(n, 'shutdown: the coordinator stopped while it ran; requeued');
+        await this.d.backlog.removeLabel(n, 'agent:working');
+        await this.d.backlog.addLabels(n, ['ready']);
+        await this.d.backlog.comment(n, `[${BRAND.cli}] The coordinator stopped (a restart or an update) while this ran: requeued from the start, and it starts again on its own after the restart. Nothing to do.`);
         return;
       }
       if (!(e instanceof Halted)) throw e;
