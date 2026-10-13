@@ -272,6 +272,16 @@ test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; 
   assert.match(runs, /worklane doctor --root/);
   assert.match(runs, /worklane up --root[\s\S]*launchctl print[\s\S]*worklane down --root/, 'the coordinator as a launchd service, up and down');
   assert.match(runs, /worklane demo/);
+  const win = ci.jobs['bootstrap-windows']! as { name?: string; 'runs-on'?: string; steps: { run?: string; uses?: string; with?: Record<string, unknown> }[] };
+  assert.equal(win.name, 'bootstrap (windows-wsl)');
+  assert.equal(win['runs-on'], 'windows-latest');
+  const wsl = win.steps.find((s) => s.uses?.startsWith('Vampire/setup-wsl@'));
+  assert.match(wsl?.uses ?? '', /@[0-9a-f]{40}$/, 'the WSL action pinned by commit');
+  assert.equal(String(wsl?.with?.['wsl-version']), '2', 'WSL2, the documented route');
+  const winRuns = win.steps.map((s) => s.run ?? '').join('\n');
+  assert.match(winRuns, /scripts\/bootstrap\.sh" --mode local --yes/);
+  assert.match(winRuns, /worklane doctor --root[\s\S]*os: windows-wsl/, 'doctor names the OS as WSL');
+  assert.match(winRuns, /worklane up --root[\s\S]*systemctl --user is-enabled[\s\S]*worklane down --root/, 'the coordinator as a systemd --user unit, up and down');
   assert.doesNotMatch(readFileSync(script, 'utf8'), /curl[^\n]*\|\s*(ba)?sh/, 'the bootstrap pipes nothing into a shell');
 });
 
