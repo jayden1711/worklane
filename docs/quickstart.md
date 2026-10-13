@@ -74,7 +74,7 @@ That command mounts your Claude login. Sign in once with `docker run -it ... wor
    - `project.repo` must be the repo's `owner/name` on GitHub (filled in from its `origin` remote when there is one);
    - `owners.default` is you;
    - `owners.writers` lists the accounts whose issues the harness will work on;
-   - `land_mode` is `pr` (the default) or `direct`.
+   - `land_mode` is `pr` (the default) or `direct`. `direct` needs branch protection on the default branch: without it (as on a private repo on GitHub Free) the coordinator refuses to start.
 2. In **`.worklane/tests.yaml`**:
    - `runner.changed`, `runner.full` and `runner.one` are your project's real test commands;
    - `vacuity.test_globs` matches your test files.
