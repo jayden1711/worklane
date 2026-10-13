@@ -89,11 +89,13 @@ export async function postPending(o: { poster: Poster; dashboardUrl?: string | n
 }
 
 /**
- * One ops post from elsewhere (a direct push's alert, src/direct-push-alert.ts), within the same machine-wide limit
- * as the incident posts: true, and counted, when one may go now; false when the window is full (try again later).
+ * One ops post from elsewhere (a direct push's alert, src/direct-push-alert.ts; a merge post, src/merge-posts.ts;
+ * fix-forward's red and green posts, coordinator/fix-forward.ts), within the same machine-wide limit as the incident
+ * posts: true, and counted, when one may go now; false when the window is full (try again later). The one helper for
+ * all of them, so they share the one window. `now`: a Date or epoch ms.
  */
-export function takeOpsPost(o: { dir?: string; now?: Date } = {}): boolean {
-  const t = (o.now ?? new Date()).getTime();
+export function takeOpsPost(o: { dir?: string; now?: Date | number } = {}): boolean {
+  const t = o.now === undefined ? Date.now() : typeof o.now === 'number' ? o.now : o.now.getTime();
   return withIncidents(o.dir, (f) => {
     const recent = f.posts.filter((s) => t - Date.parse(s) < RATE.windowMs);
     if (recent.length >= RATE.max) return false;

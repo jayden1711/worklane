@@ -27,6 +27,11 @@ required_checks: []
 # revert), one issue each. Blocks again after release_after_passes passes in a row, or an owner's clear. A re-run not
 # done in rerun_timeout_min is a real failure. The updater still requires every check green.
 # flaky: { rerun: true, release_after_passes: 10, rerun_timeout_min: 90 }
+# Fix-forward: a real red after an auto-merge first names the culprit (several PRs since the last green: each
+# first-parent commit tested on its own), then a fix task gets the failing logs, the culprit's diff and the merged
+# PRs; its PR goes through the normal gates. The culprit's revert PR is opened only if no fix is green within
+# max_attempts (0: revert at once), or at once when it touches revert_first_paths, the money path, auth or secrets.
+# fix_forward: { max_attempts: 2, revert_first_paths: [] }
 # Files two tasks at once would both change and conflict on: such tasks never run together (the second
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.
