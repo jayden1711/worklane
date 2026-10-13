@@ -53,7 +53,7 @@ function npm(o: { installFails?: boolean } = {}) {
   return { r, calls, relaunched };
 }
 
-const args = (prefix: string, said: string[], over: { yes?: boolean; reset?: boolean } = {}) => ({ root: '/work/shop', prefix, yes: over.yes ?? true, reset: over.reset ?? false, say: (l: string) => said.push(l) });
+const args = (prefix: string, said: string[], over: { yes?: boolean; reset?: boolean; answers?: Record<string, string> } = {}) => ({ root: '/work/shop', prefix, yes: over.yes ?? true, reset: over.reset ?? false, ...(over.answers ? { answers: over.answers } : {}), say: (l: string) => said.push(l) });
 
 test("npx's cache is told from an install of its own", () => {
   assert.equal(fromNpxCache('/home/you/.npm/_npx/0123abcd/node_modules/@scope/cli/'), true);
@@ -75,7 +75,7 @@ test('from npx: this very package is packed and installed under the prefix, with
   const prefix = mkdtempSync(join(tmpdir(), 'prefix-'));
   const n = npm();
   const said: string[] = [];
-  assert.equal(await handOffFromNpx(args(prefix, said, { reset: true }), `${pkg}/`, n.r), 0);
+  assert.equal(await handOffFromNpx(args(prefix, said, { reset: true, answers: { test: 'npm test', 'land-mode': 'pr' } }), `${pkg}/`, n.r), 0);
   assert.equal(n.calls.length, 2);
   const [pack, install] = n.calls as [string[], string[]];
   assert.deepEqual(pack.slice(0, 3), ['npm', 'pack', pkg]);
@@ -85,7 +85,7 @@ test('from npx: this very package is packed and installed under the prefix, with
   // The tarball's temp folder is gone.
   assert.equal(existsSync(install.at(-1)!), false);
   const cli = join(npmGlobalPackageDir(prefix, BRAND.pkg), 'dist', 'src', 'cli.js');
-  assert.deepEqual(n.relaunched, [{ cli, args: ['init', '--mode', 'local', '--yes', '--reset', '/work/shop'] }]);
+  assert.deepEqual(n.relaunched, [{ cli, args: ['init', '--mode', 'local', '--yes', '--reset', '--answer', 'test=npm test', '--answer', 'land-mode=pr', '/work/shop'] }]);
   assert.match(said.join('\n'), /running from npx's cache, which npm may clear: installing .* 9\.8\.7/);
   assert.match(said.join('\n'), /isn't on your PATH/);
 });

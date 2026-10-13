@@ -571,7 +571,7 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
       io.say('init: on Windows, run it inside WSL2 (Ubuntu): local mode is Linux there');
       return 2;
     }
-    const handed = await handOff({ root: localRoot, prefix: a.prefix, yes: a.yes, reset: a.reset, say: (l) => io.say(l) });
+    const handed = await handOff({ root: localRoot, prefix: a.prefix, yes: a.yes, reset: a.reset, ...(a.answers ? { answers: a.answers } : {}), say: (l) => io.say(l) });
     if (handed !== null) return handed;
     const file = localInitFile(localRoot);
     let state = readInitState(file);

@@ -41,6 +41,8 @@ export interface HandOffArgs {
   prefix: string;
   yes: boolean;
   reset: boolean;
+  /** init's --answer id=choice pairs, passed on. */
+  answers?: Record<string, string>;
   say(line: string): void;
 }
 
@@ -90,5 +92,5 @@ export async function handOffFromNpx(a: HandOffArgs, engineDir = ENGINE_DIR, r: 
   }
   const bin = join(a.prefix, 'bin');
   if (!(process.env.PATH ?? '').split(delimiter).includes(bin)) a.say(`   note: ${bin} isn't on your PATH: add it in your shell profile (export PATH="${bin}:$PATH") to run \`${BRAND.cli}\` from now on`);
-  return r.relaunch(cli, ['init', '--mode', 'local', ...(a.yes ? ['--yes'] : []), ...(a.reset ? ['--reset'] : []), a.root]);
+  return r.relaunch(cli, ['init', '--mode', 'local', ...(a.yes ? ['--yes'] : []), ...(a.reset ? ['--reset'] : []), ...Object.entries(a.answers ?? {}).flatMap(([id, choice]) => ['--answer', `${id}=${choice}`]), a.root]);
 }
