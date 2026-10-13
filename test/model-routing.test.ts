@@ -30,6 +30,8 @@ test('defaults: haiku for intake replies; sonnet for planning, research, eval an
   );
   assert.deepEqual(r.high_risk_labels, DEFAULT_HIGH_RISK_LABELS);
   assert.equal(routedModel(r, 'intake_replier'), 'haiku');
+  // Decision threads: the summary on haiku; questions and picks on sonnet (their held-out score dropped on haiku).
+  assert.deepEqual([r.intake_summary, r.intake_thread], ['haiku', 'sonnet']);
 });
 
 test('builds: high-risk labels go to the high-risk model; otherwise the build model, escalating after two failed attempts', () => {

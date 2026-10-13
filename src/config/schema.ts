@@ -207,6 +207,8 @@ export const AgentsConfig = z
         research: model.optional(),
         intake_triage: model.optional(),
         intake_replier: model.optional(),
+        intake_summary: model.optional(),
+        intake_thread: model.optional(),
         stage_judge: model.optional(),
         eval_answer: model.optional(),
       })

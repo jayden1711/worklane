@@ -152,7 +152,8 @@ export const EventSchemas = {
   /**
    * A reply in one of the bot's threads, from a mapped person: what it did to its target (a decision or ask).
    * answered; comment (they may not answer it: kept, redacted, as a comment); ambiguous (no single option: asked
-   * back); already (decided before: refused, naming who); refused (never answered from chat).
+   * back); already (decided before: refused, naming who); refused (never answered from chat); question (a question
+   * about it, answered from the record: never an answer); confirm (a plain-language pick, asked back to confirm).
    */
   /**
    * An idea's conversation (src/coordinator/conversation.ts), by its opening message's report id: opened (its
@@ -161,7 +162,25 @@ export const EventSchemas = {
    * filed (`issue`, `by`), dropped, failed (a run that ended without a usable result, why in `detail`).
    */
   'discord.idea': z.strictObject({ id: z.string(), stage: z.enum(['opened', 'said', 'asked', 'drafted', 'filed', 'dropped', 'failed']), by: z.string().nullable(), msg: z.string().nullable(), issue: issue.nullable(), detail: z.string().nullable() }),
-  'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
+  'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused', 'question', 'confirm']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
+  /**
+   * A plain-language pick in a thread (src/intake/explain.ts): asked (the bot asked `by` to confirm `option`),
+   * confirmed (their next message was yes: the answer is recorded through the decide path), dropped (their next
+   * message was something else). Only the same person's yes confirms.
+   */
+  'discord.confirm': z.strictObject({ thread: z.string(), target: z.string(), by: z.string(), option: z.string(), stage: z.enum(['asked', 'confirmed', 'dropped']), msg: z.string() }),
+  /**
+   * A thread's plain-language summary, once per thread: `summary` (it passed the facts check) or `template` (the
+   * fixed template and the dashboard link, `why`: the check it failed, the cap or the run's end).
+   */
+  'discord.explained': z.strictObject({ target: z.string(), thread: z.string(), used: z.enum(['summary', 'template']), why: z.string().nullable() }),
+  /**
+   * A message in a chat channel (src/coordinator/channel-chat.ts), by its report id, from a mapped admin or writer:
+   * answered (posted in `messages` parts), refused (the reply failed a code check, `why`; a fixed line was posted),
+   * failed (the run ended without a reply), capped (over discord.chat_max_usd_per_day or the daily budget). The text
+   * stays in the coordinator's private store, never here.
+   */
+  'discord.chat': z.strictObject({ id: z.string(), channel: z.string(), by: z.string(), outcome: z.enum(['answered', 'refused', 'failed', 'capped']), messages: z.number().int().nonnegative(), why: z.string().nullable() }),
   'console.run_stopped': z.strictObject({ run: z.string(), issue: issue.nullable(), role: z.string(), by: z.string() }),
   'console.request_refused': z.strictObject({ request: z.string(), kind: z.string(), run: z.string(), by: z.string(), why: z.string() }),
   /** `provider`: the open-model provider it ran on (local runs cost 0); tokens and seconds, when claude reported them. */

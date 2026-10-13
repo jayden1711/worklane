@@ -171,11 +171,12 @@ test('channel: a non-allowed sender is ignored, with nothing stored (the adapter
   await t.pass();
   const thread = t.chat.threads[0]!.id;
   const before = t.log.read().length;
+  const postsBefore = t.chat.posts.length;
   await t.pass(reply(STRANGER_ID, thread, 'approve'), reply(UNMAPPED_ID, thread, 'approve'));
   assert.deepEqual(rawFiles(t.stateDir), [], 'no raw file');
   assert.deepEqual(of(t.log, 'decision.answered'), [], 'no answer');
   assert.deepEqual(of(t.log, 'discord.reply'), [], 'no record of what they said');
-  assert.deepEqual(t.chat.posts, [], 'no reply to them');
+  assert.deepEqual(t.chat.posts.slice(postsBefore), [], 'no reply to them');
   assert.deepEqual(t.log.read().slice(before).map((e) => e.type).filter((x) => x !== 'coordinator.tick'), [], 'no event at all');
 });
 

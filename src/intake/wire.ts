@@ -55,7 +55,7 @@ export function intakeForInstance(o: {
   if (d.enabled && d.guild) {
     if (!o.tokenFile) say('intake: discord is on but credentials.yaml has no intake.discord_token; the bot is not connected');
     else {
-      const bot = new DiscordIntake({ token: readFileSync(o.tokenFile, 'utf8').trim(), guild: d.guild, channels: d.channels, allowedSenders: d.allowed_senders, prefixes: d.prefixes, ...(o.discord ?? {}) });
+      const bot = new DiscordIntake({ token: readFileSync(o.tokenFile, 'utf8').trim(), guild: d.guild, channels: d.channels, chatChannels: d.chat_channels, allowedSenders: d.allowed_senders, prefixes: d.prefixes, ...(o.discord ?? {}) });
       bot.start();
       stop = () => bot.stop();
       sources.push({ name: 'discord', take: async () => bot.take(), reply: (t, text) => bot.reply(t.id, text), openThread: (c, text, name, from) => bot.openThread(c, text, name, from), watch: (t) => bot.watch(t) });
