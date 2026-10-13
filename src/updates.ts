@@ -11,7 +11,8 @@ export const UPDATES_LOG = `/var/lib/${BRAND.cli}/updates.jsonl`;
 export const ENGINE_CURRENT = `/opt/${BRAND.cli}/current`;
 
 /** held: a commit that was rolled back, skipped until a newer one or until updates are turned off and on again. */
-export type UpdateEvent = 'attempt' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | CanaryEvent;
+/** chose: an older commit than main's tip is being installed (the tip, and every newer one, failed or held). */
+export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | CanaryEvent;
 /** The canary (docs/canary.md): filed, then passed or failed. */
 export type CanaryEvent = 'canary_filed' | 'canary_passed' | 'canary_failed';
 export interface UpdateEntry {
@@ -22,6 +23,9 @@ export interface UpdateEntry {
   reason?: string;
   units?: string[];
   failed?: string[];
+  /** On chose: main's tip then, and each newer commit passed over, with why. */
+  tip?: string;
+  skipped?: { sha: string; reason: string; held?: boolean; pending?: boolean }[];
   back?: string;
   /** On a rollback: each failing unit's result, exit status, restarts and journal tail (redacted). */
   diagnosis?: { unit: string; result: string; status: string; restarts: number; journal: string }[];
@@ -62,7 +66,7 @@ export function heldUpdate(log: UpdateEntry[]): HeldUpdate | null {
   return { at: last.at, sha: last.from ?? null, reason, migration: !!last.migration || /migration failed/.test(reason) };
 }
 
-const EVENTS = new Set<string>(['attempt', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error', 'canary_filed', 'canary_passed', 'canary_failed']);
+const EVENTS = new Set<string>(['attempt', 'chose', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error', 'canary_filed', 'canary_passed', 'canary_failed']);
 
 /** What the updater follows: signed release tags, or main's tip. */
 export type UpdateChannel = 'release' | 'main';

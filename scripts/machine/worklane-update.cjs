@@ -7,8 +7,16 @@
 //     version, its signature verifies (`git verify-tag`) against the owner's allowed signers file
 //     (updates.json allowed_signers), and its commit is the main commit it was cut from plus dist/ only.
 //     The checks below are read on that main commit (CI runs on main, not on tags).
-//   - "main" (the default when the field is absent, so an existing install keeps following main): main's
-//     newest commit, only when it is a fast-forward of the installed engine (never older, never a rewrite).
+//   - "main" (the default when the field is absent, so an existing install keeps following main): the newest
+//     commit on main's first-parent line that passes the checks below, only when it descends from the installed
+//     engine (never older, never a rewrite). One red tip doesn't block updates: from the tip back, newest first, it
+//     reads each commit's check runs (one API call each, a second apart, an older commit's red verdict remembered
+//     for an hour) and stops at the first fully green one that isn't held. It looks at most updates.json
+//     "max_lookback" commits back (default 20), only at commits newer than the installed one, and never at a merge's
+//     second parent. A commit whose checks are pending (or haven't started) is waited for, nothing older installed,
+//     until it has been on main for updates.json "pending_wait_minutes" (default 60, from its committer date); after
+//     that an older fully green commit may go in instead, and the pending one still installs later if it turns green.
+//     Installing an older commit than the tip logs a "chose" line: the commit, and why each newer one was skipped.
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
@@ -47,6 +55,7 @@ const HELD = '/var/lib/worklane/update-held.json'; // the last rolled-back commi
 const CANARY = '/var/lib/worklane/canary.json'; // the canary running now, and when the last one was filed (root, 0600)
 const OPT = '/opt/worklane';
 const SLOTS = '/var/lib/worklane/agent-slots';
+const VERDICTS = '/var/lib/worklane/update-verdicts.json'; // older main commits' red check verdicts, reused an hour
 const VERIFY_GIT = '/var/lib/worklane/verify.git'; // a root-owned bare clone, only for checking release tags
 const ALLOWED_SIGNERS = '/etc/worklane/allowed_signers';
 const BUILD_STATE = 'worklane-build'; // the DynamicUser's StateDirectory, /var/lib/worklane-build
@@ -64,6 +73,11 @@ const STABLE_MS = 30_000;
 const POLL_MS = 5_000;
 const DAY_MS = 24 * 60 * 60_000;
 const CANARY_LIMIT_MIN = 120;
+const LOOKBACK = 20; // updates.json max_lookback: first-parent commits looked at, from main's tip back
+const LOOKBACK_MAX = 100;
+const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
+const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
+const VERDICT_TTL_MS = 60 * 60_000; // how long an older commit's red verdict is reused before GitHub is asked again
 
 // ---------- decisions (pure) ----------
 
@@ -77,6 +91,105 @@ function repoFromUrl(url) {
 function fastForward(cmp) {
   if (cmp && cmp.status === 'ahead' && cmp.behind_by === 0) return { ok: true };
   return { ok: false, reason: `not a fast-forward of the installed engine (GitHub compare: ${cmp ? `${cmp.status}, ${cmp.ahead_by} ahead, ${cmp.behind_by} behind` : 'no answer'})` };
+}
+
+/** updates.json max_lookback: a whole number 1..100, else 20. */
+function lookbackOf(cfg) {
+  const n = cfg && cfg.max_lookback;
+  return Number.isInteger(n) && n >= 1 ? Math.min(n, LOOKBACK_MAX) : LOOKBACK;
+}
+
+/** updates.json pending_wait_minutes, in ms: a number >= 0, else 60 minutes. */
+function pendingWaitMs(cfg) {
+  const n = cfg && cfg.pending_wait_minutes;
+  return (typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : PENDING_WAIT_MIN) * 60_000;
+}
+
+/**
+ * The commits that may be installed, newest first: main's first-parent line from `head` back to the installed
+ * commit (not included), at most `max`, read from GitHub's compare of installed...head (its commits and their
+ * parents). Only when that line reaches the installed commit inside the compare's list, so every one descends from
+ * it; otherwise (no installed commit, a truncated list, an installed commit off the first-parent line) the tip alone.
+ * Each is { sha, date } (its committer date: when it landed on main).
+ */
+function firstParentLine(cmp, current, head, max) {
+  const commits = cmp && Array.isArray(cmp.commits) ? cmp.commits.filter((c) => c && typeof c.sha === 'string') : null;
+  const by = new Map((commits || []).map((c) => [c.sha, c]));
+  const dateOf = (c) => (c && c.commit && c.commit.committer && typeof c.commit.committer.date === 'string' ? c.commit.committer.date : null);
+  const tipOnly = [{ sha: head, date: dateOf(by.get(head)) }];
+  if (!current || !commits || (typeof cmp.total_commits === 'number' && cmp.total_commits > commits.length)) return tipOnly;
+  const line = [];
+  for (let sha = head; sha !== current; ) {
+    const c = by.get(sha);
+    if (!c || line.length >= commits.length) return tipOnly;
+    line.push({ sha, date: dateOf(c) });
+    sha = Array.isArray(c.parents) && c.parents[0] ? c.parents[0].sha : null;
+  }
+  return line.length ? line.slice(0, max) : tipOnly;
+}
+
+const short = (sha) => String(sha).slice(0, 7);
+/** `a0685ce: required check "push-gate" ended failure; …` */
+const skippedText = (skipped) => skipped.map((s) => `${short(s.sha)}: ${s.reason}`).join('; ');
+const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`;
+
+/**
+ * Which candidate (firstParentLine, newest first) to install: the newest one that isn't held and whose checks are
+ * all green (evaluateChecks). One check-run call per commit, CHECKS_SPACING_MS apart, stopping at the first green
+ * one; an older commit's final red verdict is reused for VERDICT_TTL_MS (deps.verdicts/saveVerdicts, optional), so a
+ * long red streak doesn't spend the API's hourly limit (the tip is always asked). A pending commit, or one GitHub
+ * gave no answer for, stops the scan to wait for it, until it has been on main pendingWaitMs; after that it is
+ * passed over for an older one. Returns { chosen, skipped } | { wait, reason, skipped } | { none: true, skipped },
+ * skipped being the newer commits passed over: [{ sha, reason, held?, pending? }].
+ */
+async function chooseCommit(deps, cfg, api, cands, held) {
+  const now = deps.now();
+  const waitMs = pendingWaitMs(cfg);
+  const memo = (typeof deps.verdicts === 'function' && deps.verdicts()) || {};
+  const kept = {};
+  for (const [sha, v] of Object.entries(memo)) if (v && typeof v.reason === 'string' && now - Date.parse(v.at) < VERDICT_TTL_MS) kept[sha] = v;
+  let changed = Object.keys(kept).length !== Object.keys(memo).length;
+  const skipped = [];
+  let calls = 0;
+  let out = null;
+  for (let i = 0; i < cands.length && !out; i++) {
+    const c = cands[i];
+    let v;
+    if (held && held.sha === c.sha && !(deps.configChangedAt() > Date.parse(held.at))) v = { ok: false, final: true, held: true, reason: heldReason(held) };
+    else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
+    else {
+      if (calls++) await deps.sleep(CHECKS_SPACING_MS);
+      const data = await deps.fetchJson(`${api}/commits/${c.sha}/check-runs?per_page=100`);
+      v = data ? evaluateChecks(data.check_runs, cfg.required_checks) : { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
+      if (!v.ok && v.final && i > 0) {
+        kept[c.sha] = { reason: v.reason, at: new Date(now).toISOString() };
+        changed = true;
+      }
+    }
+    if (v.ok) {
+      out = { chosen: c, skipped };
+      break;
+    }
+    let pending = false;
+    if (!v.final) {
+      const landed = Date.parse(c.date || '');
+      if (v.noAnswer || !(now - landed >= waitMs)) {
+        out = { wait: c, reason: v.reason, skipped };
+        break;
+      }
+      pending = true;
+      v = { ...v, reason: `${v.reason}, still ${Math.round(waitMs / 60_000)}+ minutes after it landed (pending_wait_minutes)` };
+    }
+    skipped.push({ sha: c.sha, reason: v.reason, ...(v.held ? { held: true } : {}), ...(pending ? { pending: true } : {}) });
+  }
+  if (changed && typeof deps.saveVerdicts === 'function') {
+    try {
+      deps.saveVerdicts(kept);
+    } catch {
+      // the memo only saves API calls
+    }
+  }
+  return out || { none: true, skipped };
 }
 
 const GREEN = new Set(['success', 'neutral', 'skipped']);
@@ -471,26 +584,40 @@ async function update(deps, cfg) {
   }
   // A commit that was rolled back is never retried by itself: only a newer commit, or the owner turning
   // updates off and on again after the rollback (updates.json written later), releases it.
+  // (On main, a held commit is passed over for an older one; see chooseCommit.)
   const held = deps.held();
-  if (held && held.sha === head && !(deps.configChangedAt() > Date.parse(held.at))) {
-    return deps.note('held', head, `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`, true);
-  }
   const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
-  // The commit whose checks count: the release's main commit, or main's newest commit itself.
-  let checked = head;
+  // On main: the newer commits passed over for the one installed, and why.
+  let skipped = [];
   if (release) {
+    if (held && held.sha === head && !(deps.configChangedAt() > Date.parse(held.at))) return deps.note('held', head, heldReason(held), true);
+    // The commit whose checks count: the main commit the release was cut from.
     const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
     if (!v.ok) return deps.note('refused', head, v.reason, true);
-    checked = v.base;
+    const checks = evaluateChecks(((await deps.fetchJson(`${api}/commits/${v.base}/check-runs?per_page=100`)) || {}).check_runs, cfg.required_checks);
+    if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
-    const ff = fastForward(current ? await deps.fetchJson(`${api}/compare/${current}...${head}`) : { status: 'ahead', behind_by: 0, ahead_by: 0 });
+    if (!Array.isArray(cfg.required_checks) || cfg.required_checks.length === 0) return deps.note('refused', head, 'no required checks configured in updates.json', true);
+    const cmp = current ? await deps.fetchJson(`${api}/compare/${current}...${head}`) : { status: 'ahead', behind_by: 0, ahead_by: 0 };
+    const ff = fastForward(cmp);
     if (!ff.ok) return deps.note('refused', head, ff.reason, true);
+    // The newest commit on main's first-parent line, back to the installed one, whose checks are all green.
+    const pick = await chooseCommit(deps, cfg, api, firstParentLine(cmp, current, head, lookbackOf(cfg)), held);
+    skipped = pick.skipped;
+    if (pick.wait) return deps.note('waiting', pick.wait.sha, skipped.length ? `${pick.reason}; newer commits skipped: ${skippedText(skipped)}` : pick.reason, false);
+    if (pick.none) {
+      const tip = skipped[0];
+      const event = tip.held ? 'held' : tip.pending ? 'waiting' : 'refused';
+      return deps.note(event, head, skipped.length === 1 ? tip.reason : `nothing to install: ${skippedText(skipped)}`, event !== 'waiting');
+    }
+    head = pick.chosen.sha;
   }
-  const checks = evaluateChecks(((await deps.fetchJson(`${api}/commits/${checked}/check-runs?per_page=100`)) || {}).check_runs, cfg.required_checks);
-  if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   const q = quiet(deps.slots(), deps.alive);
   if (!q.quiet) return deps.note('waiting', head, `not quiet: ${q.why}`, false);
 
+  if (skipped.length) {
+    deps.log({ event: 'chose', from: current, to: head, tip: skipped[0].sha, skipped, reason: `${short(head)} is the newest commit on main's first-parent line with every check green; skipped ${skippedText(skipped)}` });
+  }
   deps.log({ event: 'attempt', from: current, to: head, ...(tag ? { tag: tag.tag } : {}) });
   const [file, ...args] = buildCommand(cfg.repo_url, head);
   try {
@@ -770,6 +897,14 @@ function watchdog() {
   return import(require('node:url').pathToFileURL(f).href).catch(() => null);
 }
 
+/** Write JSON atomically: a temp file beside it, with the mode, renamed over it. */
+function saveJson(file, value, mode) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value)}\n`, { mode });
+  fs.chmodSync(tmp, mode);
+  fs.renameSync(tmp, file);
+}
+
 function realDeps() {
   const readJson = (f) => {
     try {
@@ -815,6 +950,8 @@ function realDeps() {
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
     held: () => readJson(HELD),
+    verdicts: () => readJson(VERDICTS),
+    saveVerdicts: (map) => saveJson(VERDICTS, map, 0o644),
     canaryState: () => readJson(CANARY),
     saveCanary: (state) => {
       const tmp = `${CANARY}.tmp`;
@@ -873,4 +1010,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { chooseCommit, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
