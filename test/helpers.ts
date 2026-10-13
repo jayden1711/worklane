@@ -19,10 +19,6 @@ export function exampleProject(): { dir: string; stateDir: string } {
   git('config', 'user.email', 'ada@example.com');
   git('config', 'user.name', 'Ada');
   git('config', 'commit.gpgsign', 'false');
-  // No background maintenance or auto-gc: a detached `git maintenance` run adds and removes .git/objects/maintenance.lock
-  // while a test walks the tree (chmod -R failed on main: the lock vanished mid-walk).
-  git('config', 'maintenance.auto', 'false');
-  git('config', 'gc.auto', '0');
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
   return { dir, stateDir: join(base, 'state') };
