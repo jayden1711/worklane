@@ -18,12 +18,13 @@ const ci = (await import(pathToFileURL(script).href)) as {
   forceAll: (f: string) => string | null;
   runtimePath: (f: string) => string;
   sourcePath: (p: string) => string;
+  wholeRead: (dir: string) => (file: string) => readonly string[] | null;
 };
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8' }).trim();
 
 /** A repo shaped like the engine: src/ and test/ built into dist/, test/helpers.ts, docs, templates, a script. */
 const FIXTURE: Record<string, string> = {
-  'package.json': '{ "name": "fixture" }\n',
+  'package.json': '{ "name": "fixture", "files": ["dist/src", "templates"] }\n',
   'tsconfig.json': '{}\n',
   '.nvmrc': '24\n',
   '.github/workflows/ci.yml': 'name: ci\n',
@@ -34,6 +35,9 @@ const FIXTURE: Record<string, string> = {
   'src/a.ts': "import { b } from './b.js';\nexport const a = b + 1;\n",
   'src/b.ts': "// see docs/free.md, which no code reads\nexport const b = 1;\nexport const DOC = 'named.md';\n",
   'src/c.ts': 'export const c = 3;\n',
+  'src/pack.ts': "import { spawnSync } from 'node:child_process';\nimport { fileURLToPath } from 'node:url';\nconst ENGINE = fileURLToPath(new URL('../../', import.meta.url));\nexport const pack = (dir = ENGINE) => spawnSync('npm', ['pack', dir]);\n",
+  'test/orphan.ts': 'export const nobody = 1;\n',
+  'test/pack.test.ts': "import { pack } from '../src/pack.js';\npack();\n",
   'src/data.ts': "import { readFileSync } from 'node:fs';\nexport const t = () => readFileSync(new URL('../../templates/t.md', import.meta.url), 'utf8');\n",
   'test/a.test.ts': "import { a } from '../src/a.js';\nconsole.log(a);\n",
   'test/b.test.ts': "import { b } from '../src/b.js';\nconsole.log(b);\n",
@@ -76,7 +80,8 @@ const ALL = Object.keys(FIXTURE).filter((f) => f.endsWith('.test.ts')).sort();
 const append = (f: string, s = '\n// changed\n') => (dir: string) => writeFileSync(join(dir, f), readFileSync(join(dir, f), 'utf8') + s);
 
 test('the graph on the fixture: imports, the helpers\' names, built paths back to their sources, reads, the unfollowable', () => {
-  const g = buildGraph({ files: Object.keys(FIXTURE), read: (f) => FIXTURE[f]!, pathModules: ci.HELPER_PATHS, runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
+  const paths = ['package.json', 'README.md', 'src', 'templates'];
+  const g = buildGraph({ files: Object.keys(FIXTURE), read: (f) => FIXTURE[f]!, pathModules: ci.HELPER_PATHS, runtimePath: ci.runtimePath, sourcePath: ci.sourcePath, wholeRead: (f) => (f.startsWith('src/') ? paths : null) });
   const facts = (f: string) => {
     const x = g.facts.get(f)!;
     return { edges: [...x.edges].sort(), reads: [...x.reads].sort(), opaque: x.opaque, lists: x.lists };
@@ -89,14 +94,15 @@ test('the graph on the fixture: imports, the helpers\' names, built paths back t
   assert.deepEqual(facts('test/dyn.test.ts').opaque, ['unresolved import(process.env.SOME_MODULE!)']);
   assert.equal(facts('test/list.test.ts').lists, true, 'git ls-files in the root lists names: no read of every file');
   assert.deepEqual(facts('test/helpers.ts'), { edges: [], reads: [], opaque: [], lists: false }, 'described, not scanned');
+  assert.deepEqual(facts('src/pack.ts').reads, ['package.json', 'README.md', 'src', 'templates'].sort(), 'a src/ module reading its install directory reads the package\'s files');
   assert.deepEqual([...reach(g, 'test/cli.test.ts').files].sort(), ['src/a.ts', 'src/b.ts', 'src/cli.ts', 'test/cli.test.ts', 'test/helpers.ts']);
 });
 
 test('a pull request selects the tests that reach the change, and the unfollowable test; nothing else', () => {
   const f = fixture();
   try {
-    assert.deepEqual(f.change(append('src/b.ts')), ['test/a.test.ts', 'test/b.test.ts', 'test/cli.test.ts', 'test/dyn.test.ts'], 'through a.ts, and the CLI a test runs');
-    assert.deepEqual(f.change(append('templates/t.md', 'more\n')), ['test/data.test.ts', 'test/dyn.test.ts'], 'read by src/data.ts at run time');
+    assert.deepEqual(f.change(append('src/b.ts')), ['test/a.test.ts', 'test/b.test.ts', 'test/cli.test.ts', 'test/dyn.test.ts', 'test/pack.test.ts'], 'through a.ts, the CLI a test runs, and the package src/pack.ts packs');
+    assert.deepEqual(f.change(append('templates/t.md', 'more\n')), ['test/data.test.ts', 'test/dyn.test.ts', 'test/pack.test.ts'], 'read by src/data.ts at run time; in the package');
     assert.deepEqual(f.change(append('docs/x.md', 'more\n')), ['test/doc.test.ts', 'test/dyn.test.ts'], 'read by the test');
     assert.deepEqual(f.change(append('test/b.test.ts')), ['test/b.test.ts', 'test/dyn.test.ts'], 'a test file selects itself');
     assert.deepEqual(f.change(append('docs/free.md', 'more\n')), ['test/dyn.test.ts'], 'documentation nothing names or reads: only the always-run test');
@@ -110,7 +116,7 @@ test('unsure means all: a file named in a string no read reaches, a file nothing
   const f = fixture();
   try {
     assert.deepEqual(f.change(append('docs/named.md', 'more\n')), ALL, "src/b.ts names 'named.md'");
-    assert.deepEqual(f.change(append('src/c.ts')), ALL, 'imported by nothing: an entry point this can\'t place');
+    assert.deepEqual(f.change(append('test/orphan.ts')), ALL, 'imported by nothing: a module this can\'t place');
     assert.deepEqual(f.change(append('scripts/tool.mjs')), ALL);
     assert.deepEqual(f.change((d) => writeFileSync(join(d, 'scripts', 'setup.sh'), 'echo hi\n')), ALL, 'a shell script');
   } finally {
@@ -180,7 +186,7 @@ test('test/helpers.ts\'s description covers everything it imports and reads', ()
 
 test('on the engine itself: a one-test change or a doc nothing names runs a small part of the suite, a src change what imports it', () => {
   const files = git(repoRoot, 'ls-files', '--cached', '--others', '--exclude-standard').split('\n').filter(Boolean);
-  const g = buildGraph({ files, read: (f) => readFileSync(join(repoRoot, f), 'utf8'), pathModules: ci.HELPER_PATHS, runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
+  const g = buildGraph({ files, read: (f) => readFileSync(join(repoRoot, f), 'utf8'), pathModules: ci.HELPER_PATHS, runtimePath: ci.runtimePath, sourcePath: ci.sourcePath, wholeRead: ci.wholeRead(repoRoot) });
   const all = files.filter(ci.isTest);
   const plan = (...changed: string[]) => selectTests(g, changed, { isTest: ci.isTest, forceAll: ci.forceAll, added: new Set() });
   const one = plan('test/brand.test.ts');

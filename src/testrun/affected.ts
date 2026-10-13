@@ -35,6 +35,11 @@ export interface GraphOptions {
   sourcePath?: (path: string) => string;
   /** A bare import that is a package (or a builtin): not part of the repo. */
   isPackage?: (specifier: string) => boolean;
+  /**
+   * What a read of the whole repo by this file stands for, when less than everything: a module that, at run time,
+   * reads the directory it is installed in reads the package's files. Null (the default): the whole repo.
+   */
+  wholeRead?: (file: string) => readonly string[] | null;
 }
 
 export interface FileFacts {
@@ -306,6 +311,11 @@ export function buildGraph(o: GraphOptions): Graph {
       ]);
       const readPath = (p: PathBinding) => {
         const repo = source(p.path);
+        const stands = repo === '' ? o.wholeRead?.(file) : null;
+        if (stands) {
+          for (const x of stands) f.reads.add(x);
+          return;
+        }
         const asCode = p.dir ? null : asFile(repo);
         if (asCode && CODE_EXT.test(asCode)) f.edges.add(asCode);
         f.reads.add(asCode ?? repo);
