@@ -263,7 +263,7 @@ test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; 
   assert.match(d, /^USER \S+$/m);
   assert.match(d, /bootstrap\.sh --no-repo/);
   assert.doesNotMatch(d, /curl[^\n]*\|\s*(ba)?sh/, 'nothing piped into a shell');
-  const ci = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, { strategy?: { matrix?: { os?: string[] } }; steps: { run?: string }[] }> };
+  const ci = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci-slow.yml'), 'utf8')) as { jobs: Record<string, { strategy?: { matrix?: { os?: string[] } }; steps: { run?: string }[] }> };
   const job = ci.jobs.bootstrap!;
   assert.deepEqual(job.strategy?.matrix?.os, ['ubuntu-latest', 'macos-latest'], 'local mode end to end on Linux and on a Mac');
   const runs = job.steps.map((s) => s.run ?? '').join('\n');
