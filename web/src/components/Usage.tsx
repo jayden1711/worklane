@@ -68,7 +68,7 @@ export function UsageBanner({ usage, now }: { usage: UsageInfo[]; now: number })
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <span className="font-semibold text-orange">Paused on the Claude usage limit</span>
               <span className="text-ink-2">{u.instance}</span>
-              <span className="ml-auto font-mono text-[13px] tabular-nums text-ink" data-testid="usage-countdown" aria-live="off">
+              <span className="ml-auto text-[13px] font-medium tabular-nums text-ink" data-testid="usage-countdown" aria-live="off">
                 {due ? 'resuming now' : `resumes in ${countdown(p.resetAt, now)}`}
               </span>
             </div>
