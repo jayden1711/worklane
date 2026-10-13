@@ -60,6 +60,7 @@ test_run:
 - no other run's workspace: `runs/` is an empty read-only tmpfs with only this run's directory bound in;
 - a private `/tmp`, `TMPDIR` and `HOME` inside the run's directory, no devices, no new privileges;
 - an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment.
+- the command exactly as written, for bash alone. Otherwise systemd-run expands `${...}` in it itself (as `ExecStart=` does), which blanks a shell-only `${x}`. On systemd 254 and later the helper passes `--expand-environment=no`. On an older one it writes each `$` as `$$`, systemd's escape for a literal `$`.
 
 **The wipe.** After every run, pass or fail: the run's units are killed and stopped, its containers and volumes removed, and its directory deleted. The wipe then looks again and fails if anything is left.
 
