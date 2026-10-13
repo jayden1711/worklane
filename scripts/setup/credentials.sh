@@ -8,7 +8,8 @@
 #       The coordinator's GitHub identity: a GitHub App installed on only the instance's repo.
 #       Installs the App's private key for wl-<name> (0400), then verifies it by minting an
 #       installation token and checking the installation reaches exactly <owner/repo> with the
-#       permissions below.
+#       permissions below; only then writes the App into the instance's credentials.yaml (making the instance
+#       home first when it isn't there yet), through the engine's config code.
 #   bash scripts/setup/credentials.sh <name> verify-app
 #       Read-only: the same check with the key already installed (after changing the App's permissions).
 #   bash scripts/setup/credentials.sh <name> claude
@@ -94,13 +95,14 @@ case "$what" in
     say "verify as $coord: mint an installation token and list what the installation reaches"
     verify_app "$key" "$app_id" "$inst_id" "$repo"
     echo
-    creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
-    if [ -f "$creds" ]; then
-      sudo -u "$coord" sh -c 'umask 077; printf "%s\n" "version: 1" "github: { kind: app, app_id: $1, installation_id: $2, key_path: $3 }" > "$4"' _ "$app_id" "$inst_id" "$key" "$creds"
-      echo "wrote $creds (the App; agents sign in to Claude as their own user)"
-    else
-      echo "no instance home yet (run engine.sh first); then set in credentials.yaml: github: { kind: app, app_id: $app_id, installation_id: $inst_id, key_path: $key }"
+    # The instance home (engine.sh's step) when it isn't there yet, then the App entry, written by the engine's own
+    # config code as $coord: validated against the schema, the file's other settings kept. Never a hand edit.
+    if [ ! -f "$(home_of "$coord")/.local/state/worklane/instances/$name/instance.yaml" ]; then
+      say "no instance home for $name yet: making it as $coord"
+      ensure_instance_home "$name" "$repo"
     fi
+    say "write the App into $name's credentials.yaml, as $coord"
+    run_as "$coord" 'worklane instance set-github-app "$1" --app-id "$2" --installation-id "$3" --key "$4"' "$name" "$app_id" "$inst_id" "$key"
     read -rp "Delete the copy you brought to this machine ($src) now with shred? [y/N] " yn
     if [ "$yn" = y ]; then shred -u "$src" && echo "deleted $src"; else echo "kept $src; delete it yourself"; fi
     echo "Now delete the key on your other machine (the downloaded .pem). If it's ever lost, generate a new one in the App's settings."

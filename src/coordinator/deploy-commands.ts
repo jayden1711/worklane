@@ -12,6 +12,7 @@ import { mayApproveHighRisk, personOf } from '../intake/people.js';
 import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/report.js';
 import { markSeen, reportId } from '../intake/store.js';
 import { ChannelChat } from './channel-chat.js';
+import { postDeployMessage } from '../deploy-gate/post-deploy.js';
 
 /** `deploy <sha>`: the sha (7 to 40 hex), or null for anything else. */
 export function parseDeployCommand(text: string): string | null {
@@ -112,17 +113,24 @@ export abstract class DeployCommands extends ChannelChat {
     return say(got.ok ? `Moved: \`${this.d.deployGate!.branch}\` is at \`${short(asked.sha)}\` (${gate}); the host deploys it next.` : `Not moved: ${got.reason}.`);
   }
 
-  /** Every pass: the gate's moves and holds, once each, in the ops channel (tests.yaml deploy_gate.notify: ops). */
+  /**
+   * Every pass: the gate's moves and holds (tests.yaml deploy_gate.notify: ops), and every post-deploy check that
+   * didn't pass (always, while there is an ops channel), once each, in the ops channel.
+   */
   protected override async channelOutbound(cfg: IntakeConfig): Promise<void> {
     await super.channelOutbound(cfg);
     const gate = this.d.cfg.tests.deploy_gate;
     const channel = cfg.discord.ops_channel;
     const src = this.chatSource();
-    if (!this.d.deployGate || !gate || gate.notify !== 'ops' || !cfg.discord.enabled || !channel || !src) return;
+    if (!this.d.deployGate || !gate || !cfg.discord.enabled || !channel || !src) return;
     const repo = this.d.cfg.project.project.repo;
     const link = (sha: string) => `https://github.com/${repo}/commit/${sha}`;
-    for (const e of this.d.log.read(0, ['deploy_gate.moved', 'deploy_gate.held'])) {
-      if (e.type === 'deploy_gate.moved') {
+    const types = gate.notify === 'ops' ? (['deploy_gate.moved', 'deploy_gate.held', 'deploy_gate.post_deploy'] as const) : (['deploy_gate.post_deploy'] as const);
+    for (const e of this.d.log.read(0, [...types])) {
+      if (e.type === 'deploy_gate.post_deploy') {
+        const text = postDeployMessage(e.payload as EventPayload<'deploy_gate.post_deploy'>, repo, gate.branch);
+        if (text) await this.channelSend(src, `deploy-gate:post:${e.id}`, { channel }, { kind: 'notice', text });
+      } else if (e.type === 'deploy_gate.moved') {
         const p = e.payload as EventPayload<'deploy_gate.moved'>;
         const text = p.override
           ? `**Deploy override** by @${p.by}: \`${p.branch}\` moved to \`${short(p.to)}\` (${p.gate}), from ${p.from ? `\`${short(p.from)}\`` : 'nothing'}. ${link(p.to)}`

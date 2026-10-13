@@ -35,7 +35,8 @@ import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, policiesForRepo } from './instance.js';
+import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setGithubApp } from './instance.js';
+import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
@@ -56,15 +57,16 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
-  init [<repo>] [--mode local|server] [--yes] [--reset] [--instance name] [--answer id=choice]
+  init [<repo>] [--mode local|server] [--yes] [--reset] [--instance name] [--answer id=choice] [--timeout min]
                                    the guided first setup, one checklist in order: tools, Claude login,
-                                   GitHub, repo config, protection, then Discord (and Tailscale on a
-                                   server), optional. Each step is checked before the next; rerun it to
-                                   pick up where it stopped. Asks for the mode when not given. local: this
-                                   checkout (default: here), as you; server: <owner/repo>, as root, through
-                                   scripts/setup/add-project.sh. --yes installs missing tools as shown.
-                                   Run through npx (npx ${BRAND.pkg} init), local mode first installs
-                                   the engine under ~/.local, then goes on from there
+                                   GitHub, repo config, (on a server) the coordinator running, protection,
+                                   then Discord (and Tailscale on a server), optional. Each step is checked
+                                   before the next; rerun it to pick up where it stopped. Asks for the mode
+                                   when not given. local: this checkout (default: here), as you; server:
+                                   <owner/repo>, as root, through scripts/setup/add-project.sh (--timeout:
+                                   how long it waits for a GitHub click or the setup PR's merge). --yes
+                                   installs missing tools as shown. Run through npx (npx ${BRAND.pkg} init),
+                                   local mode first installs the engine under ~/.local, then goes on from there
   export [--instance name] [--out file]
                                    one file with this checkout's (or instance's) config and history (the
                                    event log, init's checklist, findings); never secrets, locks or logs
@@ -137,6 +139,11 @@ usage: ${BRAND.cli} <command> [options]
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
+  instance set-github-app <name> --app-id <n> --installation-id <n> --key <path>
+                                   point credentials.yaml at the instance's App (credentials.sh github-app runs it)
+  instance auto-config <name> [--answer <id>=<choice>]...
+                                   server mode's repo config: detect, check as the agent user, propose the setup PR
+                                   through the App; one JSON line says where it stands (checkout.sh runs it)
   app-manifest <name> <owner/repo> [--signin] [--public-url https://<host>] [--timeout <minutes>] [--ask-lines]
                                    (as root) make a GitHub App through the hub's manifest flow: prints the
                                    approve links and waits. The agent App: its key for the coordinator only,
@@ -294,13 +301,19 @@ async function main(argv: string[]): Promise<number> {
         }
         answers[a.slice(0, eq)] = a.slice(eq + 1);
       }
+      // Server mode: how long add-project waits for a GitHub click or the setup PR's merge (minutes).
+      const timeoutOpt = option(args, '--timeout');
+      if (timeoutOpt !== undefined && !/^[1-9][0-9]{0,2}$/.test(timeoutOpt)) {
+        console.error('init: --timeout is minutes, 1 to 999');
+        return 2;
+      }
       const target = args[1]?.startsWith('-') ? undefined : args[1];
       const unknown = args.slice(target ? 2 : 1);
       if (unknown.length) {
         console.error(`init: unexpected ${unknown.join(' ')}`);
         return 2;
       }
-      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: toolPrefix(), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), ...(Object.keys(answers).length ? { answers } : {}) });
+      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: toolPrefix(), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), ...(Object.keys(answers).length ? { answers } : {}), ...(timeoutOpt ? { timeout: Number(timeoutOpt) } : {}) });
     }
 
     case 'export': {
@@ -802,17 +815,25 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       };
       const mine = listInstances();
-      const name = option(args, '--instance') ?? process.env[`${BRAND.envPrefix}_INSTANCE`] ?? (mine.length === 1 ? mine[0] : undefined);
+      // --instance on the helper's line is taken by the global option parser (instanceOpt) before this sees it.
+      const name = instanceOpt ?? option(args, '--instance') ?? process.env[`${BRAND.envPrefix}_INSTANCE`] ?? (mine.length === 1 ? mine[0] : undefined);
       if (!name) return refuse(mine.length ? `this user has ${mine.length} instances; name one with --instance` : 'no instance for this user');
+      const setUp = `set its GitHub App up first (credentials.sh ${name} github-app ..., or add-project's App step)`;
       try {
         const i = loadInstanceCredentials(name);
         const g = i.credentials.github;
-        if (g.kind !== 'app') return 0; // a gh-config-dir instance authenticates through gh's own helper
+        if (g.kind !== 'app') {
+          // A gh-config-dir instance authenticates through gh's own helper; one whose gh dir isn't there has nothing
+          // (instance init's placeholder): stop here rather than let git ask for a password it can't take.
+          if (existsSync(g.path)) return 0;
+          return refuse(`instance ${name}: credentials.yaml has no GitHub App, and no gh login at ${g.path}; ${setUp}`);
+        }
         const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
         process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
         return 0;
       } catch (e) {
-        return refuse(`instance ${name}: ${(e as Error).message.split('\n')[0]}`);
+        // Every problem, not ConfigInvalid's heading (the repo config folder "is invalid:", which named the wrong thing).
+        return refuse(`instance ${name}: ${instanceFilesProblem(e)}; ${setUp}`);
       }
     }
 
@@ -899,7 +920,60 @@ async function main(argv: string[]): Promise<number> {
         if (warn) console.log(`  ${warn.replaceAll('**', '')}`);
         return scope.ok ? 0 : 1;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name>');
+      if (sub === 'set-github-app' && target) {
+        // credentials.sh github-app, after its check passed: the App entry in credentials.yaml, validated, the rest kept.
+        const [appId, installationId, key] = [Number(option(rest, '--app-id')), Number(option(rest, '--installation-id')), option(rest, '--key')];
+        if (!Number.isInteger(appId) || appId <= 0 || !Number.isInteger(installationId) || installationId <= 0 || !key?.startsWith('/')) {
+          console.error('usage: instance set-github-app <name> --app-id <n> --installation-id <n> --key <absolute path to the key>');
+          return 2;
+        }
+        const file = join(instancesDir(), target, 'credentials.yaml');
+        if (!existsSync(join(instancesDir(), target, 'instance.yaml'))) {
+          console.error(`no instance "${target}" for this user (${join(instancesDir(), target)}): \`${BRAND.cli} instance init\` first`);
+          return 1;
+        }
+        try {
+          setGithubApp(file, { appId, installationId, keyPath: key }, 'by-hand');
+        } catch (e) {
+          console.error((e as Error).message);
+          return 1;
+        }
+        console.log(`wrote ${file} (github: App ${appId}, installation ${installationId}; the rest kept)`);
+        return 0;
+      }
+      if (sub === 'setup-status' && target) {
+        // Read-only, from local files: whether the checkout has its config, and auto-config's setup PR and questions.
+        try {
+          const i = loadInstanceSetup(target);
+          const s = readServerAutoConfig(i.stateDir);
+          console.log(JSON.stringify({ config: existsSync(join(i.repo.path, BRAND.configDir, 'config.yaml')), pr: s.pr?.url ?? null, questions: s.questions.map((q) => q.id) }));
+          return 0;
+        } catch (e) {
+          console.error(`instance ${target}: ${instanceFilesProblem(e)}`);
+          return 1;
+        }
+      }
+      if (sub === 'auto-config' && target) {
+        // Server mode's repo config (src/server-auto-config.ts), as the coordinator user: one JSON line on stdout.
+        const answers: Record<string, string> = {};
+        for (let a = option(rest, '--answer'); a !== undefined; a = option(rest, '--answer')) {
+          const eq = a.indexOf('=');
+          if (eq < 1) {
+            console.error(`instance auto-config: --answer takes <id>=<choice>, not "${a}"`);
+            return 2;
+          }
+          answers[a.slice(0, eq)] = a.slice(eq + 1);
+        }
+        let line: ServerAutoConfigLine;
+        try {
+          line = await serverAutoConfig(target, Object.keys(answers).length ? { answers } : {});
+        } catch (e) {
+          line = { kind: 'failed', detail: `instance ${target}: ${instanceFilesProblem(e)}`, pr: null, questions: [] };
+        }
+        console.log(JSON.stringify(line));
+        return line.kind === 'failed' ? 1 : 0;
+      }
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance auto-config <name> [--answer <id>=<choice>]...');
       return 2;
     }
 

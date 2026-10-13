@@ -4,7 +4,7 @@ Some hosts deploy every commit on the default branch to production as soon as it
 
 With the gate on, production deploys from a separate branch (`deploy`), and only the coordinator moves it. It moves `deploy` forward only to default-branch commits whose gate tiers all passed on that exact commit. Staging can stay on `main` and keep deploying every merge.
 
-The code is in `src/deploy-gate/`. Its Discord side (the ops posts and the owner's override) is in `src/coordinator/deploy-commands.ts`.
+The code is in `src/deploy-gate/`. After each move, an optional [post-deploy check](#post-deploy-check) smoke-tests production and rolls the host back when it fails. Its Discord side (the ops posts and the owner's override) is in `src/coordinator/deploy-commands.ts`.
 
 ## How it works
 
@@ -56,6 +56,7 @@ The coordinator also refuses a gate on the default branch. The gate needs the te
   - `deploy_gate.held`
   - `deploy_gate.refused`
   - `deploy_gate.override`
+  - `deploy_gate.post_deploy` (the post-deploy check, below)
 - **Discord ops channel** (`notify: ops`, with intake.yaml `discord.ops_channel`): one post per move and per hold. The incident gets its own post through the watchdog.
 
 ## An owner's override: `deploy <sha>`
@@ -123,6 +124,116 @@ Where this was checked: the mutation, the query and their fields are in Railway'
 
    `meta.commitHash` should be the merge commit. `meta` is untyped JSON in the schema; the Railway CLI reads `commitHash` from it. GitHub's deployments show the same: `gh api repos/<repo>/deployments --jq '.[] | [.sha, .environment, .created_at] | @tsv' | head`.
 6. A red merge: `deploy` stays put, the Machine page shows the held commit and why, and ops has a "Deploy held" post.
+
+## Post-deploy check
+
+The gate decides what `deploy` may move to. The post-deploy check looks at what production does once the host has deployed it. After each move of `deploy` (by the gate or an override), the coordinator:
+
+1. **Waits for the host's deploy of exactly that commit.** It asks the host about every 30 s until each configured production service's latest deployment has `meta.commitHash` equal to the commit and status `SUCCESS`.
+   - GitHub's deployments of the commit by `railway-app[bot]` in an environment containing `github_environment` are the cross-check, recorded with the result. Without a host token, they are the only signal.
+   - A service's deployment of the commit that ends `FAILED`, `CRASHED`, `SKIPPED` or `REMOVED`: "the deploy failed". Nothing is smoke-tested or rolled back.
+   - Not deployed within `wait_for_deploy_s`: "not deployed", an amber incident, an ops post. Nothing is smoke-tested or rolled back.
+2. **Smoke-tests production.** Each check is one `GET` to its URL with a `timeout_s` timeout and one retry. It never sends a cookie, a token or any credential, never follows a redirect, and never requests anything off `origin`. A check passes when the status is `expect_status` and, if set, the body contains `expect_text`.
+3. **Every check passed:** nothing else happens. The result is recorded, and an earlier post-deploy incident resolves.
+4. **A check failed:**
+   - **Rollback.** Each configured service is rolled back to its newest deployment of the previous `deploy` commit that served production (status `SUCCESS`, `REMOVED` or `SLEEPING`). If the commit `deploy` moved from had itself failed this check, the target is the last commit that passed. The coordinator uses the host's `deploymentRollback` when the deployment offers it (`canRollback`), and otherwise `deploymentRedeploy` of that deployment.
+   - **Nothing moves on git.** `deploy` stays where it is, and the commit is marked as failed in production: the gate never moves `deploy` to it again, and an owner's `deploy <sha>` is refused for it. Fix forward on the default branch; the next green commit moves `deploy` on, and the host deploys that.
+   - **A red incident** ("Production failed its post-deploy check").
+   - **An ops post** with each failing check, its status, a short snippet of its body, and what was rolled back per service. The snippet is redacted: secret-shaped strings, cookie, session and token values are removed. No response header is ever kept.
+   - **No host token stored:** the same, except nothing is rolled back. The post says the rollback needs the token.
+
+Post-deploy failures are posted to `discord.ops_channel` even with `notify: off`. A pass is never posted.
+
+### Configuration
+
+It is off by default. Add `post_deploy` to `deploy_gate`:
+
+```yaml
+deploy_gate:
+  branch: deploy
+  tiers: [chain, suite]
+  post_deploy:
+    host: railway
+    project: <PROJECT_ID>
+    environment: <PRODUCTION_ENV_ID>
+    services:                      # every production service deployed from `deploy`
+      - { name: web, id: <SERVICE_ID> }
+      - { name: worker, id: <SERVICE_ID> }
+    origin: https://app.example.com
+    checks:                        # must cover health, the sign-in page and one read-only API call
+      - { name: health, kind: health, url: "https://app.example.com/api/health", expect_status: 200 }
+      - { name: sign-in, kind: sign_in, url: "https://app.example.com/sign-in", expect_status: 200, expect_text: "Sign in" }
+      - { name: status, kind: api, url: "https://app.example.com/api/status", expect_status: 200 }
+    wait_for_deploy_s: 1200        # default 1200 (60 to 7200)
+    timeout_s: 10                  # each request; default 10 (1 to 30)
+    github_environment: production # default
+```
+
+The schema refuses:
+- a check URL that isn't on `origin` (same scheme, host and port), or that carries credentials;
+- an `origin` with a path, a query or credentials, or one on `http` other than `localhost`;
+- a `method` other than `GET`;
+- a set of checks without a `health`, a `sign_in` and an `api` check, or a check name used twice;
+- ids that aren't Railway ids.
+
+The results are `deploy_gate.post_deploy` events: `passed`, `failed`, `timed_out` or `deploy_failed`, with each check, the rollback and the GitHub cross-check.
+
+### The host token
+
+Rolling back needs a Railway account or workspace token. It is stored like the instance's other secrets: a file only the coordinator user can read (0400), in the instance's secrets directory, under the name `railway-token`. It is read when a call is made, and is never logged, never in an event, never on Discord.
+
+To store it:
+1. With `post_deploy` on and no token stored, the coordinator raises a setup step: "The host's API token, for the post-deploy rollback". Discord says only that a setup step needs you, with no detail.
+2. Open it from the dashboard's **Setup console**, or reply `link` in its Discord thread for a one-time link by DM (docs/intake.md, 2.1.5).
+3. Paste the token in its password box. Only the owner can, and it is not shown again.
+
+The next check uses it; no restart is needed. To replace it, delete the file and restart the coordinator: it asks again.
+
+### Commands for the owner
+
+Use these with the same token, kept in your shell only (`Authorization: Bearer $RAILWAY_TOKEN`).
+
+List a production service's latest deployments, with their commit and whether they can be rolled back to:
+
+```sh
+curl -s https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"query($i:DeploymentListInput!){deployments(input:$i,first:5){edges{node{id status createdAt canRollback meta}}}}","variables":{"i":{"projectId":"<PROJECT_ID>","environmentId":"<PRODUCTION_ENV_ID>","serviceId":"<SERVICE_ID>"}}}'
+```
+
+Roll a service back to one of them by hand (the id from the list):
+
+```sh
+curl -s https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"mutation($id:String!){deploymentRollback(id:$id)}","variables":{"id":"<DEPLOYMENT_ID>"}}'
+```
+
+If that deployment has `canRollback: false`, redeploy it instead:
+
+```sh
+curl -s https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $RAILWAY_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"mutation($id:String!){deploymentRedeploy(id:$id){id status}}","variables":{"id":"<DEPLOYMENT_ID>"}}'
+```
+
+### What is verified
+
+These were read from Railway's public GraphQL schema by unauthenticated introspection:
+- `deployments(input: DeploymentListInput!, first: Int)` with `projectId`, `environmentId` and `serviceId`;
+- `Deployment.id`, `status`, `createdAt`, `canRollback` and `meta` (the scalar `DeploymentMeta`, untyped JSON);
+- the `DeploymentStatus` values;
+- `deploymentRollback(id: String!): Boolean!` ("Rolls back to a deployment");
+- `deploymentRedeploy(id: String!, usePreviousImageTag: Boolean): Deployment!`.
+
+These have not been run against a real project, so they are unverified:
+- that `meta.commitHash` holds the commit (the Railway CLI reads it there);
+- that the list comes newest first (the coordinator sorts by `createdAt` anyway);
+- that a replaced deployment shows as `REMOVED` and can still be rolled back to;
+- that an account or workspace token may run the two mutations;
+- the environment name Railway gives its GitHub deployments (hence `github_environment`).
+
+Before relying on it, run the list command for each production service, and check that `meta.commitHash` is there and the previous deployment says `canRollback: true`.
 
 ## Limits (GitHub Free)
 
