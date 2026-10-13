@@ -65,6 +65,8 @@ export interface Backlog {
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
   /** A pull request's submitted reviews, oldest first. */
   reviews(n: number): Promise<PrReview[]>;
+  /** A pull request's inline review comments (on lines of its diff), oldest first. Absent: this tracker has none. */
+  reviewComments?(n: number): Promise<PrReviewComment[]>;
   /** Who closed an issue or pull request (null: open, or unknown). */
   closedBy(n: number): Promise<string | null>;
 }
@@ -94,6 +96,17 @@ export interface PrReview {
   author: string;
   state: string;
   body: string;
+  at: string;
+}
+
+/** An inline review comment: on `path` at `line` (null: the line is gone from the diff), part of review `review`. */
+export interface PrReviewComment {
+  id: number;
+  review: number | null;
+  author: string;
+  body: string;
+  path: string;
+  line: number | null;
   at: string;
 }
 

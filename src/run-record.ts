@@ -59,6 +59,10 @@ export interface RunRecord {
   truncated: boolean;
   /** The longest run of byte-identical tool calls the stuck-run guard saw (absent: the guard was off, or no call repeated). */
   stuck?: { repeats: number; failures: number; tool: string; input: string };
+  /** The claude session this run was (absent: it reported none, or an older record): a later fix run resumes it. */
+  sessionId?: string;
+  /** The earlier session this run continued (claude --resume). */
+  resumed?: string;
 }
 
 export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'startedAt' | 'endedAt' | 'reason' | 'costUsd' | 'turns' | 'files' | 'truncated'> & { commands: number; failedCommands: number };
@@ -115,11 +119,11 @@ export class RunRecorder {
 
   constructor(
     private stateDir: string,
-    o: { role: string; model: string; cwd: string; taskFile?: string; issue?: number },
+    o: { role: string; model: string; cwd: string; taskFile?: string; issue?: number; resumed?: string },
     now = new Date(),
   ) {
     const id = `${now.toISOString().replace(/[:.]/g, '-')}-${o.role.replace(/[^A-Za-z0-9_-]/g, '_')}-${randomBytes(3).toString('hex')}`;
-    this.rec = { v: 1, id, issue: o.issue ?? runIssue(o.cwd, o.taskFile), role: o.role, model: o.model, startedAt: now.toISOString(), endedAt: null, reason: null, costUsd: null, turns: null, steps: [], files: [], otherTools: 0, final: '', truncated: false };
+    this.rec = { v: 1, id, issue: o.issue ?? runIssue(o.cwd, o.taskFile), role: o.role, model: o.model, startedAt: now.toISOString(), endedAt: null, reason: null, costUsd: null, turns: null, steps: [], files: [], otherTools: 0, final: '', truncated: false, ...(o.resumed ? { resumed: o.resumed } : {}) };
     this.cwd = o.cwd;
   }
 
@@ -184,9 +188,10 @@ export class RunRecorder {
   }
 
   /** Write the record when the run ends; keeps only the newest KEEP_RUNS. Never throws. */
-  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string; stuck?: RunRecord['stuck'] }, now = new Date()): string | null {
+  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string; stuck?: RunRecord['stuck']; sessionId?: string }, now = new Date()): string | null {
     try {
       Object.assign(this.rec, { endedAt: now.toISOString(), reason: end.reason, costUsd: end.costUsd, turns: end.turns, model: end.model });
+      if (end.sessionId) this.rec.sessionId = end.sessionId;
       if (end.stuck && end.stuck.repeats > 1) this.rec.stuck = { ...end.stuck };
       // The session's own result text is its final message; else the last thing it said.
       if (end.final?.trim()) this.rec.final = clip(end.final, MAX_FINAL);

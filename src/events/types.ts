@@ -46,6 +46,13 @@ export const EventSchemas = {
     role: z.string(),
     reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped', 'stuck']),
     detail: z.string(),
+    /** The claude session the run was: a fix run on the issue's PR resumes the latest one (src/coordinator/fix-runs.ts). */
+    session: z.string().max(200).optional(),
+    /**
+     * A fix run's session: `resumed` the session that wrote the change (`session`), or `fresh` (a new session; `why`:
+     * none was stored, or resuming `session` failed, e.g. it is gone).
+     */
+    resume: z.strictObject({ outcome: z.enum(['resumed', 'fresh']), session: z.string().max(200).nullable(), why: z.string() }).optional(),
   }),
   /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
   'run.lock_waited': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), wait_ms: z.number().int().nonnegative() }),
@@ -369,8 +376,13 @@ export const EventSchemas = {
   'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),
-  /** A CI fix run on a PR whose required check failed at `head`; `lease` is its claim. */
-  'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
+  /**
+   * A fix run on a PR at `head`: a required check failed, or (`reviews`, their ids) a writer's review asked for
+   * changes or commented. Both count toward roles.ci_repair.max_fixes_per_pr. `lease` is its claim.
+   */
+  'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha, reviews: z.array(z.number().int().positive()).optional() }),
+  /** Writers' reviews on a harness PR that get no fix run (the cap, runs off, someone else's push): recorded once, the owner told why. */
+  'review_fix.declined': z.strictObject({ issue, number: z.number().int().positive(), reviews: z.array(z.number().int().positive()), reason: z.string() }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
   'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted', 'claim_lost']), head: sha.nullable(), detail: z.string() }),
   /** An eval of instructions the change touches, base vs head (base null: new instructions). `error`: it couldn't run. */

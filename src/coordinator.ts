@@ -21,7 +21,7 @@ import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
-import { type RunResult } from './runner.js';
+import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
@@ -109,6 +109,7 @@ export class Coordinator extends PrHygiene {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
+    await step('review fixes', () => this.watchReviewFixes(), undefined);
     await step('pr hygiene', () => this.checkPrHygiene(), null);
     await step('test runs', () => this.d.prTestRuns?.tick(), undefined);
     await step('people-prs', () => this.batchPeoplesPrs(), undefined);
@@ -928,7 +929,8 @@ export class Coordinator extends PrHygiene {
     });
     void pid;
     this.cost(n, 'worker', r);
-    this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    // Its session is kept: a fix run on this issue's PR resumes it (src/coordinator/fix-runs.ts).
+    this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000), ...(r.sessionId && SESSION_ID.test(r.sessionId) ? { session: r.sessionId } : {}) });
     const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown; intent?: string; risk_class?: RiskClass };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
