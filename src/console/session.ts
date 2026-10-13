@@ -14,6 +14,10 @@ export interface ConsoleSession {
   authenticatedAt: number | null;
   /** Whether this write request carries the session's CSRF token (#197). Reads ignore it. */
   csrfOk: boolean;
+  /** The owner's break-glass (the token on this machine, no person named); false or unset: a person's session. */
+  breakGlass?: boolean;
+  /** Whether the hub identified this request's Tailscale device as an allowed console device (writes only). */
+  deviceOk?: boolean;
 }
 
 /** The session behind a request, for one instance; null when there is none. */

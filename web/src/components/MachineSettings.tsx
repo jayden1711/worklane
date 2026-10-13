@@ -24,6 +24,12 @@ export interface MachineData {
   owner: string;
   user: string;
   canChange: boolean;
+  /** The machine's owners: only they (or the break-glass) may change these; absent from older servers. */
+  machineOwners?: string[];
+  /** Whether this person is one of them; absent from older servers. */
+  machineOwner?: boolean;
+  /** What a change needs besides (a fresh sign-in, an allowed device); absent from older servers. */
+  needs?: string | null;
   helper: string;
   slots: { cap: number; running: number; min: number; max: number };
   /** The machine's test-run slot cap; absent from older servers. */
@@ -134,7 +140,21 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
       </div>
       {!data.canChange && (
         <div className="rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink-2 shadow-hairline" data-testid="machine-read-only">
-          Only the owner, @{data.owner}, can change these; you are @{data.user}.
+          {data.machineOwners ? (
+            <>
+              Read-only: only the machine's owners can change these; you are @{data.user}.{' '}
+              <span data-testid="machine-owners">machine owners: {data.machineOwners.length ? data.machineOwners.map((o) => `@${o}`).join(', ') : 'none set'}</span>
+            </>
+          ) : (
+            <>
+              Only the owner, @{data.owner}, can change these; you are @{data.user}.
+            </>
+          )}
+        </div>
+      )}
+      {data.canChange && data.needs && (
+        <div className="text-[12px] text-ink-3" data-testid="machine-needs">
+          A change needs {data.needs}.
         </div>
       )}
       <div className="overflow-hidden rounded-card bg-surface shadow-card">
