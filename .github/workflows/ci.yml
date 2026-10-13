@@ -135,6 +135,21 @@ jobs:
           n="$(nproc)"
           sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
           tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
+          # An older install's Docker unit, still running: install must restart it into the new layout by itself.
+          u=/etc/systemd/system/worklane-test-ci-docker.service
+          sudo sed -i -e '/^DelegateSubgroup=/d' -e 's/^Delegate=.*/Delegate=yes/' "$u"
+          sudo systemctl daemon-reload && sudo systemctl restart worklane-test-ci-docker.service
+          if sudo bash scripts/setup/test-user.sh check ci > "$RUNNER_TEMP/old.log"; then echo "check passed on the old layout" >&2; exit 1; fi
+          grep -q '^FAIL Docker' "$RUNNER_TEMP/old.log"
+          # With a run in progress, install refuses to restart Docker under it, and says why.
+          sudo sed -i -e '/^DelegateSubgroup=/d' "$u"; sudo install -d -o root -g root -m 0700 /var/lib/worklane-test/ci/runs/fast-inprogress
+          if sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G > "$RUNNER_TEMP/busy.log" 2>&1; then echo "install restarted Docker under a run" >&2; exit 1; fi
+          grep -q 'test runs of ci are in progress' "$RUNNER_TEMP/busy.log"
+          sudo rmdir /var/lib/worklane-test/ci/runs/fast-inprogress
+          # No run in progress: the re-run restarts Docker and check passes, with no manual restart.
+          sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/reinstall.log"
+          grep -q '^restarted worklane-test-ci-docker.service' "$RUNNER_TEMP/reinstall.log"
+          tail -n 5 "$RUNNER_TEMP/reinstall.log" | grep -qx 'OK: all checks passed'
           # A second instance's test user, then both checks again: each must be shut out of the other's state.
           sudo bash scripts/setup/test-user.sh install ci2 --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install2.log"
           tail -n 5 "$RUNNER_TEMP/install2.log" | grep -qx 'OK: all checks passed'

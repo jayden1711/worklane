@@ -175,9 +175,12 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 need_tools() { local t; for t in "$@"; do command -v "$t" >/dev/null 2>&1 || { echo "missing tool: $t (PATH=$PATH)" >&2; exit 1; }; done; }
 need_tools systemctl getent install id stat
 
+# put <file> <generator>: writes /etc/systemd/system/<file>; put_changed=1 when its content differs from before.
+put_changed=0
 put() {
   local file="$1" tmp="/etc/systemd/system/.$1.tmp" check
   "$2" > "$tmp"; chmod 0644 "$tmp"
+  if cmp -s "$tmp" "/etc/systemd/system/$file"; then put_changed=0; else put_changed=1; fi
   check="$(mktemp -d)/$file"; cp "$tmp" "$check"
   if ! systemd-analyze verify "$check"; then rm -f "$tmp" "$check"; echo "$file invalid; nothing installed" >&2; exit 1; fi
   rm -f "$check"
@@ -212,6 +215,22 @@ access_checks() {
 
 # Docker's daemon runs in its unit's subgroup "daemon", and the unit's cgroup has the controllers delegated, so each
 # container gets a cgroup of its own beside it, inside worklane-test.slice.
+# Is the running daemon in the delegated layout (its main process in <unit>/daemon)? Quiet; for install.
+docker_layout_ok() {
+  local cg pid
+  cg="$(systemctl show "$docker_unit_name" -p ControlGroup --value 2>/dev/null || true)"
+  pid="$(systemctl show "$docker_unit_name" -p MainPID --value 2>/dev/null || true)"
+  [ -n "$cg" ] && [ "${pid:-0}" != 0 ] && [ "$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null)" = "$cg/daemon" ]
+}
+
+# This instance's test runs in progress: their units (worklane-test-<name>-<id>-<pid>.service, not the Docker unit)
+# and their directories (wipe removes both). One per line, empty when there are none.
+active_runs() {
+  systemctl list-units --plain --no-legend --state=active,activating,deactivating "worklane-test-$name-*.service" 2>/dev/null \
+    | awk -v d="$docker_unit_name" '$1 != d {print "unit " $1}'
+  find "$root/runs" -mindepth 1 -maxdepth 1 -type d -printf 'run %f\n' 2>/dev/null || true
+}
+
 docker_cgroup_check() {
   local cg pid own ctl c missing=""
   cg="$(systemctl show "$docker_unit_name" -p ControlGroup --value 2>/dev/null || true)"
@@ -324,7 +343,21 @@ install_cmd() {
   say "units: worklane-test.slice (CPUs $cpus, CPUQuota $((ncpus * 100))%, MemoryMax $memory_max, CPU weight $cpu_weight), $docker_unit_name"
   put worklane-test.slice slice
   put "$docker_unit_name" docker_unit
+  docker_changed="$put_changed"
   systemctl daemon-reload
+  # A running daemon keeps its old settings (and cgroup layout) until it restarts: restart it when its unit changed
+  # or it isn't in the delegated layout, but never under a run in progress.
+  if systemctl is-active -q "$docker_unit_name" && { [ "$docker_changed" = 1 ] || ! docker_layout_ok; }; then
+    busy="$(active_runs)"
+    if [ -n "$busy" ]; then
+      echo "$docker_unit_name needs a restart for its new settings, but test runs of $name are in progress:" >&2
+      printf '%s\n' "$busy" | sed 's/^/  /' >&2
+      echo "let them finish (or stop the coordinator and wipe them: $helper $name wipe <id>), then run install again" >&2
+      exit 1
+    fi
+    systemctl restart "$docker_unit_name"
+    echo "restarted $docker_unit_name (its unit changed or it ran in the old cgroup layout)"
+  fi
   systemctl enable --now "$docker_unit_name"
   for _ in $(seq 60); do [ -S "/run/worklane-test-$name-docker/docker.sock" ] && break; sleep 1; done
   systemctl is-active -q "$docker_unit_name" || { echo "$docker_unit_name didn't start; see: journalctl -u $docker_unit_name -n 50" >&2; systemctl --no-pager status "$docker_unit_name" >&2 || true; exit 1; }
