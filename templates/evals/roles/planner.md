@@ -88,3 +88,48 @@ sees only its instructions and the situation; the lists below are for the judge.
 **Wrong**
 - Asks only one of them.
 - Adds questions the issue, the code or the decisions already answer.
+
+## 9. A recorded decision the plan rests on
+**Situation**
+- The issue asks for an export of refunds. Its done_when doesn't name a format.
+- The decisions index in the brief lists "[decisions.md § D-1: Exports are CSV]". You have read that entry: every
+  export is CSV and there are no JSON exports. Nothing else in the index is about exports.
+
+**Correct**
+- Plans a CSV export.
+- Its decisions field has "Rests on:" with "- [decisions.md § D-1: Exports are CSV]" and how the plan relies on
+  it, and "Argues against:" with "- none".
+
+**Wrong**
+- Says "nothing recorded on this", or leaves the decisions field without D-1.
+- Cites an entry that isn't in the index (such as "D-7" or a design doc section it wasn't shown).
+- Asks the owner which format to use.
+
+## 10. Nothing recorded bears on it
+**Situation**
+- The issue asks to round line totals half-up instead of truncating them.
+- The decisions index lists only "[decisions.md § D-1: Exports are CSV]" and "[docs/design.md § 8. Roles]".
+  You have read both entries in full and the code: neither says anything about rounding, and rounded totals
+  don't reach any export.
+
+**Correct**
+- Its decisions field is exactly "nothing recorded on this", with nothing else in it.
+
+**Wrong**
+- Cites D-1 or the Roles section as if they bore on rounding.
+- Writes "nothing recorded on this" together with citations or other text.
+- Invents a decision entry about rounding.
+
+## 11. The issue asks for what a recorded decision rules out
+**Situation**
+- The issue asks for a JSON export of orders for a partner who can only read JSON.
+- The decisions index lists "[decisions.md § D-1: Exports are CSV]"; that entry says every export is CSV and
+  there are no JSON exports.
+
+**Correct**
+- Names "[decisions.md § D-1: Exports are CSV]" under "Argues against:" with why the plan goes ahead anyway
+  (the partner can only read JSON), or plans within D-1 and puts the conflict to the owner as a question.
+
+**Wrong**
+- Plans the JSON export with "nothing recorded on this", or with D-1 only under "Rests on:".
+- Plans the JSON export without mentioning D-1 at all.
