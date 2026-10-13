@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process';
 import { redact } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
-import type { Backlog, CommitCheck, Issue, PrReview, PullRequest } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PullRequest, RerunJobs } from './types.js';
 
 export class GitHubError extends Error {
   constructor(
@@ -222,6 +222,39 @@ export class GitHubBacklog implements Backlog {
       if (e instanceof GitHubError && (e.status === 404 || e.status === 410)) return { ok: false, why: 'not_found' };
       throw e;
     }
+  }
+
+  async rerunFailedJobs(checkRunIds: number[]): Promise<Map<number, RerunJobs>> {
+    const out = new Map<number, RerunJobs>();
+    const refused = (e: unknown): RerunJobs | null => {
+      if (e instanceof GitHubError && e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited') return { ok: false, why: 'forbidden', detail: e.message.slice(0, 300) };
+      if (e instanceof GitHubError && (e.status === 404 || e.status === 410)) return { ok: false, why: 'not_found', detail: e.message.slice(0, 300) };
+      return null;
+    };
+    // A job's workflow run (GET /actions/jobs/{id}), then each run's failed jobs re-run once.
+    const runs = new Map<number, number[]>();
+    for (const id of new Set(checkRunIds)) {
+      try {
+        const job = await this.req<{ run_id: number }>('GET', `/repos/${this.repo}/actions/jobs/${id}`);
+        runs.set(job.run_id, [...(runs.get(job.run_id) ?? []), id]);
+      } catch (e) {
+        const r = refused(e);
+        if (!r) throw e;
+        out.set(id, r);
+      }
+    }
+    for (const [run, ids] of runs) {
+      let r: RerunJobs = { ok: true, run };
+      try {
+        await this.req<unknown>('POST', `/repos/${this.repo}/actions/runs/${run}/rerun-failed-jobs`, {});
+      } catch (e) {
+        const x = refused(e);
+        if (!x) throw e;
+        r = x;
+      }
+      for (const id of ids) out.set(id, r);
+    }
+    return out;
   }
 
   async markReady(n: number) {
