@@ -1,4 +1,4 @@
-// Model routing, wired: the model each coordinator run uses, from the repo's agents.yaml model_routing over the
+// Model routing, wired: the model each coordinator run uses, from the repo's agents.yaml routing over the
 // defaults (src/model-routing.ts), and the instance's model_cap applied to every run the coordinator starts.
 import type { Config } from '../config/load.js';
 import type { InstanceSettings } from '../instance.js';
@@ -23,8 +23,8 @@ export function cappedModel(model: string, settings: InstanceSettings | undefine
 
 /** The routing with every open-model setting dropped: what each kind of run uses when no provider takes it. */
 function anthropicRouting(cfg: Config) {
-  const r = Object.fromEntries(Object.entries(cfg.agents.model_routing ?? {}).filter(([, v]) => typeof v !== 'string' || !providerOf(v)));
-  return modelRouting({ roles: cfg.agents.roles, model_routing: r });
+  const r = Object.fromEntries(Object.entries(cfg.agents.routing).filter(([, v]) => typeof v !== 'string' || !providerOf(v)));
+  return modelRouting({ roles: cfg.agents.roles, routing: r });
 }
 
 /**

@@ -4,6 +4,7 @@ import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
 import type { RoutedRun } from '../model-routing.js';
+import { ROUTING_ALIASES, type Routing, type RoutingKey } from '../routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
@@ -235,6 +236,25 @@ export const RoleNames = [
   'gardener',
 ] as const;
 
+const levels = z.array(z.enum(['L0', 'L1', 'L2', 'L3']));
+const modelRoutingShape = {
+  build: model.optional(),
+  build_high_risk: model.optional(),
+  high_risk_labels: z.array(z.string().min(1)).optional(),
+  escalate_after: z.number().int().min(0).max(10).optional(),
+  planner: model.optional(),
+  research: model.optional(),
+  intake_triage: model.optional(),
+  intake_replier: model.optional(),
+  intake_summary: model.optional(),
+  intake_thread: model.optional(),
+  stage_judge: model.optional(),
+  eval_answer: model.optional(),
+};
+const routingShape = { ...modelRoutingShape, eval_cheap: model.optional(), eval_cheap_levels: levels.optional(), eval_escalate: z.boolean().optional() } satisfies Record<RoutingKey, z.ZodType>;
+// INVARIANT: the routing keys that name a model for a routed run (an open model may be allowed there).
+const ROUTED_MODEL_KEYS = ['build', 'build_high_risk', 'planner', 'research', 'intake_triage', 'intake_replier', 'intake_summary', 'intake_thread', 'stage_judge', 'eval_answer'] as const satisfies readonly RoutingKey[];
+
 export const AgentsConfig = z
   .strictObject({
     /** No longer used (trust stages were removed); accepted so existing configs still load. */
@@ -243,31 +263,12 @@ export const AgentsConfig = z
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
     /**
-     * Tiered evaluation: which model judges a change, from its review level, decided in code. Changes at
-     * `cheap_levels` (docs-only, tests-only, comment-only: L0) are judged by `cheap_model`; every other level by
-     * the evaluator role's model. A failed or uncertain verdict from the cheap model is judged once more by the
-     * evaluator role's model before anything is rejected.
+     * Which model each task type uses, and the evaluator's tiering (src/routing.ts: every key, its default and its
+     * task); each key overrides its default. `model_routing` and `eval_routing` are older names for the same keys.
      */
-    /**
-     * Which model each kind of run uses (src/model-routing.ts); each key overrides its default. Builds: `build`
-     * (L1/L2) and `build_high_risk` (issues with a high_risk_labels label, or after escalate_after failed attempts).
-     */
-    model_routing: z
-      .strictObject({
-        build: model.optional(),
-        build_high_risk: model.optional(),
-        high_risk_labels: z.array(z.string().min(1)).optional(),
-        escalate_after: z.number().int().min(0).max(10).optional(),
-        planner: model.optional(),
-        research: model.optional(),
-        intake_triage: model.optional(),
-        intake_replier: model.optional(),
-        intake_summary: model.optional(),
-        intake_thread: model.optional(),
-        stage_judge: model.optional(),
-        eval_answer: model.optional(),
-      })
-      .optional(),
+    routing: z.strictObject(routingShape).optional(),
+    /** INVARIANT: an alias of `routing` (same key names); a key set in both is an error. */
+    model_routing: z.strictObject(modelRoutingShape).optional(),
     /**
      * Open-model providers a model setting can name: `local`, or `hosted:<name>`. Each instance opts in (policy.yaml
      * settings.providers); what each may run is fixed in code (src/providers.ts).
@@ -278,13 +279,8 @@ export const AgentsConfig = z
         hosted: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,40}$/), provider).optional(),
       })
       .optional(),
-    eval_routing: z
-      .strictObject({
-        cheap_model: model.default('sonnet'),
-        cheap_levels: z.array(z.enum(['L0', 'L1', 'L2', 'L3'])).default(['L0']),
-        escalate: z.boolean().default(true),
-      })
-      .prefault({}),
+    /** INVARIANT: an alias of `routing`: cheap_model is eval_cheap, cheap_levels eval_cheap_levels, escalate eval_escalate. */
+    eval_routing: z.strictObject({ cheap_model: model.optional(), cheap_levels: levels.optional(), escalate: z.boolean().optional() }).optional(),
     /**
      * A change to the agents' own instructions (a skill, AGENTS.md, a role prompt) is evaluated before it
      * lands: its eval cases at the base and at the head. A drop, a cap hit or no cases: the PR waits.
@@ -301,6 +297,23 @@ export const AgentsConfig = z
       })
       .prefault({}),
   })
+  .transform((c, ctx) => {
+    const { routing, model_routing, eval_routing, ...rest } = c;
+    const merged: Partial<Routing> = {};
+    const from: Partial<Record<RoutingKey, string>> = {};
+    const take = (section: 'routing' | keyof typeof ROUTING_ALIASES, values: Record<string, unknown> | undefined) => {
+      for (const [k, v] of Object.entries(values ?? {})) {
+        const key = section === 'routing' ? (k as RoutingKey) : ROUTING_ALIASES[section][k]!;
+        if (v === undefined) continue;
+        if (from[key]) ctx.addIssue({ code: 'custom', path: [section, k], message: `${key} is already set at ${from[key]}; set it once, in routing` });
+        else Object.assign(merged, { [key]: v }), (from[key] = `${section}.${k}`);
+      }
+    };
+    take('routing', routing);
+    take('model_routing', model_routing);
+    take('eval_routing', eval_routing);
+    return { ...rest, routing: merged, routing_from: from };
+  })
   .superRefine((c, ctx) => {
     const w = c.roles.workers;
     if (w && w.count !== undefined && w.max !== undefined && w.count > w.max) {
@@ -310,23 +323,25 @@ export const AgentsConfig = z
       ctx.addIssue({ code: 'custom', path: ['roles', 'evaluator', 'enabled'], message: 'workers require an enabled evaluator' });
     }
     // An open model only where code allows it, and only one that is configured.
-    for (const [key, value] of Object.entries(c.model_routing ?? {})) {
-      if (typeof value !== 'string') continue;
+    const at = (key: RoutingKey) => c.routing_from[key]!.split('.');
+    for (const key of ROUTED_MODEL_KEYS) {
+      const value = c.routing[key];
+      if (value === undefined) continue;
       const named = providerOf(value);
       if (!named) continue;
       const route = key === 'build' ? 'build' : key === 'build_high_risk' ? 'build' : (key as RoutedRun);
       const why = key === 'build_high_risk' ? 'hosted and local models never build high-risk work' : providerRefusal(named.kind, { route });
-      if (why) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: why });
+      if (why) ctx.addIssue({ code: 'custom', path: at(key), message: why });
       const known = named.kind === 'local' ? c.providers?.local : c.providers?.hosted?.[named.name];
-      if (!known) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: `${value} is not configured under providers` });
+      if (!known) ctx.addIssue({ code: 'custom', path: at(key), message: `${value} is not configured under providers` });
     }
     // Everywhere else a model is named (role models, tiered evaluation, instruction evals), only Anthropic models.
-    const plain = (path: (string | number)[], m: string | undefined) => m && providerOf(m) && ctx.addIssue({ code: 'custom', path, message: `${m}: open models are only for model_routing (the evaluator and roles keep their models)` });
+    const plain = (path: (string | number)[], m: string | undefined) => m && providerOf(m) && ctx.addIssue({ code: 'custom', path, message: `${m}: open models are only for routed runs in routing (the evaluator and roles keep their models)` });
     for (const [r, cfg] of Object.entries(c.roles)) {
       plain(['roles', r, 'model'], cfg?.model);
       plain(['roles', r, 'hard_issues_model'], cfg?.hard_issues_model);
     }
-    plain(['eval_routing', 'cheap_model'], c.eval_routing.cheap_model);
+    if (c.routing.eval_cheap !== undefined) plain(at('eval_cheap'), c.routing.eval_cheap);
     plain(['instruction_evals', 'model'], c.instruction_evals.model);
     plain(['instruction_evals', 'judge'], c.instruction_evals.judge);
   });
