@@ -15,6 +15,8 @@ import { newRunId, SetupStepError, type RunDatabase, type RunHost } from './host
 import { waitTestSlot } from './slots.js';
 import { createWorkspace, runEnv } from './workspace.js';
 import { configBehind, missingReferencedPath, oldHeadFailure, type Predates } from './predates.js';
+import type { Plan } from './affected.js';
+import { importsPlan, selectMode, testsArg } from './select.js';
 
 export interface TestRunRequest {
   repo: string;
@@ -84,6 +86,27 @@ export interface TestRunDeps {
   now?: () => number;
   /** The helper's protocol, asked once at coordinator start (./helper.ts): when not ok, no run starts. */
   helper?: HelperState;
+  /** test_run.select: imports's plan for a change (tests inject one); default ./select.ts importsPlan. */
+  plan?: (repo: string, sha: string, changed: readonly string[]) => Plan;
+}
+
+/**
+ * What a run hands {tests} (test_run.select: imports): the test files a PR's fast run can affect, or null for the
+ * whole suite (a full run, a run given no changed files, a plan that can't tell or fails), with the line its checks
+ * show. Never fails the run: the whole suite is always a safe answer.
+ */
+export function selectionFor(d: Pick<TestRunDeps, 'config' | 'repo' | 'plan'>, req: Pick<TestRunRequest, 'kind' | 'sha' | 'changedFiles' | 'tiers'>): { tests: string[] | null; line: string } {
+  const whole = (why: string) => ({ tests: null, line: `test selection (imports): the whole suite, ${why}` });
+  if (selectMode(d.config) !== 'imports') return { tests: null, line: '' };
+  if (req.kind !== 'fast' || req.tiers) return whole('a full run');
+  if (!req.changedFiles) return whole('the run was given no changed files');
+  try {
+    const p = (d.plan ?? importsPlan)(d.repo, req.sha, req.changedFiles);
+    if (p.all) return whole(p.all);
+    return { tests: p.tests, line: `test selection (imports): ${p.tests.length} test file(s) this change can affect` };
+  } catch (e) {
+    return whole(`the plan failed: ${String(redact((e as Error).message)).slice(0, 300)}`);
+  }
 }
 
 /** The tiers a request runs: its kind's, and of a sharded run's later shards only the shardable ones. */
@@ -92,12 +115,16 @@ export function tiersFor(c: TestRunConfig, req: Pick<TestRunRequest, 'kind' | 's
   return c.tiers.filter((t) => t.kind === req.kind && (!req.shard || req.shard.index === 1 || t.shardable));
 }
 
-/** A tier's command with its placeholders filled; null when it needs the change's files and has none. */
-export function tierCommand(t: TestRunTier, shard: { index: number; total: number }, changedFilesPath: string | null): string | null {
+/**
+ * A tier's command with its placeholders filled; null when it needs the change's files and has none. `tests` fills
+ * {tests}: the selected test files, or null (nothing) for the whole suite.
+ */
+export function tierCommand(t: TestRunTier, shard: { index: number; total: number }, changedFilesPath: string | null, tests: readonly string[] | null = null): string | null {
   if (t.command.includes('{changed_files}') && changedFilesPath === null) return null;
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
   return t.command
     .replaceAll('{changed_files}', changedFilesPath === null ? '' : q(changedFilesPath))
+    .replaceAll('{tests}', testsArg(tests))
     .replaceAll('{shard_index}', String(shard.index))
     .replaceAll('{shard_total}', String(shard.total))
     .replaceAll('{shard}', String(shard.index))
@@ -189,6 +216,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
         break;
       }
     }
+    const selection = tiers.some((t) => t.command.includes('{tests}')) ? selectionFor(d, req) : { tests: null, line: '' };
     stage = 'tiers';
     // The config commit, when this head is older than it (null otherwise): only then can a tier predate the config.
     let behind: string | null = null;
@@ -200,7 +228,15 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     for (const t of tiers) {
       if (setupFailed) break; // every tier already failed
       if (o.signal?.aborted) break;
-      const command = tierCommand(t, shard, changed);
+      const command = tierCommand(t, shard, changed, selection.tests);
+      const selects = t.command.includes('{tests}') && selection.line !== '';
+      // Selection found no test file the change can affect: nothing to run, and the check says so.
+      if (selects && selection.tests?.length === 0) {
+        const tr: TierResult = { tier: t.name, ok: true, durationMs: 0, summary: `${selection.line}: none, so nothing ran`, logRef: '' };
+        results.push(tr);
+        emit('testrun.tier', { id, tier: t.name, ok: true, duration_ms: 0, summary: tr.summary, log_ref: '', cpu_s: null, mem_peak_mb: null });
+        continue;
+      }
       if (command === null) {
         results.push({ tier: t.name, ok: false, durationMs: 0, summary: 'needs the change\'s files ({changed_files}) and the run was given none', logRef: '' });
         continue;
@@ -218,7 +254,8 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal);
       const logRef = `${id}/${t.name}.log`;
       writeFileSync(join(d.logDir, logRef), r.out, { mode: 0o600 });
-      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: r.code === null ? `timed out or cancelled\n${lastLines(r.out)}` : lastLines(r.out), logRef };
+      const out = r.code === null ? `timed out or cancelled\n${lastLines(r.out)}` : lastLines(r.out);
+      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: selects ? `${selection.line}\n${out}` : out, logRef };
       const old = behind && !tr.ok ? oldHeadFailure(command, r.code, r.out) : null;
       if (behind && old) tr.predates = { configCommit: behind, what: old, notRun: false };
       results.push(tr);

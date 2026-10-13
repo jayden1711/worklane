@@ -27,7 +27,7 @@ test_run:
 ```
 
 - **Tiers.** `fast` tiers run on every PR, and again on each new head. `full` tiers run once per batch of approved PRs (PR mode). Each tier is one command, run under bash with pipefail in the run's workspace. It posts one check.
-- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
+- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{tests}` is the test files the change can affect, shell-quoted, with `select: imports` (see "Test selection" below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
 - **Database.** A tier with `database: true` gets the run's own Postgres in `DATABASE_URL`: a container named after the run, on a port the daemon picks, on `127.0.0.1` only, with a random password. Its data is on a tmpfs, and it is removed with the run.
 - **Database connections.** `max_connections` (20 to 2000, default 200) starts the run's Postgres with `-c max_connections=<n>`; the image's own default, 100, runs out ("sorry, too many clients already") once many lanes share the database. Size it as lanes x (each lane's pool + its ORM's own connections) + headroom for migrations, psql and Postgres's reserved superuser slots: 22 lanes with a pool of 8 and 2 ORM connections each need 22 x 10 + 20 = 240. `shared_buffers` stays at the image's 128 MB: the per-connection shared memory (lock and process slots) is small, a few tens of MB even at 2000, and each connection's working memory is its own process's, not shared buffers. The helper takes it as a number in that range only, never as text.
 - **Checks.** Several tiers of one kind may map to one check (say three full tiers to `suite`): it passes only when all of them passed. A check can't have both fast and full tiers.
@@ -106,6 +106,30 @@ With `test_run` in tests.yaml and the sandbox's check passing at start (`testrun
 - **New head:** the run on the old head is cancelled, and a run starts on the new one. A closed PR's run is cancelled too. A cancelled run posts no check.
 - **Restarts:** a head already run isn't run again. A run a restart cut short is wiped at start, recorded as `interrupted`, and run again.
 - **Bots:** a bot's PR gets the fast tier. Its full tiers (a batch, in PR mode) wait until the owner approves it (`fullRunAllowed`).
+
+## Test selection
+
+A PR's fast run can run only the tests its change can affect. `test_run.select` says how:
+
+- **`repo`**: the project's own planner. A tier passes `{changed_files}` to it, and it decides. This is the default when a tier uses `{changed_files}`, so a config that already has a planner keeps it as it is.
+- **`imports`**: the engine's import graph, for a JS/TS repo (a `package.json` at its root). A fast tier passes `{tests}` to its test runner: `node --test {tests}`, `vitest run {tests}`, `jest {tests}`. `{tests}` is the selected test files (`*.test.*`, `*.spec.*`, anything under `__tests__/`), or nothing when the whole suite runs: a runner given no files runs them all. When the change can affect no test file, the tier passes without running, and its check says so. Every tier check that selected shows the selection in its first line.
+- **`off`**: no selection (the default without a `{changed_files}` tier).
+
+```yaml
+test_run:
+  select: imports
+  tiers:
+    - { name: unit, command: "npx vitest run {tests}", kind: fast }
+    - { name: suite, command: "npx vitest run", kind: full }
+```
+
+How `imports` decides (src/testrun/affected.ts; the coordinator reads the code from its clone at the PR's head):
+
+- A test file is selected when it imports a changed file, directly or through other files (static imports, and `import()` or `require()` of a path it can work out), or reads one: a path built from the file's own location (`new URL('…', import.meta.url)`, `join(__dirname, …)`, or a name bound to one), as a file or as a directory it reads.
+- The whole suite runs when a changed file is a package manifest or lockfile, a `tsconfig`/`jsconfig`, a tool config (`*.config.js` and the like: test setup files are named there), the Node version, `.github/` or the project config folder; when a file is deleted or renamed; when it is a script (`.sh`, `.py`, …) or has no extension; when some code names it in a string without an import or read reaching it; and when nothing reaches it at all (a Markdown file nothing names is documentation, and selects nothing).
+- A test that imports something the graph can't follow (a computed `import()`, a bare import that isn't a dependency in `package.json`, such as a path alias) runs on every change, and so does one that reads the whole repo.
+- A full run (a batch in PR mode, the deploy gate's run) always runs everything: `{tests}` is empty there.
+- If the plan fails (git can't read the commit), the run takes the whole suite.
 
 ## Agents skip local full runs
 
