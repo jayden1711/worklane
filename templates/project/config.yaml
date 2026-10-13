@@ -22,6 +22,11 @@ required_checks: []
 # checks above, not strict by default (a PR needn't be up to date with main first). Post-merge CI on main and the
 # main watch catch what strict would have, without PRs queueing to merge main in. true opts this repo in.
 # protection: { strict: false }
+# Flaky tests: when the default branch's required checks fail after a merge, the failing ones are re-run on the
+# same commit first. Passing then: flaky, quarantined (still run and report, but no longer stop auto-merge or open a
+# revert), one issue each. Blocks again after release_after_passes passes in a row, or an owner's clear. A re-run not
+# done in rerun_timeout_min is a real failure. The updater still requires every check green.
+# flaky: { rerun: true, release_after_passes: 10, rerun_timeout_min: 90 }
 # Files two tasks at once would both change and conflict on: such tasks never run together (the second
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.

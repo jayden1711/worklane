@@ -24,6 +24,8 @@ import { loadConfig } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
+import { handOffFromNpx, type HandOff } from './npx-engine.js';
+import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
@@ -134,7 +136,7 @@ export interface Unavailable {
 }
 
 /** What this mode can't do, each with why. Server mode has everything; local mode lacks what needs root or other users. */
-export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) => which(c) !== null): Unavailable[] {
+export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) => findTool(c) !== null): Unavailable[] {
   if (mode === 'server') return [];
   const out: Unavailable[] = [
     { feature: 'separate OS users', why: `local mode runs the agents as you, with your files and your logins; agents as a user of their own that holds no credentials and can't read yours need a Linux server set up in server mode (sudo bash scripts/bootstrap.sh --hardened)` },
@@ -536,16 +538,16 @@ export const engineRoot = () => fileURLToPath(new URL('../../', import.meta.url)
 export function systemIo(o: { interactive: boolean }): InitIo {
   let rl: ReturnType<typeof createInterface> | null = null;
   return {
-    which,
+    which: (cmd) => findTool(cmd),
     run: (cmd, args, opt = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, ...(opt.cwd ? { cwd: opt.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: withToolPath(), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     interactive: (cmd, args) =>
       new Promise((done) => {
         rl?.close();
         rl = null;
-        const p = spawn(cmd, args, { stdio: 'inherit' });
+        const p = spawn(cmd, args, { stdio: 'inherit', env: withToolPath() });
         p.on('exit', (code) => done(code ?? 1));
         p.on('error', () => done(1));
       }),
@@ -612,8 +614,11 @@ export interface InitArgs {
   timeout?: number;
 }
 
-/** `init`: the mode (asked when not given), the context, then the walk. */
-export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interactive: a.interactive }), root = isRoot): Promise<number> {
+/**
+ * `init`: the mode (asked when not given), the context, then the walk. Local mode run through npx hands over to an
+ * install of its own first (src/npx-engine.ts).
+ */
+export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interactive: a.interactive }), root = isRoot, handOff: HandOff = handOffFromNpx): Promise<number> {
   let mode = a.mode;
   // A directory that exists is a checkout (local mode); anything else is taken as owner/name (server mode).
   const localRoot = a.target === undefined ? resolve(a.cwd) : existsSync(a.target) ? resolve(a.target) : null;
@@ -645,6 +650,8 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
       io.say('init: on Windows, run it inside WSL2 (Ubuntu): local mode is Linux there');
       return 2;
     }
+    const handed = await handOff({ root: localRoot, prefix: a.prefix, yes: a.yes, reset: a.reset, ...(a.answers ? { answers: a.answers } : {}), say: (l) => io.say(l) });
+    if (handed !== null) return handed;
     const file = localInitFile(localRoot);
     let state = readInitState(file);
     if (!state || a.reset) state = newState('local', localRoot, null, null);

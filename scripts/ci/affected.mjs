@@ -50,11 +50,26 @@ export const runtimePath = (f) => (/^(src|test)\/.+\.ts$/.test(f) ? `dist/${f.re
  */
 export const sourcePath = (p) => (/^dist\/(src|test)(\/|$)/.test(p) ? p.slice(5) : p);
 
+/**
+ * The engine's package: what a src/ module reads when it reads the directory it runs from as a whole (npm pack of
+ * the engine, an install's root): package.json and its `files`, built paths back to their sources. A test's own
+ * whole-repo read (cwd: repoRoot, git archive) stays the whole repo.
+ */
+export function packagePaths(dir) {
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  const files = (pkg.files ?? []).filter((f) => !f.startsWith('!')).map((f) => (f === 'dist/web' ? 'web' : sourcePath(f)));
+  return [...new Set(['package.json', 'README.md', ...files])];
+}
+export const wholeRead = (dir) => {
+  const paths = packagePaths(dir);
+  return (file) => (file.startsWith('src/') ? paths : null);
+};
+
 /** The plan for a change to the repo at `dir` (its working tree is the change's head): `changed` and `added` paths. */
 export async function plan(dir, changed, added = new Set()) {
   const a = await import(pathToFileURL(join(root, 'dist', 'src', 'testrun', 'affected.js')).href);
   const files = git(dir, 'ls-files', '-z', '--cached', '--others', '--exclude-standard');
-  const g = a.buildGraph({ files, read: (f) => readFileSync(join(dir, f), 'utf8'), pathModules: HELPER_PATHS, runtimePath, sourcePath });
+  const g = a.buildGraph({ files, read: (f) => readFileSync(join(dir, f), 'utf8'), pathModules: HELPER_PATHS, runtimePath, sourcePath, wholeRead: wholeRead(dir) });
   return a.selectTests(g, changed, { isTest, forceAll, added });
 }
 

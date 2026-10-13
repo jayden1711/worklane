@@ -415,7 +415,11 @@ export const EventSchemas = {
   'merge.deferred': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string(), retry_at: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
   /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
-  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()) }),
+  /**
+   * The default branch's required checks on an auto-merge's commit. `flaky`: failed, then passed on a re-run of the
+   * same commit; `quarantined`: failed, but quarantined as flaky (src/flaky.ts). Neither turns it red for the harness.
+   */
+  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()), flaky: z.array(z.string()).optional(), quarantined: z.array(z.string()).optional() }),
   /** A wait reached its cap (coordinator/wait-caps.ts): recorded, the owner told, and it waits for them. `number`: the PR, if any. */
   'wait.capped': z.strictObject({ issue, number: z.number().int().positive().nullable(), kind: z.enum(['deferred_landing', 'mergeable_recheck', 'light_check_pending', 'main_checks']), detail: z.string() }),
   /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
@@ -601,6 +605,30 @@ export const EventSchemas = {
   }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
+  // flaky tests (src/flaky.ts, coordinator/flaky.ts): before the default branch counts as red, its failing checks re-run on the same commit
+  /**
+   * The default branch's required checks failed on `sha` (a red run): each failing check (`failed`) is re-run there.
+   * `via`: how each was: `actions` (its workflow run's failed jobs), `test_run` (the test run's tiers), or `none`
+   * (it can't be: `why`); `id` is the failing check run, so its re-run is told apart.
+   */
+  'flaky.rerun_requested': z.strictObject({
+    sha,
+    number: z.number().int().positive().nullable(),
+    failed: z.array(z.string()),
+    via: z.array(z.strictObject({ check: z.string(), how: z.enum(['actions', 'test_run', 'none']), id: z.number().int().nullable(), why: z.string().nullable() })),
+    /** When the re-run was asked for, by the coordinator's clock: rerun_timeout_min counts from it. */
+    at: z.string(),
+  }),
+  /** The re-run's verdict on `sha`: `flaky` passed on the re-run, `real` failed again (or couldn't re-run, or `timed_out`). */
+  'flaky.rerun_result': z.strictObject({ sha, number: z.number().int().positive().nullable(), flaky: z.array(z.string()), real: z.array(z.string()), timed_out: z.array(z.string()) }),
+  /** A test (a check: an Actions job or a test-run tier) put in quarantine: it still runs and reports, but no longer turns the branch red for the harness. `again`: it had been released. */
+  'flaky.quarantined': z.strictObject({ test: z.string(), sha, issue: z.number().int().positive().nullable(), url: z.string().nullable(), again: z.boolean() }),
+  /** A quarantined test was seen flaky again: `sightings` in all. */
+  'flaky.sighted': z.strictObject({ test: z.string(), sha, sightings: z.number().int().positive() }),
+  /** A quarantined test's result on a default-branch commit: `passes`, the passes in a row now. */
+  'flaky.observed': z.strictObject({ test: z.string(), sha, ok: z.boolean(), passes: z.number().int().nonnegative() }),
+  /** A test left quarantine (it blocks again): after `passes` passes in a row, or an owner cleared it. */
+  'flaky.released': z.strictObject({ test: z.string(), how: z.enum(['passes', 'owner']), by: z.string(), passes: z.number().int().nonnegative() }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;

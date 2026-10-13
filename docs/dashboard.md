@@ -243,6 +243,13 @@ The Reports page opens with the Trust panel: this instance's DORA-style numbers,
 per risk area (money path, auth, other) over 30 days. It is read-only measurement (docs/design.md, the waiver of
 2026-10-13): `GET /api/trust` is the only route, and nothing it serves changes slots, caps or merges.
 
+Under it, **Flaky tests** (owners and writers; `GET /api/flaky`, src/flaky.ts): each check quarantined because it
+failed on the default branch and passed when re-run on the same commit, with when it was first seen, how many times
+it has been seen flaky since, its issue, and its passes in a row toward release; the ones released lately; and the
+flake rate, flaky re-runs over red runs, over 7 and 30 days. An owner's **Clear** puts a check back to blocking at
+once (`POST /api/flaky/clear`, audited). Quarantine changes only the harness's own red/green decisions after a merge;
+the updater still installs only a commit with every check green.
+
 - **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
   on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
   issue, or a title starting "fix") changed one of its files; or a production report was traced to it.
