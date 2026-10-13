@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// CI only (the "test-run sandbox (real systemd)" job in .github/workflows/ci.yml): the coordinator's own sandbox
+// CI only (the "test-run sandbox (real systemd)" job in .github/workflows/ci-slow.yml): the coordinator's own sandbox
 // host (dist/src/testrun/host.js), against the installed helper, the real sudoers rule and real systemd-run, run as
 // the instance's coordinator user. No mocks: what this checks is exactly what the coordinator sees on a server.
 //
