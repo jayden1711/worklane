@@ -132,8 +132,8 @@ export class GitHubBacklog implements Backlog {
   }
 
   async comments(n: number) {
-    const list = await this.req<{ user: { login: string } | null; body: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
-    return list.map((c) => ({ author: c.user?.login ?? '', body: c.body ?? '' }));
+    const list = await this.req<{ user: { login: string } | null; body: string; created_at?: string }[]>('GET', `/repos/${this.repo}/issues/${n}/comments?per_page=100`);
+    return list.map((c) => ({ author: c.user?.login ?? '', body: c.body ?? '', ...(c.created_at ? { at: c.created_at } : {}) }));
   }
 
   async close(n: number) {

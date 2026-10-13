@@ -154,6 +154,21 @@ export const ProjectConfig = z.strictObject({
       strategy: z.literal('merge').default('merge'),
     })
     .prefault({}),
+  /**
+   * Stale PR hygiene (src/pr-hygiene.ts), PR mode only: every `every_hours`, each open PR the harness opened whose merge
+   * base with the default branch is older than `stale_after_days` gets the default branch merged in (and so re-tested),
+   * or goes to the conflict fix when it conflicts; one whose task is closed or superseded, with no commit or comment for
+   * `abandon_after_days`, is closed (its branch kept). A PR with one of `hold_labels`, or left to an owner, is never touched.
+   */
+  pr_hygiene: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      every_hours: z.number().positive().max(24 * 30).default(6),
+      stale_after_days: z.number().positive().max(365).default(3),
+      abandon_after_days: z.number().positive().max(365).default(14),
+      hold_labels: z.array(z.string().min(1)).default(['needs-owner', 'hold']),
+    })
+    .prefault({}),
   /** Machine-wide limits checked before each new agent starts. */
   governor: z
     .strictObject({

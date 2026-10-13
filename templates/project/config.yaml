@@ -35,6 +35,11 @@ required_checks: []
 # resolves the conflicted hunks, and the usual checks and evaluator follow (it never merges a fix that
 # strays outside the hunks or that the evaluator isn't sure keeps both sides; those wait for you).
 # conflicts: { fix: true, max_fixes_per_pr: 1 }
+# Stale PRs (PR mode): every every_hours, an open PR of the harness's whose base is over stale_after_days old
+# gets the default branch merged in (a merge commit, never a rebase or force; CI runs again), or goes to the
+# conflict fix if it conflicts. One whose task is closed or superseded, with no commit or comment for
+# abandon_after_days, is closed with a comment (the branch is kept). PRs with a hold label are never touched.
+# pr_hygiene: { enabled: true, every_hours: 6, stale_after_days: 3, abandon_after_days: 14, hold_labels: [needs-owner, hold] }
 # Before an auto-merge, if main moved and touched what the PR touches (or imports), the fast tier
 # (tests.yaml runner.changed) runs on the combination in a scratch worktree; nothing is pushed to the PR.
 # combined_check: true

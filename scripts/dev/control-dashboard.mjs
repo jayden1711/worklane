@@ -194,6 +194,7 @@ async function seedPrs(root, issues) {
     ['merge.main_result', { issue: c, number: 103, sha: h(4), outcome: 'red', failed: ['test'] }],
     ['merge.stopped', { reason: 'main went red after an auto-merge', number: 103, sha: h(4), revert: url(104) }],
     ['push.refused', { issue: d, head: h(5), stage: 'change', reasons: ['changes 1900 lines (limit 1500)'] }],
+    ['pr_hygiene.pass', { merged_in: 1, conflicting: 0, closed: 0, held: 1, skipped: 1, prs: [{ number: 101, outcome: 'merged_in', why: 'base 4 day(s) old' }, { number: 102, outcome: 'held', why: 'labelled needs-owner' }, { number: 103, outcome: 'skipped', why: 'already up to date with main' }] }],
   ];
   for (const [type, payload] of events) {
     try {

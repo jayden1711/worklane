@@ -476,6 +476,20 @@ export const EventSchemas = {
     detail: z.string(),
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
+  // stale PR hygiene (src/pr-hygiene.ts): the harness's own PRs whose base is older than pr_hygiene.stale_after_days
+  /** The default branch (base_sha) merged into a stale PR and pushed to its branch: `from` the head before, `head` the merge commit. */
+  'pr_hygiene.merged_in': z.strictObject({ issue, number: z.number().int().positive(), from: sha, head: sha, base_sha: sha, base_days: z.number().int().nonnegative() }),
+  /** An abandoned PR closed with a comment (its branch kept): its task closed or superseded, and no activity for a while. */
+  'pr_hygiene.closed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
+  /** One pass: how many PRs got the default branch merged in, conflict, were closed, were held for an owner, or skipped; each PR's result. */
+  'pr_hygiene.pass': z.strictObject({
+    merged_in: z.number().int().nonnegative(),
+    conflicting: z.number().int().nonnegative(),
+    closed: z.number().int().nonnegative(),
+    held: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    prs: z.array(z.strictObject({ number: z.number().int().positive(), outcome: z.enum(['merged_in', 'conflicting', 'closed', 'held', 'skipped']), why: z.string().max(500) })),
+  }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
   /**
    * PR mode with batching (coordinator/pr-batch.ts): a PR ready on its fast checks waits, at this head, for a batch.

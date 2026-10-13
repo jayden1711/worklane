@@ -97,6 +97,7 @@ Any other path shows the Board, the dashboard's home.
 | Next report preview (owner and writers) | `reports` | the preview card: the next report as it will be posted, plus the throughput section (which the posted report leaves out); for anyone else it says whose it is, without asking | – | `[data-testid="report-preview"]`, `[data-testid="report-refused"]` |
 | Pull requests page | `prs` | the page itself | – | `[data-testid="prs-page"]` |
 | Auto-merge state | `prs` | the card at the top: on or off, why, the kill switch and the repo's setting | – | `[data-testid="prs-auto-merge"]`, `[data-testid="prs-auto-merge-state"]`, `[data-testid="prs-auto-merge-why"]` |
+| Stale PR pass | `prs` | the auto-merge card's footer: when the last stale-PR pass ran and its counts (merged in, conflicting, closed, held, skipped) | – | `[data-testid="prs-hygiene"]` |
 | Last auto-merge stop and its revert | `prs` | the auto-merge card's last line, after a stop | – | `[data-testid="prs-revert-link"]` |
 | PRs waiting for you | `prs` | the "Waiting for you" section: one card per PR | – | `[data-testid="prs-waiting"]`, `[data-testid="pr-wait-card"]` |
 | Why a PR waits | `prs` | on a waiting card: why the merge rules left it to you, and why a CI fix run stopped | – | `[data-testid="pr-wait-reasons"]`, `[data-testid="pr-gave-up-reasons"]` |

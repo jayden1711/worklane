@@ -19,6 +19,7 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { MainWatch, repoGit } from '../main-watch.js';
+import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
 import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
@@ -359,13 +360,17 @@ export abstract class MergeFlow extends FixRuns {
   /** The policy's call on a ready PR at its current head. */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-    const base = (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
+    // A stale-PR merge-in head: the PR's own change is measured from the default branch it merged (src/pr-hygiene.ts).
+    const mergeIns = this.mergeInsOf();
+    const base = mergeInBase(mergeIns, number, pr.headSha) ?? (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
     const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
     const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
-    const v = this.events(n).filter((e) => e.type === 'eval.verdict' && (e.payload as { head: string }).head === pr.headSha).at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
+    // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
+    const judged = carriedHead(mergeIns, number, pr.headSha);
+    const v = this.events(n).filter((e) => e.type === 'eval.verdict' && (e.payload as { head: string }).head === judged).at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
     const plan = (this.events(n).filter((e) => e.type === 'plan.posted').at(-1)?.payload as EventPayload<'plan.posted'> | undefined)?.plan as { files?: string[] } | undefined;
     let policyOn = false;
     try {
@@ -859,9 +864,19 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
-  /** The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue; `except`: required checks left out. */
+  /**
+   * The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue; `except`: required
+   * checks left out. A verdict on the head the harness merged the default branch into (a clean stale-PR merge-in,
+   * src/pr-hygiene.ts) holds for the merge-in; its required checks still have to pass on it.
+   */
   prReadiness(n: number, head: string, checks: CommitCheck[], except: string[] = []): Readiness {
     const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
-    return readiness({ required: this.d.cfg.project.required_checks.filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: v.head, approved: v.patch_correct } : null });
+    const judged = v && carriedHead(this.mergeInsOf(), null, head) === v.head ? head : v?.head;
+    return readiness({ required: this.d.cfg.project.required_checks.filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: judged!, approved: v.patch_correct } : null });
+  }
+
+  /** The stale-PR merge-ins this instance pushed (pr_hygiene.merged_in), oldest first. */
+  protected mergeInsOf(): MergeIn[] {
+    return this.d.log.read(0, ['pr_hygiene.merged_in']).map((e) => e.payload as EventPayload<'pr_hygiene.merged_in'>);
   }
 }
