@@ -39,7 +39,7 @@ import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUs
 import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
-import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
+import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
@@ -1086,6 +1086,25 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           audit(who, 'machine.changed', { what: body.what, value: body.value, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
+        }
+        // Add a project to this machine: the machine helper's add-project, run by the coordinator (it streams each step
+        // into this log as add_project.step). The same gate as any machine change: this instance's owner, and a machine
+        // owner freshly signed in on an allowed device (or the break-glass).
+        if (url.pathname === '/api/machine/add-project' && req.method === 'POST') {
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may add a project; @${who.login} is a ${who.role}` });
+          const body = (await readBody(req)) as { name?: unknown; repo?: unknown };
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestAddProject(log, { name: body.name, repo: body.repo, requester: { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk }, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+          } catch (e) {
+            if (e instanceof MachineRequestError) return json(res, e.status, { error: e.message });
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.add_project', { name: r.args[1], repo: r.args[2], request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));

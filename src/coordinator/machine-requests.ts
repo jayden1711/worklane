@@ -9,6 +9,7 @@ import { recordAnswer } from '../console/asks.js';
 import type { Exec } from '../machine.js';
 import { MACHINE_EVENTS, machineRefusal, machineRequests, type MachineRequest } from '../machine-requests.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners, ownersText } from '../machine-owners.js';
+import { runAddProject, runningAddProjects, type SpawnHelper } from './add-project.js';
 
 /** A claim older than this with no outcome is from a coordinator that stopped mid-run (the helper times out at 30 s). */
 export const STALE_CLAIM_MS = 5 * 60_000;
@@ -21,6 +22,12 @@ export interface MachineRequestDeps {
   now?: () => number;
   /** The machine owners file; the system's when unset (tests). */
   ownersFile?: string;
+  /** How a streamed command (add-project) starts; sudo -n by default (src/coordinator/add-project.ts). */
+  spawn?: SpawnHelper;
+  /** This user's home (where the dashboard stores a pasted secret); the process's own when unset (tests). */
+  home?: string;
+  /** How often a streamed command's ask is checked for its answer. */
+  pollMs?: number;
 }
 
 /**
@@ -68,10 +75,14 @@ export function runMachineRequests(d: MachineRequestDeps): number {
   for (const r of machineRequests(d.log.read(0, [...MACHINE_EVENTS]))) {
     if (r.status === 'running') {
       const started = d.log.read(0, ['machine.started']).find((e) => (e.payload as { id: string }).id === r.id);
+      if (runningAddProjects.has(r.id)) continue; // this process is running it now
       if (started && now() - Date.parse(started.ts) > STALE_CLAIM_MS) d.log.append('machine.finished', { id: r.id, outcome: 'interrupted', detail: 'the coordinator stopped before it finished; not run again (see the machine changes log for whether it applied)' }, d.instance, 'coordinator');
       continue;
     }
-    if (r.status !== 'pending' || !claim(d.log, r.id, d.instance)) continue;
+    if (r.status !== 'pending') continue;
+    // One add-project at a time: a second waits, pending, until the first is over.
+    if (r.args[0] === 'add-project' && runningAddProjects.size) continue;
+    if (!claim(d.log, r.id, d.instance)) continue;
     // Checked again here, whatever the dashboard checked: a request written any other way can't widen what runs.
     const why = requesterRefusal(r, d.ownersFile) ?? machineRefusal(r.args);
     if (why) {
@@ -80,6 +91,13 @@ export function runMachineRequests(d: MachineRequestDeps): number {
     }
     const c = checkRootStep(r.args[0]!, r.args.slice(1));
     if (!c.allowed) continue; // unreachable: machineRefusal checked the same
+    if (c.rule.streams) {
+      // Minutes long, with asks on the way: run alongside the ticks, each step relayed as it comes.
+      const run = runAddProject({ log: d.log, instance: d.instance, ...(d.spawn ? { spawn: d.spawn } : {}), ...(d.home ? { home: d.home } : {}), ...(d.pollMs ? { pollMs: d.pollMs } : {}), ...(d.now ? { now: d.now } : {}) }, r).finally(() => runningAddProjects.delete(r.id));
+      runningAddProjects.set(r.id, run);
+      ran++;
+      continue;
+    }
     const out = c.rule.run(r.args.slice(1), d.exec);
     const detail = (out.ok ? out.output : out.error).slice(0, 1000);
     d.log.append('machine.finished', { id: r.id, outcome: out.ok ? 'done' : 'failed', detail }, d.instance, 'coordinator');
