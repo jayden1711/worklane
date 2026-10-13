@@ -52,7 +52,9 @@ import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
-import { trustForViewer, trustView } from './trust.js';
+import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
+import { deliveryMetrics } from './merge-metrics.js';
+import { flakyView, releaseByOwner } from './flaky.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
@@ -829,8 +831,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       prCounts: prCounts(prsView(events).prs),
       // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
       protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
-      // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why.
-      ...(opts.cfg.tests.deploy_gate ? { deployGate: deployGateView(opts.stateDir, events, repo, opts.cfg.tests.deploy_gate.branch) } : {}),
+      // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why; and
+      // whether it is on, with what turning it on would do while it is off.
+      ...(opts.cfg.tests.deploy_gate
+        ? {
+            deployGate: {
+              ...deployGateView(opts.stateDir, events, repo, opts.cfg.tests.deploy_gate.branch),
+              enabled: opts.cfg.tests.deploy_gate.enabled,
+              tiers: opts.cfg.tests.deploy_gate.tiers,
+              postDeploy: !!opts.cfg.tests.deploy_gate.post_deploy,
+            },
+          }
+        : {}),
     };
     // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
     return isWriter(who.role) ? full : stateForViewer(full);
@@ -1086,6 +1098,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (req.method !== 'GET') return json(res, 405, { error: 'the trust numbers are read-only' });
           const view = trustView(readEvents(opts.eventsDb), { agents: instanceAgents(opts) });
           return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
+        }
+        // Metrics (src/merge-metrics.ts deliveryMetrics): merges, main red, time to green, reverts and fix-forward, PR CI
+        // wall-clock, agent startup, flake rate and the slow tests. Read-only, the owner's and the writers' (test names
+        // and CI timings, like throughput).
+        if (url.pathname === '/api/metrics') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'the metrics are read-only' });
+          if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('the metrics are', who) });
+          return json(res, 200, { ...deliveryMetrics(readEvents(opts.eventsDb), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
+        }
+        // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
+        // and writers' to read; only an owner clears a test from quarantine, audited.
+        if (url.pathname === '/api/flaky' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: `the flaky tests are for the instance's owners and writers; @${who.login} is a ${who.role}` });
+          return json(res, 200, { ...flakyView(readEvents(opts.eventsDb), { now: new Date(), releaseAfter: opts.cfg.project.flaky.release_after_passes }), canClear: isOwnerHere });
+        }
+        if (url.pathname === '/api/flaky/clear' && req.method === 'POST') {
+          const body = (await readBody(req)) as { test?: unknown };
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may clear a test from quarantine; @${who.login} is a ${who.role}` });
+          const log = new EventLog(opts.eventsDb);
+          try {
+            const r = releaseByOwner(log, body.test, who.login);
+            if (!r.ok) return json(res, r.status, { error: r.error });
+            audit(who, 'flaky.cleared', { test: body.test });
+            return json(res, 200, { ok: true });
+          } finally {
+            log.close();
+          }
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.

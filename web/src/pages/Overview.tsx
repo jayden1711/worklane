@@ -1,5 +1,5 @@
 import type { State, UsageInfo } from '../api';
-import { navigate } from '../App';
+import { MenuButton, navigate } from '../App';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
@@ -7,11 +7,16 @@ import { UsageLines } from '../components/Usage';
 
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
-    <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b border-line bg-page/90 px-6 backdrop-blur">
-      <h1 className="text-[14px] font-semibold tracking-tight text-ink" data-testid="page-title">{title}</h1>
-      {sub && <span className="truncate text-[12.5px] text-ink-3">{sub}</span>}
-      <div className="ml-auto flex items-center gap-2">{children}</div>
-    </header>
+    <>
+      <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b border-line bg-page/90 px-6 backdrop-blur max-md:gap-2 max-md:px-4">
+        <MenuButton />
+        <h1 className="text-[14px] font-semibold tracking-tight text-ink" data-testid="page-title">{title}</h1>
+        {sub && <span className="truncate text-[12.5px] text-ink-3 max-md:hidden">{sub}</span>}
+        <div className="ml-auto flex items-center gap-2">{children}</div>
+      </header>
+      {/* On a phone the line under the title is whole, under the bar, rather than cut short in it. */}
+      {sub && <p className="px-6 pt-3 text-[12.5px] text-ink-3 md:hidden">{sub}</p>}
+    </>
   );
 }
 
@@ -67,7 +72,7 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
           <Stat label="Landed today" value={state.landedToday} tone={state.landedToday ? 'ok' : undefined} hint={`${queued.length} queued to land`} />
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
           {spend ? (
           <Card className="p-3">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -169,8 +174,8 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
                   ) : (
                     <span className="w-12 shrink-0" />
                   )}
-                  <span className="min-w-0 flex-1 truncate">{a.summary}</span>
-                  <Badge className="hidden sm:inline-flex">{a.type}</Badge>
+                  <span className="min-w-0 flex-1 truncate max-md:whitespace-normal max-md:break-words">{a.summary}</span>
+                  <Badge className="max-sm:hidden">{a.type}</Badge>
                 </li>
               ))}
             </ul>

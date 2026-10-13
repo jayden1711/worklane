@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Role } from '../src/dashboard-auth.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -190,6 +190,44 @@ test('main watch: a direct push is unaccounted (with a revert), found with one c
   assert.match(s.unaccounted[0]!.reason, /was pushed to main directly: no merged PR has it/);
   assert.deepEqual(s.gh.calls.slice(before).map((c) => c.what), [`pulls ${sha.slice(0, 7)}`], 'one call told');
   assert.deepEqual(s.checked, []);
+});
+
+test('regression: a merge commit GitHub has not linked to its PR yet is judged by the PR its subject names, never as a direct push', async () => {
+  // Main 09f60340 (#307's merge) was judged 6 s after it landed: GitHub's commit-to-PR link was still empty, and the
+  // watch opened a revert PR for a normal merge. The PR the merge subject names answers at once.
+  const s = await started();
+  const m = s.w.mergedPr();
+  const n = Number(/#(\d+)/.exec(git(s.w.remote, 'log', '-1', '--format=%s', m.merge))?.[1] ?? 'NaN');
+  s.gh.pr(n, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.pulls.delete(m.merge); // the link lags: no merged PR for the commit yet
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(m.head, [ci()]);
+  await run(s.gh, s.watch, 7);
+  assert.deepEqual(s.unaccounted, [], 'no revert PR for a normal merge');
+  assert.deepEqual(s.checked, [{ sha: m.merge, how: 'person', number: n }]);
+});
+
+test('a made-up merge subject is still a direct push: the named PR\'s own merge commit is another', async () => {
+  const s = await started();
+  const real = s.w.mergedPr();
+  const n = Number(/#(\d+)/.exec(git(s.w.remote, 'log', '-1', '--format=%s', real.merge))?.[1] ?? 'NaN');
+  s.gh.pr(n, real.merge, real.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(real.head, [ci()]);
+  await run(s.gh, s.watch, 6);
+  const fake = s.w.mergedPr(); // a second merge commit, which no PR has; its subject names another number
+  s.gh.prs.set(Number(/#(\d+)/.exec(git(s.w.remote, 'log', '-1', '--format=%s', fake.merge))?.[1] ?? 'NaN'), { ...s.gh.prs.get(n)!, number: Number(/#(\d+)/.exec(git(s.w.remote, 'log', '-1', '--format=%s', fake.merge))?.[1]) });
+  await run(s.gh, s.watch, 6);
+  assert.equal(s.unaccounted.length, 1);
+  assert.equal(s.unaccounted[0]!.sha, fake.merge);
+  assert.match(s.unaccounted[0]!.reason, /pushed to main directly/);
+});
+
+test('subjectPrNumber reads this repo\'s and GitHub\'s merge subjects, nothing else', () => {
+  assert.equal(subjectPrNumber('Merge #307: Tests: example repos run no background git maintenance'), 307);
+  assert.equal(subjectPrNumber('Merge pull request #12 from someone/branch'), 12);
+  assert.equal(subjectPrNumber('Fix #307 in the merge flow'), null);
+  assert.equal(subjectPrNumber('Merge branch main into feature'), null);
 });
 
 test('main watch: a PR merged with a failing, pending or missing required check is unaccounted', async () => {

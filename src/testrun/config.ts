@@ -7,6 +7,7 @@
 // Each tier posts one GitHub check; `checks` maps a tier to its check name.
 import { z } from 'zod';
 import { projectEnvProblem } from '../project-env.js';
+import { selectMode } from './select.js';
 
 const tierName = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/, 'lowercase letters, digits, _ or - (at most 40)');
 const relPath = z
@@ -15,7 +16,7 @@ const relPath = z
   .refine((p) => !p.startsWith('/') && !p.split(/[\\/]/).includes('..') && !/^[A-Za-z]:/.test(p), 'a path inside the repo (relative, no ..)');
 
 /** The placeholders a tier command may use; anything else in braces is left as written. */
-export const TIER_PLACEHOLDERS = ['{changed_files}', '{shard_index}', '{shard_total}', '{shard}', '{total}'] as const;
+export const TIER_PLACEHOLDERS = ['{changed_files}', '{tests}', '{shard_index}', '{shard_total}', '{shard}', '{total}'] as const;
 
 /** Whether a command passes its shard's place: {shard_index} and {shard_total}, or the short {shard} and {total}. */
 export function passesShard(command: string): boolean {
@@ -27,8 +28,9 @@ export const TestRunTier = z
     name: tierName,
     /**
      * Run under bash with pipefail in the run's workspace. `{changed_files}` is a file listing the change's paths,
-     * one per line (for the project's own changed-plan command); `{shard_index}` (1-based) and `{shard_total}`, or
-     * `{shard}` and `{total}`, are this shard's place in a sharded full run.
+     * one per line (for the project's own changed-plan command); `{tests}` (select: imports) the test files the
+     * change can affect, shell-quoted, or nothing for the whole suite; `{shard_index}` (1-based) and `{shard_total}`,
+     * or `{shard}` and `{total}`, are this shard's place in a sharded full run.
      */
     command: z.string().min(1),
     /** fast: every PR (and each PR's new head). full: once per batch of approved PRs. */
@@ -92,6 +94,12 @@ export const TestRunDatabase = z.strictObject({
 
 export const TestRunConfig = z
   .strictObject({
+    /**
+     * Which tests a PR's fast run selects (src/testrun/select.ts): `repo`, the repo's own planner given
+     * {changed_files} (the default when a tier passes it); `imports`, the engine's import graph, for a JS/TS repo,
+     * in {tests}; `off`, none (the default otherwise). A full run always runs everything.
+     */
+    select: z.enum(['imports', 'repo', 'off']).optional(),
     /** Run in the workspace before the tiers (e.g. `npm ci`), with the caches set; a failure fails every tier. */
     setup: z.array(z.string().min(1)).default([]),
     tiers: z.array(TestRunTier).min(1),
@@ -122,6 +130,13 @@ export const TestRunConfig = z
       if (t.database && !c.database) ctx.addIssue({ code: 'custom', path: ['tiers', i, 'database'], message: 'needs test_run.database' });
     });
     for (const k of Object.keys(c.checks)) if (!names.has(k)) ctx.addIssue({ code: 'custom', path: ['checks', k], message: `no tier named ${k}` });
+    // Each selection mode has the placeholder it fills, and only that one carries a selection.
+    const mode = selectMode(c);
+    c.tiers.forEach((t, i) => {
+      if (t.command.includes('{tests}') && mode !== 'imports') ctx.addIssue({ code: 'custom', path: ['tiers', i, 'command'], message: `{tests} is filled only with select: imports (this config's is ${mode})` });
+      if (t.command.includes('{changed_files}') && mode === 'off') ctx.addIssue({ code: 'custom', path: ['tiers', i, 'command'], message: 'select: off hands no tier the changed files: drop {changed_files}, or select: repo' });
+    });
+    if (mode === 'imports' && !c.tiers.some((t) => t.kind === 'fast' && t.command.includes('{tests}'))) ctx.addIssue({ code: 'custom', path: ['select'], message: 'select: imports needs a fast tier that passes {tests} to its test runner' });
     // A check is a fast check or a full one, never both: a PR's fast check must not wait on its batch.
     const checkKind = new Map<string, string>();
     for (const t of c.tiers) {

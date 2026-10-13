@@ -134,6 +134,18 @@
 @keyframes fade-up { 0% { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes fade-in { 0% { opacity: 0; } to { opacity: 1; } }
 @keyframes spin { to { transform: rotate(1turn); } }
+@keyframes drawer-in { 0% { transform: translateX(-100%); } to { transform: translateX(0); } }
+/* On a narrow screen (a phone; the sidebar is a drawer under 768 px) every control is a 44 x 44 px tap target at
+   least. In the base layer, so a page's own utilities (a fixed button's position, its padding) still apply; a
+   link inside a sentence stays inline (min sizes don't apply to inline boxes). */
+@layer base {
+  @media (max-width: 767.98px) {
+    :where(button, a[href], select, summary, [role="button"], [role="tab"], [role="option"], input:not([type="checkbox"], [type="radio"], [type="hidden"])) { min-height: 44px; }
+    :where(button, a[href], select, summary, [role="button"], [role="tab"]) { min-width: 44px; }
+    /* A link laid out by a flex or grid parent is a box already: its text sits in the middle of the taller box. */
+    :where([class~="flex"], [class~="inline-flex"], [class~="grid"]) > :where(a[href]) { display: inline-flex; align-items: center; }
+  }
+}
 @keyframes shimmer-text { 0% { background-position: 150%; } to { background-position: -50%; } }
 @layer components {
   .primitive-card-pad { padding: 12px; }
@@ -150,6 +162,11 @@
     color: transparent;
     animation: shimmer-text 1.6s linear infinite;
   }
+}
+/* On a narrow screen text that's cut short with an ellipsis on a wide one wraps instead, whole. Outside any layer,
+   so it wins over the truncate utility; a fixed height would cut the second line, so the box grows with it. */
+@media (max-width: 767.98px) {
+  .truncate { white-space: normal; overflow-wrap: anywhere; height: auto; }
 }
 html, body, #root { height: 100%; }
 body { background: var(--background); color: var(--foreground); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }

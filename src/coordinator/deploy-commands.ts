@@ -6,12 +6,15 @@
 // first-parent line. The bot opens a thread asking for an explicit confirm; nothing moves until the same owner
 // replies `confirm` there (`cancel` drops it). Then the deploy branch is fast-forwarded by the gate's own path (never
 // forced, only to a commit descending from where it is), posted to ops, and audited with the gate's state then.
+//
+// While tests.yaml has deploy_gate but not `enabled: true`, the gate is off: `deploy <sha>` is refused, saying so.
 import { auditWrite } from '../decide.js';
 import type { EventPayload } from '../events/types.js';
 import { mayApproveHighRisk, personOf } from '../intake/people.js';
 import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/report.js';
 import { markSeen, reportId } from '../intake/store.js';
 import { ChannelChat } from './channel-chat.js';
+import { DEPLOY_GATE_OFF } from '../deploy-gate/config.js';
 import { postDeployMessage } from '../deploy-gate/post-deploy.js';
 
 /** `deploy <sha>`: the sha (7 to 40 hex), or null for anything else. */
@@ -36,8 +39,15 @@ export abstract class DeployCommands extends ChannelChat {
   /** The override threads' targets start with this. */
   private static readonly TARGET = 'deploy:';
 
+  /** The gate is configured (on, or off and refusing). */
   private deployOn(cfg: IntakeConfig): boolean {
-    return !!this.d.deployGate && this.channelOn(cfg);
+    return (!!this.d.deployGate || this.gateOff()) && this.channelOn(cfg);
+  }
+
+  /** tests.yaml has deploy_gate, switched off (no `enabled: true`). */
+  private gateOff(): boolean {
+    const g = this.d.cfg.tests.deploy_gate;
+    return !!g && !g.enabled;
   }
 
   /** Overrides first: `deploy <sha>` in a channel the bot reads, and replies in an override's thread. */
@@ -75,7 +85,7 @@ export abstract class DeployCommands extends ChannelChat {
   }
 
   private async deployCommand(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: { login: string; role: 'owner' | 'writer' | 'viewer' | null }) {
-    const gate = this.d.deployGate!;
+    const gate = this.d.deployGate;
     const id = reportId(r);
     const ref = parseDeployCommand(r.text)!;
     const where = { channel: r.thread!.id };
@@ -83,6 +93,7 @@ export abstract class DeployCommands extends ChannelChat {
       this.emit('deploy_gate.override', { id, thread: null, sha: ref, by: who.login, stage: 'refused', detail: detail.slice(0, 1000) });
       return this.channelSend(src, `deploy-refused:${id}`, where, { kind: 'notice', text: `Not deployed: ${detail}`.slice(0, 1900) });
     };
+    if (!gate || this.gateOff()) return refuse(`${DEPLOY_GATE_OFF}.`);
     if (!mayApproveHighRisk(cfg, r.sender.id, who.role)) return refuse(`only an owner listed for Discord approvals, who is an admin of the repo, may deploy from chat (@${who.login} isn't).`);
     const c = gate.checkOverride(ref);
     if (!c.ok) return refuse(`${c.reason}.`);
@@ -99,6 +110,7 @@ export abstract class DeployCommands extends ChannelChat {
     const say = (text: string) => this.say(src, thread, `reply:${msg}`, text.slice(0, 1900));
     const asked = this.pendingOverride(id);
     if (!asked) return say('This was answered already; your reply changes nothing.');
+    if (!this.d.deployGate || this.gateOff()) return say(`Nothing moved: ${DEPLOY_GATE_OFF}.`);
     const answer = parseDeployReply(r.text);
     if (!mayApproveHighRisk(cfg, r.sender.id, who.role) || who.login.toLowerCase() !== asked.by.toLowerCase()) return say(`Only @${asked.by}, who asked, can confirm or cancel this; nothing moved.`);
     if (answer === null) return say('Nothing moved. Reply exactly **confirm** to deploy it, or **cancel**.');

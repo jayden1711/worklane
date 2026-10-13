@@ -9,13 +9,13 @@ import type { Actionability, Issue } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
 import { judge, OPTIMIZE_LABEL, optimizeDue, optimizeIssue, pickTarget, readMetric, sample, slowestTests, targetByKey, targets, type Sample, type Target } from '../optimize.js';
 import { createWorktreeAsync, removeWorktree } from '../worktrees.js';
-import { Gardener } from './gardener.js';
+import { PrHygiene } from './pr-hygiene.js';
 
 const DAY = 24 * 3600_000;
 type Pass = EventPayload<'optimize.pass'>;
 type Measured = { runs: number[]; out: string } | { error: string };
 
-export abstract class Optimizer extends Gardener {
+export abstract class Optimizer extends PrHygiene {
   /** The pass in flight. */
   protected optimizeRun: Promise<void> = Promise.resolve();
   private optimizeBusy = false;

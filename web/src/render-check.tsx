@@ -2,11 +2,12 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
+import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
-import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
+import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { Header } from './pages/Overview';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
@@ -14,6 +15,8 @@ import { UpdatesPanelView, type UpdatesPanelData } from './components/UpdatesPan
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
 import { TrustView } from './components/TrustPanel';
+import { MetricsPanel, MetricsView } from './components/MetricsPanel';
+import { FlakyView } from './components/FlakyPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -96,6 +99,9 @@ export { intakeRefusal } from './pages/Intake';
 export const renderThroughput = (t: Throughput) => renderToStaticMarkup(<ThroughputView t={t} />);
 export const renderThroughputPanel = (state: State) => renderToStaticMarkup(<ThroughputPanel state={state} />);
 export const renderTrust = (t: Trust) => renderToStaticMarkup(<TrustView t={t} />);
+export const renderMetrics = (m: Metrics) => renderToStaticMarkup(<MetricsView m={m} />);
+export const renderMetricsPanel = (state: State) => renderToStaticMarkup(<MetricsPanel state={state} />);
+export const renderFlaky = (f: Flaky) => renderToStaticMarkup(<FlakyView f={f} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
@@ -123,3 +129,19 @@ export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToSt
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
 export { countdown } from './components/Usage';
+/** The page header with its menu button and the narrow-screen navigation drawer, open; on a hub, its instances with their dots. */
+export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo; status?: Record<string, HealthStatus> } = {}) => {
+  const open = o.open ?? true;
+  const status = o.status ?? {};
+  const switcher = o.hub ? <InstanceList hub={o.hub} current={o.hub.instances[0]!.name} onSelect={() => {}} status={status} /> : null;
+  return renderToStaticMarkup(
+    <NavMenu.Provider value={{ open, setOpen: () => {} }}>
+      <Header title="Board" />
+      <NavDrawer open={open} setOpen={() => {}}>
+        <SidebarBody state={state} path="/" counts={{}} health={{ hub: o.hub ?? null, status }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
+      </NavDrawer>
+    </NavMenu.Provider>,
+  );
+};
+export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
+export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));

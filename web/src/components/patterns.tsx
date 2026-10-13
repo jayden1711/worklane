@@ -53,9 +53,9 @@ export function TaskRow({ mark, label, amount, pill, onClick, details, index = 0
   const expandable = !onClick && !!details;
   return (
     <div className="overflow-hidden border-b border-line transition-colors duration-200 last:border-0 hover:bg-inset" style={{ animation: `fade-up 450ms cubic-bezier(0.23,1,0.32,1) ${Math.min(index, 8) * 60}ms both` }} data-task-row={testId} data-testid={dataTestId}>
-      <button type="button" aria-expanded={expandable ? open : undefined} onClick={onClick ?? (expandable ? () => setOpen((o) => !o) : undefined)} className="flex h-11 w-full items-center gap-2.5 px-3 text-left">
+      <button type="button" aria-expanded={expandable ? open : undefined} onClick={onClick ?? (expandable ? () => setOpen((o) => !o) : undefined)} className="flex h-11 w-full items-center gap-2.5 px-3 text-left max-md:h-auto max-md:min-h-11 max-md:flex-wrap max-md:py-1.5">
         <span className="flex size-6 shrink-0 items-center justify-center">{mark}</span>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink max-md:min-w-[60%]">{label}</span>
         {amount !== undefined && <span className="shrink-0 text-[12.5px] tabular-nums text-ink-2">{amount}</span>}
         {pill}
         {(expandable || onClick) && (
@@ -109,7 +109,7 @@ export function ToolRow({ icon, label, chip, end, detail }: { icon: 'run' | 'wri
   const can = !!detail;
   return (
     <div style={{ animation: 'fade-up 300ms cubic-bezier(0.23,1,0.32,1) both' }} data-tool-row>
-      <button type="button" aria-expanded={can ? open : undefined} onClick={can ? () => setOpen((o) => !o) : undefined} className={cx('group/row flex min-h-7 w-full min-w-0 items-center gap-2 rounded-control px-1 py-0.5 text-left transition-colors duration-100', can && 'hover:bg-hover-2')}>
+      <button type="button" aria-expanded={can ? open : undefined} onClick={can ? () => setOpen((o) => !o) : undefined} className={cx('group/row flex min-h-7 max-md:min-h-11 w-full min-w-0 items-center gap-2 rounded-control px-1 py-0.5 text-left transition-colors duration-100', can && 'hover:bg-hover-2')}>
         <span className="relative flex size-4 shrink-0 items-center justify-center text-ink-3">
           <svg width="13" height="13" viewBox="0 0 24 24" className={cx('transition-opacity duration-100', can && 'group-hover/row:opacity-0', open && 'opacity-0')}>
             {TOOL_ICON[icon]}

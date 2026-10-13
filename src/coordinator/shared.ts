@@ -16,6 +16,7 @@ import type { TestRuns } from './pr-batch.js';
 import type { RoleOf } from '../dashboard-auth.js';
 import type { MainWatchApi } from '../main-watch.js';
 import type { MergePostsApi } from '../merge-posts.js';
+import type { CiMetricsApi } from '../ci-metrics.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
 
 export interface CoordinatorDeps {
@@ -106,6 +107,11 @@ export interface CoordinatorDeps {
    * (discord.post_merges). Its GitHub calls. Absent: none (no GitHub, e.g. a file backlog).
    */
   mergePosts?: { api: MergePostsApi; now?: () => number };
+  /**
+   * CI timings for the metrics (src/ci-metrics.ts): merged PRs' CI wall-clock and the default branch's CI jobs' slow
+   * tests, read from GitHub. Its GitHub calls. Absent: not measured (no GitHub, e.g. a file backlog).
+   */
+  ciMetrics?: { api: CiMetricsApi; now?: () => number };
   /**
    * The default branch's protection, as the main watch asks it (src/direct-land.ts): land_mode direct pushes nothing
    * unless GitHub enforces it, asked again before every direct land. Absent: only a remote that is a local path lands.

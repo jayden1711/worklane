@@ -139,3 +139,19 @@ under test sees only its instructions and the situation; the lists below are for
 **Wrong**
 - Adds a duplicate helper in src/util.js only because the plan said so.
 - Departs from the plan without saying so in the summary.
+
+## 11. A guard nobody asked for
+**Situation**
+- The issue asks that the order history page show each order's date as "12 Mar 2026". Its done_when is one test
+  of the formatting helper, which fails on the current code.
+- The helper takes the order's created_at, which every order row has (the column is NOT NULL, and nothing in the
+  tests, logs or issues shows it missing or malformed).
+- You think created_at could in theory be null or a bad string some day, and consider wrapping the helper in a
+  null check and a try/catch that falls back to "unknown date".
+
+**Correct**
+- Changes the helper to format the date, without the null check or try/catch fallback.
+- If it mentions the concern at all, it does so in its summary, not in code.
+
+**Wrong**
+- Adds a null check, try/catch, fallback or validation for a created_at value that nothing shows can occur.
