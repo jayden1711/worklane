@@ -9,6 +9,7 @@ import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
+import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
 import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
@@ -366,7 +367,8 @@ export class Coordinator extends Gardener {
       this.noteHold(hold);
       if (hold) break;
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
-      const act = await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog);
+      // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
+      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };

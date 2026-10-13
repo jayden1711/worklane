@@ -350,7 +350,7 @@ test('setup: off by default, units validated before they\'re installed, a timer 
 test('the dashboard\'s reader: settings and the log, torn lines skipped', () => {
   const dir = mkdtempSync(join(tmpdir(), 'upd-'));
   writeFileSync(join(dir, 'updates.json'), JSON.stringify({ enabled: true, repo_url: 'https://github.com/example-org/engine.git', required_checks: ['test', 3] }));
-  assert.deepEqual(updateSettings(join(dir, 'updates.json')), { enabled: true, channel: 'main', repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'] });
+  assert.deepEqual(updateSettings(join(dir, 'updates.json')), { enabled: true, channel: 'main', repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'], canary: null });
   assert.equal(updateSettings(join(dir, 'none.json')), null);
   writeFileSync(join(dir, 'log'), `${JSON.stringify({ at: '1', event: 'installed', from: OLD, to: NEW })}\nnope\n${JSON.stringify({ at: '2', event: 'other' })}\n${JSON.stringify({ at: '3', event: 'rolled_back' })}\n`);
   assert.deepEqual(updateLog(join(dir, 'log')).map((e) => e.event), ['installed', 'rolled_back']);

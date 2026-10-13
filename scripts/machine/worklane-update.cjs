@@ -21,7 +21,13 @@
 // backups, starts the services again on the old engine and holds the commit. Otherwise it switches
 // /opt/worklane/current and restarts the instance and dashboard services, and if any of them isn't active and
 // steady within 2 minutes, it restores the migration backups, switches back and restarts again.
-// Every attempt, install, refusal and rollback is one JSON line in /var/lib/worklane/updates.jsonl.
+// The canary (updates.json "canary": { "instance", "repo", "time_limit_minutes" }, docs/canary.md): a scratch-repo
+// instance that gets a tiny issue each day and after every install, filed and read with the engine's `canary` command
+// as that instance's user. It must go issue -> plan -> PR -> green checks -> merged within the time limit (default
+// 120 minutes). While one runs, no other update starts. After an install, a canary that fails or runs out of time
+// rolls back as above (backups restored, the old engine, services restarted), holds the commit and raises a watchdog
+// incident. A daily canary that fails only raises the incident.
+// Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -32,6 +38,7 @@ const CONFIG = '/etc/worklane/updates.json';
 const LOG = '/var/lib/worklane/updates.jsonl';
 const STATE = '/var/lib/worklane/update-state.json';
 const HELD = '/var/lib/worklane/update-held.json'; // the last rolled-back commit: { sha, at, failed }
+const CANARY = '/var/lib/worklane/canary.json'; // the canary running now, and when the last one was filed (root, 0600)
 const OPT = '/opt/worklane';
 const SLOTS = '/var/lib/worklane/agent-slots';
 const VERIFY_GIT = '/var/lib/worklane/verify.git'; // a root-owned bare clone, only for checking release tags
@@ -42,6 +49,8 @@ const BUILD_DIR = `/var/lib/${BUILD_STATE}`;
 const HEALTH_MS = 120_000;
 const STABLE_MS = 30_000;
 const POLL_MS = 5_000;
+const DAY_MS = 24 * 60 * 60_000;
+const CANARY_LIMIT_MIN = 120;
 
 // ---------- decisions (pure) ----------
 
@@ -352,6 +361,21 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
 async function run(deps) {
   const cfg = deps.config();
   if (!cfg || cfg.enabled !== true) return 'disabled';
+  // A canary running now goes first: no other update starts until it has passed, failed or run out of time.
+  if (cfg.canary) {
+    const st = deps.canaryState() || {};
+    if (st.pending) return checkCanaryNow(deps, cfg, st);
+  }
+  const r = await update(deps, cfg);
+  // Once a day, when no install just filed one: a canary on the engine as it is.
+  if (cfg.canary && r !== 'installed' && r !== 'rolled_back' && dailyDue(deps.canaryState(), deps.now())) {
+    const filed = startCanary(deps, cfg, 'daily', null);
+    return filed.ok ? 'canary_filed' : 'canary_failed';
+  }
+  return r;
+}
+
+async function update(deps, cfg) {
   const gh = repoFromUrl(cfg.repo_url);
   if (!gh) return deps.note('refused', null, `updates.json repo_url isn't a GitHub repository: ${cfg.repo_url}`, true);
   const current = deps.installed();
@@ -405,36 +429,11 @@ async function run(deps) {
   } catch (e) {
     return deps.note('build_failed', head, String((e && e.message) || e).slice(-500), true);
   }
-  const units = parseUnits(deps.exec('systemctl', ['list-units', '--type=service', '--all', '--plain', '--no-legend', '--full', 'worklane-*.service']));
-  const instances = units.map((u) => parseInstance(u, deps.exec('systemctl', ['show', '-p', 'User,Environment,ExecStart', u]))).filter(Boolean);
+  const { units, instances } = machineUnits(deps);
   // Every backup the migrations made, per instance: what a rollback puts back.
   const migrated = [];
-  const restoreAll = () => {
-    const failed = [];
-    for (const { inst, made } of migrated) {
-      for (const b of [...made].reverse()) {
-        try {
-          deps.exec(...splitCmd(restoreCommand(inst, b)));
-        } catch (e) {
-          failed.push(`${inst.name}: ${b.path}: ${String((e && e.message) || e).split('\n')[0]}`);
-        }
-      }
-    }
-    return failed;
-  };
-  const settle = async () => {
-    deps.exec('systemctl', ['restart', ...units]);
-    const start = deps.now();
-    const samples = [];
-    for (;;) {
-      const states = {};
-      for (const u of units) states[u] = parseShow(deps.exec('systemctl', ['show', '-p', 'ActiveState,SubState,NRestarts,Result', u]));
-      samples.push({ at: deps.now(), states });
-      const h = health(samples, start, deps.now());
-      if (h !== 'wait') return { h, states };
-      await deps.sleep(POLL_MS);
-    }
-  };
+  const restoreAll = () => restoreBackups(deps, migrated);
+  const settle = () => settleUnits(deps, units);
   if (instances.length) {
     // Migrate with the new engine while nothing runs: stop, migrate each instance, and only then switch.
     deps.exec('systemctl', ['stop', ...units]);
@@ -462,8 +461,12 @@ async function run(deps) {
   deps.switchTo(head);
   const after = await settle();
   if (after.h === 'healthy') {
-    deps.log({ event: 'installed', from: current, to: head, units, ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}) });
-    return 'installed';
+    deps.log({ event: 'installed', from: current, to: head, units, ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
+    if (!cfg.canary) return 'installed';
+    // The install stands only once the canary passes: until then the backups and the old engine are kept to go back to.
+    const filed = startCanary(deps, cfg, 'update', { from: current, to: head, migrated: migrated.map((m) => ({ inst: m.inst, made: m.made })) });
+    if (filed.ok) return 'installed';
+    return rollbackAfterCanary(deps, filed.pending, filed.verdict);
   }
   const bad = Object.entries(after.states).filter(([, s]) => s.state !== 'active' || s.sub === 'auto-restart' || s.restarts > 0);
   const down = bad.map(([u, s]) => `${u}: ${s.state}${s.sub ? ` (${s.sub})` : ''}${s.result !== 'success' ? `, ${s.result}` : ''}${s.restarts ? `, ${s.restarts} restarts` : ''}`);
@@ -491,10 +494,191 @@ async function run(deps) {
   return 'rolled_back';
 }
 
+/** The worklane-*.service units an update restarts, and the instances among them (each one's user and environment). */
+function machineUnits(deps) {
+  const units = parseUnits(deps.exec('systemctl', ['list-units', '--type=service', '--all', '--plain', '--no-legend', '--full', 'worklane-*.service']));
+  const instances = units.map((u) => parseInstance(u, deps.exec('systemctl', ['show', '-p', 'User,Environment,ExecStart', u]))).filter(Boolean);
+  return { units, instances };
+}
+
+/** Put the migrations' backups back, newest first, each as its instance's user. Returns what couldn't be restored. */
+function restoreBackups(deps, migrated) {
+  const failed = [];
+  for (const { inst, made } of migrated) {
+    for (const b of [...made].reverse()) {
+      try {
+        deps.exec(...splitCmd(restoreCommand(inst, b)));
+      } catch (e) {
+        failed.push(`${inst.name}: ${b.path}: ${String((e && e.message) || e).split('\n')[0]}`);
+      }
+    }
+  }
+  return failed;
+}
+
+/** Restart the units and wait until they're healthy or not (see health()). */
+async function settleUnits(deps, units) {
+  deps.exec('systemctl', ['restart', ...units]);
+  const start = deps.now();
+  const samples = [];
+  for (;;) {
+    const states = {};
+    for (const u of units) states[u] = parseShow(deps.exec('systemctl', ['show', '-p', 'ActiveState,SubState,NRestarts,Result', u]));
+    samples.push({ at: deps.now(), states });
+    const h = health(samples, start, deps.now());
+    if (h !== 'wait') return { h, states };
+    await deps.sleep(POLL_MS);
+  }
+}
+
+/** updates.json's canary as { instance, repo, limitMs }, or null when it doesn't name a usable one. */
+function canaryConfig(cfg) {
+  const c = cfg && cfg.canary;
+  if (!c || !/^[a-z][a-z0-9-]{0,40}$/.test(String(c.instance || '')) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(c.repo || ''))) return null;
+  const min = Number(c.time_limit_minutes);
+  return { instance: c.instance, repo: c.repo, limitMs: (Number.isFinite(min) && min > 0 ? min : CANARY_LIMIT_MIN) * 60_000 };
+}
+
+/** A daily canary is due when none was filed in the last 24 hours. */
+function dailyDue(state, now) {
+  const last = state && state.lastFiledAt ? Date.parse(state.lastFiledAt) : NaN;
+  return !(now - last < DAY_MS);
+}
+
+/** The installed engine's `canary` command, run as the canary instance's user through systemd-run, as its unit runs. */
+function canaryCommand(inst, sub, repo, extra, opt = OPT) {
+  return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, 'current', 'dist', 'src', 'cli.js'), 'canary', sub, '--instance', inst.name, '--repo', repo, ...extra, '--json']);
+}
+
+/** The canary command's one JSON line, or a failure. */
+function parseCanary(out) {
+  const line = String(out || '').trim().split('\n').filter(Boolean).at(-1) || '';
+  try {
+    return JSON.parse(line);
+  } catch {
+    return { ok: false, error: `no answer from the canary command: ${line.slice(0, 300)}` };
+  }
+}
+
+/** One canary command, as the canary instance's user. */
+function canaryRun(deps, c, sub, extra) {
+  const inst = machineUnits(deps).instances.find((i) => i.name === c.instance);
+  if (!inst) return { ok: false, error: `no instance "${c.instance}" on this machine (updates.json canary.instance)` };
+  try {
+    return parseCanary(deps.exec(...splitCmd(canaryCommand(inst, sub, c.repo, extra)), { timeout: 5 * 60_000 }));
+  } catch (e) {
+    const r = parseCanary(e && e.stdout);
+    return r.ok === false && r.error && !/^no answer/.test(r.error) ? r : { ok: false, error: String((e && e.message) || e).split('\n')[0] };
+  }
+}
+
+/**
+ * File a canary issue. update: { from, to, migrated } after an install (what its rollback needs), else null.
+ * { ok: true } once it's filed and recorded; { ok: false, pending, verdict } when it couldn't be.
+ */
+function startCanary(deps, cfg, reason, update) {
+  const c = canaryConfig(cfg);
+  const at = new Date(deps.now()).toISOString();
+  const pending = { reason, issue: null, url: null, filedAt: at, deadline: new Date(deps.now() + (c ? c.limitMs : CANARY_LIMIT_MIN * 60_000)).toISOString(), update };
+  if (!c) return failCanary(deps, pending, { stage: 'filed', reason: 'updates.json canary needs an instance name and its repo (owner/repo)', pr: null });
+  const r = canaryRun(deps, c, 'file', ['--reason', reason]);
+  if (!r.ok || !Number.isInteger(r.issue)) return failCanary(deps, pending, { stage: 'filed', reason: `couldn't file the canary issue: ${String(r.error || 'no issue number').slice(0, 500)}`, pr: null });
+  const filed = { ...pending, issue: r.issue, url: typeof r.url === 'string' ? r.url : null };
+  deps.saveCanary({ pending: filed, lastFiledAt: at });
+  deps.log({ event: 'canary_filed', trigger: reason, reason: `the ${reason === 'update' ? 'post-update' : 'daily'} canary: issue #${r.issue}`, issue: r.issue, url: filed.url, deadline: filed.deadline, ...(update ? { to: update.to } : {}) });
+  return { ok: true, pending: filed };
+}
+
+/** A canary that couldn't be filed fails now: logged here; an install's is rolled back by the caller. */
+function failCanary(deps, pending, verdict) {
+  const v = { ...verdict, state: 'failed' };
+  deps.saveCanary({ pending: null, lastFiledAt: pending.filedAt });
+  logCanary(deps, pending, v);
+  if (!pending.update) raise(deps, pending, v);
+  return { ok: false, pending, verdict: v };
+}
+
+/** One canary result in the log: passed or failed, at which stage and why, how long it took, its PR. */
+function logCanary(deps, pending, v, extra = {}) {
+  deps.log({ event: v.state === 'passed' ? 'canary_passed' : 'canary_failed', trigger: pending.reason, issue: pending.issue, url: pending.url, stage: v.stage, reason: v.reason, pr: v.pr || null, duration_ms: deps.now() - Date.parse(pending.filedAt), ...(pending.update ? { to: pending.update.to } : {}), ...extra });
+}
+
+/** The watchdog's incident, when the engine has the watchdog (an optional dependency until it does). */
+function raise(deps, pending, v) {
+  if (typeof deps.raiseIncident !== 'function') return;
+  const what = pending.update ? `the canary after installing ${String(pending.update.to).slice(0, 12)} failed: ${v.reason}; rolled back and held` : `the daily canary failed: ${v.reason}`;
+  const fix = pending.update ? 'look at the canary issue and its PR; turning updates off and on again retries the held commit' : 'look at the canary issue and its PR';
+  try {
+    deps.raiseIncident('canary_failed', 'canary', what, fix);
+  } catch {
+    // the log line is the record
+  }
+}
+
+/** Ask the running canary how far it got: passed, failed, out of time, or still going. */
+async function checkCanaryNow(deps, cfg, st) {
+  const p = st.pending;
+  const c = canaryConfig(cfg);
+  let v = c ? canaryRun(deps, c, 'check', ['--issue', String(p.issue)]) : { ok: false, error: 'updates.json canary needs an instance name and its repo' };
+  if (!v.ok) v = { state: 'pending', stage: 'filed', reason: `the check failed: ${String(v.error).slice(0, 300)}`, pr: null };
+  if (v.state === 'pending' && deps.now() >= Date.parse(p.deadline)) {
+    v = { ...v, state: 'failed', reason: `timed out after ${Math.round((deps.now() - Date.parse(p.filedAt)) / 60_000)} minutes at "${v.stage}": ${v.reason}`, timedOut: true };
+  }
+  if (v.state === 'pending') return 'canary_pending';
+  deps.saveCanary({ pending: null, lastFiledAt: st.lastFiledAt || p.filedAt });
+  logCanary(deps, p, v, v.timedOut ? { timed_out: true } : {});
+  if (v.state === 'passed') {
+    if (typeof deps.resolveIncident === 'function') {
+      try {
+        deps.resolveIncident('canary_failed', 'canary');
+      } catch {
+        // nothing to resolve
+      }
+    }
+    return 'canary_passed';
+  }
+  if (!p.update) {
+    raise(deps, p, v);
+    return 'canary_failed';
+  }
+  return rollbackAfterCanary(deps, p, v);
+}
+
+/**
+ * The canary after an install failed: the same rollback as an install whose services don't come up (stop, every
+ * migration's backups put back, the old engine, restart), the commit held, and the watchdog told. Only while that
+ * install is still the engine.
+ */
+async function rollbackAfterCanary(deps, pending, v) {
+  const { from, to, migrated } = pending.update;
+  const reason = `rollback: canary failed: ${v.reason}`;
+  if (deps.installed() !== to) {
+    deps.log({ event: 'error', reason: `${reason}; not rolled back: the engine is ${deps.installed()} now, not ${to}` });
+    return 'canary_failed';
+  }
+  const { units } = machineUnits(deps);
+  if (migrated.length) deps.exec('systemctl', ['stop', ...units]);
+  const unrestored = restoreBackups(deps, migrated);
+  if (from) deps.switchTo(from);
+  const back = from ? await settleUnits(deps, units) : { h: 'failed' };
+  const at = new Date(deps.now()).toISOString();
+  deps.hold({ sha: to, at, failed: [reason] });
+  deps.log({ event: 'rolled_back', from: to, to: from, units, reason, canary: { issue: pending.issue, url: pending.url, stage: v.stage, pr: v.pr || null }, back: back.h, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+  raise(deps, pending, v);
+  return 'rolled_back';
+}
+
 /** [file, args] of an argv. */
 const splitCmd = (argv) => [argv[0], argv.slice(1)];
 
 // ---------- the machine (real effects) ----------
+
+/** The installed engine's watchdog module, or null while it has none. */
+function watchdog() {
+  const f = path.join(OPT, 'current', 'dist', 'src', 'watchdog', 'index.js');
+  if (!fs.existsSync(f)) return Promise.resolve(null);
+  return import(require('node:url').pathToFileURL(f).href).catch(() => null);
+}
 
 function realDeps() {
   const readJson = (f) => {
@@ -540,6 +724,16 @@ function realDeps() {
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
     held: () => readJson(HELD),
+    canaryState: () => readJson(CANARY),
+    saveCanary: (state) => {
+      const tmp = `${CANARY}.tmp`;
+      fs.writeFileSync(tmp, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+      fs.chmodSync(tmp, 0o600);
+      fs.renameSync(tmp, CANARY);
+    },
+    // The watchdog's incidents (src/watchdog) once the installed engine has them; until then the log line is the record.
+    raiseIncident: (kind, key, detail, fix) => void watchdog().then((w) => w && typeof w.raiseIncident === 'function' && w.raiseIncident(kind, key, detail, fix)).catch(() => {}),
+    resolveIncident: (kind, key) => void watchdog().then((w) => w && typeof w.resolveIncident === 'function' && w.resolveIncident(kind, key)).catch(() => {}),
     hold: (entry) => {
       const tmp = `${HELD}.tmp`;
       fs.writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { mode: 0o644 });
@@ -588,4 +782,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

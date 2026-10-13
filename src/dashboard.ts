@@ -41,7 +41,7 @@ import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
-import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
+import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
@@ -134,7 +134,7 @@ export interface DashboardOptions {
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
-  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
   acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
@@ -1115,6 +1115,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
         // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
         const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        // The Machine page's Updates panel: the engine installed now, the last install, any rollback or hold and why,
+        // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
+        if (url.pathname === '/api/updates' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('engine updates are', who) });
+          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT)));
+        }
         if (url.pathname === '/api/machine' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
           return json(res, 200, machine());

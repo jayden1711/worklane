@@ -60,6 +60,8 @@ interface Render {
   renderAgents(state: State, live: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
   renderMachine(data: unknown): string;
+  renderUpdatesPanel(data: unknown): string;
+  duration(ms: number | null): string;
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
@@ -535,6 +537,37 @@ test('the research settings: readable names, bounds from the machine\'s limits, 
   assert.equal(r.boundsOf('research.max_usd_per_day', { ...data, limits: { ...data.limits, research: undefined } }), '', 'no research limits sent: no bounds line, not a wrong one');
   // Every setting key the server has gets a readable name, so a new one never shows as its raw key.
   assert.deepEqual(SETTING_KEYS.filter((k) => !r.LABEL[k]), []);
+});
+
+test('the Updates panel: the engine installed, the last update, a rollback held because the canary failed, and the canary with its duration and PR link', () => {
+  const at = new Date(Date.now() - 3 * 3600_000).toISOString();
+  const data = {
+    configured: true,
+    enabled: true,
+    installed: { sha: 'a'.repeat(40), version: '0.4.1' },
+    lastInstall: { at, from: 'a'.repeat(40), to: 'b'.repeat(40) },
+    rollback: { at, sha: 'b'.repeat(40), reason: 'rollback: canary failed: timed out after 121 minutes at "pr": PR #7 open', held: true, canary: true },
+    canary: {
+      settings: { instance: 'canary', repo: 'example-org/canary-scratch', timeLimitMinutes: 120 },
+      running: null,
+      last: { at, passed: false, trigger: 'update', stage: 'pr', why: 'timed out after 121 minutes at "pr": PR #7 open', durationMs: 121 * 60_000, timedOut: true, issue: { number: 6, url: 'https://github.com/example-org/canary-scratch/issues/6' }, pr: { number: 7, url: 'https://github.com/example-org/canary-scratch/pull/7' }, sha: 'b'.repeat(40) },
+    },
+  };
+  const html = r.renderUpdatesPanel(data);
+  for (const id of ['updates-panel', 'updates-installed', 'updates-last', 'updates-rollback', 'updates-rollback-reason', 'updates-canary', 'updates-canary-last', 'updates-canary-why']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="updates-installed"[\s\S]*?v0\.4\.1[\s\S]*?aaaaaaaaaaaa/);
+  assert.match(html, /data-testid="updates-last"[\s\S]*?aaaaaaaaaaaa → bbbbbbbbbbbb/);
+  assert.match(html, /rolled back: canary failed[\s\S]*?held[\s\S]*?timed out after 121 minutes/);
+  assert.match(html, /data-testid="updates-canary-last"[\s\S]*?timed out[\s\S]*?after installing bbbbbbbbbbbb · 2 h 01 min[\s\S]*?href="https:\/\/github\.com\/example-org\/canary-scratch\/pull\/7"[^>]*>PR #(<!-- -->)?7/);
+  // Passed, a daily one, and nothing rolled back.
+  const ok = r.renderUpdatesPanel({ ...data, rollback: null, canary: { ...data.canary, running: { at, trigger: 'daily', issue: 9, url: 'https://github.com/example-org/canary-scratch/issues/9', deadline: at }, last: { ...data.canary.last, passed: true, timedOut: false, trigger: 'daily', durationMs: 17 * 60_000, why: 'PR #7 merged with 1 green check' } } });
+  assert.match(ok, /data-testid="updates-rollback"[\s\S]*?none/);
+  assert.match(ok, /passed[\s\S]*?daily · 17 min/);
+  assert.doesNotMatch(ok, /data-testid="updates-canary-why"/, 'a pass shows no failure reason');
+  assert.match(ok, /data-testid="updates-canary-running"[\s\S]*?issue #(<!-- -->)?9/);
+  // No canary configured: where to read how.
+  assert.match(r.renderUpdatesPanel({ ...data, canary: { settings: null, running: null, last: null } }), /not set up: see[\s\S]*docs\/canary\.md/);
+  assert.deepEqual([r.duration(42_000), r.duration(17 * 60_000), r.duration(65 * 60_000), r.duration(null)], ['42s', '17 min', '1 h 05 min', '–']);
 });
 
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {

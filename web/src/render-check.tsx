@@ -9,6 +9,7 @@ import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
+import { UpdatesPanelView, type UpdatesPanelData } from './components/UpdatesPanel';
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
 import { TrustView } from './components/TrustPanel';
@@ -72,6 +73,8 @@ export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => 
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
 export { boundsOf, LABEL, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
+export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
+export { duration } from './components/UpdatesPanel';
 export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToStaticMarkup(<LiveFeedView items={items} ended={ended} />);
 export const renderConsole = (data: ConsoleData) => renderToStaticMarkup(<ConsolePanel data={data} run="r" />);
 export const renderAgents = (state: State, live: LiveList | null) => renderToStaticMarkup(<Agents state={state} live={live} />);
