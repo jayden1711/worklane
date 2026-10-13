@@ -50,6 +50,8 @@ export class Watchdog {
   private postLock: Lock | null = null;
   private history: RestartHistory = new Map();
   private auth: { at: number; value: ReturnType<NonNullable<WatchdogDeps['auth']>> } | null = null;
+  /** When the probe first said signed out, of the probes in a row that say so; null while it says signed in. */
+  private authFailingSince: number | null = null;
   private running = false;
 
   constructor(private d: WatchdogDeps) {}
@@ -106,6 +108,7 @@ export class Watchdog {
       }
       // Not asked successfully: keep what was known (a login doesn't expire because a check couldn't run).
       if (value || !this.auth) this.auth = { at: now.getTime(), value };
+      if (value) this.authFailingSince = value.loggedIn ? null : (this.authFailingSince ?? now.getTime());
     }
     let githubTokenError: string | null = null;
     if (this.d.githubToken) {
@@ -115,7 +118,7 @@ export class Watchdog {
         githubTokenError = (e as Error).message.split('\n')[0]!.slice(0, 300);
       }
     }
-    const facts: InstanceFacts = { instance: this.d.instance, events: this.d.events(), now: now.getTime(), stallHours: cfg.stallHours, stop: this.d.stop(), auth: this.auth?.value ?? null, githubTokenError, emergency: this.d.emergency() };
+    const facts: InstanceFacts = { instance: this.d.instance, events: this.d.events(), now: now.getTime(), stallHours: cfg.stallHours, stop: this.d.stop(), auth: this.auth?.value ?? null, ...(this.authFailingSince !== null ? { authFailingSince: this.authFailingSince } : {}), githubTokenError, emergency: this.d.emergency() };
     // A login's expiry is this probe's to resolve only when it knows one (another module may report it otherwise).
     const kinds = facts.auth?.expiresAt ? INSTANCE_KINDS : INSTANCE_KINDS.filter((k) => k !== 'claude_login_expiring');
     reconcile(instanceFindings(facts), { kinds, instance: this.d.instance }, opts);

@@ -483,6 +483,52 @@ jobs:
           tail -n 80 "$F/requests.log" "$F/server.log" || true
           tail -n 80 "$F"/run*.err || true
 
+  auth-probe-real-users:
+    # The watchdog's Claude sign-in probe on a real host: instance.sh's coordinator and agent users (separate homes,
+    # 0700) and its real sudoers rule; the agent user signed in to a stand-in claude that reads the login under the
+    # HOME it is given; the probe run as the coordinator through sudo, as its service runs it, finds it signed in.
+    # scripts/ci/auth-probe-real-users.mjs has the assertions.
+    name: Claude sign-in probe (real users)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci && npm run build
+      - name: the instance's users and sudoers rule (instance.sh), and the stand-in claude
+        run: |
+          sudo bash scripts/setup/instance.sh probe
+          sudo install -m 0755 "$(command -v node)" /usr/local/bin/node
+          sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
+      - name: the agent user signed in, in its own home only
+        run: |
+          a="$(getent passwd wl-probe-agent | cut -d: -f6)" && c="$(getent passwd wl-probe | cut -d: -f6)"
+          [ "$a" != "$c" ]
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"
+          sudo install -d -o wl-probe-agent -g wl-probe-agent -m 0700 "$a/.claude"
+          printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$t" | sudo -u wl-probe-agent sh -c 'umask 077 && cat > "$1"' _ "$a/.claude/.credentials.json"
+          unset t
+          sudo -H -u wl-probe-agent env PATH=/usr/local/bin:/usr/bin:/bin claude auth status --json | jq -e '.loggedIn == true'
+          sudo -H -u wl-probe env PATH=/usr/local/bin:/usr/bin:/bin claude auth status --json | jq -e '.loggedIn == false'
+      - name: the probe, as the coordinator through sudo, finds the agent user signed in
+        run: |
+          # What wl-probe runs, world-readable: the build, its dependencies, node and the driver.
+          t="$(mktemp -d /tmp/wl-probe-XXXXXX)"
+          mkdir -p "$t/node_modules"
+          cp -r dist package.json "$t/"
+          cp -r node_modules/ws node_modules/yaml node_modules/zod "$t/node_modules/"
+          cp scripts/ci/auth-probe-real-users.mjs "$t/"
+          chmod -R a+rX "$t"
+          a="$(getent passwd wl-probe-agent | cut -d: -f6)"
+          sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
+            sh -c 'cd "$HOME" && exec node "$1/auth-probe-real-users.mjs" "$1/dist" wl-probe-agent "$2"' _ "$t" "$a"
+
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.
     runs-on: ubuntu-latest
