@@ -241,10 +241,16 @@ export function AddProjectView({ data, onChanged }: { data: AddProjectData; onCh
       </form>
       {!data.allowed && data.why && (
         <p className="text-[12.5px] text-ink-2" data-testid="add-project-disabled">
-          Not available: {data.why}.{' '}
-          <span className="text-ink-3" data-testid="add-project-owners">
-            Machine owners: {data.machineOwners.length ? data.machineOwners.map((o) => `@${o}`).join(', ') : 'none set'}.
-          </span>
+          Not available: {data.why}.
+          {/* The machine owners, unless the reason already names them. */}
+          {!/machine owners:/.test(data.why) && (
+            <>
+              {' '}
+              <span className="text-ink-3" data-testid="add-project-owners">
+                Machine owners: {data.machineOwners.length ? data.machineOwners.map((o) => `@${o}`).join(', ') : 'none set'}.
+              </span>
+            </>
+          )}
         </p>
       )}
       {err && (

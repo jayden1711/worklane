@@ -1088,7 +1088,8 @@ test("Add project: enabled for a machine owner, freshly signed in on an allowed 
     assert.match(html, /data-testid="add-project" data-enabled="no"/, who);
     assert.ok(controls(html).length === 3 && controls(html).every((c) => /disabled=""/.test(c)), `${who}: every control disabled`);
     assert.match(html.match(/data-testid="add-project-disabled"[\s\S]*?<\/p>/)?.[0] ?? '', why, `${who}: says why`);
-    assert.match(html, /data-testid="add-project-owners"[^>]*>Machine owners: @ada, @olu\./, `${who}: names the machine owners`);
+    const said = (html.match(/data-testid="add-project-disabled"[\s\S]*?<\/p>/)?.[0] ?? '').replace(/<[^>]+>/g, '');
+    assert.equal((said.match(/[Mm]achine owners: @ada, @olu/g) ?? []).length, 1, `${who}: names the machine owners, once: ${said}`);
   }
   assert.match(view(freshRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
 });
