@@ -63,12 +63,6 @@ export interface RunRequest {
    * it. A provider model without a route is never sent anywhere but the fallback.
    */
   route?: { kind: 'build' | 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer' | 'evaluator' | 'other'; highRisk?: boolean; fallback: string };
-  /**
-   * A person is waiting on this run (a chat-channel reply, a question in a decision's thread): it takes its Claude
-   * login's start lock only (the auth check and claude's start, when a token refresh happens), never the login's
-   * run lock, so it doesn't wait behind an agent run. Same lane, sandbox, tools and caps as any run.
-   */
-  interactive?: boolean;
   /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
   lane?: string;
   /** The project's own variables (tests.yaml env); never one the harness sets. */
@@ -255,49 +249,24 @@ export const TRANSIENT_BUDGET_MS = 30 * 60_000;
 const STARTUP_WINDOW_MS = 90_000;
 
 /**
- * Two locks per Claude login (CLAUDE_CONFIG_DIR). Why: three runs started 0.1 s apart on one login all failed on
- * "another Claude Code process is refreshing it": two claude processes refreshing one OAuth login at once, and the
- * loser fails. claude refreshes a due token before its first request, so:
- * - the start lock (loginStartLock) covers the auth check and claude's start until its first answer (or its end,
- *   or LOGIN_START_HOLD_MS): no two claude processes on one login are ever starting, and refreshing, at once.
- *   Every run takes it.
- * - the run lock (withLoginLock) keeps agent runs one at a time per login for their whole run, as before. An
- *   interactive run (a person waiting: chat, thread questions) doesn't take it, so it never waits behind one.
+ * One claude at a time per Claude login (CLAUDE_CONFIG_DIR): two processes on one login can refresh its
+ * token at the same moment, and the loser fails ("another Claude Code process is refreshing it").
  */
 const loginLocks = new Map<string, Promise<unknown>>();
-const startLocks = new Map<string, Promise<unknown>>();
-
-/** Wait for `key` in `locks`; resolves to its release (idempotent). Waiters go in arrival order. */
-async function acquireIn(locks: Map<string, Promise<unknown>>, key: string): Promise<() => void> {
-  const prev = locks.get(key) ?? Promise.resolve();
+export async function withLoginLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = loginLocks.get(key) ?? Promise.resolve();
   let release!: () => void;
   const mine = new Promise<void>((r) => (release = r));
   const tail = prev.then(() => mine);
-  locks.set(key, tail);
+  loginLocks.set(key, tail);
   await prev.catch(() => {});
-  let done = false;
-  return () => {
-    if (done) return;
-    done = true;
-    release();
-    if (locks.get(key) === tail) locks.delete(key);
-  };
-}
-
-export async function withLoginLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const release = await acquireIn(loginLocks, key);
   try {
     return await fn();
   } finally {
     release();
+    if (loginLocks.get(key) === tail) loginLocks.delete(key);
   }
 }
-
-/** Take a login's start lock; the caller releases it once claude has started (or ended). */
-export const loginStartLock = (key: string): Promise<() => void> => acquireIn(startLocks, key);
-
-/** The longest one start holds its login's start lock: a claude with no first answer by then isn't refreshing. */
-export const LOGIN_START_HOLD_MS = 60_000;
 
 const sleepFor = (ms: number, signal?: AbortSignal) =>
   new Promise<boolean>((resolve) => {
@@ -386,7 +355,7 @@ export class CliRunner implements AgentRunner {
   }
 
   /**
-   * One run: agent runs serialized per Claude login, every run's start too (see loginStartLock). A failure at startup on an auth or transient error is not
+   * One run, serialized per Claude login. A failure at startup on an auth or transient error is not
    * the task's: it is retried after a wait (1 min, 2 min, then 5 min) for up to TRANSIENT_BUDGET_MS,
    * and only then reported, marked transient.
    */
@@ -397,18 +366,10 @@ export class CliRunner implements AgentRunner {
     const first = now();
     for (let tries = 1; ; tries++) {
       const started = now();
-      const key = this.loginOf(req);
-      // Every run: the login's start lock, around the auth check and claude's start. Agent runs: its run lock too.
-      const once = async () => {
-        const release = await loginStartLock(key);
+      const r = await withLoginLock(this.loginOf(req), () => {
         req.onLockWait?.(Math.max(0, now() - started));
-        try {
-          return await this.runOnce(req, release);
-        } finally {
-          release();
-        }
-      };
-      const r = req.interactive ? await once() : await withLoginLock(key, once);
+        return this.runOnce(req);
+      });
       const atStartup = now() - started < STARTUP_WINDOW_MS || r.turns <= 1;
       const transient = atStartup && (r.reason === 'rate_limited' || ((r.reason === 'failed' || r.reason === 'auth_mismatch') && TRANSIENT_ERROR.test(r.detail)));
       if (!transient) return r;
@@ -423,8 +384,7 @@ export class CliRunner implements AgentRunner {
     }
   }
 
-  /** One try. `started` releases the login's start lock: once claude has answered (its token is fresh), or ended. */
-  private async runOnce(req: RunRequest, started: () => void): Promise<RunResult> {
+  private async runOnce(req: RunRequest): Promise<RunResult> {
     // With a key file, apiKeyHelper is the key's only way in: none from this process's environment.
     const base = req.provider ? { ...this.base, ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined } : this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base;
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
@@ -457,7 +417,7 @@ export class CliRunner implements AgentRunner {
       const refusal = projectSettingsRefusal(req.cwd, guard);
       if (refusal) return { reason: 'failed', detail: `${refusal}; not starting`, costUsd: 0, turns: 0, model: req.model };
     }
-    // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
+    // Preflight, inside the login lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
     const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
     const auth = status.method;
@@ -548,8 +508,6 @@ export class CliRunner implements AgentRunner {
         },
         stop: () => kill('stopped'),
       });
-      // The start lock is held until claude's first answer, LOGIN_START_HOLD_MS at most.
-      const startHold = setTimeout(started, LOGIN_START_HOLD_MS);
       let stall = setTimeout(() => kill('stalled'), req.stallMs);
       const overall = setTimeout(() => kill('timed_out'), req.timeoutMs);
       req.signal?.addEventListener('abort', () => kill('canceled_by_reconciliation'));
@@ -586,7 +544,6 @@ export class CliRunner implements AgentRunner {
             }
           }
           req.onLine?.(j);
-          if (j.type === 'assistant' || j.type === 'result') started();
           if (j.type === 'result') {
             result = j as ResultLine;
             turnEnded();
@@ -608,8 +565,6 @@ export class CliRunner implements AgentRunner {
         }
         clearTimeout(stall);
         clearTimeout(overall);
-        clearTimeout(startHold);
-        started();
         const r = result as ResultLine | null;
         const model = Object.keys(r?.modelUsage ?? {})[0] ?? req.model;
         const u = r?.usage;

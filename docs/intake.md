@@ -35,9 +35,7 @@ issues, prompts or logs.
 - **Pull, never listen.** The machine accepts no inbound connection for intake. The chat bot holds an
   outbound gateway connection; in-product reports are read through the existing read-only production path.
 - **One loop.** The coordinator runs intake on a timer, as it does the console and chat requests, so intake
-  agent runs take the same per-login lock as every other run and count against the same budget. Chat-channel
-  messages and decision-thread replies are the exception: they wake the coordinator as they arrive, and their
-  runs take only the login's start lock (2.1.3, "How fast").
+  agent runs take the same per-login lock as every other run and count against the same budget.
 
 ## 2. Sources
 
@@ -213,21 +211,6 @@ Its model is `discord.chat_model` (`haiku`, `sonnet` or `opus`; default `haiku`)
 `model_cap`. It has its own daily cap, `discord.chat_max_usd_per_day` (default 2, at most 20), and every run
 counts against the instance's daily budget. Over either, it says so once that day and is quiet until the next
 (`discord.chat`, outcome `capped`). A chat channel can't also be an ideas channel or the asks channel.
-
-**How fast.** A person waits on a chat-channel message and on a reply in a decision's or ask's thread, so those
-don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
-
-- The gateway runs in the coordinator's process: a message it queues wakes a pass at once. One pass at a time; a
-  message during a pass makes one more pass after it. The short timer still runs the pass, in case a wake was
-  missed. Ideas (an ideas channel, an idea's thread) stay on the intake pull: they are reports.
-- Discord's typing indicator shows as soon as a message is accepted and is sent again every 8 s until the reply
-  is posted: one per channel, stopped on the first failed send (a rate limit included), and not sent there again
-  for a minute after one.
-- Each reply runs in order within its channel or thread, at most two at once per instance. They take no machine
-  agent slot, and they don't wait behind agent runs on the Claude login: an `interactive` run takes only the
-  login's start lock (the auth check and claude's start, where a due token is refreshed), not the run lock that
-  keeps agent runs one at a time (`src/runner.ts`). No two claude processes on one login ever start, and so
-  refresh its token, at once.
 
 ### 2.2 In-product bug reports
 

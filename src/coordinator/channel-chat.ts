@@ -38,30 +38,25 @@ export abstract class ChannelChat extends Conversation {
     const chats = reports.filter((r) => r.thread?.kind === 'chat');
     const out = await super.channelInbound(cfg, reports.filter((r) => r.thread?.kind !== 'chat'));
     if (!chats.length) return out;
+    const meter = () => new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime());
     for (const r of chats) {
-      const person = await this.acceptChat(cfg, r);
-      if (person === 'ignored') out.ignored.push(r);
-      else if (person) await this.chatReply(cfg, this.chatSource()!, r, person);
+      // Chat off, or a channel no longer listed: never a report, never stored.
+      if (!this.chatOn(cfg) || !cfg.discord.chat_channels.includes(r.thread!.id)) {
+        out.ignored.push(r);
+        continue;
+      }
+      const person = await personOf(cfg, r.sender.id, this.d.intake?.roleOf);
+      // Unmapped: ignored entirely, before anything of the message is stored. A viewer gets no reply either.
+      if (!person || !mayAddIdea(person.role)) {
+        meter().countDrop(person ? 'not_writer' : 'unmapped');
+        out.ignored.push(r);
+        continue;
+      }
+      // Each message is taken once (the seen ledger), however often the gateway delivers it.
+      if (!storeRaw(this.d.stateDir, r)) continue;
+      await this.chatReply(cfg, this.chatSource()!, r, person);
     }
     return out;
-  }
-
-  /**
-   * Whether a chat-channel message gets a reply: its sender when it does (the message is stored, taken once);
-   * `ignored` when chat is off, the channel isn't listed, or the sender is unmapped or a viewer (nothing stored);
-   * null when it was taken before (the gateway delivered it again).
-   */
-  protected async acceptChat(cfg: IntakeConfig, r: IncomingReport): Promise<ChatPerson | 'ignored' | null> {
-    // Chat off, or a channel no longer listed: never a report, never stored.
-    if (!this.chatOn(cfg) || !cfg.discord.chat_channels.includes(r.thread!.id)) return 'ignored';
-    const person = await personOf(cfg, r.sender.id, this.d.intake?.roleOf);
-    // Unmapped: ignored entirely, before anything of the message is stored. A viewer gets no reply either.
-    if (!person || !mayAddIdea(person.role)) {
-      new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime()).countDrop(person ? 'not_writer' : 'unmapped');
-      return 'ignored';
-    }
-    // Each message is taken once (the seen ledger), however often the gateway delivers it.
-    return storeRaw(this.d.stateDir, r) ? person : null;
   }
 
   private historyFile(channel: string) {
@@ -101,7 +96,7 @@ export abstract class ChannelChat extends Conversation {
   }
 
   /** One reply: within the chat's cap and the daily budget, a channel-chat run, its reply checked, then posted. */
-  protected async chatReply(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: ChatPerson) {
+  private async chatReply(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: ChatPerson) {
     const id = reportId(r);
     const channel = r.thread!.id;
     const say = (key: string, text: string) => this.say(src, channel, `chat:${id}:${key}`, text);
@@ -123,8 +118,6 @@ export abstract class ChannelChat extends Conversation {
       ...spec,
       stateDir: this.d.stateDir,
       route: { kind: 'other', fallback: cfg.discord.chat_model },
-      // A person is waiting: the run doesn't queue behind agent runs on the login (src/runner.ts loginStartLock).
-      interactive: true,
       maxBudgetUsd: Math.max(0.05, Math.min(1, cap - meter.chatSpent(), left)),
       stallMs: 5 * 60_000,
       timeoutMs: 10 * 60_000,

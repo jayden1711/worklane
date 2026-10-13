@@ -557,7 +557,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
   - Urgent control (pause, stop) uses interrupt and stop, never a message.
   - **Built (2026-10-10):**
     - Every run's input is stream-json: the prompt is the first user message, and the input stays open for the run.
-    - A console message is held by the runner until the turn's `result`, then written as the next user message. A local probe showed a message written mid-turn is folded into that turn and replaces its answer. With nothing held at a result, the input closes and the session ends. The per-login run lock still covers an agent's whole run; an interactive run (a chat or thread reply) takes only the login's start lock (src/runner.ts, docs/intake.md 2.1.3).
+    - A console message is held by the runner until the turn's `result`, then written as the next user message. A local probe showed a message written mid-turn is folded into that turn and replaces its answer. With nothing held at a result, the input closes and the session ends. The per-login lock still covers the whole run.
     - The dashboard and the coordinator are separate processes. The console library (src/console.ts, owner only) writes a request into `<state>/console/requests/`, which the coordinator takes every 5 s. It lists live runs in `<state>/console/live.json`, and records every outcome as an event (`console.message_queued`, `console.message_delivered`, `console.message_dropped`, `console.run_stopped`, `console.request_refused`).
     - **Stop** kills the run's tree (reason `stopped`), and the task is blocked with who stopped it.
     - **Interrupt** is not offered yet: the spike's interrupt step (part 3) has to confirm it for a run as another OS user first.
