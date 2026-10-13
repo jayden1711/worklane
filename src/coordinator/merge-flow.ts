@@ -27,6 +27,7 @@ import { approveMerge, mergeApproval } from '../decide.js';
 import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
+import { FlakyGate } from './flaky.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
@@ -36,6 +37,25 @@ export abstract class MergeFlow extends FixRuns {
   /** Polls of the merge flow's capped waits (wait-caps.ts). */
   protected readonly waitPolls = new PollCounter();
   private batcher: PrBatcher | null = null;
+  private flakyGateInst: FlakyGate | null = null;
+
+  /** The flaky-test gate in front of a red default branch (coordinator/flaky.ts): re-run first, quarantine what passes. */
+  protected get flakyGate(): FlakyGate {
+    this.flakyGateInst ??= new FlakyGate({
+      log: this.d.log,
+      actor: this.d.instance,
+      backlog: this.d.backlog,
+      config: () => this.d.cfg.project.flaky,
+      repo: this.d.cfg.project.project.repo,
+      branch: this.branch,
+      clone: this.d.repo,
+      testRuns: this.d.testRuns ?? null,
+      tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
+      fetch: () => void this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch),
+    });
+    return this.flakyGateInst;
+  }
+
   /** The merge train: this pass's merges, up to tests.yaml land.parallel_merges. */
   protected readonly mergePass = new MergePass(() => this.d.cfg.tests.land.parallel_merges);
   /** The merge train's clock for deferrals (tests move it). */
@@ -598,7 +618,12 @@ export abstract class MergeFlow extends FixRuns {
       if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
       this.mainPolled.set(m.sha, now);
       const required = this.d.cfg.project.required_checks;
-      const outcomes = requiredOutcomes(required, await this.d.backlog.checks(m.sha));
+      // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
+      // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
+      // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
+      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.d.backlog.checks(m.sha)) });
+      if (gate.wait) continue;
+      const outcomes = gate.outcomes;
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
       if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) {
         // Still running, up to a timeout (in polls, so it holds whatever the poll interval).
@@ -610,7 +635,7 @@ export abstract class MergeFlow extends FixRuns {
         await this.d.backlog.comment(m.number, `[${BRAND.cli}] @${this.ownerOf(m.issue)} the required check(s) ${missing.join(', ')} never reported on the merge commit \`${m.sha.slice(0, 8)}\` (${polls} polls), so whether ${this.branch} is green after this merge is unknown. Auto-merge goes on; check them yourself.`);
         continue;
       }
-      this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed });
+      this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
       if (failed.length) await this.mainWentRed(m, failed);
     }
   }
