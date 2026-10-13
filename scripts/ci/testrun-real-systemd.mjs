@@ -52,7 +52,7 @@ assert.equal(raw.status, 0);
 assert.equal(raw.stdout, 'probed\n', 'the run\'s stdout is its own: systemd-run prints nothing there');
 const keys = (stderr) => stderr.slice(stderr.lastIndexOf('Finished with result: ')).trimEnd().split('\n').map((l) => l.slice(0, l.indexOf(': ')));
 assert.deepEqual(keys(raw.stderr), keys(readFileSync(join(fixtures, 'probe.stderr'), 'utf8')), 'the summary has the fixture\'s lines, in its order');
-assert.match(raw.stderr, /^Running as unit: \S+\.service; invocation ID: [0-9a-f]{32}\n/, 'the unit line is first, in the fixture\'s format');
+assert.match(raw.stderr, /^Running as unit: \S+\.service(?:; invocation ID: [0-9a-f]{32})?\n/, 'the unit line is first (with or without its invocation ID, as systemd 255 builds differ)');
 const own = systemdRunStats(raw.stderr);
 let rest = '';
 let at = 0;

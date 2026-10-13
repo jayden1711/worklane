@@ -92,7 +92,7 @@ export interface SystemdRunStats {
 
 /**
  * systemd-run --wait's own lines in its stderr (not --quiet; the run's stderr is the same stream under --pipe):
- * "Running as unit: <unit>; invocation ID: <id>" near the start, and its summary (result, CPU time, peak memory, ...)
+ * "Running as unit: <unit>" near the start (with "; invocation ID: <id>" on some systemd 255 builds, not others), and its summary (result, CPU time, peak memory, ...)
  * at the very end, after the unit has stopped, so nothing a run prints can come after it. Only that final block is
  * read: a run's own "Memory peak: 999G" line is part of its output, never a stat. `own`: the [start, end) ranges of
  * `stderr` that are systemd-run's.
@@ -100,7 +100,7 @@ export interface SystemdRunStats {
 export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: Array<[number, number]> } {
   const own: Array<[number, number]> = [];
   const stats: SystemdRunStats = { cpuS: null, memPeakMb: null };
-  const unit = new RegExp(`(?:^|\n)(Running as unit: ${BRAND.cli}-test-[a-z0-9-]+\\.service; invocation ID: [0-9a-f]{32}\n)`).exec(stderr);
+  const unit = new RegExp(`(?:^|\n)(Running as unit: ${BRAND.cli}-test-[a-z0-9-]+\\.service(?:; invocation ID: [0-9a-f]{32})?\n)`).exec(stderr);
   if (unit) own.push([unit.index + unit[0].length - unit[1]!.length, unit.index + unit[0].length]);
   // The last "Finished with result: " whose rest is all summary; the line may follow a run's last unended line.
   for (let at = stderr.lastIndexOf('Finished with result: '); at >= 0; at = at === 0 ? -1 : stderr.lastIndexOf('Finished with result: ', at - 1)) {

@@ -82,6 +82,13 @@ test('systemd-run 255\'s own lines: the unit line and the final summary are its,
   assert.deepEqual(p.stats, { cpuS: 0, memPeakMb: 0.3 });
   assert.equal(cut(probe, p.own), '', 'every line of the probe\'s stderr is systemd-run\'s');
 
+  // GitHub's Ubuntu 24.04 runner (systemd 255.4-1ubuntu8.17), captured from the real-systemd job: its unit line has
+  // no invocation ID, where the server's does. Both are systemd-run's own.
+  const runner = fixture('probe-runner.stderr');
+  const r = systemdRunStats(runner);
+  assert.deepEqual(r.stats, { cpuS: 0, memPeakMb: 0.3 });
+  assert.equal(cut(runner, r.own), '', 'every line of the runner\'s probe stderr is systemd-run\'s');
+
   // A run's own lines that look like systemd's stay its own; the stats come from the summary at the very end.
   const exec = fixture('exec.stderr');
   const e = systemdRunStats(exec);
