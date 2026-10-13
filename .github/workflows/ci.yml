@@ -124,14 +124,25 @@ jobs:
           nproc
       - name: a coordinator user and the full-run lock (what instance.sh and the machine script make)
         run: |
-          sudo useradd --create-home --shell /bin/bash wl-ci
-          sudo chmod 0750 "$(getent passwd wl-ci | cut -d: -f6)"
+          # Two instances, so each test user's check also proves it can't reach the other's state.
+          for u in wl-ci wl-ci2; do
+            sudo useradd --create-home --shell /bin/bash "$u"
+            sudo chmod 0750 "$(getent passwd "$u" | cut -d: -f6)"
+          done
           sudo install -o root -g root -m 0644 /dev/null /run/lock/worklane-full-run.lock
       - name: test-user.sh install, in full
         run: |
           n="$(nproc)"
           sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
           tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
+          # A second instance's test user, then both checks again: each must be shut out of the other's state.
+          sudo bash scripts/setup/test-user.sh install ci2 --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install2.log"
+          tail -n 5 "$RUNNER_TEMP/install2.log" | grep -qx 'OK: all checks passed'
+          for i in ci ci2; do
+            sudo bash scripts/setup/test-user.sh check "$i" | tee "$RUNNER_TEMP/check-$i.log"
+            grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo ci2 || echo ci)" "$RUNNER_TEMP/check-$i.log"
+            tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
+          done
       - name: the coordinator's sandbox host, as wl-ci, against real systemd-run
         run: |
           # What wl-ci runs, world-readable: the build, its one dependency, node, the driver and the fixtures.

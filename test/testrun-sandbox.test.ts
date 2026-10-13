@@ -513,3 +513,14 @@ test('test-user.sh sets its own PATH with the sbin directories, and checks the s
   const need = [...sh.matchAll(/^\s*need_tools (.+)$/gm)].flatMap((m) => m[1]!.split(/\s+/));
   for (const t of ['runuser', 'systemd-run', 'useradd', 'usermod', 'setfacl', 'sysctl', 'iptables', 'ip', 'newuidmap', 'slirp4netns', 'systemctl']) assert.ok(need.includes(t), `test-user.sh checks for ${t}`);
 });
+
+test('regression: an instance\'s state dir and its runs are root:<its test user> 0710, so other instances\' test users can\'t enter them', { skip: !posix && 'bash' }, () => {
+  // They were root:root 0711: any test user could traverse into another instance's /var/lib/worklane-test/<name>.
+  const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
+  const helper = readFileSync(helperSrc, 'utf8');
+  assert.match(sh, /install -d -o root -g root -m 0711 \/var\/lib\/worklane-test\n/, 'the base stays 0711');
+  assert.match(sh, /install -d -o root -g "\$user" -m 0710 "\$root" "\$root\/runs"/);
+  assert.match(sh, /chown root:"\$user" "\$root" "\$root\/runs"; chmod 0710 "\$root" "\$root\/runs"/, 're-running install fixes old 0711 directories');
+  assert.match(helper, /install -d -o root -g "\$user" -m 0710 "\$root\/runs"/);
+  assert.doesNotMatch(sh + helper, /-m 0711 "\$root/, 'no state dir is 0711 any more');
+});
