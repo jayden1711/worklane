@@ -52,6 +52,8 @@ export interface CoordinatorDeps {
   leaseMs?: number;
   /** How often each open PR is polled for its checks (ms; default 60 s). */
   prPollMs?: number;
+  /** How often the harness's open PRs are read for new reviews that start a fix run (ms; default REVIEW_FIX_POLL_MS, 5 min). */
+  reviewPollMs?: number;
   /** The instance policy's auto-merge kill switch, read on every decision (absent or throwing: off). */
   autoMerge?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
