@@ -1,6 +1,5 @@
-// P0 item 4: blocks for the budget or auth keep the claim (block(..., release_=false)). They must retry on their own
-// once the window resets, and relabelling the issue `ready` must requeue them (isTerminal is false for them). A rate
-// limit is no longer a block at all: the instance pauses until its reset and the task is requeued (src/usage-limit.ts).
+// P0 item 4: blocks for a rate limit, the budget or auth keep the claim (block(..., release_=false)). They must retry on
+// their own once the window resets, and relabelling the issue `ready` must requeue them (isTerminal is false for them).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeRunner, type RunRequest } from '../../src/runner.js';
@@ -20,7 +19,7 @@ function endsFirstWith(reason: string, transient = false) {
   return { runner, workers: () => workers };
 }
 
-for (const reason of ['budget_exhausted', 'auth_mismatch']) {
+for (const reason of ['rate_limited', 'budget_exhausted', 'auth_mismatch']) {
   test(`${reason} block: relabelling the issue ready requeues it`, { skip }, async () => {
     const f = fixture();
     const n = f.backlog.open(easyIssue('Add a.js', 'a.js'));
@@ -38,15 +37,28 @@ for (const reason of ['budget_exhausted', 'auth_mismatch']) {
   });
 }
 
-test("rate_limited: never blocked; once the pause's reset has passed (a day later), the task runs again on its own", { skip }, async (t) => {
+test('transient rate-limit block: relabelling the issue ready requeues it', { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open(easyIssue('Add a.js', 'a.js'));
+  const s = endsFirstWith('rate_limited', true);
+  const c = coordinator(f, s.runner);
+  await c.tick();
+  await c.idle();
+  await f.backlog.removeLabel(n, 'blocked');
+  await f.backlog.addLabels(n, ['ready']);
+  await c.tick();
+  await c.idle();
+  assert.equal(s.workers(), 2, `relabelled ready, the task runs again (worker runs: ${s.workers()})`);
+});
+
+test('rate_limited block: once the window has passed (a day later), the task retries on its own', { skip }, async (t) => {
   const f = fixture();
   const n = f.backlog.open(easyIssue('Add a.js', 'a.js'));
   const s = endsFirstWith('rate_limited');
   const c = coordinator(f, s.runner);
   await c.tick();
   await c.idle();
-  assert.ok(!f.log.read(0, ['issue.blocked']).some((e) => (e.payload as { issue: number }).issue === n), 'not blocked');
-  assert.ok((await f.backlog.get(n)).labels.includes('ready'), 'requeued');
+  assert.ok(f.log.read(0, ['issue.blocked']).some((e) => (e.payload as { issue: number }).issue === n), 'blocked');
   // A day later (only Date moves; timers are real).
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 24 * 3600_000 });
   try {
@@ -57,5 +69,5 @@ test("rate_limited: never blocked; once the pause's reset has passed (a day late
   } finally {
     t.mock.timers.reset();
   }
-  assert.equal(s.workers(), 2, `a day after the usage-limit pause, the task has run again by itself (worker runs: ${s.workers()})`);
+  assert.equal(s.workers(), 2, `a day after a rate-limit block, the task has retried by itself (worker runs: ${s.workers()})`);
 });

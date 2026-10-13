@@ -25,8 +25,7 @@ import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
-import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted, UsagePaused } from './shared.js';
-import { limitHit, pauseOf, resetWords, USAGE_INCIDENT, type LimitHit, type UsagePause } from '../usage-limit.js';
+import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted } from './shared.js';
 import { cappedModel } from './model-routing.js';
 import { resolveProvider } from './providers.js';
 import { providerCost, providerOf } from '../providers.js';
@@ -91,30 +90,20 @@ export abstract class CoordinatorBase {
   /** Aborted by an emergency stop: every agent run gets this signal. */
   protected halt = new AbortController();
 
-  /** Open-model providers that hit their usage or rate limit, by label: skipped (their runs fall back) until then (ms). */
-  protected providerLimited = new Map<string, number>();
-
   constructor(protected d: CoordinatorDeps) {
     // Every agent run carries the halt signal; a run after a halt never starts.
     const runner = d.runner;
     this.d = {
       ...d,
       runner: {
-        run: async (asked): Promise<RunResult> => {
+        run: async (asked) => {
           if (this.halt.signal.aborted) throw new Halted();
           // A model that names an open-model provider goes to it, or to its fallback (recorded); then the instance's
           // model cap holds for every run on an Anthropic model, whatever chose it.
           const settings = this.d.settings?.().settings ?? {};
-          const limited = (label: string) => {
-            const until = this.providerLimited.get(label);
-            return until !== undefined && until > this.nowMs() ? new Date(until).toISOString() : null;
-          };
-          const routed = await resolveProvider(asked, { cfg: this.d.cfg, settings, stateDir: this.d.stateDir, limited, ...(this.d.providerKeys ? { providerKeys: this.d.providerKeys } : {}) });
+          const routed = await resolveProvider(asked, { cfg: this.d.cfg, settings, stateDir: this.d.stateDir, ...(this.d.providerKeys ? { providerKeys: this.d.providerKeys } : {}) });
           if (routed.fellBack) this.emit('provider.fallback', { issue: asked.issue ?? runIssue(asked.cwd, asked.taskFile), role: asked.role, provider: routed.fellBack.provider, reason: routed.fellBack.reason.slice(0, 500), model: routed.req.model });
           const req = routed.req.provider ? routed.req : { ...routed.req, model: cappedModel(routed.req.model, settings) };
-          // Paused on the Claude usage limit: no run on Anthropic starts until its reset (src/usage-limit.ts).
-          const pause = req.provider ? null : this.usagePause();
-          if (pause) throw new UsagePaused(pause.resetAt);
           // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
           const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
           // The console holds every live run's input: listed for the dashboard while it runs.
@@ -169,21 +158,6 @@ export abstract class CoordinatorBase {
           }
           if (live.stoppedBy) throw new StoppedByOwner(live.stoppedBy);
           if (this.halt.signal.aborted) throw new Halted();
-          if (r.reason === 'rate_limited') {
-            const hit = r.limit ?? limitHit({ text: r.detail, now: this.nowMs() });
-            this.emit('usage.limit_hit', { ...who, provider: req.provider?.name ?? null, reset_at: hit.resetAt, source: hit.source, kind: hit.kind, detail: r.detail.slice(0, 500) });
-            // An open-model provider's limit is its own: it is skipped until its reset, and this run is redone at
-            // once on its fallback (the role's normal model). Never a pause, and never retried on the provider.
-            if (req.provider) {
-              this.providerLimited.set(req.provider.name, Date.parse(hit.resetAt));
-              const fallback = asked.route?.fallback ?? 'sonnet';
-              this.emit('provider.fallback', { issue: who.issue, role: req.role, provider: req.provider.name, reason: `${req.provider.name} hit its usage or rate limit; skipped until ${hit.resetAt}`, model: fallback });
-              return this.d.runner.run({ ...asked, model: fallback });
-            }
-            // The Claude login's limit: the instance pauses until it resets, and the caller requeues its task.
-            this.pauseOnLimit(hit, who, r.detail);
-            throw new UsagePaused(hit.resetAt);
-          }
           return r;
         },
       },
@@ -269,33 +243,6 @@ export abstract class CoordinatorBase {
     if (load !== null && load > maxLoad) return { reason: `machine load ${load.toFixed(0)} > ${maxLoad}`, load, freeDiskPct: disk.freePct };
     if (freeAfter < minFree) return { reason: `free disk would drop to ${freeAfter.toFixed(1)}% (< ${minFree}%) with another ${est} GB worktree`, load, freeDiskPct: disk.freePct };
     return null;
-  }
-
-  /** The coordinator's clock, in ms (tests set `now`). */
-  protected nowMs(): number {
-    return (this.d.now?.() ?? new Date()).getTime();
-  }
-
-  /** The usage-limit pause in force (src/usage-limit.ts), from the log, or null. */
-  protected usagePause(): UsagePause | null {
-    return pauseOf(this.d.log.read(0, ['usage.paused', 'usage.resumed']));
-  }
-
-  /** Pause on a usage-limit hit: once (a hit while paused changes nothing), with the incident raised when there's a watchdog. */
-  private pauseOnLimit(hit: LimitHit, who: { issue: number | null; role: string }, detail: string) {
-    if (this.usagePause()) return;
-    this.emit('usage.paused', { reset_at: hit.resetAt, source: hit.source, kind: hit.kind, issue: who.issue, role: who.role, detail: detail.slice(0, 500) });
-    const when = resetWords(hit.resetAt, this.nowMs());
-    this.d.incidents?.raiseIncident(USAGE_INCIDENT, this.d.instance, `Claude usage limit reached; no new runs until ${when}${hit.source === 'default' ? " (claude gave no reset time: the default wait)" : ''}`, 'Nothing to do: it resumes on its own at the reset. To resume sooner, switch the Claude account.');
-  }
-
-  /** The pause's reset time has passed: it ends, and the next dispatch starts runs again. */
-  protected resumeIfDue(): boolean {
-    const p = this.usagePause();
-    if (!p || Date.parse(p.resetAt) > this.nowMs()) return false;
-    this.emit('usage.resumed', { reset_at: p.resetAt, paused_ms: Math.max(0, Math.round(this.nowMs() - Date.parse(p.since))) });
-    this.d.incidents?.resolveIncident(USAGE_INCIDENT, this.d.instance);
-    return true;
   }
 
   protected noteHold(h: ReturnType<CoordinatorBase['governorHold']>) {

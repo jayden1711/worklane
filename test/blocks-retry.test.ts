@@ -1,5 +1,4 @@
-// Budget blocks retry on their own once their window passes, up to a cap; auth blocks never do. A rate limit isn't a
-// block: the instance pauses until its reset and requeues the task (src/usage-limit.ts), one run per window.
+// Rate-limit and budget blocks retry on their own once their window passes, up to a cap; auth blocks never do.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
@@ -55,7 +54,7 @@ test('a budget block retries at the next UTC midnight', { skip }, async () => {
   assert.equal(b.retry_after, new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString());
 });
 
-test('a usage limit is never a block: one run per reset window, requeued each time, never given up on', { skip }, async (t) => {
+test('a rate-limit block retries at most 3 times, then stays blocked with one give-up', { skip }, async (t) => {
   const f = fixture();
   const n = f.backlog.open(easyIssue('Add a.js', 'a.js'));
   const s = alwaysEndsWith('rate_limited');
@@ -74,9 +73,9 @@ test('a usage limit is never a block: one run per reset window, requeued each ti
       t.mock.timers.reset();
     }
   }
-  assert.equal(s.workers(), 7, `the first run and one per day after each reset (worker runs: ${s.workers()})`);
-  assert.equal(f.log.read(0, ['issue.blocked']).length, 0);
-  assert.equal(f.log.read(0, ['issue.retry']).length, 0);
-  assert.equal(f.log.read(0, ['usage.paused']).length, 7);
-  assert.ok((await f.backlog.get(n)).labels.includes('ready'));
+  assert.equal(s.workers(), 4, `the first run and 3 retries (worker runs: ${s.workers()})`);
+  const retries = f.log.read(0, ['issue.retry']).map((e) => e.payload as EventPayload<'issue.retry'>);
+  assert.deepEqual(retries.map((r) => [r.attempt, r.gave_up]), [[1, false], [2, false], [3, false], [3, true]]);
+  assert.ok((await f.backlog.get(n)).labels.includes('blocked'));
+  assert.ok((await f.backlog.comments(n)).some((m) => m.body.includes('still blocked after 3 automatic retries')));
 });

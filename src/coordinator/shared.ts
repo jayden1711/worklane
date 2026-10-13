@@ -1,5 +1,4 @@
 // What the coordinator's parts share: its dependencies, constants and module-level helpers.
-import type { IncidentSink } from '../usage-limit.js';
 import { spawn } from 'node:child_process';
 import type { Config } from '../config/load.js';
 import { type Backlog, type Issue } from '../backlog/types.js';
@@ -54,11 +53,6 @@ export interface CoordinatorDeps {
   autoMerge?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
   settings?: () => { settings: InstanceSettings; error: string | null };
-  /**
-   * The watchdog's incident model (one alert per incident, one when resolved), when the instance has one: the
-   * usage-limit pause raises and resolves its incident there. Absent: the pause reports only through its events.
-   */
-  incidents?: IncidentSink;
   /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
   providerKeys?: Record<string, string>;
   /** The clock (tests). */
@@ -181,18 +175,8 @@ export interface LiveEntry {
 }
 
 export class Halted extends Error {
-  constructor(message = 'emergency stop') {
-    super(message);
-  }
-}
-
-/**
- * The instance is paused on the Claude usage limit (src/usage-limit.ts): a run that hit it, or one asked for while
- * the pause holds, which never starts. A kind of halt, so every caller that requeues on a halt requeues on this too.
- */
-export class UsagePaused extends Halted {
-  constructor(readonly resetAt: string) {
-    super(`paused on the Claude usage limit until ${resetAt}`);
+  constructor() {
+    super('emergency stop');
   }
 }
 

@@ -19,8 +19,6 @@ export interface ProviderDeps {
   providerKeys?: Record<string, string>;
   fetch?: typeof fetch;
   lockHeld?: (path: string) => boolean | null;
-  /** When a provider (by label) hit its usage or rate limit: the ISO time it's skipped until, or null. */
-  limited?: (label: string) => string | null;
 }
 
 /** The run as it will start: on its provider, or on its fallback, with why it fell back (null when it didn't). */
@@ -31,8 +29,6 @@ export async function resolveProvider(req: RunRequest, d: ProviderDeps): Promise
   const fallback = req.route?.fallback ?? 'sonnet';
   const back = (reason: string) => ({ req: { ...req, model: fallback }, fellBack: { provider: label, reason } });
   if (!req.route) return back('the run has no route, so it may not go to an open model');
-  const until = d.limited?.(label);
-  if (until) return back(`${label} hit its usage or rate limit; skipped until ${until}`);
   const opted = named.kind === 'local' ? d.settings.providers?.local === true : (d.settings.providers?.hosted ?? []).includes(named.name);
   if (!opted) return back(`this instance hasn't opted into ${label} (policy.yaml settings.providers)`);
   const p: ProviderConfig | undefined = named.kind === 'local' ? d.cfg.agents.providers?.local : d.cfg.agents.providers?.hosted?.[named.name];

@@ -200,7 +200,6 @@ roles:
   - Reaping is by process group; processes are never matched by name.
   - On startup, the coordinator reaps orphans from its own recorded pgids and cleans the worktrees of terminal tasks.
   - A rate-limit or usage pause is classified first and is not treated as a stall.
-  - A run that hits the Claude usage limit ends at once (never retried) and pauses the instance until the reset time claude names (else a 5-hour default): no run starts, the task is requeued rather than failed, one notice goes to the asks channel and the dashboard, and the pause ends on its own at the reset. An open-model provider's limit only skips that provider until its reset; the run is redone on its fallback (src/usage-limit.ts).
   - The done_when contract and base SHA are stored on the **task**, not the attempt, so a retry can't lose them.
   - The coordinator enforces **evaluator ≠ author**, including in any recovery path.
   - Wakeups from bulk issue edits are debounced and coalesced.
