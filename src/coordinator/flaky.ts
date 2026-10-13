@@ -72,7 +72,7 @@ export class FlakyGate {
     let real: string[] = [];
     if (done) ({ flaky, real } = done);
     else if (requested) {
-      const r = await this.resolve(o.sha, o.number, requested.payload as EventPayload<'flaky.rerun_requested'>, Date.parse(requested.ts), outcomes, cfg);
+      const r = await this.resolve(o.sha, o.number, requested.payload as EventPayload<'flaky.rerun_requested'>, Date.parse((requested.payload as EventPayload<'flaky.rerun_requested'>).at), outcomes, cfg);
       if (!r) return { wait: true };
       ({ flaky, real } = r);
     } else if (cfg.rerun) {
@@ -123,7 +123,7 @@ export class FlakyGate {
     }
     const tr = via.filter((v) => v.how === 'test_run').map((v) => v.check);
     if (tr.length) this.startTestRunRerun(sha, tr);
-    this.emit('flaky.rerun_requested', { sha, number, failed: blocking.map((c) => c.name), via });
+    this.emit('flaky.rerun_requested', { sha, number, failed: blocking.map((c) => c.name), via, at: new Date(this.now).toISOString() });
   }
 
   /** Run the tiers behind `checks` again on `sha` in the background, and post their checks again. */

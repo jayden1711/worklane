@@ -583,6 +583,8 @@ export const EventSchemas = {
     number: z.number().int().positive().nullable(),
     failed: z.array(z.string()),
     via: z.array(z.strictObject({ check: z.string(), how: z.enum(['actions', 'test_run', 'none']), id: z.number().int().nullable(), why: z.string().nullable() })),
+    /** When the re-run was asked for, by the coordinator's clock: rerun_timeout_min counts from it. */
+    at: z.string(),
   }),
   /** The re-run's verdict on `sha`: `flaky` passed on the re-run, `real` failed again (or couldn't re-run, or `timed_out`). */
   'flaky.rerun_result': z.strictObject({ sha, number: z.number().int().positive().nullable(), flaky: z.array(z.string()), real: z.array(z.string()), timed_out: z.array(z.string()) }),

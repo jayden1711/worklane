@@ -43,8 +43,7 @@ function fixture(o: { cfg?: Partial<FlakyConfig>; rerun?: boolean; testRuns?: Te
           },
         }),
   } as unknown as Backlog;
-  // The log stamps events with the real clock; the gate's clock starts there and is moved on by tick().
-  let now = Date.now();
+  let now = Date.parse('2026-10-13T12:00:00Z');
   const gate = new FlakyGate({
     log,
     actor: 'inst',
@@ -244,7 +243,7 @@ test('the flake rate: flaky re-runs over red runs, over 7 and 30 days', () => {
   let id = 0;
   const ev = (type: string, ts: string, payload: object): StoredEvent => ({ id: ++id, ts, type, actor: 'c', source: 'coordinator', payload }) as unknown as StoredEvent;
   const red = (n: number, days: number, flaky: boolean) => [
-    ev('flaky.rerun_requested', at(days), { sha: sha(n), number: null, failed: ['ci'], via: [] }),
+    ev('flaky.rerun_requested', at(days), { sha: sha(n), number: null, failed: ['ci'], via: [], at: at(days) }),
     ev('flaky.rerun_result', at(days), { sha: sha(n), number: null, flaky: flaky ? ['ci'] : [], real: flaky ? [] : ['ci'], timed_out: [] }),
   ];
   const events = [...red(1, 1, true), ...red(2, 2, false), ...red(3, 3, false), ...red(4, 4, true), ...red(5, 10, true), ...red(6, 20, false), ...red(7, 40, true)];
