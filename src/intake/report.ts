@@ -44,6 +44,16 @@ export interface IntakeSource {
   openThread?(channel: string, text: string, name: string, from?: string): Promise<string | null>;
   /** A chat source only: take replies in this thread of the bot's (no prefix or mention needed). */
   watch?(thread: string): void;
+  /**
+   * A chat source only: the reports received and not yet taken that match `which`, taken now (the rest stay for
+   * take()). With it, the coordinator answers chat-channel messages and decision-thread replies as they arrive
+   * (src/coordinator/quick-replies.ts) and the intake pass takes everything else.
+   */
+  takeNow?(which: (r: IncomingReport) => boolean): Promise<IncomingReport[]>;
+  /** A chat source only: call `fn` as each chat-channel message or thread reply arrives. */
+  onArrival?(fn: (r: IncomingReport) => void): void;
+  /** A chat source only: show the typing indicator in a channel or thread. False on any failure. */
+  typing?(where: string): Promise<boolean>;
 }
 
 /** Intake's daily caps. The instance settings win; these (or the intake config's) are the defaults. */
