@@ -214,40 +214,6 @@ A viewer's board leaves out everything about runs and agents (the run, its resou
 
 Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
-## Trust
-
-The Reports page opens with the Trust panel: this instance's DORA-style numbers, read from its event log
-(`trustMetrics` in src/merge-metrics.ts, src/trust.ts), over the last 7 days with the 30-day value under each, and
-per risk area (money path, auth, other) over 30 days. It is read-only measurement (docs/design.md, the waiver of
-2026-10-13): `GET /api/trust` is the only route, and nothing it serves changes slots, caps or merges.
-
-- **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
-  on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
-  issue, or a title starting "fix") changed one of its files; or a production report was traced to it.
-- **Escaped bugs**: production reports (issues intake filed) traced to a harness merge: the latest merge, up to 30
-  days before the report, that changed a file the report's fix changed.
-- **Time to restore**: the median hours from a failure showing to its fix or revert merging, or the default branch
-  green again (or auto-merge resumed).
-- **Revise/reject rate**: of the issues a person reviewed (a plan decided, a correction recorded, a merge), those
-  sent back (a plan revised or rejected, a PR or landing rejected, changes requested).
-- **Flaky-check rate**: of the checks and test tiers run on a commit, those that both passed and failed on it.
-- **Cost per merged PR**: the runs' own cost estimates (not billed money) and tokens over the merges; runs on no
-  issue count in the instance's total only.
-- **Verification time per tier**: each test-run tier, the coordinator's verify checks and the evaluator's runs.
-- **Risk area**: money path when the review level names a money path (or the issue has the `money-path` label),
-  auth when it names auth or secrets, else other.
-
-**The recommendation** is fixed rules (`TRUST_RULES`), never a model's: "Ready to raise to 3 agents" at 30 or more
-merges in 30 days, a change failure rate under 5% and no escaped money-path bug; otherwise "Keep 2 agents" with
-what is missing. Per area: verify more heavily at a 10% change failure rate (over 10 or more merges) or any escaped
-bug; lighter only for other changes, under 2% over 20 or more merges; money path and auth are never advised lighter.
-Raising the agent count stays a machine owner's action (the Machine page's slots).
-
-**Who sees what.** The owner and writers see every figure. A viewer sees a figure only when the viewer-events
-allowlist (src/viewer-events.ts) shows every event field it is made of, and never cost; today that is the merge
-counts. **The weekly digest** posts the same numbers to the Discord ops channel (`discord.ops_channel` in
-intake.yaml), once a week, when one is set.
-
 ## Pull requests
 
 In PR mode, the **Pull requests** page (`g p`) shows every PR the harness opened, from its own events:

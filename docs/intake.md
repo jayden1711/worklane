@@ -99,11 +99,7 @@ discord:
   chat_model: haiku                      # its model (default haiku)
   chat_max_usd_per_day: 2                # its own daily cap (default 2, at most 20)
   owners: ["100000000000000011", "100000000000000012"]  # optional: high-risk approvals and setup links (2.1.4, 2.1.5)
-  ops_channel: "100000000000000005"    # optional: the weekly trust digest (docs/dashboard.md, "Trust")
 ```
-
-`ops_channel` only receives posts (the bot never reads it, so instances may share one): once a week, the instance's
-trust numbers and recommendation (src/trust.ts). It needs Discord enabled, nothing else; absent, no digest is posted.
 
 A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
 (admin: owner; maintain or write: writer; triage or read: viewer; none or an error: no access). Every mapped id

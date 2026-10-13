@@ -716,45 +716,6 @@ export interface Throughput {
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
 }
 
-/**
- * Trust (GET /api/trust, src/trust.ts): read-only measurement per instance, over 7 and 30 days, by risk area, with the
- * agent-count and verification recommendations. A figure a viewer may not see is null (cost always is, for them).
- */
-export type RiskArea = 'money' | 'auth' | 'other';
-export interface TrustArea {
-  merges: number | null;
-  failures: number | null;
-  changeFailureRate: number | null;
-  escapedBugs: number | null;
-  restoreHours: number[] | null;
-  medianRestoreHours: number | null;
-  reviewed: number | null;
-  revisedOrRejected: number | null;
-  reviseRejectRate: number | null;
-  checks: number | null;
-  flakyChecks: number | null;
-  flakyRate: number | null;
-  cost: { usd: number; tokens: number; perMergedPrUsd: number | null; perMergedPrTokens: number | null } | null;
-  verification: { tier: string; runs: number; medianMinutes: number; totalMinutes: number }[] | null;
-}
-export interface TrustWindow {
-  days: number;
-  since: string;
-  total: TrustArea;
-  byArea: Record<RiskArea, TrustArea> | null;
-  failures: { issue: number; number: number | null; area: RiskArea; kind: 'reverted' | 'main_red' | 'fix_followed' | 'escaped'; by: number | null }[] | null;
-  escapedMoney: number | null;
-}
-export interface Trust {
-  until: string;
-  windows: TrustWindow[];
-  agents: { action: 'keep' | 'raise'; now: number; to: number; text: string; why: { rule: string; met: boolean }[] } | null;
-  verification: { area: RiskArea; advice: 'heavier' | 'lighter' | 'keep' | 'too_few'; text: string }[] | null;
-  definitions: string[];
-  note: string;
-  hidden: string[];
-}
-
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {
