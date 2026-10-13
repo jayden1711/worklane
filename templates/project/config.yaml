@@ -22,6 +22,11 @@ required_checks: []
 # checks above, not strict by default (a PR needn't be up to date with main first). Post-merge CI on main and the
 # main watch catch what strict would have, without PRs queueing to merge main in. true opts this repo in.
 # protection: { strict: false }
+# Flaky tests: when the default branch's required checks fail after a merge, the failing ones are re-run on the
+# same commit first. Passing then: flaky, quarantined (still run and report, but no longer stop auto-merge or open a
+# revert), one issue each. Blocks again after release_after_passes passes in a row, or an owner's clear. A re-run not
+# done in rerun_timeout_min is a real failure. The updater still requires every check green.
+# flaky: { rerun: true, release_after_passes: 10, rerun_timeout_min: 90 }
 # Files two tasks at once would both change and conflict on: such tasks never run together (the second
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.
@@ -30,6 +35,11 @@ required_checks: []
 # resolves the conflicted hunks, and the usual checks and evaluator follow (it never merges a fix that
 # strays outside the hunks or that the evaluator isn't sure keeps both sides; those wait for you).
 # conflicts: { fix: true, max_fixes_per_pr: 1 }
+# Stale PRs (PR mode): every every_hours, an open PR of the harness's whose base is over stale_after_days old
+# gets the default branch merged in (a merge commit, never a rebase or force; CI runs again), or goes to the
+# conflict fix if it conflicts. One whose task is closed or superseded, with no commit or comment for
+# abandon_after_days, is closed with a comment (the branch is kept). PRs with a hold label are never touched.
+# pr_hygiene: { enabled: true, every_hours: 6, stale_after_days: 3, abandon_after_days: 14, hold_labels: [needs-owner, hold] }
 # Before an auto-merge, if main moved and touched what the PR touches (or imports), the fast tier
 # (tests.yaml runner.changed) runs on the combination in a scratch worktree; nothing is pushed to the PR.
 # combined_check: true

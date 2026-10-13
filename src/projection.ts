@@ -2,6 +2,7 @@
 // Nothing here is stored; delete it and replay the log and you get the same.
 import type { StoredEvent } from './events/types.js';
 import { batchSummaries } from './coordinator/pr-batch.js';
+import { hygieneLine, type HygieneCounts } from './pr-hygiene.js';
 
 export type TaskStatus =
   | 'triage'
@@ -207,6 +208,12 @@ export function summarize(e: StoredEvent): string {
       return `console request refused: ${p.why}`;
     case 'settings.changed':
       return `setting ${p.key}: ${settingText(p.from)} → ${settingText(p.to)}, by @${p.by}`;
+    case 'pr_hygiene.pass':
+      return `stale PR pass: ${hygieneLine(p as unknown as HygieneCounts)}`;
+    case 'pr_hygiene.merged_in':
+      return `#${p.number}: ${String(p.base_sha).slice(0, 8)} merged in (base ${p.base_days} day(s) old)`;
+    case 'pr_hygiene.closed':
+      return `#${p.number} closed as abandoned: ${p.why}`;
     default:
       return e.type;
   }
@@ -574,6 +581,8 @@ export interface PrsView {
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
   /** Tasks held because another task is changing the same hotspot files, newest first: still held (until null), or released after waitedMs. */
   holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
+  /** The latest stale-PR pass (src/pr-hygiene.ts): when, its counts and their line; null before the first. */
+  hygiene: (HygieneCounts & { at: string; line: string }) | null;
 }
 
 /** Every PR the harness opened, newest first, with what happened to it; plus refused pushes and auto-merge stops. */
@@ -583,6 +592,7 @@ export function prsView(events: StoredEvent[]): PrsView {
   const refused: PrsView['refused'] = [];
   const stops: PrsView['stops'] = [];
   const holds: PrsView['holds'] = [];
+  let hygiene: PrsView['hygiene'] = null;
   for (const e of events) {
     const p = e.payload as Record<string, unknown>;
     const n = Number(p.number);
@@ -671,6 +681,11 @@ export function prsView(events: StoredEvent[]): PrsView {
       case 'light_check.finished':
         if (pr) pr.lightCheck = { state: 'done', at: e.ts, mainSha: String(p.main_sha), overlap: p.overlap as string[], outcome: String(p.outcome), waitMs: Number(p.wait_ms), detail: String(p.detail) };
         break;
+      case 'pr_hygiene.pass': {
+        const c = { merged_in: Number(p.merged_in), conflicting: Number(p.conflicting), closed: Number(p.closed), held: Number(p.held), skipped: Number(p.skipped) };
+        hygiene = { ...c, at: e.ts, line: hygieneLine(c) };
+        break;
+      }
       case 'hotspot.held':
         holds.push({ issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, by: Number(p.by), files: p.files as string[], reason: String(p.reason), since: e.ts, until: null, waitedMs: null });
         break;
@@ -685,7 +700,7 @@ export function prsView(events: StoredEvent[]): PrsView {
     pr.waitReasons = pr.decision && !pr.decision.auto && pr.decision.head === pr.head ? pr.decision.reasons : [];
     pr.phase = phaseOf(pr);
   }
-  return { prs: [...prs.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt) || b.number - a.number), refused: refused.reverse(), stops: stops.reverse(), holds: holds.reverse() };
+  return { prs: [...prs.values()].sort((a, b) => b.openedAt.localeCompare(a.openedAt) || b.number - a.number), refused: refused.reverse(), stops: stops.reverse(), holds: holds.reverse(), hygiene };
 }
 
 /** Whether the last conflict fix left the PR to a person: it gave up, or what it pushed waits for review. */

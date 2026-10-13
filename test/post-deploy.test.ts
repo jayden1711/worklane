@@ -180,7 +180,7 @@ async function setup(o: { token: boolean; deployed: boolean; prodOk: boolean; wa
     (sha, reason) => g?.markFailed(sha, reason),
   );
   g = new DeployGate({
-    config: DeployGateConfig.parse({ branch: 'deploy', tiers: ['suite'] }),
+    config: DeployGateConfig.parse({ enabled: true, branch: 'deploy', tiers: ['suite'] }),
     defaultBranch: 'main',
     git: gateGit(r.clone, 'origin', 'main', 'deploy'),
     refs: fakeRefs(r.bare),
@@ -201,7 +201,7 @@ async function setup(o: { token: boolean; deployed: boolean; prodOk: boolean; wa
   git(checkout, 'add', '-A');
   git(checkout, ...ID, 'commit', '-q', '-m', 'init');
   const cfg = loadConfig(checkout);
-  cfg.tests.deploy_gate = DeployGateConfig.parse({ branch: 'deploy', tiers: ['suite'] });
+  cfg.tests.deploy_gate = DeployGateConfig.parse({ enabled: true, branch: 'deploy', tiers: ['suite'] });
   const posts: { where: string; text: string }[] = [];
   const src: IntakeSource = { name: 'discord', take: async () => [], reply: async (t, text) => (posts.push({ where: t.id, text }), true), openThread: async () => '1', watch: () => {} };
   const slotsDir = join(r.base, 'slots');

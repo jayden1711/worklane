@@ -107,6 +107,7 @@ export class Coordinator extends ChecksFromFeedback {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
+    await step('pr hygiene', () => this.checkPrHygiene(), null);
     await step('test runs', () => this.d.prTestRuns?.tick(), undefined);
     await step('people-prs', () => this.batchPeoplesPrs(), undefined);
     await step('pr-batch', () => this.prBatchTick(), undefined);
