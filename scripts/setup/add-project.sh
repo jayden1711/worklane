@@ -49,12 +49,6 @@ repo_ok "$repo" || { echo "repo $repo: a GitHub owner/name" >&2; exit 2; }
 # stdout carries the JSON lines only: everything else goes to stderr.
 exec 3>&1 1>&2
 
-# A JSON string: backslashes and quotes escaped, newlines as \n, other control characters dropped.
-json_str() {
-  local s="$1"
-  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\t'/ }"
-  printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"
-}
 # One progress line: emit <step> <state> <detail> [<ask json>] [<retry>]
 emit() {
   local line

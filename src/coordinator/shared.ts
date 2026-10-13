@@ -64,6 +64,11 @@ export interface CoordinatorDeps {
    * (absent: the checkout's HEAD); `check`, checks beyond the schema a new config must pass (an instance's policy).
    */
   liveConfig?: { tree?: string | null; check?: (cfg: Config) => ConfigError[] };
+  /**
+   * When the last Claude account switch put this instance on a new login and resumed it (src/claude-account.ts,
+   * switchedOnto): that time, else null. A usage-limit pause from before it ends then. Absent: only the reset ends it.
+   */
+  accountSwitched?: () => string | null;
   /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
   providerKeys?: Record<string, string>;
   /** The clock (tests). */

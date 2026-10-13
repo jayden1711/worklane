@@ -156,3 +156,18 @@ test('merged since yesterday: each PR merged on its own since the last digest, w
   assert.match(md, /\*\*Merged since yesterday\*\* \(2\)\n- #21 for #2 Round totals to the cent: L0, evaluator confidence high\n- #31 for #3 Document the rounding rule: L1, evaluator confidence not recorded\n$/);
   assert.match(md, /^## Waiting on you, 2026-10-15 \(0\)\n\nNothing is waiting on you\./, 'the count is still what waits');
 });
+
+test('a high-risk PR left to the owner carries why it waits, plainly (merge.decided why); older decisions without it still list', () => {
+  const why = [{ category: 'self-modification', text: 'changes the merge policy: src/merge-policy.ts' }];
+  const d = waitingOnYou([
+    seen(3, 'Tighten the merge rule'),
+    ev('pr.opened', { issue: 3, number: 31, url: 'u', head: sha('a'), draft: true }, h(10)),
+    ev('merge.decided', { issue: 3, number: 31, head: sha('a'), auto: false, reasons: ['high-risk: self-modification (src/merge-policy.ts)'], why }, h(5)),
+    seen(4, 'Old one'),
+    ev('pr.opened', { issue: 4, number: 41, url: 'u', head: sha('b'), draft: true }, h(10)),
+    ev('merge.decided', { issue: 4, number: 41, head: sha('b'), auto: false, reasons: ['big: 900 changed lines (over 800)'] }, h(5)),
+  ], NOW, { updates: [] });
+  const owner = d.items.filter((i) => i.kind === 'needs_owner');
+  assert.deepEqual(owner.find((i) => i.pr === 31)?.why, why);
+  assert.equal(owner.find((i) => i.pr === 41)?.why, undefined);
+});

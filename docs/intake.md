@@ -99,11 +99,24 @@ discord:
   chat_model: haiku                      # its model (default haiku)
   chat_max_usd_per_day: 2                # its own daily cap (default 2, at most 20)
   owners: ["100000000000000011", "100000000000000012"]  # optional: high-risk approvals and setup links (2.1.4, 2.1.5)
-  ops_channel: "100000000000000005"    # optional: the weekly trust digest (docs/dashboard.md, "Trust")
+  ops_channel: "100000000000000005"    # optional: watchdog incidents and the weekly trust digest (below; needs dashboard_url)
 ```
 
-`ops_channel` only receives posts (the bot never reads it, so instances may share one): once a week, the instance's
-trust numbers and recommendation (src/trust.ts). It needs Discord enabled, nothing else; absent, no digest is posted.
+**Ops channel.** `ops_channel` only receives posts (the bot never reads it, so instances may share one); it needs
+`dashboard_url`. Two things post there:
+
+- **Incidents.** The machine's watchdog (`src/watchdog/`) posts each incident: a service down or crash-looping, an
+  engine update rolled back or held, a Claude sign-in failing or a login about to expire, runs paused on the Claude usage limit, the GitHub App's token or
+  permissions failing, ready work that hasn't moved for `stall_hours`, the main watch stopping auto-merge, a disk over
+  85%, the test sandbox check failing. One post when it opens (what broke, what was already tried, the one fix, a link
+  to it on the Health page) and one when it is resolved; at most 5 posts per 10 minutes, machine-wide, and never a
+  secret. One coordinator on the machine posts, whichever instances set an ops channel. The machine-level
+  `/etc/<cli>/watchdog.json` may set the thresholds (`stall_hours`, `disk_pct`) and, for instances without their own,
+  `ops_channel` and `dashboard_url`.
+- **The weekly trust digest.** Once a week, the instance's trust numbers and recommendation (src/trust.ts; see
+  docs/dashboard.md, "Trust").
+
+Absent: neither is posted from this instance.
 
 A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
 (admin: owner; maintain or write: writer; triage or read: viewer; none or an error: no access). Every mapped id

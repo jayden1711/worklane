@@ -18,6 +18,16 @@
 // directory above it are root's and nobody else may write them. Its stdin (the agent's Claude token, which the
 // script asks for) and its output (one JSON line per step) pass straight through; the change log gets the name and
 // the repo, never what came on stdin.
+//
+//   worklane-machine claude-account status
+//   worklane-machine claude-account switch
+//
+// run the installed engine's scripts/setup/claude-account.sh, under the same root-owned check. status runs it here
+// (`status --json`: each agent user's account and expiry, written to /var/lib/worklane/claude-account/status.json).
+// switch starts it as its own transient unit, worklane-claude-account.service, outside the asking coordinator's
+// cgroup, because the switch stops every coordinator, that one included; it takes the token from the asking
+// instance's dashboard (--token-from <the instance whose coordinator asked>: from SUDO_USER, never an argument). An
+// admin switches from a terminal with claude-account.sh itself.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,9 +37,11 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const ETC = '/etc/worklane';
 const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const ADD_PROJECT = '/opt/worklane/current/scripts/setup/add-project.sh';
+const CLAUDE_ACCOUNT = '/opt/worklane/current/scripts/setup/claude-account.sh';
+const CLAUDE_ACCOUNT_UNIT = 'worklane-claude-account';
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo>';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -75,20 +87,63 @@ function logLine(what, from, to) {
   return by;
 }
 
-function addProject(p) {
-  // The script's whole path, resolved (current is a link to the engine's directory): every part root's alone.
+/** A setup script's whole path, resolved (current is a link to the engine's directory), when every part is root's alone; else null, having said why. */
+function rootScript(file) {
   let real;
   try {
-    real = fs.realpathSync(ADD_PROJECT);
+    real = fs.realpathSync(file);
   } catch {
-    process.stderr.write(`${ADD_PROJECT} is missing: install the engine (engine.sh) first\n`);
-    return 1;
+    process.stderr.write(`${file} is missing: install the engine (engine.sh) first\n`);
+    return null;
   }
   const why = notRootOwned(real);
   if (why) {
     process.stderr.write(`not running ${real}: ${why}\n`);
+    return null;
+  }
+  return real;
+}
+
+/** The claude-account action a list asks for (status or switch), or null when it is anything else. */
+function parseClaudeAccount(args) {
+  return args.length === 2 && args[0] === 'claude-account' && (args[1] === 'status' || args[1] === 'switch') ? args[1] : null;
+}
+
+/** The instance whose coordinator user this is (wl-<name>), or null for anyone else. */
+const coordinatorInstance = (user) => {
+  const m = /^wl-(.+)$/.exec(user || '');
+  return m && instanceName(m[1]) ? m[1] : null;
+};
+
+function claudeAccount(action) {
+  const real = rootScript(CLAUDE_ACCOUNT);
+  if (!real) return 1;
+  const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
+  if (action === 'status') {
+    logLine('claude-account', null, 'status');
+    const r = spawnSync('bash', [real, 'status', '--json'], { cwd: '/', env, stdio: 'inherit' });
+    return r.error ? 1 : r.status === null ? 1 : r.status;
+  }
+  // switch: for the asking coordinator's dashboard, in a unit of its own (it stops that coordinator too).
+  const instance = coordinatorInstance(process.env.SUDO_USER);
+  if (!instance) {
+    process.stderr.write('claude-account switch here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh switch\n');
+    return 2;
+  }
+  logLine('claude-account', null, `switch (token from ${instance}'s dashboard)`);
+  const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account switch', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', real, 'switch', '--json', '--token-from', instance], { cwd: '/', env, encoding: 'utf8' });
+  if (r.error || r.status !== 0) {
+    const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
+    process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a Claude account switch is already running (worklane-claude-account.service)\n' : `couldn't start the switch: ${text.split('\n')[0]}\n`);
     return 1;
   }
+  process.stdout.write(`started the Claude account switch as ${CLAUDE_ACCOUNT_UNIT}.service; it waits for the token in ${instance}'s dashboard\n`);
+  return 0;
+}
+
+function addProject(p) {
+  const real = rootScript(ADD_PROJECT);
+  if (!real) return 1;
   logLine('add-project', null, `${p.name} ${p.repo}`);
   const r = spawnSync('bash', [real, p.name, p.repo], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
   if (r.error) {
@@ -120,6 +175,8 @@ function readJson(file) {
 function main(args) {
   const add = parseAddProject(args);
   if (add) return addProject(add);
+  const account = parseClaudeAccount(args);
+  if (account) return claudeAccount(account);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
@@ -147,4 +204,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseAddProject };
+module.exports = { parse, parseAddProject, parseClaudeAccount, coordinatorInstance };

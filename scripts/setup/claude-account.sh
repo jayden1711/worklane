@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# Switch every agent on this machine to another Claude account, or see which account each one has. As root
+# (review it first).
+#
+#   sudo bash scripts/setup/claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...]
+#   sudo bash scripts/setup/claude-account.sh status [--json]
+#
+# switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
+#   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
+#            going finish, then it exits). An instance that wasn't running is left as it is, and left stopped after.
+#   token    the token `claude setup-token` prints, pasted once (not shown) or on stdin. From the dashboard, a machine
+#            owner pastes it in the asking instance's dashboard instead (--token-from, which the machine helper passes).
+#   wait     until each paused instance's runs have finished, or --timeout (30 minutes): then it is stopped, and the
+#            runs still going are requeued when it starts again.
+#   install  the token, for every agent user of every instance (its agent user, and its eval user if it has one;
+#            channel chat runs as the agent user), in that user's own ~/.claude/.credentials.json, 0600. Never echoed,
+#            never an argument, never in a log.
+#   check    `claude auth status`, as each of those users.
+#   resume   each instance it paused whose users all passed is started again. One whose check failed is not: it stays
+#            stopped, named, until a rerun passes. Safe to rerun: it remembers the instances it paused.
+# Without a token (none pasted, or not one from claude setup-token) nothing is installed: each paused instance is
+# checked on its current login and resumed if that passes.
+#
+# status: each agent user's account (as claude auth status names it), whether it is signed in, which token (the first
+# 8 hex digits of its sha256: the same login shows the same id) and when that expires.
+#
+# Output: plain lines, or with --json one JSON line per step change (switch) or one JSON object (status). Either way
+# the switch's lines go to $CLAUDE_ACCOUNT_DIR/switch.jsonl and what status found to status.json, root's 0644, for the
+# dashboard. Exit 0 when every instance it paused was resumed (switch) or every user is signed in (status).
+source "$(dirname "$0")/lib.sh"
+as_root "$@"
+here="$(cd "$(dirname "$0")" && pwd)"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json]"
+# Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
+PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+: "${MINUTE:=60}" "${SWITCH_POLL:=5}"
+
+cmd="${1:-}"
+[ "$#" -ge 1 ] && shift
+timeout=30 token_timeout=30 token_from="" json="" names=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timeout) timeout="${2:-}"; shift 2 ;;
+    --token-timeout) token_timeout="${2:-}"; shift 2 ;;
+    --token-from) token_from="${2:-}"; shift 2 ;;
+    --json) json=1; shift ;;
+    -*) echo "$usage" >&2; exit 2 ;;
+    *) names+=("$1"); shift ;;
+  esac
+done
+case "$cmd" in switch | status) ;; *) echo "$usage" >&2; exit 2 ;; esac
+[[ "$timeout" =~ ^[0-9]{1,3}$ ]] || { echo "--timeout: minutes, 0 to 999" >&2; exit 2; }
+[[ "$token_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--token-timeout: minutes, 1 to 999" >&2; exit 2; }
+[ -z "$token_from" ] || instance_name_ok "$token_from" || { echo "--token-from: an instance name" >&2; exit 2; }
+for n in ${names[@]+"${names[@]}"}; do instance_name_ok "$n" || { echo "instance name $n: lowercase letters, digits and dashes" >&2; exit 2; }; done
+[ "$cmd" = switch ] || [ "${#names[@]}" -eq 0 ] || { echo "$usage" >&2; exit 2; }
+
+# --- the instances and their agent users
+
+inst_file() { echo "$(home_of "wl-$1")/.local/state/worklane/instances/$1/instance.yaml"; }
+# Every instance on the machine (as add-project.sh counts them: the machine helper's rule and the hub), or the ones
+# named; each must have its coordinator user.
+instances() {
+  local n
+  if [ "${#names[@]}" -gt 0 ]; then printf '%s\n' "${names[@]}"; else { helper_instances; hub_instances; } | sort -u; fi | while read -r n; do
+    instance_name_ok "$n" || continue
+    if user_exists "wl-$n"; then echo "$n"; else echo "note: $n is named, but there is no wl-$n; left out" >&2; fi
+  done
+}
+# One value of instance.yaml's run_as (two-space indent, as the engine writes it), quotes taken off.
+run_as_value() {
+  local f
+  f="$(inst_file "$1")"
+  [ -f "$f" ] || return 0
+  sed -n "s/^  $2: *//p" "$f" | head -1 | tr -d "\"'" | sed 's/[[:space:]]*$//'
+}
+# "<kind> <user> <claude config dir>" for each agent user of an instance: its agent user, then its eval user.
+users_of() {
+  local n="$1" agent ev cfg
+  agent="$(run_as_value "$n" agent_user)"; agent="${agent:-wl-$n-agent}"
+  cfg="$(run_as_value "$n" claude_config_dir)"
+  [[ -z "$cfg" || "$cfg" =~ ^/[A-Za-z0-9._/-]+$ ]] || cfg=""
+  [[ "$agent" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && user_exists "$agent" && echo "agent $agent ${cfg:-$(home_of "$agent")/.claude}"
+  ev="$(run_as_value "$n" eval_user)"; ev="${ev:-wl-$n-eval}"
+  if [[ "$ev" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && user_exists "$ev"; then echo "eval $ev $(home_of "$ev")/.claude"; fi
+  return 0
+}
+
+# One user's record: its stored login (read as root: which token, by id; when it expires) and claude auth status as
+# that user. Never the token itself.
+account_record() { # <instance> <kind> <user> <credentials file> <claude auth status output>
+  "$(command -v node)" -e '
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const [instance, kind, user, file, auth] = process.argv.slice(1);
+const r = { instance, kind, user, stored: false, logged_in: false, auth_method: null, account: null, org: null, subscription: null, token_id: null, expires_at: null, installed_at: null, error: null };
+try {
+  const st = fs.lstatSync(file);
+  if (!st.isFile()) throw Object.assign(new Error("not a file"), { code: "NOTFILE" });
+  const o = (JSON.parse(fs.readFileSync(file, "utf8")) || {}).claudeAiOauth;
+  if (o && typeof o.accessToken === "string" && o.accessToken) {
+    r.stored = true;
+    r.token_id = crypto.createHash("sha256").update(o.accessToken).digest("hex").slice(0, 8);
+    if (typeof o.expiresAt === "number" && Number.isFinite(o.expiresAt)) r.expires_at = new Date(o.expiresAt).toISOString();
+    r.installed_at = st.mtime.toISOString();
+  }
+} catch (e) {
+  r.error = e.code === "ENOENT" ? "no Claude login stored" : "its Claude credentials file can not be read";
+}
+let a = null;
+try {
+  a = JSON.parse(auth);
+} catch {}
+if (!a || typeof a !== "object") r.error = r.error || (auth.trim() ? "claude auth status did not answer in JSON" : "claude auth status gave no answer (is claude installed?)");
+else {
+  r.logged_in = a.loggedIn === true;
+  for (const [k, from] of [["auth_method", "authMethod"], ["account", "email"], ["org", "orgName"], ["subscription", "subscriptionType"]]) if (typeof a[from] === "string") r[k] = a[from].slice(0, 200);
+  if (!r.logged_in) r.error = r.error || "claude auth status says it is not logged in";
+}
+process.stdout.write(JSON.stringify(r));
+' "$@"
+}
+# Every agent user's record, as a JSON array; written to status.json (root's, 0644) for the dashboard.
+collect_status() {
+  local n kind user cfg recs="" rec
+  for n in $(instances); do
+    while read -r kind user cfg; do
+      [ -n "$user" ] || continue
+      rec="$(account_record "$n" "$kind" "$user" "$cfg/.credentials.json" "$(claude_status_json "$user")")"
+      recs="${recs:+$recs,}$rec"
+    done < <(users_of "$n")
+  done
+  printf '[%s]' "$recs"
+}
+write_file() { # <name> <content>: into CLAUDE_ACCOUNT_DIR, root's 0644, by a rename
+  install -d -m 0755 "$CLAUDE_ACCOUNT_DIR"
+  printf '%s\n' "$2" > "$CLAUDE_ACCOUNT_DIR/.$1.tmp"
+  chmod 0644 "$CLAUDE_ACCOUNT_DIR/.$1.tmp"
+  mv -f "$CLAUDE_ACCOUNT_DIR/.$1.tmp" "$CLAUDE_ACCOUNT_DIR/$1"
+}
+save_status() { write_file status.json "{\"at\":$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),\"users\":$1}"; }
+show_status() { # <records json>: one line per user
+  "$(command -v node)" -e '
+const rows = JSON.parse(process.argv[1]);
+if (!rows.length) console.log("no agent users found (no instances on this machine, or none named)");
+for (const r of rows) {
+  const who = r.account ? `${r.account}${r.org ? ` (${r.org})` : ""}` : r.auth_method || "-";
+  const until = r.expires_at ? r.expires_at.slice(0, 10) : "-";
+  console.log(`${r.instance.padEnd(14)} ${r.user.padEnd(24)} ${(r.logged_in ? "signed in" : "NOT signed in").padEnd(14)} ${who.padEnd(32)} token ${r.token_id || "-"}  expires ${until}${r.error ? `  (${r.error})` : ""}`);
+}
+' "$1"
+}
+
+if [ "$cmd" = status ]; then
+  recs="$(collect_status)"
+  save_status "$recs"
+  if [ -n "$json" ]; then printf '{"users":%s}\n' "$recs"; else show_status "$recs"; fi
+  # Exit 1 when any user isn't signed in.
+  if printf '%s' "$recs" | grep -q '"logged_in":false'; then exit 1; fi
+  exit 0
+fi
+
+# --- switch
+
+exec 3>&1
+[ -z "$json" ] || exec 1>&2
+install -d -m 0755 "$CLAUDE_ACCOUNT_DIR"
+progress="$CLAUDE_ACCOUNT_DIR/switch.jsonl" paused_file="$CLAUDE_ACCOUNT_DIR/paused"
+again="sudo bash $here/claude-account.sh switch"
+# One progress line: emit <step> <state> <instance or ""> <detail> [<user>]. To switch.jsonl, and to stdout: JSON with
+# --json, else as text.
+emit() {
+  local line
+  line="{\"at\":$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),\"step\":$(json_str "$1"),\"state\":$(json_str "$2")"
+  [ -z "$3" ] || line="$line,\"instance\":$(json_str "$3")"
+  [ -z "${5:-}" ] || line="$line,\"user\":$(json_str "$5")"
+  line="$line,\"detail\":$(json_str "$4")}"
+  printf '%s\n' "$line" >> "$progress"
+  if [ -n "$json" ]; then printf '%s\n' "$line" >&3; else printf '%-8s %-8s %-14s %s\n' "$1" "$2" "${3:--}" "$4${5:+ ($5)}" >&3; fi
+}
+
+# One switch at a time on a machine.
+if command -v flock >/dev/null 2>&1; then
+  install -d -m 0755 "$(dirname "$CLAUDE_ACCOUNT_LOCK")"
+  exec 9> "$CLAUDE_ACCOUNT_LOCK"
+  flock -n 9 || { echo "another Claude account switch is running on this machine; wait for it to finish" >&2; exit 1; }
+fi
+
+: > "$progress"
+chmod 0644 "$progress"
+touch "$paused_file"
+chmod 0644 "$paused_file"
+all=()
+while read -r n; do all+=("$n"); done < <(instances)
+emit switch started "" "${#all[@]} instance(s): ${all[*]:-none}; the token from ${token_from:+the dashboard of }${token_from:-this terminal}"
+[ "${#all[@]}" -gt 0 ] || { emit switch failed "" "no instances on this machine (or none of those named): nothing to switch"; exit 1; }
+
+# 1. Pause: every running instance, recorded before anything else so a rerun after a crash knows them as its own.
+ours=()
+for n in "${all[@]}"; do
+  unit="worklane-$n.service"
+  if grep -qx "$n" "$paused_file"; then
+    ours+=("$n")
+    if unit_active "$unit"; then unit_drain "$unit"; fi
+    emit pause done "$n" "paused by an earlier switch that didn't resume it; it is this switch's to resume"
+  elif unit_active "$unit"; then
+    echo "$n" >> "$paused_file"
+    ours+=("$n")
+    if unit_drain "$unit"; then
+      emit pause done "$n" "starts no more runs; the ones it has going finish first"
+    else
+      emit pause failed "$n" "couldn't signal $unit; it is stopped once the wait is over"
+    fi
+  else
+    emit pause skipped "$n" "it wasn't running before the switch, so it is left stopped after"
+  fi
+done
+
+# 2. The token: pasted here (not shown), on stdin, or from the asking instance's dashboard.
+token=""
+if [ -n "$token_from" ]; then
+  f="$(home_of "wl-$token_from")/.config/$token_from-secrets/$CLAUDE_ACCOUNT_CREDENTIAL"
+  emit token ask "" "paste the token claude setup-token prints in $token_from's dashboard (Machine, Claude account); waiting up to $token_timeout min"
+  until_t=$((SECONDS + token_timeout * MINUTE))
+  while [ "$SECONDS" -lt "$until_t" ] && ! [ -e "$f" ]; do sleep "$SWITCH_POLL"; done
+  if [ -e "$f" ]; then
+    if file_owned_by "$f" "wl-$token_from"; then IFS= read -r token < "$f" || true; fi
+    rm -f "$f"
+  fi
+else
+  emit token ask "" "paste the token claude setup-token prints (on a machine signed in to the new account)"
+  if [ -t 0 ]; then
+    read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
+    echo >&2
+  else
+    IFS= read -r token || true
+  fi
+fi
+token="$(printf '%s' "$token" | tr -d '[:space:]')"
+have_token=""
+if [ -z "$token" ]; then
+  emit token failed "" "no token came: nothing installed; each paused instance is checked on its current login"
+elif ! claude_token_ok "$token"; then
+  token=""
+  emit token failed "" "that is not a token from claude setup-token (sk-ant-oat01-...): nothing installed; each paused instance is checked on its current login"
+else
+  have_token=1
+  emit token done "" "received; not shown or stored anywhere but each agent user's own Claude login"
+fi
+
+# 3. Wait for each paused instance's runs to finish, or the timeout; then it is stopped for sure.
+until_t=$((SECONDS + timeout * MINUTE))
+for n in ${ours[@]+"${ours[@]}"}; do
+  unit="worklane-$n.service"
+  while unit_active "$unit" && [ "$SECONDS" -lt "$until_t" ]; do sleep "$SWITCH_POLL"; done
+  if unit_active "$unit"; then
+    unit_stop "$unit" || true
+    emit wait done "$n" "still running after $timeout min: stopped; its runs still going are requeued when it starts"
+  else
+    emit wait done "$n" "its runs have finished; stopped"
+  fi
+done
+
+# 4. Install the token for every agent user, then check each as that user.
+failed=" "
+for n in "${all[@]}"; do
+  found=""
+  while read -r kind user cfg; do
+    [ -n "$user" ] || continue
+    found=1
+    if [ -n "$have_token" ]; then
+      if printf '%s' "$token" | install_claude_token "$user" "$cfg" >/dev/null 2>&1; then
+        emit install done "$n" "stored in its own Claude login, 0600" "$user"
+      else
+        emit install failed "$n" "couldn't store the token in $cfg/.credentials.json" "$user"
+        failed="$failed$n "
+        continue
+      fi
+    fi
+    rec="$(account_record "$n" "$kind" "$user" "$cfg/.credentials.json" "$(claude_status_json "$user")")"
+    who="$(printf '%s' "$rec" | sed -n 's/.*"account":"\([^"]*\)".*/\1/p')"
+    method="$(printf '%s' "$rec" | sed -n 's/.*"auth_method":"\([^"]*\)".*/\1/p')"
+    if printf '%s' "$rec" | grep -q '"logged_in":true'; then
+      emit check done "$n" "claude auth status: signed in${who:+ as $who}${method:+ ($method)}" "$user"
+    else
+      why="$(printf '%s' "$rec" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')"
+      emit check failed "$n" "${why:-claude auth status says it is not logged in}" "$user"
+      failed="$failed$n "
+    fi
+  done < <(users_of "$n")
+  if [ -z "$found" ]; then
+    emit check failed "$n" "no agent user found (wl-$n-agent, or instance.yaml's run_as)"
+    failed="$failed$n "
+  fi
+done
+token=""
+
+# 5. Resume the instances this switch paused, unless their check failed.
+left=()
+for n in "${all[@]}"; do
+  unit="worklane-$n.service"
+  mine=""
+  for o in ${ours[@]+"${ours[@]}"}; do [ "$o" = "$n" ] && mine=1; done
+  if [ -z "$mine" ]; then
+    emit resume skipped "$n" "left stopped, as it was before the switch"
+  elif [[ "$failed" == *" $n "* ]]; then
+    left+=("$n")
+    emit resume failed "$n" "not resumed: its auth check failed. Fix it, then rerun: $again"
+  elif unit_start "$unit" && unit_active "$unit"; then
+    emit resume done "$n" "running again"
+  else
+    left+=("$n")
+    emit resume failed "$n" "$unit didn't start: see journalctl -u $unit, then rerun: $again"
+  fi
+done
+# Only the instances still waiting on a rerun stay in the paused list.
+if [ "${#left[@]}" -gt 0 ]; then printf '%s\n' "${left[@]}" > "$paused_file"; else : > "$paused_file"; fi
+
+save_status "$(collect_status)"
+if [ "${#left[@]}" -gt 0 ]; then
+  emit switch failed "" "not resumed: ${left[*]}; fix what each says, then rerun: $again"
+  exit 1
+fi
+if [ -z "$have_token" ]; then
+  emit switch failed "" "no token installed; every paused instance was resumed on its current login"
+  exit 1
+fi
+emit switch done "" "every agent user is on the new login; ${#ours[@]} instance(s) resumed"

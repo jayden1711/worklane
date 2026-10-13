@@ -28,7 +28,7 @@ export interface MachineRequest {
   /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>, add-project <name> <owner/repo>. */
   args: string[];
   by: string;
-  via: 'settings' | 'ask' | 'add-project';
+  via: 'settings' | 'ask' | 'add-project' | 'claude-account';
   ask: string | null;
   /** Asked for on the owner's break-glass (no person named), which needs no machine owner. */
   breakGlass: boolean;
@@ -94,7 +94,7 @@ const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'runn
  * (src/machine-owners.ts), the helper's allowlist, and that a root-step ask doesn't already have one pending.
  * Never runs anything.
  */
-export function requestMachineChange(log: EventLog, r: { args: string[]; requester: MachineRequester; via: 'settings' | 'ask' | 'add-project'; ask?: string | null; ownersFile?: string; now?: number }): MachineRequest {
+export function requestMachineChange(log: EventLog, r: { args: string[]; requester: MachineRequester; via: 'settings' | 'ask' | 'add-project' | 'claude-account'; ask?: string | null; ownersFile?: string; now?: number }): MachineRequest {
   const who = machineChangeRefusal(r.requester, { file: r.ownersFile ?? MACHINE_OWNERS_FILE, ...(r.now !== undefined ? { now: r.now } : {}) });
   if (who) throw new MachineRequestError(who, 403);
   const why = machineRefusal(r.args);

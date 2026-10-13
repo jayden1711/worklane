@@ -2,8 +2,12 @@
 # Get Worklane installed and running on a fresh Mac or Linux machine, for one user, then set up a repo.
 # Safe to run again: each step checks first and does nothing when it's already done.
 #
-#   bash scripts/bootstrap.sh <repo-dir>          install the tools and the engine, `worklane install` in the
-#                                                 repo, then `worklane doctor` (its exit status is this script's)
+#   bash scripts/bootstrap.sh [--mode local] <repo-dir>
+#                                                 local mode (as you, no server): install the tools and the
+#                                                 engine, then `worklane init --mode local` in the repo (the
+#                                                 guided checklist: Claude login, GitHub, repo config, ...),
+#                                                 then `worklane doctor` (its exit status is this script's).
+#                                                 Without --mode it asks; with no terminal to ask on, local.
 #   bash scripts/bootstrap.sh --no-repo           the tools and the engine only (e.g. in an image)
 #   bash scripts/bootstrap.sh --dry-run <repo>    print what it would do; change nothing
 #   bash scripts/bootstrap.sh --engine <spec> ... install the engine from <spec> (an npm tarball or spec)
@@ -13,7 +17,8 @@
 #                                                 scripts/setup/, in order, each printed for review first.
 #                                                 You become the machine's first owner (your GitHub login:
 #                                                 asked, or read from gh and confirmed); at the end it prints
-#                                                 the dashboard's URL, where everything after this happens
+#                                                 the dashboard's URL, where everything after this happens.
+#                                                 This is server mode (--mode server alone points here).
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
 # gitleaks against the sha256 sums below, the engine by its release commit, Claude Code by npm's integrity
@@ -40,9 +45,9 @@ ENGINE_COMMIT=9c24a10eb91ffac894e24f0b0a54d8407f23d423
 
 PREFIX="${WORKLANE_PREFIX:-$HOME/.local}"
 DRY=0 NO_REPO=0 HARDENED=0 YES=0 AFTER_CREDENTIALS=0
-REPO="" ENGINE="" NAME="" GITHUB="" OWNER="" PUBLIC_URL=""
+REPO="" ENGINE="" NAME="" GITHUB="" OWNER="" PUBLIC_URL="" MODE=""
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "bootstrap: $*" >&2; exit 1; }
 say() { printf '\n== %s\n' "$*"; }
 ok() { printf '   ok: %s\n' "$*"; }
@@ -59,6 +64,10 @@ while [ $# -gt 0 ]; do
     --yes) YES=1 ;;
     --engine) [ $# -ge 2 ] || die "--engine needs a value"; ENGINE="$2"; shift ;;
     --hardened) HARDENED=1 ;;
+    --mode)
+      [ $# -ge 2 ] || die "--mode needs local or server"
+      case "$2" in local | server) MODE="$2" ;; *) die "--mode is local or server, not $2" ;; esac
+      shift ;;
     --machine-owner) [ $# -ge 2 ] || die "--machine-owner needs a GitHub login"; OWNER="$2"; shift ;;
     --public-url) [ $# -ge 2 ] || die "--public-url needs a value"; PUBLIC_URL="$2"; shift ;;
     --after-credentials) AFTER_CREDENTIALS=1 ;;
@@ -163,7 +172,29 @@ dashboard_next() {
   echo
   echo "dashboard: ${url:-$later (turn on Tailscale with MagicDNS and HTTPS certificates: docs/dashboard.md)}"
   echo "   sign in with GitHub as @$OWNER. Everything after this first install happens there: Setup console, Add project."
+  echo "   the checklist for a project, from here: sudo $CLI init --mode server <owner/repo> --instance <name>"
 }
+
+# The mode: --hardened is server mode; without either, ask (or, with no terminal to ask on, local).
+if [ "$HARDENED" = 1 ]; then
+  [ "$MODE" != local ] || die "--hardened is server mode, not local; leave out one of them"
+  MODE=server
+elif [ "$MODE" = server ]; then
+  die "server mode is the hardened multi-user Linux setup: sudo bash scripts/bootstrap.sh --hardened <instance-name> <owner/repo>"
+elif [ -z "$MODE" ] && [ "$NO_REPO" = 0 ]; then
+  if [ "$YES" = 0 ] && [ "$DRY" = 0 ] && [ -t 0 ] && [ -t 1 ]; then
+    printf 'Where should %s run?\n  local   on this machine, as you (macOS, Linux, or Windows through WSL2); no server, no ssh\n  server  a hardened multi-user Linux server (as root: separate users per project)\nlocal or server? ' "$CLI"
+    read -r answer || answer=""
+    case "$answer" in
+      l | local) MODE=local ;;
+      s | server) die "server mode: sudo bash scripts/bootstrap.sh --hardened <instance-name> <owner/repo> (docs/quickstart.md)" ;;
+      *) die "\"$answer\" is neither local nor server" ;;
+    esac
+  else
+    MODE=local
+    echo "bootstrap: no --mode, and no terminal to ask on: local mode (this machine, as you)"
+  fi
+fi
 
 if [ "$HARDENED" = 1 ]; then
   [ "$OS" = Linux ] || die "--hardened is for Linux servers (apt and systemd); on a Mac use the single-user path"
@@ -308,8 +339,16 @@ if [ "$NO_REPO" = 1 ]; then
   exit 0
 fi
 
-say "set up $REPO"
-run "$CLI" install --root "$REPO"
+say "set up $REPO: the guided checklist ($CLI init, $MODE mode)"
+init_args=(init --mode "$MODE")
+[ "$YES" = 0 ] || init_args+=(--yes)
+status=0
+run "$CLI" "${init_args[@]}" "$REPO" || status=$?
+if [ "$status" != 0 ]; then
+  echo
+  echo "init stopped (exit $status): fix what it says, then run this again; it picks up where it stopped"
+  exit "$status"
+fi
 
 say "check it"
 case ":$ORIG_PATH:" in
@@ -320,13 +359,12 @@ if [ "$DRY" = 1 ]; then
   printf '   would run: %s doctor --root %s\n' "$CLI" "$REPO"
   exit 0
 fi
-status=0
 "$CLI" doctor --root "$REPO" || status=$?
 if [ "$status" = 0 ]; then
   echo
   echo "next: $CLI up --root $REPO        (starts the coordinator as a service)"
-  echo "      $CLI dashboard --root $REPO (the dashboard)"
-  echo "      docs/quickstart.md: set the repo and its owners in .worklane/config.yaml (\"Setting up a project by"
+  echo "      $CLI dashboard --root $REPO (the dashboard; its First-run page has the checklist)"
+  echo "      docs/quickstart.md: look over the owners in .worklane/config.yaml (\"Setting up a project by"
   echo "      hand\"), then your first issue, and where to look"
 fi
 exit "$status"

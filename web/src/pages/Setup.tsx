@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, streamUrl, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
+import { navigate } from '../App';
 import { Header } from './Overview';
 
 const KIND_LABEL: Record<Ask['kind'], string> = { paste_secret: 'Paste a secret', approve_link: 'Open and approve', question: 'Question', root_step: 'Machine step' };
@@ -429,6 +430,11 @@ export function SetupPage() {
       <Header title="Setup console" sub="what the harness needs from you and can't do itself" />
       <div className="mx-auto max-w-4xl space-y-6 p-6">
         {err && <p className="text-[13px] text-red">{err}</p>}
+        {(data?.role === 'owner' || data?.role === 'writer') && (
+          <button onClick={() => navigate('/first-run')} className="text-[12.5px] text-blue-ink hover:underline" data-testid="setup-first-run-link">
+            The first-run checklist: tools, Claude login, GitHub, repo config, protection
+          </button>
+        )}
         {linkErr && (
           <p className="text-[13px] text-red" data-testid="setup-link-error">
             Your Discord link didn't open a step: {linkErr}

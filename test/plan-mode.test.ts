@@ -59,7 +59,7 @@ const hold = (p: { files: string[]; design_change?: boolean; design_reason?: str
 
 test("a plan touching an L3 path is held, judged with the merge policy's own categories", () => {
   assert.deepEqual(hold({ files: ['migrations/002_orders.sql', 'src/price.js'] }), ['high-risk: migration (migrations/002_orders.sql)']);
-  assert.deepEqual(hold({ files: ['.github/workflows/ci.yml'] }), ['high-risk: deploy-config (.github/workflows/ci.yml)', 'high-risk: ci-config (.github/workflows/ci.yml)']);
+  assert.deepEqual(hold({ files: ['.github/workflows/ci.yml'] }), ['high-risk: deploy-config (.github/workflows/ci.yml)', 'high-risk: ci-config (.github/workflows/ci.yml)', 'high-risk: self-modification (.github/workflows/ci.yml)']);
 });
 
 test('a design-level plan is held: its own flag, a dependency manifest, or a new top-level module; no design answer holds too', () => {

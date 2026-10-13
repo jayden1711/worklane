@@ -666,6 +666,29 @@ export interface AddProjectData {
   runs: AddProjectRun[];
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
+
+/** The first-run checklist (GET /api/first-run, src/init.ts firstRunView): init's steps as it recorded them. */
+export type FirstRunStatus = 'pending' | 'done' | 'skipped' | 'failed';
+export interface FirstRunStep {
+  id: string;
+  title: string;
+  optional: boolean;
+  status: FirstRunStatus;
+  detail: string;
+  at: string | null;
+}
+export interface FirstRun {
+  recorded: boolean;
+  mode: 'local' | 'server' | null;
+  steps: FirstRunStep[];
+  done: number;
+  total: number;
+  unavailable: { feature: string; why: string }[];
+  updatedAt: string | null;
+  finishedAt: string | null;
+  command: string;
+}
+export const getFirstRun = () => api<FirstRun>('/api/first-run');
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
  * The name and repo add-project takes: the same rules as the server's and the machine helper's (addProjectNameOk and
@@ -680,6 +703,66 @@ export function addProjectInvalid(name: string, repo: string): string | null {
   if (!m || m[2] === '.' || m[2] === '..') return 'The repo is owner/name, as on GitHub.';
   return null;
 }
+
+/** The agents' Claude account (src/claude-account.ts), as GET /api/claude-account serves it to a machine owner. */
+export interface AccountUser {
+  instance: string;
+  kind: string;
+  user: string;
+  stored: boolean;
+  loggedIn: boolean;
+  authMethod: string | null;
+  account: string | null;
+  org: string | null;
+  subscription: string | null;
+  tokenId: string | null;
+  expiresAt: string | null;
+  installedAt: string | null;
+  error: string | null;
+}
+export interface SwitchLine {
+  at: string;
+  step: 'switch' | 'pause' | 'token' | 'wait' | 'install' | 'check' | 'resume';
+  state: 'started' | 'done' | 'failed' | 'ask' | 'skipped';
+  instance: string | null;
+  user: string | null;
+  detail: string;
+}
+export interface SwitchInstance {
+  name: string;
+  pause: SwitchLine | null;
+  wait: SwitchLine | null;
+  users: { user: string; install: SwitchLine | null; check: SwitchLine | null }[];
+  check: SwitchLine | null;
+  resume: SwitchLine | null;
+}
+export interface SwitchView {
+  startedAt: string;
+  status: 'running' | 'done' | 'failed' | 'stalled';
+  detail: string;
+  tokenFrom: string | null;
+  waitingForToken: boolean;
+  token: SwitchLine | null;
+  instances: SwitchInstance[];
+}
+export interface ClaudeAccountData {
+  machineOwner: boolean;
+  machineOwners: string[];
+  login: string;
+  instance: string;
+  /** Whether this person may refresh or switch (the server checks again). */
+  allowed: boolean;
+  why: string | null;
+  canSwitch: boolean;
+  busy: string | null;
+  canPasteToken: boolean;
+  status: { at: string; users: AccountUser[] } | null;
+  switch: SwitchView | null;
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+}
+export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
+export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
+export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
 
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
@@ -798,6 +881,8 @@ export interface WaitItem {
   title: string | null;
   detail: string;
   sha?: string;
+  /** A PR left to the owner as high-risk: each category it touches, plainly, with its first file ("changes the merge policy: src/merge-policy.ts"). */
+  why?: { category: string; text: string }[];
 }
 /** A PR merged on its own since the last digest, for sampling: its review level and the evaluator's confidence. */
 export interface MergedItem {
@@ -891,4 +976,74 @@ export async function onInstance<T>(instance: string | null, path: string, init:
 export async function instanceStream(instance: string | null, path: string, scope: Promise<InstanceScope> = instanceScope): Promise<string> {
   if (instance !== null && !(await scope).instances.includes(instance)) throw new Error(`instance ${instance} isn't selected`);
   return streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));
+}
+
+/** An instance's health, as its sidebar dot shows it: green (nothing open), amber (needs a person soon), red (broken). */
+export type HealthStatus = 'green' | 'amber' | 'red';
+
+/**
+ * A watchdog incident (GET /api/health/incidents; src/watchdog/). A viewer gets id, kind, instance, severity, title,
+ * since and resolvedAt only; owners and writers also what broke, what was tried and the fix.
+ */
+export interface Incident {
+  id: string;
+  kind: string;
+  instance: string | null;
+  severity: 'red' | 'amber';
+  title: string;
+  since: string;
+  resolvedAt: string | null;
+  lastSeen?: string;
+  key?: string;
+  detail?: string;
+  fix?: string;
+  tried?: string[];
+}
+export interface IncidentsView {
+  instance: string | null;
+  status: HealthStatus;
+  open: Incident[];
+  resolved: Incident[];
+  detail: boolean;
+}
+/** One instance's incidents as the Health page read them (null name: this page's own server). */
+export interface InstanceIncidents {
+  name: string | null;
+  view: IncidentsView | null;
+  error: string | null;
+}
+
+/**
+ * Every instance's incidents this person may read: on a hub, each instance with a role on it, through its own server
+ * (the hub checks the role again); off a hub, this page's own server. One that can't be read says why.
+ */
+export async function loadIncidents(h: HubInfo | null, get: (name: string | null, path: string) => Promise<IncidentsView> = (n, p) => (n ? instanceApi<IncidentsView>(n, p) : api<IncidentsView>(p))): Promise<InstanceIncidents[]> {
+  const names: (string | null)[] = h?.instances.length ? h.instances.map((i) => i.name) : [null];
+  return Promise.all(
+    names.map(async (name) => {
+      if (name && h?.instances.find((i) => i.name === name)?.up === false) return { name, view: null, error: "its dashboard isn't answering" };
+      try {
+        return { name, view: await get(name, '/api/health/incidents'), error: null };
+      } catch (e) {
+        return { name, view: null, error: (e as Error).message };
+      }
+    }),
+  );
+}
+
+/** The machine's incidents once each (a machine-wide one is in every instance's answer), open oldest first, resolved newest first. */
+export function mergeIncidents(all: InstanceIncidents[]): { open: Incident[]; resolved: Incident[]; detail: boolean } {
+  const byId = new Map<string, Incident>();
+  for (const a of all) for (const x of [...(a.view?.open ?? []), ...(a.view?.resolved ?? [])]) if (!byId.has(x.id)) byId.set(x.id, x);
+  const xs = [...byId.values()];
+  return {
+    open: xs.filter((x) => !x.resolvedAt).sort((a, b) => a.since.localeCompare(b.since)),
+    resolved: xs.filter((x) => x.resolvedAt).sort((a, b) => b.resolvedAt!.localeCompare(a.resolvedAt!)),
+    detail: all.some((a) => a.view?.detail),
+  };
+}
+
+/** Each instance's dot: its own server's status; red when it isn't answering. */
+export function statusOf(all: InstanceIncidents[]): Record<string, HealthStatus> {
+  return Object.fromEntries(all.map((a) => [a.name ?? '', a.view?.status ?? 'red']));
 }

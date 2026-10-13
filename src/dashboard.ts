@@ -41,7 +41,7 @@ import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
-import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
+import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
@@ -55,6 +55,11 @@ import { trustForViewer, trustView } from './trust.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
+import { firstRunView, INIT_FILE } from './init.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { readSecretBody } from './console/secrets.js';
+import { AskError } from './console/asks.js';
+import { incidentsView } from './watchdog/view.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -133,13 +138,15 @@ export interface DashboardOptions {
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
-  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
   acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
   /** The machine owners file (src/machine-owners.ts); the system's when unset (tests). */
   machineOwnersFile?: string;
+  /** Where claude-account.sh writes status.json and switch.jsonl (src/claude-account.ts); the system's when unset (tests). */
+  claudeAccountDir?: string;
 }
 
 /**
@@ -1085,6 +1092,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
           return json(res, 200, { ...view, usage, docs: { backups: docsUrl('backups') } });
         }
+        // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
+        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).
+        if (url.pathname === '/api/health/incidents' && req.method === 'GET') return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, full: isWriter(who.role) }));
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
         if (url.pathname === '/api/instance-settings' && req.method === 'POST') {
@@ -1099,6 +1109,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
+        // The first-run page: init's checklist as it recorded it (src/init.ts), and what this mode can't do. Read-only.
+        if (url.pathname === '/api/first-run' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          return json(res, 200, firstRunView(join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null }));
+        }
         // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
         // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.
         if (url.pathname === '/api/add-project' && req.method === 'GET') {
@@ -1111,6 +1126,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
         // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
         const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        // The Machine page's Updates panel: the engine installed now, the last install, any rollback or hold and why,
+        // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
+        if (url.pathname === '/api/updates' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('engine updates are', who) });
+          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT)));
+        }
         if (url.pathname === '/api/machine' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
           return json(res, 200, machine());
@@ -1156,6 +1177,57 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           audit(who, 'machine.add_project', { name: r.args[1], repo: r.args[2], request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
+        // expiry, and the switch, followed from claude-account.sh's own progress file. Hidden from everyone else.
+        const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+        const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
+        const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
+        if (url.pathname === '/api/claude-account' && req.method === 'GET') {
+          if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
+          const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
+          return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
+        }
+        // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
+        if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { action?: unknown };
+          const action = String(body.action ?? '').slice(0, 20);
+          if (!isOwnerHere) {
+            audit(who, 'machine.claude_account_refused', { action, why: 'not an owner here' });
+            return json(res, 403, { error: `only the instance's owners (admin on ${repo}) who are machine owners may switch the Claude account; @${who.login} is a ${who.role}` });
+          }
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestClaudeAccount(log, { action: body.action, requester: accountRequester, dir: accountDir, ...ownersOpt });
+          } catch (e) {
+            if (e instanceof MachineRequestError) {
+              auditWrite(log, who, opts.instance ?? null, 'machine.claude_account_refused', { action, why: e.message.slice(0, 300) });
+              return json(res, e.status, { error: e.message });
+            }
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.claude_account', { action, request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // The new account's token, for the running switch: its own body handling, so the value never reaches readBody,
+        // an error, an event or the audit (which records only that it was stored).
+        if (url.pathname === '/api/claude-account/token' && req.method === 'POST') {
+          if (!isOwnerHere) {
+            req.resume();
+            return json(res, 403, { error: `only the instance's owners who are machine owners may paste the token; @${who.login} is a ${who.role}` });
+          }
+          try {
+            const value = await readSecretBody(req);
+            storeSwitchToken({ value, instance: opts.instance ?? opts.cfg.project.project.name, who: { role: who.role, requester: accountRequester }, dir: accountDir, ...(opts.secretsHome ? { home: opts.secretsHome } : {}), ...ownersOpt });
+          } catch (e) {
+            if (e instanceof ClaudeTokenError || e instanceof AskError) return json(res, e.status, { error: e.message });
+            return json(res, 500, { error: "the token couldn't be stored" });
+          }
+          audit(who, 'claude_account.token', { stored: true });
+          return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
