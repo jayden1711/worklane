@@ -60,6 +60,15 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
 }
 
 /**
+ * The agents' Claude account through the helper (scripts/setup/claude-account.sh, src/claude-account.ts): status
+ * refreshes each agent user's account and expiry; switch starts the switch as its own unit, which then takes the token
+ * from this instance's dashboard.
+ */
+export function claudeAccount(action: 'status' | 'switch', exec: Exec = defaultExec): MachineResult {
+  return runHelper(['claude-account', action], exec);
+}
+
+/**
  * add-project's arguments, exactly as the machine helper takes them (scripts/machine/, the helper's source; a test
  * keeps the two equal): an instance name (instance.sh's shape; never the viewer's, dash, nor one ending in -agent,
  * -eval or -work, whose users would be another instance's) and a GitHub owner/name.

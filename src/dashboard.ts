@@ -53,6 +53,9 @@ import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './view
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { readSecretBody } from './console/secrets.js';
+import { AskError } from './console/asks.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -136,6 +139,8 @@ export interface DashboardOptions {
   secretsHome?: string;
   /** The machine owners file (src/machine-owners.ts); the system's when unset (tests). */
   machineOwnersFile?: string;
+  /** Where claude-account.sh writes status.json and switch.jsonl (src/claude-account.ts); the system's when unset (tests). */
+  claudeAccountDir?: string;
 }
 
 /**
@@ -1087,6 +1092,57 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           audit(who, 'machine.add_project', { name: r.args[1], repo: r.args[2], request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
+        // expiry, and the switch, followed from claude-account.sh's own progress file. Hidden from everyone else.
+        const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+        const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
+        const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
+        if (url.pathname === '/api/claude-account' && req.method === 'GET') {
+          if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
+          const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
+          return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
+        }
+        // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
+        if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { action?: unknown };
+          const action = String(body.action ?? '').slice(0, 20);
+          if (!isOwnerHere) {
+            audit(who, 'machine.claude_account_refused', { action, why: 'not an owner here' });
+            return json(res, 403, { error: `only the instance's owners (admin on ${repo}) who are machine owners may switch the Claude account; @${who.login} is a ${who.role}` });
+          }
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestClaudeAccount(log, { action: body.action, requester: accountRequester, dir: accountDir, ...ownersOpt });
+          } catch (e) {
+            if (e instanceof MachineRequestError) {
+              auditWrite(log, who, opts.instance ?? null, 'machine.claude_account_refused', { action, why: e.message.slice(0, 300) });
+              return json(res, e.status, { error: e.message });
+            }
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.claude_account', { action, request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // The new account's token, for the running switch: its own body handling, so the value never reaches readBody,
+        // an error, an event or the audit (which records only that it was stored).
+        if (url.pathname === '/api/claude-account/token' && req.method === 'POST') {
+          if (!isOwnerHere) {
+            req.resume();
+            return json(res, 403, { error: `only the instance's owners who are machine owners may paste the token; @${who.login} is a ${who.role}` });
+          }
+          try {
+            const value = await readSecretBody(req);
+            storeSwitchToken({ value, instance: opts.instance ?? opts.cfg.project.project.name, who: { role: who.role, requester: accountRequester }, dir: accountDir, ...(opts.secretsHome ? { home: opts.secretsHome } : {}), ...ownersOpt });
+          } catch (e) {
+            if (e instanceof ClaudeTokenError || e instanceof AskError) return json(res, e.status, { error: e.message });
+            return json(res, 500, { error: "the token couldn't be stored" });
+          }
+          audit(who, 'claude_account.token', { stored: true });
+          return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));

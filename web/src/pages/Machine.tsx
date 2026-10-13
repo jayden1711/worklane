@@ -7,6 +7,7 @@ import type { State } from '../api';
 import { HealthPanel } from '../components/HealthPanel';
 import { ProtectionStatus } from '../components/Protection';
 import { MachineSettings } from '../components/MachineSettings';
+import { ClaudeAccountPanel } from '../components/ClaudeAccount';
 import { TestRunsPanel } from '../components/TestRuns';
 import { RecordsTable } from '../components/patterns';
 import { ago } from '../components/ui';
@@ -55,6 +56,8 @@ export function MachinePage({ state }: { state: State }) {
         <ProtectionStatus protection={state.protection} brand={state.brand.name} />
         <TestRunsPanel />
         <HealthPanel />
+        {/* The agents' Claude account: the machine owners' only (it renders nothing for anyone else). */}
+        <ClaudeAccountPanel />
         {/* The machine settings are the owners' and writers' (a viewer's request for them is refused). */}
         {state.canReadMachine ? (
           <MachineSettings />

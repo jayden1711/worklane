@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AddProjectData, AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Waiting } from './api';
+import type { AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -32,6 +32,7 @@ import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages
 import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
+import { ClaudeAccountView } from './components/ClaudeAccount';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -101,3 +102,4 @@ export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsol
 export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<AddProjectView data={data} />);
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
+export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
