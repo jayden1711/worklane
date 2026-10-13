@@ -59,7 +59,7 @@ Each user signs in to its own accounts. Worklane never creates, reads or copies 
 
   After changing the App's permissions (and accepting them on the installation), `bash scripts/setup/credentials.sh <name> verify-app` runs the same check with the installed key, read-only.
 
-  Delete the downloaded key elsewhere, too. In `credentials.yaml`: `github: { kind: app, app_id, installation_id, key_path }`.
+  Delete the downloaded key elsewhere, too. Once the check passes, the script writes `github: { kind: app, app_id, installation_id, key_path }` into `credentials.yaml` itself, as the coordinator (`worklane instance set-github-app`, validated, its other settings kept), making the instance home first if it isn't there yet. Nothing to edit by hand.
   - **How it's used:** the coordinator mints hour-long installation tokens limited to the instance's repos. It caches them in its private state and renews them before they expire. API calls use them, and git gets them through a credential helper. `gh` has no login in App mode. Tokens never reach agents.
   - **Enforced at start**, and by `instance show`: the installation must reach exactly the instance's repos.
   - **Required checks:** an App can post check runs. When Worklane posts its own gate check (planned), the App also needs Checks: write.
