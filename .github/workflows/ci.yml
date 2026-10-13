@@ -48,15 +48,23 @@ jobs:
           echo "full-ci label: $FULL; bootstrap jobs: $bootstrap; real systemd / real users jobs: $machine"
           { echo "bootstrap=$bootstrap"; echo "machine=$machine"; } >> "$GITHUB_OUTPUT"
 
-  test:
-    # Ubuntu only (the owner's choice): the OS adapters stay in place, but only Linux runs in CI.
+  # The unit tests (npm test: build, then dist/test/**/*.test.js) in 4 shards per Node version, split by
+  # scripts/ci/shard.mjs on the measured per-file durations in test/timings.json. Each shard builds for itself
+  # (cheaper on the wall clock than one build job the shards wait for). Shard 4 also runs the typecheck and the
+  # dashboard UI build: shard 1 gets the longest file, so 4 has room. The checks the ruleset, .worklane/config.yaml
+  # and the updater require are the summary jobs below, test (ubuntu-latest, 22) and (ubuntu-latest, 24), green only
+  # when all 4 of their shards are; the shards themselves are required by nothing (test/update-checks.test.ts).
+  # Ubuntu only (the owner's choice): the OS adapters stay in place, but only Linux runs in CI.
+  test-shard-22:
+    name: test shard ${{ matrix.shard }}/4 (${{ matrix.os }}, ${{ matrix.node }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node: ['22', '24']
+        node: ['22']
+        shard: [1, 2, 3, 4]
     runs-on: ${{ matrix.os }}
-    steps:
+    steps: &test-shard-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -79,10 +87,60 @@ jobs:
           case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run typecheck
-      - run: npm test
+        if: matrix.shard == 4
+      - run: npm run build
+      - name: this shard's tests
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          node scripts/ci/shard.mjs --plan 4
+          mapfile -t files < <(node scripts/ci/shard.mjs "$SHARD/4")
+          [ "${#files[@]}" -gt 0 ] || { echo "shard $SHARD/4 has no test files" >&2; exit 1; }
+          node --test "${files[@]}"
       - name: build the dashboard UI
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.shard == 4
         run: npm run build:web
+
+  test-shard-24:
+    name: test shard ${{ matrix.shard }}/4 (${{ matrix.os }}, ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: ['24']
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ matrix.os }}
+    steps: *test-shard-steps
+
+  # The required checks, under the names they have always had: green only when every shard of that Node version
+  # succeeded. always(): a failed, cancelled or skipped shard makes this job fail, never skip (a skipped required
+  # check would count as passing).
+  test-22:
+    name: test (ubuntu-latest, 22)
+    needs: test-shard-22
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: all 4 shards succeeded
+        env:
+          RESULT: ${{ needs.test-shard-22.result }}
+        run: |
+          echo "test shard 1..4/4 (ubuntu-latest, 22): $RESULT"
+          [ "$RESULT" = success ]
+
+  test-24:
+    name: test (ubuntu-latest, 24)
+    needs: test-shard-24
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: all 4 shards succeeded
+        env:
+          RESULT: ${{ needs.test-shard-24.result }}
+        run: |
+          echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
+          [ "$RESULT" = success ]
 
   desktop:
     # The optional desktop window (desktop/, Tauri): its URL and navigation guards, against the locked crates.
