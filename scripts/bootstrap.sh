@@ -8,9 +8,12 @@
 #   bash scripts/bootstrap.sh --dry-run <repo>    print what it would do; change nothing
 #   bash scripts/bootstrap.sh --engine <spec> ... install the engine from <spec> (an npm tarball or spec)
 #                                                 instead of the pinned release
-#   sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
+#   sudo bash scripts/bootstrap.sh --hardened [--machine-owner <login>] [--public-url <url>] <name> <owner/repo>
 #                                                 Linux (apt + systemd): the multi-user setup scripts in
-#                                                 scripts/setup/, in order, each printed for review first
+#                                                 scripts/setup/, in order, each printed for review first.
+#                                                 You become the machine's first owner (your GitHub login:
+#                                                 asked, or read from gh and confirmed); at the end it prints
+#                                                 the dashboard's URL, where everything after this happens
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
 # gitleaks against the sha256 sums below, the engine by its release commit, Claude Code by npm's integrity
@@ -37,9 +40,9 @@ ENGINE_COMMIT=9c24a10eb91ffac894e24f0b0a54d8407f23d423
 
 PREFIX="${WORKLANE_PREFIX:-$HOME/.local}"
 DRY=0 NO_REPO=0 HARDENED=0 YES=0 AFTER_CREDENTIALS=0
-REPO="" ENGINE="" NAME="" GITHUB=""
+REPO="" ENGINE="" NAME="" GITHUB="" OWNER="" PUBLIC_URL=""
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { echo "bootstrap: $*" >&2; exit 1; }
 say() { printf '\n== %s\n' "$*"; }
 ok() { printf '   ok: %s\n' "$*"; }
@@ -56,6 +59,8 @@ while [ $# -gt 0 ]; do
     --yes) YES=1 ;;
     --engine) [ $# -ge 2 ] || die "--engine needs a value"; ENGINE="$2"; shift ;;
     --hardened) HARDENED=1 ;;
+    --machine-owner) [ $# -ge 2 ] || die "--machine-owner needs a GitHub login"; OWNER="$2"; shift ;;
+    --public-url) [ $# -ge 2 ] || die "--public-url needs a value"; PUBLIC_URL="$2"; shift ;;
     --after-credentials) AFTER_CREDENTIALS=1 ;;
     -*) echo "bootstrap: unknown option $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -96,6 +101,70 @@ at_least() {
 
 # ---------------------------------------------------------------- hardened (multi-user, Linux)
 
+# The machine owners file (scripts/setup/lib.sh, src/machine-owners.ts).
+MACHINE_OWNERS="/etc/$CLI/machine-owners.json"
+LOGIN_RE='^[A-Za-z0-9](-?[A-Za-z0-9])*$'
+login_ok() { [ "${#1}" -le 39 ] && [[ "$1" =~ $LOGIN_RE ]]; }
+
+# Who is installing, as a GitHub login: the machine's first owner (src/machine-owners.ts), who may add projects
+# from the dashboard. --machine-owner; else what gh says (as the person who ran sudo), confirmed; else asked.
+first_owner() {
+  local found="" answer=""
+  if [ -z "$OWNER" ] && command -v gh >/dev/null 2>&1; then
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then found="$(sudo -H -u "$SUDO_USER" gh api user --jq .login 2>/dev/null || true)"
+    else found="$(gh api user --jq .login 2>/dev/null || true)"; fi
+    login_ok "$found" || found=""
+  fi
+  if [ -z "$OWNER" ] && [ -n "$found" ]; then
+    if [ "$YES" = 1 ] || [ "$DRY" = 1 ]; then
+      OWNER="$found"
+    else
+      printf "You are @%s on GitHub (from gh), and become this machine's first owner. Right? [Y/n] " "$found"
+      read -r answer </dev/tty || answer=n
+      case "$answer" in "" | y | Y | yes) OWNER="$found" ;; esac
+    fi
+  fi
+  if [ -z "$OWNER" ] && [ "$DRY" = 1 ]; then
+    OWNER="<login>"
+    printf '   would ask for your GitHub login (or give --machine-owner <login>)\n'
+    return 0
+  fi
+  if [ -z "$OWNER" ]; then
+    [ "$YES" = 0 ] || die "who is installing? give your GitHub login with --machine-owner <login> (gh isn't signed in here)"
+    printf "Your GitHub login (you become this machine's first owner, who adds projects from the dashboard): "
+    read -r OWNER </dev/tty || OWNER=""
+  fi
+  login_ok "$OWNER" || die "\"$OWNER\" isn't a GitHub login (letters, digits and single dashes, at most 39)"
+  ok "first machine owner: @$OWNER"
+}
+
+# The dashboard: its URL (--public-url, else this machine's Tailscale name), the sign-in App (made through
+# GitHub's manifest flow when the hub is up; otherwise how to), and that everything after this happens there.
+dashboard_next() {
+  local url="$PUBLIC_URL" viewer_home="" dns="" later="https://<machine>.<tailnet>.ts.net"
+  if [ -z "$url" ] && command -v tailscale >/dev/null 2>&1; then
+    # The first DNSName in `tailscale status --json` is this machine's (Self comes before the peers).
+    dns="$(tailscale status --json 2>/dev/null | sed -n 's/^ *"DNSName": *"\([a-z0-9.-]*[a-z0-9]\)\.\{0,1\}",\{0,1\} *$/\1/p' | head -1 || true)"
+    [ -z "$dns" ] || url="https://$dns"
+  fi
+  if command -v getent >/dev/null 2>&1; then viewer_home="$(getent passwd wl-dash | cut -d: -f6 || true)"; fi
+  say "the dashboard"
+  if [ -n "$viewer_home" ] && [ -f "$viewer_home/.config/dashboard-signin/client-secret" ]; then
+    ok "the sign-in App is set up"
+  elif [ -n "$viewer_home" ] && [ -s "$viewer_home/.local/state/$CLI/dashboard-hub/dashboard-token" ] && [ -n "$url" ]; then
+    echo "   no sign-in App yet: making one through GitHub's manifest flow (open the link it prints, approve on GitHub)"
+    run "$CLI" app-manifest "$NAME" "$GITHUB" --signin --public-url "$url" || echo "   that didn't finish: run it again, or make the App by hand (bash scripts/setup/credentials.sh dashboard-signin)"
+  else
+    echo "   no sign-in App yet. People sign in to the dashboard with a GitHub App; make it once, either way:"
+    echo "   - through GitHub's manifest flow, once the hub runs: sudo $CLI app-manifest $NAME $GITHUB --signin --public-url ${url:-$later}"
+    echo "   - by hand: bash scripts/setup/credentials.sh dashboard-signin (docs/dashboard.md)"
+  fi
+  echo "   then: sudo bash scripts/setup/dashboards.sh --machine-owner $OWNER --client-id <the App's client id> --public-url ${url:-$later} $NAME"
+  echo
+  echo "dashboard: ${url:-$later (turn on Tailscale with MagicDNS and HTTPS certificates: docs/dashboard.md)}"
+  echo "   sign in with GitHub as @$OWNER. Everything after this first install happens there: Setup console, Add project."
+}
+
 if [ "$HARDENED" = 1 ]; then
   [ "$OS" = Linux ] || die "--hardened is for Linux servers (apt and systemd); on a Mac use the single-user path"
   command -v apt-get >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 || die "--hardened needs apt-get and systemd"
@@ -105,8 +174,12 @@ if [ "$HARDENED" = 1 ]; then
   setup="$(cd "$(dirname "$0")" && pwd)/setup"
   [ -d "$setup" ] || die "run this from a checkout of the engine repo (no $setup)"
   [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "--hardened runs the setup scripts as root: run it with sudo"
+  [ -z "$PUBLIC_URL" ] || [[ "$PUBLIC_URL" =~ ^https://[a-z0-9.-]+$ ]] || die "--public-url: the dashboard's https origin (https://<machine>.<tailnet>.ts.net)"
+  # After the credentials, the first owner is already on file: read it back rather than ask again.
+  if [ "$AFTER_CREDENTIALS" = 1 ] && [ -z "$OWNER" ] && [ -s "$MACHINE_OWNERS" ]; then OWNER="$(sed -n 's/^{"owners":\["\([A-Za-z0-9-]*\)".*/\1/p' "$MACHINE_OWNERS")"; fi
+  first_owner
   # Each step: the script and its arguments. Credentials need your hands in between (see below).
-  steps=("node.sh $NODE_VERSION" "machine.sh" "tools.sh $CLAUDE_VERSION" "instance.sh $NAME" "engine.sh $ENGINE_TAG $NAME $GITHUB")
+  steps=("node.sh $NODE_VERSION" "machine.sh" "machine-owners.sh --first $OWNER" "tools.sh $CLAUDE_VERSION" "instance.sh $NAME" "engine.sh $ENGINE_TAG $NAME $GITHUB")
   [ "$AFTER_CREDENTIALS" = 1 ] && steps=("checkout.sh $NAME $GITHUB" "service.sh $NAME" "check.sh $NAME")
   for step in "${steps[@]}"; do
     script="${step%% *}"
@@ -128,6 +201,7 @@ if [ "$HARDENED" = 1 ]; then
     echo "   then: sudo bash scripts/bootstrap.sh --hardened --after-credentials $NAME $GITHUB"
     echo "   (docs/separate-users.md has the details)"
   fi
+  dashboard_next
   exit 0
 fi
 
