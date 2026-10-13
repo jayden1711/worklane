@@ -59,6 +59,20 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
   return runHelper(['set-updates', on ? 'on' : 'off'], exec);
 }
 
+/**
+ * add-project's arguments, exactly as the machine helper takes them (scripts/machine/, the helper's source; a test
+ * keeps the two equal): an instance name (instance.sh's shape; never the viewer's, dash, nor one ending in -agent,
+ * -eval or -work, whose users would be another instance's) and a GitHub owner/name.
+ */
+export function addProjectNameOk(s: unknown): s is string {
+  return typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
+}
+export function addProjectRepoOk(s: unknown): s is string {
+  if (typeof s !== 'string') return false;
+  const m = /^([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})\/([A-Za-z0-9_.-]{1,100})$/.exec(s);
+  return !!m && m[2] !== '.' && m[2] !== '..';
+}
+
 /** The helper's change log, newest last; unreadable or malformed lines are skipped. */
 export function machineChanges(path = MACHINE_CHANGES, limit = 200): MachineChange[] {
   let text: string;

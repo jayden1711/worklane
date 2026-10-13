@@ -5,7 +5,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -15,6 +14,7 @@ import { startHub } from '../src/dashboard-hub.js';
 import { SESSION_COOKIE, STATE_COOKIE } from '../src/dashboard-auth.js';
 import { EventLog } from '../src/events/log.js';
 import { currentUser } from '../src/os/index.js';
+import { APP_SECRET, FAKE_PEM, fakeGitHub as fake } from './fake-github.js';
 import {
   AGENT_APP_PERMISSIONS,
   agentKeyDir,
@@ -38,64 +38,9 @@ const CLIENT_SECRET = 'client-secret-for-tests';
 const PUBLIC = 'https://hub.example.test';
 const REPO = 'example/alpha';
 const PEM = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
-const APP_SECRET = 'appclientsecret0123456789abcdefABCDEF';
-
-/** A fake GitHub: sign-in, users, App names, manifest conversions (each code once), the App's installation and its token. */
-async function fakeGitHub() {
-  const codes = new Map<string, { slug: string; id: number }>(); // manifest codes
-  const signins = new Map<string, string>(); // oauth codes -> login
-  const takenNames = new Set<string>();
-  const state = { installed: false, reaches: [REPO], permissions: { ...AGENT_APP_PERMISSIONS } as Record<string, string>, conversions: 0 };
-  const server: Server = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      const send = (status: number, j: unknown) => {
-        res.writeHead(status, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(j));
-      };
-      const url = new URL(req.url ?? '/', 'http://x');
-      const auth = req.headers.authorization ?? '';
-      const jwtIss = () => {
-        const m = auth.match(/^Bearer [^.]+\.([^.]+)\./);
-        return m ? (JSON.parse(Buffer.from(m[1]!, 'base64url').toString()) as { iss: string }).iss : null;
-      };
-      let m: RegExpMatchArray | null;
-      if (req.method === 'POST' && url.pathname === '/login/oauth/access_token') {
-        const b = JSON.parse(body) as { code: string };
-        const login = signins.get(b.code);
-        signins.delete(b.code);
-        return login ? send(200, { access_token: `ghu_${login}` }) : send(200, { error: 'bad_verification_code' });
-      }
-      if (req.method === 'GET' && url.pathname === '/user') return send(200, { login: auth.replace(/^Bearer ghu_/, '') });
-      if (req.method === 'DELETE' && /^\/applications\/[^/]+\/token$/.test(url.pathname)) return res.writeHead(204).end();
-      if (req.method === 'GET' && (m = url.pathname.match(/^\/users\/([^/]+)$/))) return send(200, { login: m[1], id: 501, type: m[1] === 'example-org' ? 'Organization' : 'User' });
-      if (req.method === 'GET' && (m = url.pathname.match(/^\/apps\/([^/]+)$/))) return takenNames.has(m[1]!) ? send(200, { slug: m[1] }) : send(404, { message: 'Not Found' });
-      if (req.method === 'POST' && (m = url.pathname.match(/^\/app-manifests\/([^/]+)\/conversions$/))) {
-        const c = codes.get(m[1]!);
-        codes.delete(m[1]!);
-        if (!c) return send(404, { message: 'Not Found' });
-        state.conversions++;
-        return send(201, { id: c.id, slug: c.slug, client_id: 'Iv1.madeapp00001', client_secret: APP_SECRET, webhook_secret: null, pem: PEM, owner: { login: 'example' }, html_url: `https://github.com/apps/${c.slug}` });
-      }
-      if (req.method === 'GET' && url.pathname === `/repos/${REPO}`) return send(200, { id: 777, full_name: REPO });
-      if (req.method === 'GET' && url.pathname === `/repos/${REPO}/installation`) {
-        if (jwtIss() !== '91') return send(401, { message: 'Bad credentials' });
-        return state.installed ? send(200, { id: 4242, app_id: 91 }) : send(404, { message: 'Not Found' });
-      }
-      if (req.method === 'GET' && url.pathname === '/app') return jwtIss() === '91' ? send(200, { id: 91, slug: 'alpha-app' }) : send(401, {});
-      if (req.method === 'POST' && url.pathname === '/app/installations/4242/access_tokens') return send(201, { token: 'ghs_inst', expires_at: '2099-01-01T00:00:00Z', permissions: state.permissions });
-      if (req.method === 'GET' && url.pathname === '/installation/repositories') {
-        return auth === 'Bearer ghs_inst' ? send(200, { repositories: state.reaches.map((full_name) => ({ full_name })) }) : send(401, {});
-      }
-      send(404, { message: 'Not Found' });
-    });
-  });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
-  const addr = server.address();
-  const url = `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`;
-  return { url, codes, signins, takenNames, state, close: () => new Promise<void>((r) => server.close(() => r())) };
-}
+FAKE_PEM.value = PEM;
+/** The fake GitHub (test/fake-github.ts), the App installed on REPO alone once a test says so. */
+const fakeGitHub = () => fake({ repo: REPO, permissions: { ...AGENT_APP_PERMISSIONS } });
 
 async function setup(o: { signIn?: boolean } = {}) {
   const gh = await fakeGitHub();

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { answerAsk, getAsks, hubInstance, pasteSecret, runRootStep, type Ask, type AsksView } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, pasteSecret, runRootStep, streamUrl, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { Header } from './Overview';
 
@@ -136,12 +136,148 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
   );
 }
 
-export function SetupConsoleView({ data, onChanged }: { data: AsksView; onChanged?: () => void }) {
-  const open = data.asks.filter((a) => a.status === 'open');
-  const done = data.asks.filter((a) => a.status !== 'open').reverse();
+const STEP_LABEL: Record<string, string> = {
+  instance: 'Instance users and folders',
+  app: 'GitHub App (create, then install)',
+  'claude-token': "The agent's Claude token",
+  checkout: 'Checkout of the repo',
+  policy: 'Default policy',
+  service: 'Coordinator service',
+  'test-user': 'Test-run user',
+  'machine-helper': 'Machine helper',
+  dashboards: 'Dashboards',
+};
+const STEP_TONE: Record<AddProjectStep['state'], 'neutral' | 'ok' | 'warn' | 'danger' | 'info'> = { pending: 'neutral', started: 'info', done: 'ok', failed: 'danger', ask: 'warn' };
+const STEP_STATE: Record<AddProjectStep['state'], string> = { pending: 'not yet', started: 'running', done: 'done', failed: 'failed', ask: 'waiting on you' };
+const RUN_STATUS: Record<string, string> = { pending: 'waiting for the coordinator', running: 'running', done: 'done', failed: 'failed', refused: 'refused', interrupted: 'interrupted' };
+
+/** One add-project run: its steps in the script's order, then what it's waiting on you for (in this same view). */
+function AddProjectRunCard({ run, onChanged }: { run: AddProjectRun; onChanged?: () => void }) {
+  return (
+    <div className="space-y-3 rounded-control bg-inset p-3 shadow-hairline" data-testid="add-project-run" data-run={run.id} data-status={run.status}>
+      <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
+        <span className="font-medium text-ink">
+          {run.name} <span className="font-normal text-ink-3">({run.repo})</span>
+        </span>
+        <Badge tone={run.status === 'done' ? 'ok' : run.status === 'pending' || run.status === 'running' ? 'info' : 'danger'}>{RUN_STATUS[run.status] ?? run.status}</Badge>
+        <span className="text-ink-3">
+          asked {ago(run.at)} by @{run.by}
+        </span>
+      </div>
+      <ol className="space-y-1" data-testid="add-project-steps">
+        {run.steps.map((s, i) => (
+          <li key={s.step} className="flex flex-wrap items-baseline gap-2 text-[12.5px]" data-testid="add-project-step" data-step={s.step} data-state={s.state}>
+            <span className="w-5 text-right tabular-nums text-ink-3">{i + 1}.</span>
+            <span className={cx('min-w-48', s.state === 'pending' ? 'text-ink-3' : 'text-ink')}>{STEP_LABEL[s.step] ?? s.step}</span>
+            <Badge tone={STEP_TONE[s.state]}>{STEP_STATE[s.state]}</Badge>
+            {s.detail && <span className="text-ink-3">{s.detail}</span>}
+            {s.state === 'failed' && s.retry && (
+              <span className="text-ink-2" data-testid="add-project-retry">
+                To retry: <code>{s.retry}</code>
+              </span>
+            )}
+          </li>
+        ))}
+      </ol>
+      {run.failedStep && (
+        <p className="text-[12.5px] text-red" data-testid="add-project-failed">
+          Stopped at "{STEP_LABEL[run.failedStep] ?? run.failedStep}". Fix what it says, then add the same project again: the steps already done are skipped.
+        </p>
+      )}
+      {(run.status === 'failed' || run.status === 'refused' || run.status === 'interrupted') && run.detail && !run.failedStep && <p className="text-[12.5px] text-red">{run.detail}</p>}
+      {!!run.asks.length && (
+        <div className="space-y-2" data-testid="add-project-asks">
+          {run.asks.map((a) => (
+            <AskCard key={a.id} a={a} {...(onChanged ? { onChanged } : {})} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Add project: a name and an owner/repo, checked here and again on the server, recorded as a machine request that
+ * the coordinator runs as root through the machine helper. Enabled only when the server says this person may (a
+ * machine owner, freshly signed in, on an allowed device); otherwise it says why.
+ */
+export function AddProjectView({ data, onChanged }: { data: AddProjectData; onChanged?: () => void }) {
+  const [name, setName] = useState('');
+  const [repo, setRepo] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    const bad = addProjectInvalid(name.trim(), repo.trim());
+    if (bad) return setErr(bad);
+    setBusy(true);
+    setErr(null);
+    try {
+      await addProject(name.trim(), repo.trim());
+      setName('');
+      setRepo('');
+      onChanged?.();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+  return (
+    <Card className="space-y-3 p-4" data-testid="add-project" data-enabled={data.allowed ? 'yes' : 'no'}>
+      <div>
+        <div className="text-[14px] font-medium text-ink">Add project</div>
+        <p className="text-[12px] text-ink-3">
+          A new instance for a GitHub repo on this machine: its users, its GitHub App (two clicks on GitHub), the agent's Claude token, the checkout, a default policy (auto-merge off, $20 a day, 2 workers) and its services. It runs as root through the machine helper, step by step below, and every step is recorded.
+        </p>
+      </div>
+      <form
+        className="flex flex-wrap items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <input value={name} onChange={(e) => (setName(e.target.value), setErr(null))} disabled={!data.allowed || busy} aria-label="Project name" placeholder="name (e.g. shop)" spellCheck={false} autoComplete="off" className={cx(field, 'w-40')} data-testid="add-project-name" />
+        <input value={repo} onChange={(e) => (setRepo(e.target.value), setErr(null))} disabled={!data.allowed || busy} aria-label="GitHub repo" placeholder="owner/repo" spellCheck={false} autoComplete="off" className={cx(field, 'min-w-56 flex-1')} data-testid="add-project-repo" />
+        <Button type="submit" size="sm" disabled={!data.allowed || busy} data-testid="add-project-submit">
+          {busy ? 'Adding…' : 'Add project'}
+        </Button>
+      </form>
+      {!data.allowed && data.why && (
+        <p className="text-[12.5px] text-ink-2" data-testid="add-project-disabled">
+          Not available: {data.why}.
+          {/* The machine owners, unless the reason already names them. */}
+          {!/machine owners:/.test(data.why) && (
+            <>
+              {' '}
+              <span className="text-ink-3" data-testid="add-project-owners">
+                Machine owners: {data.machineOwners.length ? data.machineOwners.map((o) => `@${o}`).join(', ') : 'none set'}.
+              </span>
+            </>
+          )}
+        </p>
+      )}
+      {err && (
+        <p className="text-[12.5px] text-red" data-testid="add-project-invalid">
+          {err}
+        </p>
+      )}
+      {data.runs.map((r) => (
+        <AddProjectRunCard key={r.id} run={r} {...(onChanged ? { onChanged } : {})} />
+      ))}
+    </Card>
+  );
+}
+
+export function SetupConsoleView({ data, onChanged, shown }: { data: AsksView; onChanged?: () => void; shown?: ReadonlySet<string> }) {
+  // An ask an add-project run raised is shown with that run, not twice.
+  const asks = shown ? data.asks.filter((a) => !shown.has(a.id)) : data.asks;
+  const open = asks.filter((a) => a.status === 'open');
+  const done = asks.filter((a) => a.status !== 'open').reverse();
   return (
     <div className="space-y-6">
-      {!data.asks.length && <Empty title="Nothing to set up" hint="When the harness needs something it can't do itself (a secret, an approval, a machine step), it asks here." />}
+      {!asks.length && <Empty title="Nothing to set up" hint="When the harness needs something it can't do itself (a secret, an approval, a machine step), it asks here." />}
       {!!open.length && (
         <section className="space-y-3">
           <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Waiting</h2>
@@ -242,22 +378,50 @@ function Terminal({ instance }: { instance: string }) {
 
 export function SetupPage() {
   const [data, setData] = useState<AsksView | null>(null);
+  const [adding, setAdding] = useState<AddProjectData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [inst, setInst] = useState<string | null>(null);
-  const load = () =>
+  const load = () => {
     void getAsks()
-      .then((d) => (setData(d), setErr(null)))
+      .then((d) => {
+        setData(d);
+        setErr(null);
+        // Add project is for the instance's owners and writers to see (only a machine owner may start one).
+        if (d.role === 'owner' || d.role === 'writer') void getAddProject().then(setAdding, () => setAdding(null));
+      })
       .catch((e: Error) => setErr(e.message));
+  };
   useEffect(() => {
     load();
     void hubInstance.then(setInst);
+    // Live: each new event (an add-project step, an ask) reloads the console, debounced.
+    let es: EventSource | null = null;
+    let closed = false;
+    let timer: number | undefined;
+    void apiPath('/api/stream').then((p) => {
+      if (closed) return;
+      es = new EventSource(streamUrl(p));
+      es.addEventListener('change', (m) => {
+        const types = ((JSON.parse(String((m as MessageEvent).data || '{}')) as { types?: string[] }).types ?? []);
+        if (types.length && !types.some((t) => /^(ask|machine|add_project)\./.test(t))) return;
+        window.clearTimeout(timer);
+        timer = window.setTimeout(load, 150);
+      });
+    });
+    return () => {
+      closed = true;
+      window.clearTimeout(timer);
+      es?.close();
+    };
   }, []);
+  const shown = new Set((adding?.runs ?? []).flatMap((r) => r.asks.map((a) => a.id)));
   return (
     <div data-testid="page-setup">
       <Header title="Setup console" sub="what the harness needs from you and can't do itself" />
       <div className="mx-auto max-w-4xl space-y-6 p-6">
         {err && <p className="text-[13px] text-red">{err}</p>}
-        {data && <SetupConsoleView data={data} onChanged={load} />}
+        {adding && <AddProjectView data={adding} onChanged={load} />}
+        {data && <SetupConsoleView data={data} onChanged={load} shown={shown} />}
         {inst && data?.role === 'owner' && <Terminal instance={inst} />}
       </div>
     </div>

@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -172,11 +172,67 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   const r = m.run('--hardened', '--dry-run', 'shop', 'acme/shop');
   assert.equal(r.code, 0, r.out);
   const steps = [...r.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim());
-  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
+  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
   assert.match(r.out, /credentials\.sh shop github-app/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
   assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop']);
   assert.match(m.run('--hardened', 'shop', 'acme/shop').out, /run it with sudo|y\/N/, 'a real run needs root (or asks before each script)');
+});
+
+test('bootstrap --hardened, the first install: the person installing becomes the first machine owner (from gh, or given), and it prints the dashboard URL', { skip }, () => {
+  // A stand-in root: `id -u` says 0 and chown does nothing; Tailscale names the machine (its own name comes first).
+  const net = ['tail1234', 'ts', 'net'].join('.');
+  const box = `box.${net}`;
+  const m = machine({
+    have: { 'apt-get': 'true', systemctl: 'true', chown: 'true', gh: 'echo ada-lovelace', tailscale: `cat <<'J'\n{\n  "Self": {\n    "DNSName": "${box}.",\n  },\n  "Peer": {\n    "k": {\n      "DNSName": "other.${net}.",\n    }\n  }\n}\nJ` },
+  });
+  rmSync(join(m.bin, 'id'));
+  m.stub('id', 'case "$1" in -u) echo 0 ;; *) exit 1 ;; esac');
+  for (const t of ['mv', 'chmod']) symlinkSync(which(t)!, join(m.bin, t));
+  // A stand-in engine checkout: this bootstrap, the real machine-owners.sh and lib.sh (its owners file moved off
+  // /etc), and every other setup script a stand-in that records its arguments.
+  const eng = join(m.dir, 'engine', 'scripts');
+  const setup = join(eng, 'setup');
+  mkdirSync(setup, { recursive: true });
+  copyFileSync(script, join(eng, 'bootstrap.sh'));
+  copyFileSync(join(repoRoot, 'scripts', 'setup', 'machine-owners.sh'), join(setup, 'machine-owners.sh'));
+  const owners = join(m.dir, 'machine-owners.json');
+  const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  assert.match(lib, /^MACHINE_OWNERS=\/etc\/worklane\/machine-owners\.json$/m);
+  writeFileSync(join(setup, 'lib.sh'), lib.replace(/^MACHINE_OWNERS=.*$/m, `MACHINE_OWNERS=${owners}`));
+  const ran = join(m.dir, 'steps.log');
+  for (const s of ['node.sh', 'machine.sh', 'tools.sh', 'instance.sh', 'engine.sh']) writeFileSync(join(setup, s), `echo "${s} $*" >> "${ran}"\n`);
+  const run = (...args: string[]) => {
+    const r = spawnSync(join(m.bin, 'bash'), [join(eng, 'bootstrap.sh'), '--hardened', '--yes', ...args], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir } });
+    return { code: r.status, out: r.stdout + r.stderr };
+  };
+
+  const r = run('shop', 'acme/shop');
+  assert.equal(r.code, 0, r.out);
+  assert.match(m.calls().join('\n'), /gh api user --jq \.login/, 'the login, from gh');
+  assert.match(r.out, /first machine owner: @ada-lovelace/);
+  assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n', 'written as the first machine owner');
+  assert.deepEqual(readFileSync(ran, 'utf8').trim().split('\n').map((l) => l.trim()), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
+  assert.match(r.out, new RegExp(`^dashboard: https://${esc(box)}$`, 'm'), "the dashboard's URL, this machine's Tailscale name");
+  assert.match(r.out, /sign in with GitHub as @ada-lovelace\. Everything after this first install happens there/);
+  assert.match(r.out, new RegExp(`no sign-in App yet[\\s\\S]*app-manifest shop acme/shop --signin --public-url https://${esc(box)}`), 'how to make the sign-in App');
+  assert.match(r.out, /dashboards\.sh --machine-owner ada-lovelace --client-id/);
+
+  // A rerun with someone else keeps the list as it is.
+  const again = run('--machine-owner', 'grace', '--public-url', 'https://hub.example.test', 'shop', 'acme/shop');
+  assert.equal(again.code, 0, again.out);
+  assert.match(again.out, /machine owners already set, kept as they are/);
+  assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n');
+  assert.match(again.out, /^dashboard: https:\/\/hub\.example\.test$/m, '--public-url wins');
+
+  // With nobody to name (gh not signed in) and no one to ask, it stops before any script runs.
+  rmSync(owners);
+  m.stub('gh', 'exit 1');
+  const nobody = run('shop', 'acme/shop');
+  assert.notEqual(nobody.code, 0);
+  assert.match(nobody.out, /give your GitHub login with --machine-owner <login>/);
+  assert.equal(existsSync(owners), false);
+  assert.match(run('--machine-owner', 'not a login', 'shop', 'acme/shop').out, /isn't a GitHub login/);
 });
 
 test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; the CI job runs the bootstrap on Linux', () => {

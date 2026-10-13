@@ -39,7 +39,7 @@ import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUs
 import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
-import { MachineRequestError, machineRequests, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
+import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
@@ -52,6 +52,7 @@ import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
+import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -1029,6 +1030,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
+        // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
+        // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.
+        if (url.pathname === '/api/add-project' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
+          const requester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+          return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}));
+        }
         // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
         // instance's owner who is also a machine owner, freshly signed in on an allowed device (or the break-glass),
         // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
@@ -1055,6 +1063,30 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           audit(who, 'machine.changed', { what: body.what, value: body.value, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
+        }
+        // Add a project to this machine: the machine helper's add-project, run by the coordinator (it streams each step
+        // into this log as add_project.step). The same gate as any machine change: this instance's owner, and a machine
+        // owner freshly signed in on an allowed device (or the break-glass).
+        if (url.pathname === '/api/machine/add-project' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { name?: unknown; repo?: unknown };
+          // A refusal is audited too: what was asked for (cut short), and why.
+          const refused = (status: number, error: string) => {
+            audit(who, 'machine.add_project_refused', { name: String(body.name ?? '').slice(0, 40), repo: String(body.repo ?? '').slice(0, 200), why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may add a project; @${who.login} is a ${who.role}`);
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestAddProject(log, { name: body.name, repo: body.repo, requester: { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk }, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+          } catch (e) {
+            if (e instanceof MachineRequestError) return refused(e.status, e.message);
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.add_project', { name: r.args[1], repo: r.args[2], request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
