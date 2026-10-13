@@ -10,6 +10,9 @@
 //   4. The branch not where the gate last put it (someone pushed it): if it is off the default branch's line, nothing
 //      moves until a person puts it back; either way a watchdog incident is raised. GitHub Free can't stop the push.
 //
+// 5. After each move, the post-deploy check (post-deploy.ts, deploy_gate.post_deploy) waits for the host's deploy of
+//    the commit and smoke-tests production; a commit that failed it is never moved to again (by the gate or an override).
+//
 // An owner may override from Discord (`deploy <sha>`, src/coordinator/deploy-commands.ts): a commit on the default
 // branch's first-parent line, moved by the same fast-forward-only path, recorded with the gate's state at the time.
 import { existsSync, readFileSync, renameSync } from 'node:fs';
@@ -20,6 +23,7 @@ import { writeGroupOnly } from '../os/index.js';
 import type { IncidentSink } from '../usage-limit.js';
 import type { TestRunRequest, TestRunResult } from '../testrun/index.js';
 import { DEPLOY_GATE_INCIDENT, type DeployGateConfig } from './config.js';
+import type { PostDeploy } from './post-deploy.js';
 
 /** What the gate reads with git, in the coordinator's clone. */
 export interface GateGit {
@@ -71,6 +75,8 @@ export interface GateDeps {
   /** How often the branches are fetched (default 90 s). */
   pollMs?: number;
   now?: () => number;
+  /** The post-deploy check (deploy_gate.post_deploy): started after every move. Absent: off. */
+  postDeploy?: PostDeploy;
 }
 
 interface GateFile {
@@ -80,6 +86,8 @@ interface GateFile {
   deployed: string | null;
   /** Recent verdicts, newest last: the gate's state for an override. */
   verdicts: { sha: string; ok: boolean; reason: string }[];
+  /** Commits that failed the post-deploy check in production: never moved to again. */
+  failed: { sha: string; reason: string }[];
 }
 
 const VERDICTS_KEPT = 50;
@@ -101,18 +109,18 @@ export class DeployGate {
   }
 
   private read(): GateFile {
-    if (!existsSync(this.file)) return { lastRun: null, deployed: null, verdicts: [] };
+    if (!existsSync(this.file)) return { lastRun: null, deployed: null, verdicts: [], failed: [] };
     try {
       const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<GateFile>;
-      return { lastRun: j.lastRun ?? null, deployed: j.deployed ?? null, verdicts: Array.isArray(j.verdicts) ? j.verdicts : [] };
+      return { lastRun: j.lastRun ?? null, deployed: j.deployed ?? null, verdicts: Array.isArray(j.verdicts) ? j.verdicts : [], failed: Array.isArray(j.failed) ? j.failed : [] };
     } catch {
-      return { lastRun: null, deployed: null, verdicts: [] };
+      return { lastRun: null, deployed: null, verdicts: [], failed: [] };
     }
   }
 
   private write(f: GateFile) {
     const tmp = `${this.file}.${process.pid}.tmp`;
-    writeGroupOnly(tmp, JSON.stringify({ ...f, verdicts: f.verdicts.slice(-VERDICTS_KEPT) }, null, 2));
+    writeGroupOnly(tmp, JSON.stringify({ ...f, verdicts: f.verdicts.slice(-VERDICTS_KEPT), failed: f.failed.slice(-VERDICTS_KEPT) }, null, 2));
     renameSync(tmp, this.file);
   }
 
@@ -122,6 +130,17 @@ export class DeployGate {
 
   get branch() {
     return this.d.config.branch;
+  }
+
+  /** A commit that failed the post-deploy check in production: the branch is never moved to it again. */
+  markFailed(sha: string, reason: string): void {
+    const f = this.read();
+    this.write({ ...f, failed: [...f.failed.filter((x) => x.sha !== sha), { sha, reason: reason.slice(0, 500) }] });
+  }
+
+  /** Whether `sha` failed the post-deploy check. */
+  failedPostDeploy(sha: string): boolean {
+    return this.read().failed.some((x) => x.sha === sha);
   }
 
   /** The gate's state for `sha`: its verdict, running now, or none. */
@@ -136,7 +155,9 @@ export class DeployGate {
    * a run on the default branch's tip when it is new and no run is going. The run is not waited for.
    */
   async step(): Promise<void> {
-    if (this.stopped.signal.aborted || this.running) return;
+    if (this.stopped.signal.aborted) return;
+    this.d.postDeploy?.step();
+    if (this.running) return;
     const now = (this.d.now ?? Date.now)();
     if (now - this.lastPoll < (this.d.pollMs ?? 90_000)) return;
     this.lastPoll = now;
@@ -235,6 +256,7 @@ export class DeployGate {
     const f = this.read();
     const deploy = tips.deploy;
     if (!this.d.git.isAncestor(target, tips.main)) return { ok: false, reason: `${target.slice(0, 8)} is not on the default branch` };
+    if (f.failed.some((x) => x.sha === target)) return { ok: false, reason: `${target.slice(0, 8)} failed its post-deploy check in production: ${this.branch} is never moved to it again` };
     if (deploy === target) {
       if (f.deployed !== target) this.write({ ...f, deployed: target });
       return { ok: false, reason: `${this.branch} is at ${target.slice(0, 8)} already` };
@@ -255,6 +277,7 @@ export class DeployGate {
     }
     this.write({ ...this.read(), deployed: target });
     this.emit('deploy_gate.moved', { branch: this.branch, from: deploy, to: target, by: meta.by, override: meta.override, gate: meta.gate });
+    this.d.postDeploy?.start(target, deploy);
     this.d.incidents?.resolveIncident(DEPLOY_GATE_INCIDENT, this.branch);
     return { ok: true, from: deploy };
   }
@@ -269,6 +292,7 @@ export class DeployGate {
     const sha = this.d.git.resolve(ref);
     if (!sha || !sha.startsWith(ref)) return { ok: false, reason: `${ref} is not a commit here` };
     if (!this.d.git.onFirstParent(sha, tips.main)) return { ok: false, reason: `${sha.slice(0, 8)} is not on the default branch's first-parent line` };
+    if (this.failedPostDeploy(sha)) return { ok: false, reason: `${sha.slice(0, 8)} failed its post-deploy check in production; it is never deployed again` };
     return { ok: true, sha, gate: this.stateOf(sha) };
   }
 
@@ -284,10 +308,12 @@ export class DeployGate {
   /** Wait for the run in flight (tests and shutdown). */
   async idle(): Promise<void> {
     while (this.running) await this.running.done;
+    await this.d.postDeploy?.idle();
   }
 
   stop(): void {
     this.stopped.abort();
+    this.d.postDeploy?.stop();
     this.running?.controller.abort();
   }
 }

@@ -1,13 +1,20 @@
 // The deploy gate's real git and GitHub calls, and setting it up at coordinator start (only with tests.yaml
 // deploy_gate, and only once the instance's test runs are set up: the gate runs its tiers through them).
 import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { asks } from '../console/asks.js';
+import { secretsDir } from '../console/secrets.js';
 import type { Config } from '../config/load.js';
 import type { EventLog } from '../events/log.js';
 import { classifyGitHubError } from '../github/errors.js';
 import { checkNamesFor, postChecks, startTestRun, type TestRunResult } from '../testrun/index.js';
 import type { IncidentSink } from '../usage-limit.js';
-import { DEPLOY_GATE_CHECK } from './config.js';
+import { DEPLOY_GATE_CHECK, HOST_TOKEN_CREDENTIAL, type PostDeployConfig } from './config.js';
 import { DeployGate, refUpdateBody, type DeployRefs, type GateGit, type RefResult } from './gate.js';
+import { PostDeploy } from './post-deploy.js';
+import { githubDeployments, railwayHost, RAILWAY_API } from './railway.js';
 
 type Fetch = typeof fetch;
 
@@ -72,6 +79,73 @@ export interface DeployGateSetup {
   repo: string;
   token: () => Promise<string>;
   api?: string;
+  /** The instance: its secrets hold the host's token (secretsDir). Absent (a checkout): no token, no rollback. */
+  instance?: string;
+  /** The coordinator user's home, where the secrets are (tests); the process's own when unset. */
+  secretsHome?: string;
+  /** The host's GraphQL endpoint (tests point it at a fake); else Railway's. */
+  hostApi?: string;
+  /** The smoke checks' HTTP (tests). */
+  http?: typeof fetch;
+  /** The post-deploy check's poll and retry pauses (tests). */
+  postDeployPollMs?: number;
+  postDeployRetryMs?: number;
+  postDeployNow?: () => number;
+  /** GitHub's deployments of a commit (tests); else read with the App's token. */
+  github?: (sha: string) => Promise<{ total: number; success: number } | null>;
+}
+
+/** The host token's file: the instance's secrets, 0400, for the coordinator user only (console/secrets.ts). */
+export function hostTokenFile(instance: string, home = homedir()): string {
+  return join(secretsDir(instance, home), HOST_TOKEN_CREDENTIAL);
+}
+
+/** The stored host token, read now, or null. Never logged. */
+export function readHostToken(file: string | null): string | null {
+  if (!file || !existsSync(file)) return null;
+  try {
+    return readFileSync(file, 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The post-deploy check, for a gate with deploy_gate.post_deploy. Without a stored token it still smoke-tests and
+ * alerts, and asks the owner once (a paste_secret ask in the setup console) for the token a rollback needs.
+ */
+export function postDeployFor(config: PostDeployConfig, branch: string, s: DeployGateSetup, d: { log: EventLog; actor: string; stateDir: string; incidents?: IncidentSink }, markFailed: (sha: string, reason: string) => void): PostDeploy {
+  const file = s.instance ? hostTokenFile(s.instance, s.secretsHome) : null;
+  const token = () => readHostToken(file);
+  if (s.instance && !token()) {
+    const a = asks(d.log);
+    const open = a.list({ instance: s.instance, status: 'open' }).some((x) => x.kind === 'paste_secret' && x.credential === HOST_TOKEN_CREDENTIAL);
+    if (!open)
+      a.create({
+        kind: 'paste_secret',
+        instance: s.instance,
+        title: "The host's API token, for the post-deploy rollback",
+        detail: `deploy_gate.post_deploy is on, but no ${config.host} token is stored. Without it, a failed post-deploy check is only reported: production is not rolled back. Paste an account or workspace token (docs/deploy-gate.md, "Post-deploy check"). It is stored for the coordinator only (0400) and never shown, logged or posted.`,
+        credential: HOST_TOKEN_CREDENTIAL,
+        where: `the instance's secrets, ${HOST_TOKEN_CREDENTIAL} (the coordinator only)`,
+      });
+  }
+  return new PostDeploy({
+    config,
+    branch,
+    host: railwayHost({ project: config.project, environment: config.environment }, token, fetch, s.hostApi ?? RAILWAY_API),
+    hasToken: () => token() !== null,
+    github: s.github ?? githubDeployments(s.repo, s.token, config.github_environment, fetch, s.api),
+    markFailed,
+    log: d.log,
+    actor: d.actor,
+    stateDir: d.stateDir,
+    ...(d.incidents ? { incidents: d.incidents } : {}),
+    ...(s.http ? { http: s.http } : {}),
+    ...(s.postDeployPollMs !== undefined ? { pollMs: s.postDeployPollMs } : {}),
+    ...(s.postDeployRetryMs !== undefined ? { retryMs: s.postDeployRetryMs } : {}),
+    ...(s.postDeployNow ? { now: s.postDeployNow } : {}),
+  });
 }
 
 /** The gate, when tests.yaml has deploy_gate and the test runs are set up; else undefined (and why, in the log). */
@@ -88,7 +162,9 @@ export function setupDeployGate(cfg: Config, s: DeployGateSetup, d: { log: Event
   if (config.branch === main) return fail(`deploy_gate.branch can't be the default branch (${main})`);
   const names = checkNamesFor(testRun);
   const gateNames = Object.fromEntries(config.tiers.map((t) => [t, DEPLOY_GATE_CHECK]));
-  return new DeployGate({
+  let gate: DeployGate | null = null;
+  const postDeploy = config.post_deploy ? postDeployFor(config.post_deploy, config.branch, s, d, (sha, reason) => gate?.markFailed(sha, reason)) : undefined;
+  gate = new DeployGate({
     config,
     defaultBranch: main,
     git: gateGit(d.root, d.remote ?? 'origin', main, config.branch),
@@ -105,5 +181,7 @@ export function setupDeployGate(cfg: Config, s: DeployGateSetup, d: { log: Event
       await postChecks(sha, gate, gateNames);
     },
     ...(d.incidents ? { incidents: d.incidents } : {}),
+    ...(postDeploy ? { postDeploy } : {}),
   });
+  return gate;
 }
