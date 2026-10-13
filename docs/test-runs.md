@@ -68,7 +68,7 @@ test_run:
 
 ```ts
 interface TestRunRequest { repo: string; sha: string; kind: 'fast' | 'full'; prs: number[]; changedFiles?: string[]; shard?: { index: number; total: number } }  // index is 1-based
-interface TierResult { tier: string; ok: boolean; durationMs: number; summary: string; logRef: string }
+interface TierResult { tier: string; ok: boolean; durationMs: number; summary: string; logRef: string; predates?: { configCommit: string; what: string; notRun: boolean } }
 interface TestRunResult { id: string; sha: string; kind: 'fast'|'full'; ok: boolean; tiers: TierResult[]; outcome: 'done' | 'cancelled' | 'error' }  // anything but done: no verdict
 startTestRun(req, opts?: { signal?: AbortSignal }): Promise<TestRunResult>
 postChecks(sha, result, checkNames): Promise<void>
@@ -78,7 +78,7 @@ postChecks(sha, result, checkNames): Promise<void>
 2. **The full-run lock**, `/run/lock/worklane-full-run.lock`, taken **shared**. Test runs never wait on each other. Agents' and other full runs take it exclusive, so a test run waits for one in progress and then proceeds; it never fails for the wait. The wait is recorded (`lock_wait_ms`). A missing lock file fails the run: it is never run unlocked.
 3. **The run.** The workspace, the change's files, the caches, the shared directories and the database (only if a tier needs it) are set up first. Then the setup steps run, then the tiers. A failed setup step fails every tier. A tier that needs `{changed_files}` fails when the run was given none. No tiers of the kind is never a pass.
 4. **The wipe**, pass, fail or cancel. A wipe that leaves anything is recorded (`testrun.wipe_failed`) and shown in health.
-5. **Events:** `testrun.queued`, `testrun.started`, `testrun.tier` (with the tier's CPU time and peak memory, as the sandbox's unit reports them) and `testrun.finished`. Each tier's full log is in the instance's state (`state/test-runs/<id>/`), never in an event or a check.
+5. **Events:** `testrun.queued`, `testrun.started`, `testrun.tier` (with the tier's CPU time and peak memory, as the sandbox's unit reports them) and `testrun.finished`. Each tier's full log is in the instance's state (`state/test-runs/<id>/`); an event and a check carry only its last lines, redacted.
 
 **Cancel.** Aborting `signal` stops a run that is queued, waiting for the lock or running. It is wiped and recorded as `cancelled`.
 
@@ -86,7 +86,14 @@ postChecks(sha, result, checkNames): Promise<void>
 
 ## Checks
 
-`postChecks(sha, result, checkNames)` posts one completed check run per check name on `sha` through the instance's App. The check's output lists each tier's pass or fail and duration, never a log: a check is readable by everyone who can read the repo.
+`postChecks(sha, result, checkNames)` posts one completed check run per check name on `sha` through the instance's App. The check's output lists each tier's pass or fail and duration, and each tier's last 30 lines of output (stdout and stderr as captured), redacted: a check is readable by everyone who can read the repo, so the full log stays on the instance, linked from the check. A setup failure shows only the end of that step's stderr, never its stdout (db-start prints the database's password there).
+
+**A PR that predates the test-run config.** Tier commands come from tests.yaml `test_run` on the default branch, but they run on the PR's own head. When the head doesn't contain the commit that last changed `test_run` there (src/testrun/predates.ts):
+
+- a tier whose command names a file (`bash .worklane/checks/x.sh`, `node scripts/plan.mjs`) that the default branch had at that commit and the head lacks is not run;
+- a tier that exits 127 with "No such file" for a path its command names, or 2 with its runner's own unknown-option message for an option its command passes, is marked the same way.
+
+Its check is a failure titled "This PR predates the test-run config: update it with main", naming what the head lacks, the config's commit, and the fix: merge main into the branch (for a Dependabot PR, comment `@dependabot rebase`). A failure, not `action_required`: GitHub shows a failure's title in the PR's checks list, `action_required` wants a details page to act on, and the engine's gate reads `action_required` as a hold rather than a fail. A head that already contains the config's commit is never marked: a script it lacks, it removed itself.
 
 Posting needs the App's **Checks: read & write** permission, which only the owner adds. Without it, GitHub answers 403. That is recorded (`testrun.checks_failed`, `no_permission`), and health and the dashboard say so plainly. At start the coordinator also reads the App's permission on its installation (`testrun.checks_permission`), so a read-only App is reported before any post fails.
 

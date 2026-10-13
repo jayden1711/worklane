@@ -20,7 +20,8 @@ import { MACHINE_HELPER } from './machine.js';
 import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, serviceRunning, systemUnitActive, which } from './os/index.js';
+import { lingerEnabled, serviceRunning, systemUnitActive } from './os/index.js';
+import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
@@ -48,9 +49,9 @@ export interface SetupProbe {
 
 export function systemProbe(): SetupProbe {
   return {
-    which,
+    which: (cmd) => findTool(cmd),
     run: (cmd, args, o = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, ...(o.cwd ? { cwd: o.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: withToolPath(), ...(o.cwd ? { cwd: o.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     serviceRunning,
@@ -108,6 +109,12 @@ export interface SetupContext {
   /** Auto-config's open questions and its setup PR, as init recorded them (local mode). */
   openQuestions: number;
   setupPr: string | null;
+  /**
+   * Server mode: add-project's last state and detail per step, as init recorded them (src/init.ts). What the
+   * coordinator's user can't see for itself (the agent user's Claude login, a step left waiting) is read from here.
+   */
+  handoff?: Record<string, string>;
+  handoffDetail?: Record<string, string>;
   machine?: Partial<MachinePaths>;
   /** A server instance's credentials and home; loadInstance when unset. */
   instanceFacts?: () => InstanceFacts | { error: string };
@@ -131,7 +138,7 @@ export type Fix =
   /** The Start button: the coordinator's service. */
   | { kind: 'start' };
 
-export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
+export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
 export interface GroupDef {
   id: GroupId;
@@ -149,13 +156,14 @@ export const GROUPS: readonly GroupDef[] = [
   { id: 'claude', title: 'Claude login', optional: false, modes: MODES, walked: true },
   { id: 'github', title: 'GitHub', optional: false, modes: MODES, walked: true },
   { id: 'repo-config', title: 'Repo config', optional: false, modes: MODES, walked: true },
+  { id: 'coordinator', title: 'Coordinator running', optional: false, modes: ['server'], walked: true },
   { id: 'protection', title: 'Protection', optional: false, modes: MODES, walked: true },
   { id: 'policy', title: 'Instance policy', optional: false, modes: ['server'], walked: false },
   { id: 'discord', title: 'Discord', optional: true, modes: MODES, walked: true },
   { id: 'tailscale', title: 'Tailscale', optional: true, modes: ['server'], walked: true },
   { id: 'updates', title: 'Engine updates', optional: false, modes: ['server'], walked: false },
   { id: 'extras', title: 'Extras', optional: true, modes: MODES, walked: false },
-  { id: 'service', title: 'Start', optional: false, modes: MODES, walked: false },
+  { id: 'service', title: 'Start', optional: false, modes: ['local'], walked: false },
 ];
 
 /** How many installs reach a step (the audit's estimate from where it sits on the path, not usage data). */
@@ -191,6 +199,8 @@ export interface Checking {
 }
 
 const ok = (detail: string): Detected => ({ done: true, detail });
+/** Server mode: a step this user can't check for itself, done as init recorded add-project's step; null when not recorded done. */
+const recorded = (k: Checking, step: string, what: string): Detected | null => (k.c.handoff?.[step] === 'done' ? ok(`${what}: done, as init recorded it (add-project: ${step}); not visible to this user to check again`) : null);
 const no = (detail: string): Detected => ({ done: false, detail });
 const firstLine = (s: string) => s.trim().split('\n')[0] ?? '';
 const isErr = <T extends object>(v: T | { error: string }): v is { error: string } => 'error' in v;
@@ -397,8 +407,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (its paste box)" },
     detect: (k) => {
       const i = k.inst();
-      if (isErr(i)) return no(i.error);
-      if (i.credentials.claude) return existsSync(i.credentials.claude.config_dir) ? ok(`the agents' Claude login is stored (${i.credentials.claude.config_dir})`) : no(`Claude config dir ${i.credentials.claude.config_dir} not found`);
+      if (isErr(i)) return recorded(k, 'claude-token', "the agents' Claude login") ?? no(i.error);
+      if (i.credentials.claude) return existsSync(i.credentials.claude.config_dir) ? ok(`the agents' Claude login is stored (${i.credentials.claude.config_dir})`) : (recorded(k, 'claude-token', "the agents' Claude login") ?? no(`Claude config dir ${i.credentials.claude.config_dir} not found`));
       if (i.credentials.agent_api_key) return ok('the agents bill to an API key (credentials.yaml agent_api_key)');
       return no("credentials.yaml names no Claude login for the agents");
     },
@@ -463,7 +473,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (the App through GitHub's manifest flow)" },
     detect: (k) => {
       const i = k.inst();
-      if (isErr(i)) return no(i.error);
+      if (isErr(i)) return recorded(k, 'app', "the agents' GitHub App") ?? no(i.error);
       const g = i.credentials.github;
       if (g.kind !== 'app') return no(`the instance uses a gh login (${g.path}), not a GitHub App`);
       return existsSync(g.key_path) ? ok(`the App's private key is installed (${g.key_path})`) : no(`the App's private key ${g.key_path} is missing`);
@@ -512,6 +522,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     today: `Review and merge the setup PR init proposed (local), or edit and merge the ${BRAND.cli}/setup branch's PR by hand (server); then \`${BRAND.cli} init\` again.`,
     fix: { kind: 'coming' },
     detect: (k) => {
+      // Server mode: add-project leaves the service waiting until its setup PR merges; that wait is this step's.
+      if (k.c.handoff?.service === 'waiting') return no(`${k.c.handoffDetail?.service || 'waiting for the setup PR to merge'} (add-project: service)`);
       const cfg = k.cfg();
       if (isErr(cfg)) return no(`${cfg.error}${k.c.setupPr ? `; proposed in ${k.c.setupPr}` : ''}`);
       const b = cfg.project.project.default_branch;
@@ -806,24 +818,40 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       return envs.length ? ok(`environments: ${envs.map((e) => e.name).join(', ')}`) : no('no environments in deploy.yaml');
     },
   },
-  // Start
+  // Coordinator running (server): add-project's last steps, the service among them
+  {
+    id: 'coordinator',
+    blocks: true,
+    group: 'coordinator',
+    rows: [20, 26],
+    title: "The instance's coordinator running",
+    modes: ['server'],
+    optional: false,
+    reach: 'all',
+    today: `\`sudo ${BRAND.cli} init --mode server <owner/repo> --instance <name> [--timeout <minutes>]\` hands off to add-project.sh, whose last steps (service, test-user, machine-helper, dashboards) install and start ${BRAND.cli}-<name>.service; --timeout is how long it waits for a GitHub click or the setup PR's merge (default 15).`,
+    fix: { kind: 'start' },
+    detect: (k) => {
+      const unit = instanceUnit(k.c.instance ?? '<name>');
+      const up = k.p.systemUnitActive(unit);
+      if (up) return ok(`${unit} is active`);
+      // Why not, as add-project left it: a step waiting or failed, with its detail.
+      const left = ['service', 'test-user', 'machine-helper', 'dashboards'].find((s) => k.c.handoff?.[s] === 'waiting' || k.c.handoff?.[s] === 'failed');
+      const why = left ? `; add-project ${left} ${k.c.handoff![left]}${k.c.handoffDetail?.[left] ? `: ${k.c.handoffDetail[left]}` : ''}` : '';
+      return no(`${up === null ? 'no systemd here to ask' : `${unit} isn't active`}${why}`);
+    },
+  },
+  // Start (local)
   {
     id: 'service',
     group: 'service',
     rows: [20],
     title: 'The coordinator running',
-    modes: MODES,
+    modes: ['local'],
     optional: false,
     reach: 'all',
-    today: `\`${BRAND.cli} up\` (local); on a server the setup scripts install ${BRAND.cli}-<name>.service and systemd runs it.`,
+    today: `\`${BRAND.cli} up\` installs and starts it as your own service.`,
     fix: { kind: 'start' },
     detect: (k) => {
-      if (k.c.mode === 'server') {
-        const unit = instanceUnit(k.c.instance ?? '<name>');
-        const up = k.p.systemUnitActive(unit);
-        if (up === null) return no('no systemd here to ask');
-        return up ? ok(`${unit} is active`) : no(`${unit} isn't active`);
-      }
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet: the coordinator needs one');
       const label = serviceLabel(cfg);

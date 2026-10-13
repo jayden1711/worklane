@@ -158,3 +158,36 @@ test('push gate allows the owner only in a real merge commit with the exact subj
   assert.notEqual(gateRange(r.dir, base, own).status, 0, 'a plain commit wearing the merge subject gets no allowance');
   assert.notEqual(merged('Merge pull request #12 from secretproject/feat/x by hand').run(own).status, 0, 'only the exact GitHub subject');
 });
+
+/** A GitHub squash merge: author is the owner's display name, committer is GitHub, body carries the branch's sign-offs. */
+function squashed(body: string) {
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  writeFileSync(join(r.dir, 'ok.md'), 'fine\n');
+  r.git('add', 'ok.md');
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Ada Lovelace', GIT_AUTHOR_EMAIL: 'ada@example.com', GIT_COMMITTER_NAME: 'GitHub', GIT_COMMITTER_EMAIL: 'noreply@example.com' };
+  execFileSync('git', ['commit', '-q', '-F', '-'], { cwd: r.dir, input: body, env });
+  return gateRange(r.dir, base, own);
+}
+
+// "secretproject" plays the owner's handle in the sign-offs; the commit's own author name is a different display name.
+const squashBody = (signOff: string) => `Add ok (#12)\n\n* first step\n\n${signOff}\n\n* second step\n\n${signOff}\n`;
+
+test('push gate allows a squash merge whose sign-offs carry the commit\'s own email under the owner\'s handle', { skip }, () => {
+  const p = squashed(squashBody('Signed-off-by: secretproject <ada@example.com>'));
+  assert.equal(p.status, 0, p.stderr);
+});
+
+test('push gate still scans a sign-off with a different email, and only that one', { skip }, () => {
+  const p = squashed('Add ok (#12)\n\n* first step\n\nSigned-off-by: secretproject <ada@example.com>\n\n* second step\n\nSigned-off-by: secretproject <someone@example.com>\n');
+  assert.notEqual(p.status, 0);
+  assert.match(p.stderr, /COMMIT_MSG:9: denied term "secretproject"/);
+  assert.doesNotMatch(p.stderr, /COMMIT_MSG:5:/, 'the own-email sign-off is not a hit');
+});
+
+test('push gate still refuses the owner\'s handle in prose next to an own sign-off', { skip }, () => {
+  const p = squashed('Add ok (#12)\n\nThanks secretproject.\n\nSigned-off-by: secretproject <ada@example.com>\n');
+  assert.notEqual(p.status, 0);
+  assert.match(p.stderr, /COMMIT_MSG:3: denied term "secretproject"/);
+  assert.doesNotMatch(p.stderr, /COMMIT_MSG:5:/);
+});

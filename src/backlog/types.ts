@@ -42,8 +42,11 @@ export interface Backlog {
   checks(sha: string): Promise<CommitCheck[]>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
-  /** Merge a PR with a merge commit (never squash), only if its head is still `sha`. Returns the merge commit. */
-  mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }>;
+  /**
+   * Merge a PR with a merge commit (never squash), only if its head is still `sha` (GitHub's `sha`, like `gh pr merge
+   * --match-head-commit`). `title` and `body` are the merge commit's subject and message. Returns the merge commit.
+   */
+  mergePr(n: number, sha: string, title: string, body?: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }>;
   /** Ask these people to review a PR (GitHub notifies them). */
   requestReview(n: number, logins: string[]): Promise<void>;
   /**
@@ -51,6 +54,13 @@ export interface Backlog {
    * read Actions logs; `not_found`: there is no such log (not an Actions job, or expired).
    */
   jobLog(id: number): Promise<{ ok: true; text: string } | { ok: false; why: 'forbidden' | 'not_found' }>;
+  /**
+   * Re-run, on the same commit, the failed jobs of the Actions workflow runs these check runs' jobs belong to: each
+   * workflow run once (POST /actions/runs/{run}/rerun-failed-jobs). Per check run: re-run, or `forbidden` (the
+   * credential can't, no Actions: write, or GitHub refuses it now: the run is still going) or `not_found` (not an
+   * Actions job). Absent: this tracker can't re-run checks.
+   */
+  rerunFailedJobs?(checkRunIds: number[]): Promise<Map<number, RerunJobs>>;
   ensureLabels(labels: { name: string; color: string; description: string }[]): Promise<string[]>;
   /** A pull request's submitted reviews, oldest first. */
   reviews(n: number): Promise<PrReview[]>;
@@ -85,6 +95,9 @@ export interface PrReview {
   body: string;
   at: string;
 }
+
+/** What a re-run request got: the workflow run re-run, or why not. */
+export type RerunJobs = { ok: true; run: number } | { ok: false; why: 'forbidden' | 'not_found'; detail: string };
 
 /** One check on a commit, as GitHub reports it: a check run, or a commit status (completed with its state). */
 export interface CommitCheck {

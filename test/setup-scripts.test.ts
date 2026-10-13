@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { repoRoot } from './helpers.js';
@@ -80,12 +80,13 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.match(r.stdout, /^git config core.sharedRepository group$/m);
     assert.match(r.stdout, /^git -c core.hooksPath=\/dev\/null pull -q --ff-only$/m);
     assert.match(r.stdout, /^worklane install --root \. --git-hooks-only$/m);
-    r = runAs(checkout[1]!, ['site', dest, repo]);
+    // No config yet: auto-config, as the coordinator, with the API it is given; nothing branched or pushed here.
+    const proposed = `worklane() { echo "args: $* api=\${WORKLANE_GITHUB_API:-}" >&2; echo '{"kind":"proposed","detail":"x","pr":"https://github.com/example-org/example shop/pull/1","questions":[]}'; }\n`;
+    r = runAs(proposed + checkout[1]!, ['site', dest, 'http://127.0.0.1:8999']);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^worklane install --root \. --instance site --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m);
-    assert.match(r.stdout, /^git add \.worklane$/m, 'the config only: no .claude/settings.json is committed');
-    assert.match(r.stdout, /^git push -q origin HEAD:refs\/heads\/worklane\/setup$/m);
-    assert.match(r.stdout, /compare\/worklane\/setup/);
+    assert.match(r.stderr, /^args: instance auto-config site api=http:\/\/127\.0\.0\.1:8999$/m);
+    assert.match(r.stdout, /^auto-config: \{"kind":"proposed"/m);
+    assert.doesNotMatch(r.stdout, /git (switch|add|commit|push)/);
     r = runAs(service[0]!, ['site']);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout, 'worklane instance show site\n');
@@ -94,10 +95,11 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
   }
 });
 
-test("checkout.sh installs the agent runs' guardrail hooks whether or not the repo has its config, and never commits .claude/settings.json", { skip: process.platform === 'win32' && 'bash scripts' }, () => {
+test("checkout.sh: with the config, the agent runs' guardrail hooks; without it, auto-config's setup PR (audit B4), and never a branch in the checkout, so a rerun can't trip on one (audit B5)", { skip: process.platform === 'win32' && 'bash scripts' }, () => {
   const config = sections('checkout.sh')[1]!;
-  const stubs = 'worklane() { echo "worklane $*"; }\ngit() { echo "git $*"; case "$1" in rev-parse) echo main;; esac; }\n';
-  const run = (dest: string) => spawnSync('bash', ['-euo', 'pipefail', '-c', stubs + config, '_', 'site', dest, 'example-org/shop'], { encoding: 'utf8' });
+  const stubs = (answer: string) => `worklane() { case "$1 $2" in "instance auto-config") echo "worklane $*" >&2; echo '${answer}';; *) echo "worklane $*";; esac; }\ngit() { echo "git $*"; case "$1" in rev-parse) echo main;; esac; }\n`;
+  const run = (dest: string, answer = '{"kind":"proposed","detail":"proposed in PR #1","pr":"https://github.com/example-org/shop/pull/1","questions":[]}') =>
+    spawnSync('bash', ['-euo', 'pipefail', '-c', stubs(answer) + config, '_', 'site', dest, ''], { encoding: 'utf8' });
   const install = /^worklane install --root \. --instance site --engine \/opt\/worklane\/current\/dist\/src\/cli.js$/m;
   const withConfig = mkdtempSync(join(tmpdir(), 'wl-checkout-'));
   const without = mkdtempSync(join(tmpdir(), 'wl-checkout-'));
@@ -105,12 +107,23 @@ test("checkout.sh installs the agent runs' guardrail hooks whether or not the re
     mkdirSync(join(withConfig, '.worklane'));
     let r = run(withConfig);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, install, 'a repo that already has .worklane/ still gets the hooks');
+    assert.match(r.stdout, install, 'a repo that already has .worklane/ gets the hooks');
     assert.doesNotMatch(r.stdout, /git (switch|add|commit|push)/, 'and nothing is committed or pushed');
-    r = run(without);
+    // Without: auto-config drafts and proposes the config; the checkout gets no branch, commit or scaffold.
+    for (let i = 0; i < 2; i++) {
+      r = run(without);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /^worklane instance auto-config site$/m);
+      assert.match(r.stdout, /the config is proposed in its setup PR: review and merge it/);
+      assert.doesNotMatch(r.stdout, /git (switch|checkout|branch|add|commit|push)|worklane install/, 'a rerun finds the PR, never a branch here');
+    }
+    assert.ok(!existsSync(join(without, '.worklane')));
+    r = run(without, '{"kind":"questions","detail":"1 question to answer","pr":null,"questions":["one-test-file"]}');
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, install);
-    assert.doesNotMatch(r.stdout, /settings\.json/);
+    assert.match(r.stdout, /auto-config has questions to answer/);
+    r = run(without, '{"kind":"failed","detail":"pushing worklane/setup failed: denied","pr":null,"questions":[]}');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /auto-config failed/);
   } finally {
     rmSync(withConfig, { recursive: true, force: true });
     rmSync(without, { recursive: true, force: true });
@@ -128,6 +141,26 @@ test('the coordinator service unit runs as the coordinator user, can still sudo 
   assert.doesNotMatch(unit, /NoNewPrivileges=(yes|true)/, 'agents are started through sudo');
   const install = readFileSync(join(dir, 'service.sh'), 'utf8');
   assert.ok(install.indexOf('systemd-analyze verify') < install.indexOf('mv -f'), 'validated before it is moved into place');
+});
+
+test('regression (audit B3): credentials.sh github-app writes credentials.yaml itself, through the engine, after its check; never "set it by hand"', () => {
+  const text = readFileSync(join(dir, 'credentials.sh'), 'utf8');
+  const app = text.slice(text.indexOf('  github-app)'), text.indexOf('  verify-app)'));
+  assert.doesNotMatch(app, /then set in credentials\.yaml/, 'no hand edit');
+  assert.doesNotMatch(app, /printf "%s\\n" "version: 1" "github:/, 'no hand-rolled file that drops its other settings');
+  const verify = app.indexOf('verify_app "$key"');
+  const home = app.indexOf('ensure_instance_home "$name" "$repo"');
+  const write = app.indexOf(`run_as "$coord" 'worklane instance set-github-app "$1" --app-id "$2" --installation-id "$3" --key "$4"' "$name" "$app_id" "$inst_id" "$key"`);
+  assert.ok(verify > 0 && home > verify && write > home, 'checked first; the instance home made when missing; then written as the coordinator, by the engine');
+});
+
+test('a repo whose setup PR has not merged: service.sh starts nothing and exits 3 ("waiting", naming the PR); bootstrap passes that on as waiting, never success', () => {
+  const service = readFileSync(join(dir, 'service.sh'), 'utf8');
+  const waiting = service.indexOf(`run_as "$coord" 'worklane instance setup-status "$1"' "$name"`);
+  assert.ok(waiting > 0 && waiting < service.indexOf('worklane instance show'), 'checked before anything is installed');
+  assert.match(service, /echo "waiting for the setup PR \$pr: the coordinator starts once it has merged[^"]*"\n[\s\S]*?exit 3/);
+  const boot = readFileSync(join(repoRoot, 'scripts', 'bootstrap.sh'), 'utf8');
+  assert.match(boot, /if \[ "\$rc" = 3 \]; then[\s\S]*?exit 3\n {4}fi\n {4}\[ "\$rc" = 0 \] \|\| exit "\$rc"/);
 });
 
 test('the service yields to other work: a low-weight top-level slice, a hard memory cap without swap, per-instance limits', { skip: process.platform === 'win32' && 'bash scripts' }, () => {

@@ -15,6 +15,7 @@ import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
 import { writeOwnerOnly } from './os/index.js';
+import { toolBin } from './tool-path.js';
 import { installPrePushHook } from './push-guard.js';
 
 export { HOOK_MARKER };
@@ -241,6 +242,8 @@ export function installGitHook(root: string): string {
     hook,
     `#!/bin/sh
 ${GIT_HOOK_MARKER}: secret scan on every commit. Missing gitleaks fails the commit.
+# Where ${BRAND.cli} init installs tools, for a commit made without it on PATH.
+PATH="$PATH":'${toolBin().replaceAll("'", "'\\''")}'
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "${BRAND.cli}: gitleaks not found; install it to commit (secret scanning is required)" >&2
   exit 1

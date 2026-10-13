@@ -33,7 +33,7 @@ test('the registry covers every row of the first-run audit (1-33), each step onc
     if (s.fix.kind === 'outside') assert.ok(s.fix.url === null || /^https:\/\//.test(s.fix.url), `${s.id}: a direct https link`);
   }
   assert.deepEqual(STEPS.map((s) => s.id), GROUPS.filter((g) => g.walked).map((g) => g.id));
-  assert.deepEqual(STEPS.map((s) => s.title), ['Tools present', 'Claude login', 'GitHub', 'Repo config', 'Protection', 'Discord', 'Tailscale']);
+  assert.deepEqual(STEPS.map((s) => s.title), ['Tools present', 'Claude login', 'GitHub', 'Repo config', 'Coordinator running', 'Protection', 'Discord', 'Tailscale']);
 });
 
 /** A machine of stand-ins: which tools are on PATH, what commands answer, the service manager; git runs for real. */
@@ -144,6 +144,13 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
   backup: { mode: 'server', on: (f) => writeFileSync(join(f.home, 'offsite-backup.yaml'), 'x'), off: () => {} },
   'more-owners': { mode: 'server', on: (f) => writeFileSync(f.machine.machineOwners, '{"owners":["ada","bo"]}', { mode: 0o644 }), off: (f) => writeFileSync(f.machine.machineOwners, '{"owners":["ada"]}', { mode: 0o644 }) },
   'deploy-gate': { mode: 'local', on: (f) => writeFileSync(join(f.dir, BRAND.configDir, 'deploy.yaml'), 'version: 1\nenvironments:\n  - name: staging\n    verify: "true"\n'), off: () => {}, done: /staging/ },
+  coordinator: {
+    mode: 'server',
+    on: (_f, w) => void w.units.add(`${BRAND.cli}-shop.service`),
+    off: (f) => f.ctx('server', { handoff: { service: 'failed' }, handoffDetail: { service: '.worklane: missing' } }),
+    done: /-shop\.service is active/,
+    not: /isn't active; add-project service failed: \.worklane: missing/,
+  },
   service: { mode: 'local', on: (_f, w) => void (w.service = true), off: () => {}, done: /dev\.\S+ is running/, not: /isn't running/ },
   linger: { mode: 'local', on: (_f, w) => void (w.linger = true), off: (_f, w) => void (w.linger = false) },
 };
@@ -171,6 +178,19 @@ for (const [id, c] of Object.entries(CASES)) {
     }
   });
 }
+
+test("server: what the coordinator's user can't see is read from init's record; the setup PR's wait is the config step's", () => {
+  const f = fixture();
+  const ctx = f.ctx('server', { instanceFacts: () => ({ error: "instance shop can't be read here" }), handoff: { 'claude-token': 'done', app: 'done', service: 'waiting' }, handoffDetail: { service: 'waiting for the setup PR https://github.com/example-org/example-shop/pull/4 to merge' } });
+  const v = checkSetup(ctx, probeFor(world()));
+  assert.equal(stepIn(v, 'claude-token')!.done, true);
+  assert.match(stepIn(v, 'claude-token')!.detail, /as init recorded it/);
+  assert.equal(stepIn(v, 'agent-app')!.done, true);
+  assert.equal(stepIn(v, 'config-on-main')!.done, false);
+  assert.match(stepIn(v, 'config-on-main')!.detail, /pull\/4 to merge \(add-project: service\)/);
+  const none = checkSetup(f.ctx('server', { instanceFacts: () => ({ error: 'unreadable' }), handoff: { 'claude-token': 'failed' } }), probeFor(world()));
+  assert.equal(stepIn(none, 'claude-token')!.done, false, 'only a recorded done counts');
+});
 
 test('a step for the other mode is not shown; linger only where loginctl answers', () => {
   const f = fixture();

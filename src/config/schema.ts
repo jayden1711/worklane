@@ -6,6 +6,7 @@ import { providerOf, providerRefusal } from '../providers.js';
 import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
+import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -78,6 +79,26 @@ export const ProjectConfig = z.strictObject({
    * post-merge CI and the main watch catch what strict would have, without PRs queueing to merge main in and rerun CI.
    */
   protection: z.strictObject({ strict: z.boolean().default(false) }).prefault({}),
+  /**
+   * Flaky tests (src/flaky.ts): when the default branch's required checks fail after a merge, the failing ones are
+   * re-run on the same commit first (`rerun`). Passing then: flaky, quarantined (they still run and report, but no
+   * longer turn the branch red for the harness's own stop, revert and fix decisions), one issue each. A quarantined
+   * test blocks again after `release_after_passes` passes in a row, or when an owner clears it. A re-run not done in
+   * `rerun_timeout_min` counts as a real failure. Never changes what the updater requires: every check green.
+   */
+  flaky: z
+    .strictObject({
+      rerun: z.boolean().default(true),
+      release_after_passes: z.number().int().min(1).max(1000).default(10),
+      rerun_timeout_min: z.number().int().min(5).max(720).default(90),
+    })
+    .prefault({}),
+  /**
+   * The main watch (src/main-watch.ts), where GitHub doesn't protect the default branch. `direct_push_alert`: a
+   * commit that lands there without a PR (a direct push, a force-push) is posted to the Discord ops channel at once,
+   * mentioning the Discord owners. On by default; read as committed just before the push, so a push can't turn it off.
+   */
+  main_watch: z.strictObject({ direct_push_alert: z.boolean().default(true) }).prefault({}),
   /**
    * Files two tasks running at once would both change and then conflict on (globs). Two tasks that would
    * touch the same one never run together; the second waits while other ready work takes the slot.
@@ -412,6 +433,12 @@ export const TestsConfig = z.strictObject({
        */
       defer_timeout_minutes: z.number().int().min(1).max(7 * 24 * 60).default(180),
       /**
+       * PR mode: the most of the harness's own ready PRs the merge train merges in one pass of the PR watch
+       * (src/merge-policy-train.ts). Each needs every required check green on its exact head and GitHub reporting it
+       * mergeable; none is made to merge the default branch in first. Over the cap, a PR merges on the next pass.
+       */
+      parallel_merges: z.number().int().min(1).max(16).default(4),
+      /**
        * PR mode only (coordinator/pr-batch.ts): approved PRs wait in a queue and are tested together, one full run
        * per batch, before any of them merges. Off by default. When on, a PR merges only with every `fast_checks`
        * check passing on its head and a passing full run from a batch that held exactly that head.
@@ -493,6 +520,10 @@ export const TestsConfig = z.strictObject({
     .default([]),
   /** The coordinator's own test runs of PRs (src/testrun/, docs/test-runs.md); absent: none. */
   test_run: TestRunConfig.optional(),
+  /** The pre-deploy gate (src/deploy-gate/, docs/deploy-gate.md); absent: off. */
+  deploy_gate: DeployGateConfig.optional(),
+}).superRefine((t, ctx) => {
+  for (const p of deployGateProblems(t.deploy_gate, t.test_run ? t.test_run.tiers.map((x) => x.name) : null)) ctx.addIssue({ code: 'custom', path: p.path, message: p.message });
 });
 
 // ---------- review.yaml ----------

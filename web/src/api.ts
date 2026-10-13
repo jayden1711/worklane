@@ -248,6 +248,16 @@ export interface State {
   reports: { day: string; slot: string; issue: number | null; at: string }[];
   /** How the default branch is guarded; a viewer gets `mode` only. Absent from an older server. */
   protection?: Protection;
+  /** The pre-deploy gate, when tests.yaml has one (owners and writers only). */
+  deployGate?: DeployGate;
+}
+
+/** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
+export interface DeployGate {
+  branch: string;
+  deployed: { sha: string; url: string; at: string | null; by: string | null; override: boolean } | null;
+  held: { sha: string; url: string; at: string; reason: string } | null;
+  refused: { at: string; reason: string } | null;
 }
 
 /** The default branch's protection: GitHub's, the main watch's (with the last commit it checked and an alert), or off. */
@@ -262,6 +272,20 @@ export interface Protection {
   accepted?: AcceptedMerge[];
   /** Whether this person may accept one (an admin, while the main watch guards the branch). */
   canAccept?: boolean;
+  /** The last commit that landed without a PR, and its ops-channel alert (owners and writers). */
+  directPush?: DirectPush | null;
+}
+
+export interface DirectPush {
+  at: string;
+  sha: string;
+  url: string;
+  kind: 'direct' | 'rewrite';
+  pusher: string | null;
+  /** posted; pending (the ops posts' limit); not_posted (with `note` saying why); off (turned off). */
+  status: 'posted' | 'pending' | 'not_posted' | 'off';
+  mentioned: number;
+  note: string | null;
 }
 
 export interface AcceptedMerge {
@@ -644,7 +668,7 @@ export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}
 /** The setup console's Add project (src/console/add-project.ts), as GET /api/add-project serves it. */
 export interface AddProjectStep {
   step: string;
-  state: 'pending' | 'started' | 'done' | 'failed' | 'ask';
+  state: 'pending' | 'started' | 'done' | 'failed' | 'ask' | 'waiting';
   detail: string;
   /** A failed step: how to try again (absent from older servers). */
   retry?: string | null;
@@ -955,6 +979,30 @@ export interface Trust {
   note: string;
   hidden: string[];
 }
+
+/**
+ * Flaky tests (GET /api/flaky, src/flaky.ts; owners and writers): the quarantined checks, those released lately, and
+ * the flake rate (flaky re-runs over red runs on the default branch) over 7 and 30 days.
+ */
+export interface FlakyTest {
+  test: string;
+  state: 'quarantined' | 'released';
+  firstSeen: string;
+  lastSeen: string;
+  sightings: number;
+  issue: number | null;
+  url: string | null;
+  passes: number;
+  released: { at: string; how: 'passes' | 'owner'; by: string } | null;
+}
+export interface Flaky {
+  releaseAfter: number;
+  quarantined: FlakyTest[];
+  released: FlakyTest[];
+  rates: { days: number; redRuns: number; flakyReruns: number; rate: number | null }[];
+  canClear: boolean;
+}
+export const clearFlaky = (test: string) => api<{ ok: boolean }>('/api/flaky/clear', { method: 'POST', body: JSON.stringify({ test }) });
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';

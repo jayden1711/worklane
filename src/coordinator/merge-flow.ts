@@ -17,12 +17,17 @@ import { abortMerge, mergeBaseInto } from '../merge-base.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
+import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { MainWatch, repoGit } from '../main-watch.js';
+import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
+import { redactString } from '../events/redact.js';
+import { takeOpsPost } from '../watchdog/post.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
 import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
+import { FlakyGate } from './flaky.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
@@ -32,6 +37,29 @@ export abstract class MergeFlow extends FixRuns {
   /** Polls of the merge flow's capped waits (wait-caps.ts). */
   protected readonly waitPolls = new PollCounter();
   private batcher: PrBatcher | null = null;
+  private flakyGateInst: FlakyGate | null = null;
+
+  /** The flaky-test gate in front of a red default branch (coordinator/flaky.ts): re-run first, quarantine what passes. */
+  protected get flakyGate(): FlakyGate {
+    this.flakyGateInst ??= new FlakyGate({
+      log: this.d.log,
+      actor: this.d.instance,
+      backlog: this.d.backlog,
+      config: () => this.d.cfg.project.flaky,
+      repo: this.d.cfg.project.project.repo,
+      branch: this.branch,
+      clone: this.d.repo,
+      testRuns: this.d.testRuns ?? null,
+      tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
+      fetch: () => void this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch),
+    });
+    return this.flakyGateInst;
+  }
+
+  /** The merge train: this pass's merges, up to tests.yaml land.parallel_merges. */
+  protected readonly mergePass = new MergePass(() => this.d.cfg.tests.land.parallel_merges);
+  /** The merge train's clock for deferrals (tests move it). */
+  protected trainNow: () => number = () => Date.now();
 
   // ---------------------------------------------------------------- PR batches
 
@@ -152,6 +180,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   protected async watchPrs() {
     const now = Date.now();
+    this.mergePass.start();
     const interval = this.d.prPollMs ?? 60_000;
     // A merge into the default branch (by anyone) is when PRs start conflicting: look at all of them now.
     if (this.watchedPrs().length && now - this.tipCheckedAt >= TIP_CHECK_MS) {
@@ -168,7 +197,7 @@ export abstract class MergeFlow extends FixRuns {
     const due = this.watchedPrs()
       .filter((p) => now - (this.prPolled.get(p.number) ?? 0) >= interval)
       .sort((a, b) => (this.prPolled.get(a.number) ?? 0) - (this.prPolled.get(b.number) ?? 0))
-      .slice(0, 10);
+      .slice(0, Math.max(10, this.d.cfg.tests.land.parallel_merges));
     for (const watched of due) {
       this.prPolled.set(watched.number, now);
       await this.watchPr(watched);
@@ -261,7 +290,70 @@ export abstract class MergeFlow extends FixRuns {
   private async mergeOurs(pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
     const never = neverAutoMerge({ branch: pr.head, openedByHarness: this.openedByUs(pr.number) });
     if (never.length) return { ok: false, why: never.join('; ') };
-    return this.d.backlog.mergePr(pr.number, pr.headSha, `${pr.title} (#${pr.number})`);
+    const msg = mergeMessage({ title: pr.title, number: pr.number, head: pr.headSha, product: BRAND.name });
+    return this.d.backlog.mergePr(pr.number, pr.headSha, msg.subject, msg.body);
+  }
+
+  // ---------------------------------------------------------------- merge train
+
+  /**
+   * The merge train's one door to mergeOurs (src/merge-policy-train.ts): within this pass's cap (a PR over it merges
+   * on the next pass); at the head GitHub reports right now, since an earlier merge of the pass or a push may have
+   * moved it (a moved head is never merged: it is decided afresh); and a branch GitHub calls behind its base (strict
+   * protection) or a base that moved mid-merge is put off with a backoff, never retried in a loop and never made to
+   * merge the default branch in. null: not merged this pass, nothing to record; a failure is the caller's to record.
+   */
+  private async trainMerge(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string } | null> {
+    const { number } = w;
+    if (this.mergeDeferred(number, pr.headSha)) return null;
+    if (!this.mergePass.room()) {
+      this.prPolled.delete(number); // first in line on the next pass
+      return null;
+    }
+    const now = await this.d.backlog.pullRequest(number);
+    if (now.state !== 'open' || now.headSha !== pr.headSha) {
+      this.prPolled.delete(number);
+      return null;
+    }
+    if (isBehind(now)) {
+      await this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
+      return null;
+    }
+    const m = await this.mergeOurs(pr);
+    if (m.ok) {
+      this.mergePass.took();
+      return m;
+    }
+    const refusal = mergeRefusal(m.why);
+    if (deferrable(refusal)) {
+      await this.deferMerge(w, pr, refusal as 'behind' | 'base_moved', `GitHub refused the merge: ${m.why}`);
+      return null;
+    }
+    if (refusal === 'head_moved') this.prPolled.delete(number);
+    return m;
+  }
+
+  private deferrals(): Deferral[] {
+    return this.d.log.read(0, ['merge.deferred']).map((e) => e.payload as EventPayload<'merge.deferred'>);
+  }
+
+  /** PR `number` at `head` was put off and its retry time hasn't come. */
+  protected mergeDeferred(number: number, head: string): boolean {
+    return mergeDeferral(this.deferrals(), number, head, this.trainNow()).waiting;
+  }
+
+  /**
+   * Put off merging PR `number` at this head, for longer each time (deferDelay). The first time a head is put off as
+   * behind, one comment says why and what lets it through; the owner isn't asked: it isn't theirs to decide.
+   */
+  private async deferMerge(w: EventPayload<'pr.opened'>, pr: PullRequest, kind: 'behind' | 'base_moved', why: string) {
+    const now = this.trainNow();
+    const { times } = mergeDeferral(this.deferrals(), w.number, pr.headSha, now);
+    const retryAt = now + deferDelay(times);
+    this.emit('merge.deferred', { issue: w.issue, number: w.number, head: pr.headSha, why: why.slice(0, 500), retry_at: new Date(retryAt).toISOString() });
+    if (kind === 'behind' && times === 0) {
+      await this.d.backlog.comment(w.number, `[${BRAND.cli}] Ready to merge, but this repo requires branches to be up to date with ${this.branch} (strict branch protection), and ${BRAND.name} doesn't merge ${this.branch} into a PR to get there. It tries again later, waiting longer each time (up to ${deferDelay(99) / 60_000} min). Updating the branch, or turning off "require branches to be up to date", lets it merge.`);
+    }
   }
 
   /** The policy's call on a ready PR at its current head. */
@@ -334,6 +426,10 @@ export abstract class MergeFlow extends FixRuns {
     }
     const d = this.mergeDecisionFor(n, number, pr);
     if (d.auto) {
+      // The merge train put it off (behind its base under strict protection, or its base moved mid-merge): not before
+      // its retry time. Behind is never a human's call, and never merged by merging the default branch in.
+      if (this.mergeDeferred(number, pr.headSha)) return;
+      if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
       if (pr.mergeableState === 'draft') return;
       if (pr.mergeable === null || pr.mergeableState === 'unknown') {
@@ -371,7 +467,8 @@ export abstract class MergeFlow extends FixRuns {
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
     if (this.prBatching()) return this.mergeTested(w, pr, 'auto');
-    const m = await this.mergeOurs(pr);
+    const m = await this.trainMerge(w, pr);
+    if (!m) return;
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -403,7 +500,8 @@ export abstract class MergeFlow extends FixRuns {
       if (how === 'approved') await this.d.backlog.comment(number, `[${BRAND.cli}] Approved, but not merged yet: ${turn.why}. It is tested again on the current ${this.branch} first, and merges once that passes.`);
       return;
     }
-    const m = await this.mergeOurs(pr);
+    const m = await this.trainMerge(w, pr);
+    if (!m) return;
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -458,13 +556,16 @@ export abstract class MergeFlow extends FixRuns {
     const stopped = this.autoMergeStopped();
     if (stopped) return hold(`approved by @${by}, but auto-merge is stopped: ${stopped}`.slice(0, 500));
     if (pr.mergeableState === 'draft' || pr.mergeable === null || pr.mergeableState === 'unknown') return; // GitHub still computing: next poll
+    if (this.mergeDeferred(number, pr.headSha)) return;
+    if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `approved by @${by}, but GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
     if (!pr.mergeable || !['clean', 'unstable', 'has_hooks'].includes(pr.mergeableState)) return hold(`approved by @${by}, but GitHub can't merge it cleanly (${pr.mergeableState})`);
     if (this.prBatching()) return this.mergeTested(w, pr, 'approved');
     const gate = await this.combinedGate(w, pr);
     if (gate === 'pending') return;
     if (gate !== 'merge') return hold(`approved by @${by}, but ${gate === 'conflict' ? 'merging the default branch into it conflicts' : gate.hold}`.slice(0, 500));
     if (this.emergencyInForce() || this.autoMergeStopped()) return;
-    const m = await this.mergeOurs(pr);
+    const m = await this.trainMerge(w, pr);
+    if (!m) return;
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -517,7 +618,12 @@ export abstract class MergeFlow extends FixRuns {
       if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
       this.mainPolled.set(m.sha, now);
       const required = this.d.cfg.project.required_checks;
-      const outcomes = requiredOutcomes(required, await this.d.backlog.checks(m.sha));
+      // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
+      // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
+      // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
+      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.d.backlog.checks(m.sha)) });
+      if (gate.wait) continue;
+      const outcomes = gate.outcomes;
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
       if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) {
         // Still running, up to a timeout (in polls, so it holds whatever the poll interval).
@@ -529,7 +635,7 @@ export abstract class MergeFlow extends FixRuns {
         await this.d.backlog.comment(m.number, `[${BRAND.cli}] @${this.ownerOf(m.issue)} the required check(s) ${missing.join(', ')} never reported on the merge commit \`${m.sha.slice(0, 8)}\` (${polls} polls), so whether ${this.branch} is green after this merge is unknown. Auto-merge goes on; check them yourself.`);
         continue;
       }
-      this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed });
+      this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
       if (failed.length) await this.mainWentRed(m, failed);
     }
   }
@@ -634,6 +740,8 @@ export abstract class MergeFlow extends FixRuns {
       accepted: (sha, number, a) => this.emit('main_watch.accepted', { sha, how: 'accepted', number, id: a.id, by: a.by, reason: a.reason.slice(0, 500) }),
       unaccounted: (o) => this.mainUnaccounted(o),
     });
+    // A direct push's alert that couldn't go yet (the ops posts' limit was reached): try again.
+    await this.directPushOutbound();
     if (this.d.cfg.project.land_mode !== 'pr') return this.mainWatcher.off(`land_mode direct: the harness lands by pushing ${this.branch} itself`);
     if ((w.setting?.() ?? 'auto') === 'off') return this.mainWatcher.off('turned off in the instance policy (main_watch: off)');
     await this.mainWatcher.step();
@@ -644,12 +752,14 @@ export abstract class MergeFlow extends FixRuns {
    * it on the dashboard), then alert (main_watch.unaccounted: the dashboard; the asks channel posts it) and open a revert
    * PR for a human. Once per commit, even across a restart.
    */
-  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean }) {
+  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null }) {
     if (this.d.log.read(0, ['main_watch.unaccounted']).some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
     const reason = `main watch: ${o.reason}`;
     if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
     this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null });
+    // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
+    if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;
     if (o.revert) {
       const body = `Reverts \`${o.sha.slice(0, 8)}\` on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
@@ -664,6 +774,53 @@ export abstract class MergeFlow extends FixRuns {
       }
     }
     this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null });
+  }
+
+  /**
+   * A commit that landed without a PR (src/direct-push-alert.ts): who pushed it (one API call: a GitHub login, never
+   * an email) and its subject (git), recorded once (main_watch.direct_push); then its ops post, unless turned off.
+   */
+  private async directPushNoted(sha: string, url: string, push: { kind: 'direct' | 'rewrite'; alert: boolean }) {
+    if (this.d.log.read(0, ['main_watch.direct_push']).some((e) => (e.payload as EventPayload<'main_watch.direct_push'>).sha === sha)) return;
+    let who: { login: string; from: 'activity' | 'commit' } | null = null;
+    try {
+      who = (await this.d.mainWatch?.api.pusher?.(this.branch, sha)) ?? null;
+    } catch {
+      who = null;
+    }
+    const s = spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: this.d.repo, encoding: 'utf8' });
+    const subject = redactString(s.status === 0 ? s.stdout.trim() : '').slice(0, 300);
+    this.emit('main_watch.direct_push', { sha, url, kind: push.kind, pusher: who?.login ?? null, pusher_from: who?.from ?? null, subject, alert: push.alert });
+    await this.directPushOutbound();
+  }
+
+  /**
+   * Post each direct push's alert not posted yet to the ops channel, once per commit, mentioning the Discord owners,
+   * within the machine-wide limit of ops posts (what is over it waits for a later pass). Turned off (`alert` false):
+   * never posted. No ops channel: not posted, and the dashboard says why (recorded once).
+   */
+  protected async directPushOutbound() {
+    const pushes = this.d.log.read(0, ['main_watch.direct_push']).map((e) => e.payload as EventPayload<'main_watch.direct_push'>).filter((p) => p.alert);
+    if (!pushes.length) return;
+    const posted = this.postedKeys();
+    const noted = new Set(this.d.log.read(0, ['main_watch.direct_push_alert']).map((e) => (e.payload as EventPayload<'main_watch.direct_push_alert'>).sha));
+    const cfg = this.d.intake?.config() ?? null;
+    const target = alertTarget(cfg);
+    const src = this.chatSource();
+    for (const p of pushes) {
+      if (posted.has(directPushKey(p.sha))) continue;
+      if ('why' in target || !src || !cfg) {
+        const why = 'why' in target ? target.why : 'the Discord bot is not connected';
+        if (!noted.has(p.sha)) this.emit('main_watch.direct_push_alert', { sha: p.sha, ok: false, mentioned: 0, note: `not posted: ${why}` });
+        noted.add(p.sha);
+        continue;
+      }
+      if (!takeOpsPost({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}) })) return;
+      const { mentions, note } = ownerMentions(cfg);
+      await this.channelSend(src, directPushKey(p.sha), { channel: target.channel }, { kind: 'notice', text: directPushText(p, { branch: this.branch, dashboardUrl: target.dashboardUrl }), ...(mentions.length ? { mentions } : {}) });
+      const ok = this.d.log.read(0, ['discord.posted']).some((e) => (e.payload as EventPayload<'discord.posted'>).key === directPushKey(p.sha) && (e.payload as EventPayload<'discord.posted'>).ok);
+      this.emit('main_watch.direct_push_alert', { sha: p.sha, ok, mentioned: ok ? mentions.length : 0, note: ok ? note : 'not posted: Discord refused the post (it is not sent again)' });
+    }
   }
 
   /** Merge the default branch into the PR head in a scratch worktree and run the fast tier there. Nothing is pushed. */

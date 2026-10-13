@@ -12,6 +12,8 @@
 // each pushed tip, and runs gitleaks over the commits. One allowance: in the
 // subject of a GitHub merge commit ("Merge pull request #<n> from <owner>/<branch>")
 // the repo's own owner (from GITHUB_REPOSITORY or the origin URL) is not a leak.
+// And a Signed-off-by line whose email is the commit's own author or committer
+// email (a squash merge's DCO trailers) is dropped whole, name included.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { loadRules, scanText, SKIP } from './lib/denylist.mjs';
@@ -87,6 +89,23 @@ function withoutOwnMergeSubject(msg, owner, isMerge) {
   return `${m[1]}${m[3]}${nl === -1 ? '' : msg.slice(nl)}`;
 }
 
+/**
+ * Blank every `Signed-off-by: <name> <email>` line whose email is the commit's own author or committer email.
+ * A DCO sign-off by the commit's own identity is inherent to it, name included: a squash merge's author is the
+ * owner's display name while the squashed commits' sign-offs carry their handle. A sign-off with any other email,
+ * and the name anywhere else, are still scanned. Lines are blanked, not removed, so hit line numbers stay true.
+ */
+function withoutOwnSignOffs(msg, emails) {
+  const own = new Set(emails.filter(Boolean).map((e) => e.toLowerCase()));
+  return msg
+    .split('\n')
+    .map((line) => {
+      const m = /^\s*Signed-off-by:[^<>\n]*<([^<>\s]+)>\s*$/i.exec(line);
+      return m && own.has(m[1].toLowerCase()) ? '' : line;
+    })
+    .join('\n');
+}
+
 function scanCommit(rules, sha, owner) {
   const short = sha.slice(0, 8);
   const hits = [];
@@ -94,7 +113,7 @@ function scanCommit(rules, sha, owner) {
   // A commit's own author and committer identity (and its sign-off) are inherent to it; anything else in the message is scanned.
   const [an, ae, cn, ce] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce', sha).trim().split('\0');
   const isMerge = git('log', '-1', '--format=%P', sha).trim().split(' ').length > 1;
-  let msg = withoutOwnMergeSubject(git('log', '-1', '--format=%B', sha), owner, isMerge);
+  let msg = withoutOwnSignOffs(withoutOwnMergeSubject(git('log', '-1', '--format=%B', sha), owner, isMerge), [ae, ce]);
   for (const id of [ae, ce, an, cn].filter(Boolean)) msg = msg.split(id).join('');
   hits.push(...scanText(rules, 'COMMIT_MSG', msg).map((h) => `${short} ${h}`));
   return hits;

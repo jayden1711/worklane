@@ -40,6 +40,7 @@ interface Render {
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
   renderTrust(t: unknown): string;
+  renderFlaky(f: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean }): string;
@@ -59,6 +60,7 @@ interface Render {
   renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
   countdown(resetAt: string, now: number): string;
   renderProtection(protection: unknown, brand: string): string;
+  renderDeployGate(gate: unknown): string;
   renderMainWatchAlert(protection: unknown): string;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
@@ -762,6 +764,19 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+});
+
+test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
+  const a = 'a'.repeat(40);
+  const b = 'b'.repeat(40);
+  const now = new Date().toISOString();
+  const moving = r.renderDeployGate({ branch: 'deploy', deployed: { sha: a, url: `https://github.com/o/r/commit/${a}`, at: now, by: 'gate', override: false }, held: null, refused: null });
+  assert.match(moving, /Pre-deploy gate[\s\S]*Moving/);
+  assert.match(moving, /data-testid="deploy-gate-deployed"[\s\S]*deploy[\s\S]*aaaaaaaa/);
+  assert.doesNotMatch(moving, /deploy-gate-held/);
+  const held = r.renderDeployGate({ branch: 'deploy', deployed: { sha: a, url: '', at: null, by: null, override: false }, held: { sha: b, url: `https://github.com/o/r/commit/${b}`, at: now, reason: 'failed: suite' }, refused: null });
+  assert.match(held, /Held<[\s\S]*data-testid="deploy-gate-held"[\s\S]*bbbbbbbb[\s\S]*failed: suite/);
+  assert.match(r.renderDeployGate({ branch: 'deploy', deployed: null, held: null, refused: { at: now, reason: 'deploy is off main' } }), /Refused[\s\S]*not moved by the gate yet[\s\S]*deploy is off main/);
 });
 
 test('bootstrap merges on the Machine page: an admin gets the accept field, a writer the list read-only, a viewer neither', () => {
@@ -1591,4 +1606,15 @@ test('the trust panel: the recommendation and its rules, each figure over 7 and 
   assert.deepEqual([...viewer.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges']);
   assert.doesNotMatch(viewer, /trust-recommendation|trust-area|~\$/);
   assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
+});
+
+test('flaky tests: each quarantined check is a row with its sightings, issue and passes toward release, and the flake rate over 7 and 30 days', () => {
+  const t = { test: 'ci', state: 'quarantined', firstSeen: '2026-10-12T00:00:00Z', lastSeen: '2026-10-13T00:00:00Z', sightings: 3, issue: 101, url: 'https://github.com/example/repo/issues/101', passes: 2, released: null };
+  const html = r.renderFlaky({ releaseAfter: 10, quarantined: [t], released: [], rates: [{ days: 7, redRuns: 4, flakyReruns: 1, rate: 0.25 }, { days: 30, redRuns: 8, flakyReruns: 4, rate: 0.5 }], canClear: true });
+  assert.match(html, /data-testid="flaky-count">1</);
+  assert.match(html, /data-testid="flaky-row" data-test="ci"[\s\S]*?data-testid="flaky-sightings"[^>]*>3<[\s\S]*?#101[\s\S]*?2 of 10[\s\S]*?Clear/);
+  assert.match(html, /data-testid="flaky-rate"[^>]*>Flake rate: 25% over 7 days \(1 of 4 red runs\), 50% over 30 days \(4 of 8\)/);
+  assert.match(html, /The updater still needs every check green/);
+  const none = r.renderFlaky({ releaseAfter: 10, quarantined: [], released: [], rates: [{ days: 7, redRuns: 0, flakyReruns: 0, rate: null }, { days: 30, redRuns: 0, flakyReruns: 0, rate: null }], canClear: false });
+  assert.match(none, /No flaky tests found yet/);
 });

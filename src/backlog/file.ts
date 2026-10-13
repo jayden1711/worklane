@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { redactString } from '../events/redact.js';
-import type { Backlog, CommitCheck, Issue, PrReview, PullRequest } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PullRequest, RerunJobs } from './types.js';
 
 interface FilePr {
   head: string;
@@ -19,6 +19,7 @@ interface FilePr {
   /** The merge commit, once merged. */
   mergeSha?: string;
   mergeTitle?: string;
+  mergeBody?: string;
   /** Submitted reviews (tests set them). */
   reviews?: PrReview[];
   /** Who closed it (tests set it). */
@@ -149,16 +150,20 @@ export class FileBacklog implements Backlog {
     const stats = i.pr!.stats ? { stats: { ...i.pr!.stats, comments: i.comments.length } } : {};
     return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
   }
+  /** Test hook: re-running a check run's failed Actions jobs (a file backlog has no Actions: absent, nothing re-runs). */
+  rerunFailedJobs?: (checkRunIds: number[]) => Promise<Map<number, RerunJobs>>;
   /** Test hook: how a merge happens (e.g. a real merge commit on a test remote); returns the merge commit. */
   mergeWith?: (pr: { number: number; head: string; headSha: string; base: string }) => string;
-  async mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
+  async mergePr(n: number, sha: string, title: string, body?: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
     const i = this.load().issues.find((x) => x.number === n && x.pr);
     if (!i || i.state !== 'open') return { ok: false, why: 'not open' };
     if (i.pr!.headSha !== sha) return { ok: false, why: `head is ${i.pr!.headSha}, not ${sha}` };
     if ((i.pr!.mergeableState ?? 'clean') === 'dirty') return { ok: false, why: 'merge conflict' };
+    // Strict branch protection: GitHub's 405 for a branch behind its base.
+    if (i.pr!.mergeableState === 'behind') return { ok: false, why: 'Head branch is not up to date with the base branch' };
     const mergeSha = this.mergeWith ? this.mergeWith({ number: n, head: i.pr!.head, headSha: sha, base: i.pr!.base }) : sha.replace(/^./, 'f');
     this.edit(n, (x) => {
-      Object.assign(x.pr!, { merged: true, mergeSha, mergeTitle: title });
+      Object.assign(x.pr!, { merged: true, mergeSha, mergeTitle: title, ...(body !== undefined ? { mergeBody: body } : {}) });
       x.state = 'closed';
     });
     return { ok: true, sha: mergeSha };

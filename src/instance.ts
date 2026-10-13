@@ -11,7 +11,7 @@ import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { defaultAgentPath, homeOf, homesRoot, stateDir, userExists } from './os/index.js';
+import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
@@ -429,4 +429,53 @@ export function loadInstanceCredentials(instanceName: string, dir = instancesDir
   const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
   if (errors.length || !inst || !credentials) throw new ConfigInvalid(errors);
   return { stateDir: join(home, 'state'), repos: inst.repos.map((r) => r.repo), credentials };
+}
+
+/** An instance-file problem as one line (ConfigInvalid's own message starts with the repo config's heading). */
+export const instanceFilesProblem = (e: unknown): string => (e instanceof ConfigInvalid ? e.errors.map((x) => `${x.file}${x.path ? ` at ${x.path}` : ''}: ${x.message}`).join('; ') : (e as Error).message.split('\n')[0]!);
+
+/**
+ * An instance's setup, before its repo has a config: where its checkout is and who its agents run as, with its
+ * credential references and policy. Server auto-config needs it (src/server-auto-config.ts); loadInstance needs the
+ * repo config too.
+ */
+export function loadInstanceSetup(instanceName: string, dir = instancesDir()): { home: string; stateDir: string; repo: { path: string; repo: string }; credentials: CredentialsFile; policy: PolicyFile; runAs: RunAs | null } {
+  const home = join(dir, instanceName);
+  const errors: ConfigError[] = [];
+  const inst = readYaml(InstanceFile, join(home, 'instance.yaml'), errors);
+  const policy = readYaml(PolicyFile, join(home, 'policy.yaml'), errors);
+  const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
+  if (errors.length || !inst || !policy || !credentials) throw new ConfigInvalid(errors);
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path: inst.run_as.path ?? defaultAgentPath() } : null;
+  return { home, stateDir: join(home, 'state'), repo: { ...inst.repos[0]!, path: resolve(home, inst.repos[0]!.path) }, credentials, policy, runAs };
+}
+
+/** How an instance's GitHub App was made, as its setup recorded it (beside the App's key): the manifest flow, or by hand. */
+export type AppOrigin = 'manifest' | 'by-hand';
+const APP_ORIGIN_FILE = 'made-by';
+export const appOriginText = (o: AppOrigin | null) => (o === 'manifest' ? 'made through the manifest flow' : o === 'by-hand' ? 'made by hand (credentials.sh github-app)' : 'how it was made is not recorded');
+export function readAppOrigin(keyPath: string): AppOrigin | null {
+  try {
+    const t = readFileSync(join(dirname(keyPath), APP_ORIGIN_FILE), 'utf8').trim();
+    return t === 'manifest' || t === 'by-hand' ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Point an instance's credentials.yaml at its GitHub App, keeping its other settings, validated against the schema
+ * before anything is written (0600, renamed into place), and record how the App was made beside its key. The one
+ * writer of the App entry: credentials.sh github-app (`instance set-github-app`) and the manifest flow both come here.
+ */
+export function setGithubApp(file: string, app: { appId: number; installationId: number; keyPath: string }, origin: AppOrigin): void {
+  const doc = parseDocument(existsSync(file) ? readFileSync(file, 'utf8') : 'version: 1\n');
+  if (doc.errors.length) throw new Error(`${file} isn't valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`);
+  if (!doc.has('version')) doc.set('version', 1);
+  doc.set('github', { kind: 'app', app_id: app.appId, installation_id: app.installationId, key_path: app.keyPath });
+  const r = CredentialsFile.safeParse(doc.toJS());
+  if (!r.success) throw new Error(`${file} would not be valid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  // Each keeps its directory's owner: root (the manifest flow) writes them for the coordinator user.
+  replaceFileAtomically(file, String(doc), 0o600, dirname(file));
+  replaceFileAtomically(join(dirname(app.keyPath), APP_ORIGIN_FILE), `${origin}\n`, 0o600, dirname(app.keyPath));
 }

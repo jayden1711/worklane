@@ -24,12 +24,15 @@ import { loadConfig } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
-import { detectOs, isRoot, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { handOffFromNpx, type HandOff } from './npx-engine.js';
+import { findTool, withToolPath } from './tool-path.js';
+import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { coordinatorUser } from './setup/app-manifest.js';
 import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 
 export { MODES, type Mode, type RunResult };
-export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'protection' | 'discord' | 'tailscale';
+export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
 export type StepStatus = 'pending' | 'done' | 'skipped' | 'failed';
 
 export interface StepDef {
@@ -39,7 +42,11 @@ export interface StepDef {
   modes: readonly Mode[];
 }
 
-/** The checklist, in order: the registry's walked groups (src/setup-steps.ts), so init, doctor and the page share one list. */
+/**
+ * The checklist, in order: the registry's walked groups (src/setup-steps.ts), so init, doctor and the page share one
+ * list. Server mode's Coordinator running is add-project's last steps (the coordinator's service, test user, machine
+ * helper, dashboards); local mode starts the coordinator with `up` after init, so it has no such step.
+ */
 export const STEPS: readonly StepDef[] = GROUPS.filter((g) => g.walked).map((g) => ({ id: g.id as StepId, title: g.title, optional: g.optional, modes: g.modes }));
 export const stepsFor = (mode: Mode) => STEPS.filter((s) => s.modes.includes(mode));
 
@@ -62,6 +69,8 @@ export interface InitState {
   steps: Partial<Record<StepId, StepRecord>>;
   /** server: add-project.sh's last state per step. */
   handoff: Record<string, string>;
+  /** server: add-project.sh's last detail per step (how the App was made, the setup PR it waits for). */
+  handoffDetail?: Record<string, string>;
   /** Local mode: auto-config's answers, open questions, command results and setup PR (src/auto-config.ts). */
   autoConfig?: AutoConfigState;
   updatedAt: string;
@@ -71,8 +80,16 @@ export interface InitState {
 export const INIT_FILE = 'init.json';
 /** Local mode's state: beside the project's other machine-local state (the dashboard's state dir for it). */
 export const localInitFile = (root: string) => join(projectStateDir(root), INIT_FILE);
-/** Server mode's state: root's, per instance. */
-export const serverInitFile = (instance: string) => join(stateDir(), 'init', `${instance}.json`);
+/**
+ * Server mode's state, per instance: written by root (init runs add-project.sh as root), in the machine's state
+ * (machineInitDir(), 0755), each file root's and readable by that instance's coordinator group only (0640), so
+ * `doctor` run as the coordinator, and the instance's dashboard, show what init recorded. No secret is in it.
+ */
+export const serverInitFile = (instance: string) => join(machineInitDir(), `${instance}.json`);
+/** The machine's init records (tests point it elsewhere). */
+export const machineInitDir = () => process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] ?? `/var/lib/${BRAND.cli}/init`;
+/** Where an engine before this kept it: root's own state, which the coordinator can't read. Read once, to carry it over. */
+export const legacyServerInitFile = (instance: string) => join(stateDir(), 'init', `${instance}.json`);
 
 export function readInitState(file: string): InitState | null {
   try {
@@ -83,9 +100,27 @@ export function readInitState(file: string): InitState | null {
   }
 }
 
+/** Why a state file that is there can't be read (as this user), or null: doctor says so rather than "not reached". */
+export function initStateUnreadable(file: string): string | null {
+  if (!existsSync(file)) return null;
+  try {
+    readFileSync(file, 'utf8');
+    return null;
+  } catch (e) {
+    return `can't read init's record ${file} as this user (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`;
+  }
+}
+
 export function writeInitState(file: string, s: InitState): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
+}
+
+/** Server mode: write the state, then open it to the instance's coordinator group (read only). */
+export function writeServerInitState(file: string, s: InitState, instance: string): void {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
+  writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
+  shareReadWithGroup(file, coordinatorUser(instance));
 }
 
 export interface Unavailable {
@@ -94,7 +129,7 @@ export interface Unavailable {
 }
 
 /** What this mode can't do, each with why. Server mode has everything; local mode lacks what needs root or other users. */
-export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) => which(c) !== null): Unavailable[] {
+export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) => findTool(c) !== null): Unavailable[] {
   if (mode === 'server') return [];
   const out: Unavailable[] = [
     { feature: 'separate OS users', why: `local mode runs the agents as you, with your files and your logins; agents as a user of their own that holds no credentials and can't read yours need a Linux server set up in server mode (sudo bash scripts/bootstrap.sh --hardened)` },
@@ -116,8 +151,8 @@ export interface InitIo {
   download: Download;
   /** The pinned install for a missing tool (src/tool-install.ts), or null where none is pinned. */
   plan(tool: InstallableTool, prefix: string): ToolInstall | null;
-  /** Server mode: run add-project.sh, reporting each step line; its exit status and each step's last state. */
-  addProject(name: string, repo: string): Promise<{ code: number; steps: Record<string, string>; last: string }>;
+  /** Server mode: run add-project.sh, reporting each step line; its exit status and each step's last state and detail. */
+  addProject(name: string, repo: string, timeoutMinutes?: number): Promise<{ code: number; steps: Record<string, string>; details?: Record<string, string>; last: string }>;
 }
 
 export interface InitContext {
@@ -138,6 +173,10 @@ export interface InitContext {
   answers?: Record<string, string>;
   /** Keep the state now (runInit sets it): auto-config saves each answer and result as it comes. */
   save?: () => void;
+  /** Server mode: how long add-project waits for a GitHub click or the setup PR's merge, in minutes (its default: 15). */
+  timeout?: number;
+  /** Server mode: add-project's run in this init, once it has run (it runs at most once). */
+  handedOff?: { code: number; last: string };
 }
 
 export interface StepResult {
@@ -188,23 +227,56 @@ async function tools(c: InitContext, act: boolean): Promise<StepResult> {
 }
 
 /** add-project.sh's steps that make each server checklist step. */
-const HANDOFF: Partial<Record<StepId, string[]>> = { claude: ['claude-token'], github: ['instance', 'app', 'checkout'], 'repo-config': ['checkout', 'policy'] };
+const HANDOFF: Partial<Record<StepId, string[]>> = {
+  claude: ['claude-token'],
+  github: ['instance', 'app', 'checkout'],
+  'repo-config': ['checkout', 'policy'],
+  coordinator: ['service', 'test-user', 'machine-helper', 'dashboards'],
+};
 
 async function handoff(c: InitContext, id: StepId, act: boolean): Promise<StepResult> {
   const need = HANDOFF[id]!;
-  const done = () => need.every((s) => c.state.handoff[s] === 'done');
-  const what: Record<string, string> = {
-    claude: `the agent's Claude login, stored for its user only (add-project: claude-token)`,
-    github: `the instance, its GitHub App (made through the manifest flow) and the checkout (add-project: instance, app, checkout)`,
-    'repo-config': `the checkout's ${BRAND.configDir}/ and the instance's policy (add-project: checkout, policy), from the templates; auto-config (detected, checked commands) runs in local mode so far`,
+  // The repo config isn't done while the service waits for its setup PR to merge (as in local mode, where it is done
+  // once the PR has merged): that wait is this step's, and the walk stops here saying so.
+  const watch = id === 'repo-config' ? [...need, 'service'] : need;
+  const done = () => need.every((s) => c.state.handoff[s] === 'done') && !watch.some((s) => c.state.handoff[s] === 'waiting');
+  const detail = (s: string) => c.state.handoffDetail?.[s] ?? '';
+  const what = (): string => {
+    // How the App was made, as add-project's app step found it recorded (never assumed).
+    const app = /, (made [^;]*|how it was made is not recorded)$/.exec(detail('app'))?.[1] ?? 'how it was made is not recorded';
+    const checkout = detail('checkout');
+    return {
+      claude: `the agent's Claude login, stored for its user only (add-project: claude-token)`,
+      github: `the instance, its GitHub App (${app}) and the checkout (add-project: instance, app, checkout)`,
+      'repo-config': `the checkout's ${BRAND.configDir}/ and the instance's policy (add-project: checkout, policy)${checkout ? `: ${checkout}` : ''}`,
+      coordinator: `the coordinator's service, the machine helper and the dashboards (add-project: ${need.join(', ')})`,
+    }[id as 'claude' | 'github' | 'repo-config' | 'coordinator'];
   };
-  if (done()) return { status: 'done', detail: what[id]! };
-  if (!act) return { status: 'failed', detail: `not yet: ${need.filter((s) => c.state.handoff[s] !== 'done').join(', ')} (add-project)` };
-  c.io.say(`   handing off to scripts/setup/add-project.sh ${c.instance} ${c.repo} (as root; each of its steps is skipped when done)`);
-  const r = await c.io.addProject(c.instance!, c.repo!);
-  Object.assign(c.state.handoff, r.steps);
-  if (done()) return { status: 'done', detail: what[id]! };
+  // A step add-project left waiting (the service, for the setup PR) is not done: say what it waits for.
+  const notDone = (): StepResult => {
+    const waiting = watch.find((s) => c.state.handoff[s] === 'waiting');
+    if (waiting) return { status: 'failed', detail: `${detail(waiting) || 'waiting'} (add-project: ${waiting}); run \`${BRAND.cli} init --mode server ${c.repo} --instance ${c.instance}\` again once it has` };
+    return { status: 'failed', detail: `not yet: ${need.filter((s) => c.state.handoff[s] !== 'done').join(', ')} (add-project)` };
+  };
+  if (done()) return { status: 'done', detail: what() };
+  if (!act) return notDone();
+  // add-project runs once per init: it walks all of its steps, and a later checklist step reads what it left.
+  let r = c.handedOff;
+  if (!r) {
+    c.io.say(`   handing off to scripts/setup/add-project.sh ${c.instance} ${c.repo} (as root; each of its steps is skipped when done)`);
+    // Each run's states replace the last run's: a step it didn't reach this time is no longer "waiting" or "failed".
+    const ran = await c.io.addProject(c.instance!, c.repo!, c.timeout);
+    c.state.handoff = { ...Object.fromEntries(Object.entries(c.state.handoff).filter(([, v]) => v === 'done')), ...ran.steps };
+    c.state.handoffDetail = { ...c.state.handoffDetail, ...ran.details };
+    r = c.handedOff = { code: ran.code, last: ran.last };
+  }
+  if (done()) return { status: 'done', detail: what() };
+  if (r.code === 3) return notDone();
   return { status: 'failed', detail: `add-project stopped (exit ${r.code})${r.last ? `: ${r.last}` : ''}; fix that, then run \`${BRAND.cli} init --mode server ${c.repo} --instance ${c.instance}\` again` };
+}
+
+async function coordinator(c: InitContext, act: boolean): Promise<StepResult> {
+  return handoff(c, 'coordinator', act);
 }
 
 const claudeStatus = (c: InitContext): StepResult => asStep(detectClaudeLogin(c.io));
@@ -313,7 +385,7 @@ async function tailscale(c: InitContext): Promise<StepResult> {
   return t ? asStep(t) : { status: 'skipped', detail: 'optional, not on a tailnet: the dashboard stays on this machine (docs/dashboard.md sets up Tailscale sign-in)' };
 }
 
-const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': repoConfig, protection, discord, tailscale };
+const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': repoConfig, coordinator, protection, discord, tailscale };
 
 export interface ChecklistItem extends StepDef {
   status: StepStatus;
@@ -343,7 +415,8 @@ export async function runInit(c: InitContext, file: string): Promise<number> {
   const steps = stepsFor(c.mode);
   const save = () => {
     c.state.updatedAt = now();
-    writeInitState(file, c.state);
+    if (c.mode === 'server' && c.instance) writeServerInitState(file, c.state, c.instance);
+    else writeInitState(file, c.state);
   };
   c.save = save;
   const doneEarlier = steps.filter((s) => ['done', 'skipped'].includes(c.state.steps[s.id]?.status ?? '')).length;
@@ -386,16 +459,16 @@ export const engineRoot = () => fileURLToPath(new URL('../../', import.meta.url)
 export function systemIo(o: { interactive: boolean }): InitIo {
   let rl: ReturnType<typeof createInterface> | null = null;
   return {
-    which,
+    which: (cmd) => findTool(cmd),
     run: (cmd, args, opt = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, ...(opt.cwd ? { cwd: opt.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: withToolPath(), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     interactive: (cmd, args) =>
       new Promise((done) => {
         rl?.close();
         rl = null;
-        const p = spawn(cmd, args, { stdio: 'inherit' });
+        const p = spawn(cmd, args, { stdio: 'inherit', env: withToolPath() });
         p.on('exit', (code) => done(code ?? 1));
         p.on('error', () => done(1));
       }),
@@ -407,25 +480,28 @@ export function systemIo(o: { interactive: boolean }): InitIo {
     say: (line) => console.log(line),
     download: httpDownload,
     plan: (tool, prefix) => installPlan(tool, prefix),
-    addProject: (name, repo) =>
+    addProject: (name, repo, timeoutMinutes) =>
       new Promise((done) => {
         const script = join(engineRoot(), 'scripts', 'setup', 'add-project.sh');
         if (!existsSync(script)) return done({ code: 2, steps: {}, last: `no ${script}: server mode runs from the engine's checkout (bootstrap --hardened installs it)` });
-        const p = spawn('bash', [script, name, repo], { stdio: ['inherit', 'pipe', 'inherit'] });
+        const p = spawn('bash', [script, name, repo, ...(timeoutMinutes ? ['--timeout', String(timeoutMinutes)] : [])], { stdio: ['inherit', 'pipe', 'inherit'] });
         const steps: Record<string, string> = {};
+        const details: Record<string, string> = {};
         let last = '';
         createInterface({ input: p.stdout! }).on('line', (line) => {
           try {
             const j = JSON.parse(line) as { step: string; state: string; detail?: string; retry?: string };
             steps[j.step] = j.state;
             if (j.state === 'started') return;
+            if (j.detail) details[j.step] = j.detail;
             last = `${j.step} ${j.state}${j.detail ? `: ${j.detail}` : ''}${j.retry ? ` (retry: ${j.retry})` : ''}`;
             console.log(`     add-project ${last}`);
           } catch {
             // not a step line
           }
         });
-        p.on('exit', (code) => done({ code: code ?? 1, steps, last }));
+        // 'close', not 'exit': every line read before the result is taken.
+        p.on('close', (code) => done({ code: code ?? 1, steps, details, last }));
         p.on('error', (e) => done({ code: 1, steps, last: e.message }));
       }),
   };
@@ -455,10 +531,15 @@ export interface InitArgs {
   interactive: boolean;
   /** `--answer id=choice`, for auto-config's questions. */
   answers?: Record<string, string>;
+  /** Server mode: add-project's --timeout, in minutes. */
+  timeout?: number;
 }
 
-/** `init`: the mode (asked when not given), the context, then the walk. */
-export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interactive: a.interactive }), root = isRoot): Promise<number> {
+/**
+ * `init`: the mode (asked when not given), the context, then the walk. Local mode run through npx hands over to an
+ * install of its own first (src/npx-engine.ts).
+ */
+export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interactive: a.interactive }), root = isRoot, handOff: HandOff = handOffFromNpx): Promise<number> {
   let mode = a.mode;
   // A directory that exists is a checkout (local mode); anything else is taken as owner/name (server mode).
   const localRoot = a.target === undefined ? resolve(a.cwd) : existsSync(a.target) ? resolve(a.target) : null;
@@ -490,6 +571,8 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
       io.say('init: on Windows, run it inside WSL2 (Ubuntu): local mode is Linux there');
       return 2;
     }
+    const handed = await handOff({ root: localRoot, prefix: a.prefix, yes: a.yes, reset: a.reset, ...(a.answers ? { answers: a.answers } : {}), say: (l) => io.say(l) });
+    if (handed !== null) return handed;
     const file = localInitFile(localRoot);
     let state = readInitState(file);
     if (!state || a.reset) state = newState('local', localRoot, null, null);
@@ -512,9 +595,10 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
     return 2;
   }
   const file = serverInitFile(instance);
-  let state = readInitState(file);
+  // A record an earlier engine kept in root's own state is carried over (and written where the coordinator reads it).
+  let state = readInitState(file) ?? readInitState(legacyServerInitFile(instance));
   if (!state || a.reset) state = newState('server', repo, repo, instance);
-  return runInit({ mode, root: null, repo, instance, prefix: a.prefix, yes: a.yes, interactive: a.interactive, io, state }, file);
+  return runInit({ mode, root: null, repo, instance, prefix: a.prefix, yes: a.yes, interactive: a.interactive, io, state, ...(a.timeout ? { timeout: a.timeout } : {}) }, file);
 }
 
 /** The dashboard's first-run page (GET /api/first-run): the checklist as init recorded it, and what the mode can't do. */
@@ -550,7 +634,19 @@ export interface FirstRunLive {
 
 /** The setup context for a checkout or an instance, with what init recorded (auto-config's questions and PR). */
 export function setupContext(state: InitState | null, o: { mode: Mode; root: string; repo: string | null; instance: string | null; stateDir: string; policyFile: string | null }): SetupContext {
-  return { mode: o.mode, root: o.root, repo: o.repo, instance: o.instance, stateDir: o.stateDir, policyFile: o.policyFile, openQuestions: state?.autoConfig?.questions.length ?? 0, setupPr: state?.autoConfig?.pr?.url ?? null };
+  // Server mode: the setup PR add-project waits on, as it said (the service step's detail).
+  const serverPr = /https:\/\/\S+\/pull\/\d+/.exec(state?.handoffDetail?.service ?? '')?.[0] ?? null;
+  return {
+    mode: o.mode,
+    root: o.root,
+    repo: o.repo,
+    instance: o.instance,
+    stateDir: o.stateDir,
+    policyFile: o.policyFile,
+    openQuestions: state?.autoConfig?.questions.length ?? 0,
+    setupPr: state?.autoConfig?.pr?.url ?? serverPr,
+    ...(state?.mode === 'server' ? { handoff: state.handoff, handoffDetail: state.handoffDetail ?? {} } : {}),
+  };
 }
 
 /**
