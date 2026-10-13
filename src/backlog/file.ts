@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { redactString } from '../events/redact.js';
-import type { Backlog, CommitCheck, Issue, PrReview, PullRequest } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PullRequest, RerunJobs } from './types.js';
 
 interface FilePr {
   head: string;
@@ -30,7 +30,7 @@ interface FilePr {
 
 interface FileState {
   // As on GitHub, a pull request is an issue too (same numbering, labels and comments), with `pr` set.
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[]; pr?: FilePr })[];
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string; at?: string }[]; pr?: FilePr })[];
   labels: string[];
   /** Checks per commit sha (tests set them). */
   checks?: Record<string, CommitCheck[]>;
@@ -84,9 +84,9 @@ export class FileBacklog implements Backlog {
     });
   }
 
-  /** Test helper: a human comments on an issue. */
-  humanComment(n: number, author: string, body: string) {
-    this.edit(n, (i) => i.comments.push({ author, body }));
+  /** Test helper: a human comments on an issue (now, or at `at`). */
+  humanComment(n: number, author: string, body: string, at = new Date().toISOString()) {
+    this.edit(n, (i) => i.comments.push({ author, body, at }));
   }
 
   async list(label: string) {
@@ -120,7 +120,7 @@ export class FileBacklog implements Backlog {
   }
   // What the harness writes is redacted first (events/redact.ts), as the GitHub backlog does for everything it sends.
   async comment(n: number, body: string) {
-    this.edit(n, (i) => i.comments.push({ author: this.actor, body: redactString(body) }));
+    this.edit(n, (i) => i.comments.push({ author: this.actor, body: redactString(body), at: new Date().toISOString() }));
   }
   async comments(n: number) {
     return this.load().issues.find((x) => x.number === n)?.comments ?? [];
@@ -150,6 +150,8 @@ export class FileBacklog implements Backlog {
     const stats = i.pr!.stats ? { stats: { ...i.pr!.stats, comments: i.comments.length } } : {};
     return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
   }
+  /** Test hook: re-running a check run's failed Actions jobs (a file backlog has no Actions: absent, nothing re-runs). */
+  rerunFailedJobs?: (checkRunIds: number[]) => Promise<Map<number, RerunJobs>>;
   /** Test hook: how a merge happens (e.g. a real merge commit on a test remote); returns the merge commit. */
   mergeWith?: (pr: { number: number; head: string; headSha: string; base: string }) => string;
   async mergePr(n: number, sha: string, title: string, body?: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {

@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, EventType } from '../events/types.js';
-import { redact } from '../events/redact.js';
+import { redact, redactString } from '../events/redact.js';
 import { holdFlock, type HeldFlock } from '../os/index.js';
 import { BRAND } from '../brand.js';
 import type { Lock } from '../locks.js';
@@ -15,6 +15,7 @@ import type { HelperState } from './helper.js';
 import { newRunId, SetupStepError, type RunDatabase, type RunHost } from './host.js';
 import { waitTestSlot } from './slots.js';
 import { createWorkspace, runEnv } from './workspace.js';
+import { configBehind, missingReferencedPath, oldHeadFailure, type Predates } from './predates.js';
 
 export interface TestRunRequest {
   repo: string;
@@ -31,8 +32,11 @@ export interface TierResult {
   tier: string;
   ok: boolean;
   durationMs: number;
+  /** What the check shows of it: its last output lines (redacted), or why it didn't run. */
   summary: string;
   logRef: string;
+  /** The PR's head is older than the test-run config and can't run this tier as configured (./predates.ts). */
+  predates?: Predates;
 }
 export interface TestRunResult {
   id: string;
@@ -102,6 +106,12 @@ export function tierCommand(t: TestRunTier, shard: { index: number; total: numbe
 }
 
 const tail = (out: string, lines = 20) => String(redact(out.trim().split('\n').slice(-lines).join('\n'))).slice(-1800);
+/**
+ * A tier's last lines, as its check shows them. The whole output is redacted first, so a secret that spans lines (a
+ * private key) is masked even when only its end is in the last lines.
+ */
+export const TIER_LINES = 30;
+export const lastLines = (out: string, lines = TIER_LINES) => redactString(out).trim().split('\n').slice(-lines).join('\n').slice(-4000);
 
 export function validateRequest(req: TestRunRequest): void {
   if (!/^[0-9a-f]{7,40}$/.test(req.sha)) throw new Error(`not a commit: ${req.sha}`);
@@ -181,6 +191,13 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       }
     }
     stage = 'tiers';
+    // The config commit, when this head is older than it (null otherwise): only then can a tier predate the config.
+    let behind: string | null = null;
+    try {
+      behind = configBehind(d.repo, req.sha);
+    } catch {
+      // no evidence of an old head
+    }
     for (const t of tiers) {
       if (setupFailed) break; // every tier already failed
       if (o.signal?.aborted) break;
@@ -189,11 +206,22 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
         results.push({ tier: t.name, ok: false, durationMs: 0, summary: 'needs the change\'s files ({changed_files}) and the run was given none', logRef: '' });
         continue;
       }
+      // A file the command calls that this old head doesn't have: not run (it could only fail), and the check says why.
+      const missing = behind ? missingReferencedPath(d.repo, req.sha, behind, t.command) : null;
+      if (behind && missing) {
+        const predates: Predates = { configCommit: behind, what: `\`${missing}\` is not in this PR's head`, notRun: true };
+        const tr: TierResult = { tier: t.name, ok: false, durationMs: 0, summary: `not run: ${predates.what} (the test-run config is from ${behind.slice(0, 10)})`, logRef: '', predates };
+        results.push(tr);
+        emit('testrun.tier', { id, tier: t.name, ok: false, duration_ms: 0, summary: tr.summary.slice(0, 2000), log_ref: '', cpu_s: null, mem_peak_mb: null });
+        continue;
+      }
       const start = now();
       const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal);
       const logRef = `${id}/${t.name}.log`;
       writeFileSync(join(d.logDir, logRef), r.out, { mode: 0o600 });
-      const tr = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: r.code === null ? `timed out or cancelled\n${tail(r.out)}` : tail(r.out), logRef };
+      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: r.code === null ? `timed out or cancelled\n${lastLines(r.out)}` : lastLines(r.out), logRef };
+      const old = behind && !tr.ok ? oldHeadFailure(command, r.code, r.out) : null;
+      if (behind && old) tr.predates = { configCommit: behind, what: old, notRun: false };
       results.push(tr);
       emit('testrun.tier', { id, tier: t.name, ok: tr.ok, duration_ms: tr.durationMs, summary: tr.summary.slice(0, 2000), log_ref: logRef, cpu_s: r.stats?.cpuS ?? null, mem_peak_mb: r.stats?.memPeakMb ?? null });
       // Its per-test durations, for the metrics' slow tests (src/test-durations.ts): names and times only, never output.
@@ -237,6 +265,7 @@ export function mergeShards(results: readonly TestRunResult[]): TestRunResult {
     durationMs: Math.max(...ts.map((t) => t.durationMs)),
     summary: ts.filter((t) => !t.ok).map((t) => t.summary).join('\n---\n') || ts[0]!.summary,
     logRef: ts.map((t) => t.logRef).filter(Boolean).join(' '),
+    ...(ts.find((t) => t.predates) ? { predates: ts.find((t) => t.predates)!.predates! } : {}),
   }));
   // Any shard without a verdict leaves the whole run without one.
   const outcome = results.find((r) => r.outcome !== 'done')?.outcome ?? 'done';

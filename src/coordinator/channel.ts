@@ -172,7 +172,8 @@ export abstract class Channel extends ResearchOnDemand {
         thread = await src.openThread!(where.channel, post.text, post.name, where.from);
         ok = thread !== null;
       } else {
-        ok = await src.reply('thread' in where ? { kind: 'thread', id: where.thread } : { kind: 'channel', id: where.channel }, post.text, post.kind === 'notice' && post.mentions?.length && 'thread' in where ? { mentions: post.mentions } : undefined);
+        // Mentions only ever ping discord.owners, and only in the bot's own threads or the ops channel: the adapter's rule.
+        ok = await src.reply('thread' in where ? { kind: 'thread', id: where.thread } : { kind: 'channel', id: where.channel }, post.text, post.kind === 'notice' && post.mentions?.length ? { mentions: post.mentions } : undefined);
       }
     } catch {
       ok = false;

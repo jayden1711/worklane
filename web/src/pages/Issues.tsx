@@ -51,10 +51,11 @@ function matches(t: Task, f: Filters): boolean {
 
 function Row({ t, selected }: { t: Task; selected: boolean }) {
   return (
-    <button data-issue={t.issue} data-testid="issue-row" onClick={() => navigate(`/issues/${t.issue}`)} className={cx('flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-accent', selected && 'bg-accent')}>
+    <button data-issue={t.issue} data-testid="issue-row" onClick={() => navigate(`/issues/${t.issue}`)} className={cx('flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-accent max-md:flex-wrap max-md:gap-y-1', selected && 'bg-accent')}>
       <span className="w-12 shrink-0 font-mono text-xs text-muted-foreground">#{t.issue}</span>
       <StatusBadge status={t.status} />
-      <span className="min-w-0 flex-1 truncate">{t.title}</span>
+      {/* On a phone the row stacks: its title on a line of its own, whole. */}
+      <span className="min-w-0 flex-1 truncate max-md:order-last max-md:basis-full max-md:whitespace-normal">{t.title}</span>
       <span className="hidden gap-1 xl:flex">
         {t.labels.filter((l) => !['ready', 'agent:working', 'in-review'].includes(l) && !l.startsWith('review:')).slice(0, 3).map((l) => (
           <Badge key={l}>{l}</Badge>
@@ -172,7 +173,7 @@ export function Issues({ state }: { state: State }) {
         <span className="hidden items-center gap-1 text-xs text-muted-foreground lg:flex">
           <Kbd>/</Kbd> search · <Kbd>j</Kbd>/<Kbd>k</Kbd> · <Kbd>↵</Kbd> open · <Kbd>b</Kbd> board
         </span>
-        <div className="flex rounded-full bg-hover-2 p-0.5">
+        <div className="flex rounded-full bg-hover-2 p-0.5 max-md:p-0">
           <button onClick={() => setMode('list')} className={cx('rounded px-2 py-1', mode === 'list' && 'bg-accent')} aria-label="List view" title="List" data-testid="issues-list-mode">
             <List className="size-4" />
           </button>
