@@ -19,6 +19,7 @@ import { install, GIT_HOOK_MARKER } from '../src/install.js';
 import { localInitFile, newState, serverInitFile, STEPS, writeInitState } from '../src/init.js';
 import { checkSetup, checkSetupOffThread, GROUPS, SETUP_STEPS, type InstanceFacts, type MachinePaths, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
 import { serviceChange, type ServiceSpec } from '../src/os/index.js';
+import { localServiceSpec } from '../src/service.js';
 import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-state-'));
@@ -395,4 +396,12 @@ test('the tools detector sees a missing tool installed since, without init runni
   assert.equal(stepIn(checkSetup(f.ctx('local'), probeFor(w)), 'tools')!.done, false);
   w.tools.add('gh');
   assert.equal(stepIn(checkSetup(f.ctx('local'), probeFor(w)), 'tools')!.done, true);
+});
+
+test("Start's service (localServiceSpec, shared with `up`) gets a PATH that reaches the tool prefix, even when the caller's doesn't", () => {
+  const f = fixture();
+  const env = { PATH: '/usr/bin', HOME: '/home/example' };
+  const spec = localServiceSpec(f.dir, loadConfig(f.dir), env);
+  assert.deepEqual(spec.env!.PATH!.split(delimiter), ['/usr/bin', toolBin(env)]);
+  assert.equal(spec.env!.HOME, '/home/example');
 });
