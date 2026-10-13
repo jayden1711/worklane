@@ -222,6 +222,21 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
 }
 
 /**
+ * claude auth status --json as the agent user, read for the watchdog: whether it is signed in, and the login's expiry
+ * when the CLI reports one. Never the token (the command doesn't print it). Null when it couldn't be read.
+ */
+export function claudeAuthStatusJson(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { loggedIn: boolean; expiresAt?: unknown } | null {
+  const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
+  const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
+  try {
+    const j = JSON.parse(r.stdout) as { loggedIn?: unknown; expiresAt?: unknown };
+    return typeof j.loggedIn === 'boolean' ? { loggedIn: j.loggedIn, ...(j.expiresAt !== undefined ? { expiresAt: j.expiresAt } : {}) } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Errors that say nothing about the task: the Claude login's token refresh, rate limits, overload,
  * server errors and the network. Another attempt at the same moment fails the same way; waiting helps.
  */

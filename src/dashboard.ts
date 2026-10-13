@@ -53,6 +53,7 @@ import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './view
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
+import { incidentsView } from './watchdog/view.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -1016,6 +1017,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
           return json(res, 200, { ...view, usage, docs: { backups: docsUrl('backups') } });
         }
+        // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
+        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).
+        if (url.pathname === '/api/health/incidents' && req.method === 'GET') return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, full: isWriter(who.role) }));
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
         if (url.pathname === '/api/instance-settings' && req.method === 'POST') {

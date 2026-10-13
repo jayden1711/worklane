@@ -198,3 +198,47 @@ export function processGroupUsage(pgids: number[], d: Pick<StatsDeps, 'platform'
   }
   return out;
 }
+
+/** A service unit's run state, for the watchdog: whether it is up, and how often its manager restarted it. */
+export interface UnitState {
+  unit: string;
+  /** systemd's LoadState: not-found means no such unit on this machine. */
+  loadState: string | null;
+  /** active, activating, failed, inactive, ... */
+  activeState: string | null;
+  /** running, auto-restart, dead, ... */
+  subState: string | null;
+  /** Restarts the manager made since the unit was last started by hand; null when not reported. */
+  restarts: number | null;
+}
+
+/** `systemctl show -p LoadState,ActiveState,SubState,NRestarts` output for one unit. */
+export function parseUnitState(unit: string, text: string): UnitState {
+  const props = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const i = line.indexOf('=');
+    if (i > 0) props.set(line.slice(0, i), line.slice(i + 1).trim());
+  }
+  const n = Number(props.get('NRestarts'));
+  return { unit, loadState: props.get('LoadState') || null, activeState: props.get('ActiveState') || null, subState: props.get('SubState') || null, restarts: props.get('NRestarts') && Number.isInteger(n) && n >= 0 ? n : null };
+}
+
+/**
+ * These units' run states (Linux, systemd; an unprivileged `systemctl show` reads them). Null where units aren't
+ * measured (other platforms): the caller then knows nothing, rather than that every unit is down. A unit that
+ * couldn't be read is left out. Never throws.
+ */
+export function unitStates(units: string[], d: Pick<StatsDeps, 'platform' | 'exec'> = {}): UnitState[] | null {
+  if ((d.platform ?? process.platform) !== 'linux') return null;
+  const exec = d.exec ?? ((file: string, args: string[]) => execFileSync(file, args, { encoding: 'utf8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] }));
+  const out: UnitState[] = [];
+  for (const unit of units) {
+    if (!UNIT.test(unit)) continue;
+    try {
+      out.push(parseUnitState(unit, exec('systemctl', ['show', unit, '-p', 'LoadState,ActiveState,SubState,NRestarts'])));
+    } catch {
+      // unreadable: unknown, not down
+    }
+  }
+  return out;
+}

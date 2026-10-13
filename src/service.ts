@@ -36,6 +36,8 @@ import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
 import { GitHubMainWatchApi } from './github/main-watch-api.js';
 import { directLandStartGate, localRemote, type Protection } from './direct-land.js';
+import { watchdogForInstance } from './watchdog/wire.js';
+import type { IntakeConfig } from './intake/report.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
 export const INSTANCE_UMASK = 0o007;
@@ -181,8 +183,10 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
   const watchApi = new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi());
   const mainWatch = i.config.project.backlog === 'github' ? { api: watchApi, setting: () => loadInstance(name).policy.main_watch } : undefined;
+  // The machine watchdog (src/watchdog/): this instance's checks, and the machine's and the posting if elected.
+  const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(i.runAs ? { runAs: i.runAs } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
-  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, watchdog, ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
@@ -203,7 +207,7 @@ export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?
   return runSite(site, { ...opts, label: 'coordinator', ...(protection ? { protection } : {}) });
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; label?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void } }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -259,6 +263,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     void coordinator.checkIntake();
   }, 5_000);
   watch.unref();
+  const watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
   let lastBackup = 0;
   try {
     do {
@@ -276,6 +281,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     await coordinator.idle();
   } finally {
     clearInterval(watch);
+    watchdog?.stop();
     intake?.stop();
     log.close();
     lock.lock.release();

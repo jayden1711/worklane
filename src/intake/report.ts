@@ -148,10 +148,17 @@ export const IntakeConfig = z.strictObject({
        * others, in its thread). Empty (the default): no high-risk approval and no link comes from Discord.
        */
       owners: z.array(snowflake('user')).default([]),
+      /**
+       * The ops channel: the machine's watchdog posts each incident here (a service down, an update rolled back, a
+       * login failing, a full disk...), once when it opens and once when it is resolved, each linking to its place on
+       * the dashboard's Health page (src/watchdog/). Only one coordinator on the machine posts. Absent: none from here.
+       */
+      ops_channel: snowflake('channel').optional(),
     })
     .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
     .refine((d) => !d.chat_channels.some((c) => d.channels.includes(c) || c === d.asks_channel), { message: 'a chat channel must not also be an ideas channel (discord.channels) or the asks channel', path: ['chat_channels'] })
     .refine((d) => !d.asks_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.asks_channel (posts link to it)', path: ['dashboard_url'] })
+    .refine((d) => !d.ops_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.ops_channel (incident posts link to the Health page)', path: ['dashboard_url'] })
     .prefault({}),
   'bug-store': z
     .strictObject({
