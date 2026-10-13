@@ -73,6 +73,12 @@ export const ProjectConfig = z.strictObject({
    */
   required_checks: z.array(z.string().min(1)).default([]),
   /**
+   * The default branch's protection as the harness recommends it (src/branch-protection.ts; advice only, never
+   * applied). `strict`: whether a PR must be up to date with the default branch before it merges. Off by default:
+   * post-merge CI and the main watch catch what strict would have, without PRs queueing to merge main in and rerun CI.
+   */
+  protection: z.strictObject({ strict: z.boolean().default(false) }).prefault({}),
+  /**
    * Files two tasks running at once would both change and then conflict on (globs). Two tasks that would
    * touch the same one never run together; the second waits while other ready work takes the slot.
    * Absent: lockfiles, registries and changelogs, shared test helpers. An empty list turns holds off.
