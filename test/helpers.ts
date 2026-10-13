@@ -99,4 +99,6 @@ export function seedInstanceItems(log: { append(type: string, data: unknown, act
 }
 
 /** Every trace of one instance's items a response or page could carry: its issue numbers, PR, run, project, actor and titles. */
-export const marksOf = (m: InstanceMarks): RegExp => new RegExp([m.issue, m.issue + 1, m.issue + 2, m.pr, m.run, m.project, m.actor, m.title].map((x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));
+// A number marks an item only as a whole number: b's PR 9270 must not match a byte count like 15381192704.
+export const marksOf = (m: InstanceMarks): RegExp =>
+  new RegExp([...[m.issue, m.issue + 1, m.issue + 2, m.pr].map((n) => `(?<![0-9])${n}(?![0-9])`), ...[m.run, m.project, m.actor, m.title].map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))].join('|'));
