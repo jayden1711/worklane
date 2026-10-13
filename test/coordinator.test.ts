@@ -2640,7 +2640,7 @@ test('push limits on the change: refused before any check runs, the worker is to
       return { summary: 'fixed' };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 3 });
   await c.tick();
   await c.idle();
   await c.tick();
