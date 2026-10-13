@@ -98,7 +98,8 @@ jobs:
           tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
           bash scripts/bootstrap.sh --dry-run --mode local --engine "$tgz" "$ex"
           bash scripts/bootstrap.sh --mode local --yes --engine "$tgz" "$ex" | tee "$RUNNER_TEMP/first.log"
-          for step in 'Tools present' 'Claude login' 'GitHub' 'Repo config' 'Protection'; do grep -A1 "] $step" "$RUNNER_TEMP/first.log" | grep -E '^   done' > /dev/null; done
+          # Each step's result line ("   done: ...") can follow what the step printed doing it: count them, not neighbours.
+          [ "$(grep -cE '^   done: ' "$RUNNER_TEMP/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$RUNNER_TEMP/first.log"
           # The second run: no --mode and no terminal (local, said so); it installs nothing and redoes no step.
           bash scripts/bootstrap.sh --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/second.log"
