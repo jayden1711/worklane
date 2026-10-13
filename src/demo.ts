@@ -44,7 +44,7 @@ function agents() {
       return { structured: { test_path: 'test/repro-qty.test.js', explanation: 'negative qty subtracts from the total' }, costUsd: 0.21 };
     }
     if (req.role === 'investigator') {
-      return { structured: { summary: 'No: refunds go through a separate path and are never added to totals.', findings: [{ claim: 'totalCents only sums line items', evidence: 'src/price.js:3' }], recommendation: 'No fix needed; add a test that pins this.', confidence: 'high' }, costUsd: 0.34 };
+      return { structured: { summary: 'No: refunds go through a separate path and are never added to totals.', findings: [{ claim: 'totalCents only sums line items', evidence: 'src/price.js:3' }], recommendation: 'Nothing is broken today: refunds are recorded by the refunds path and never pass through totalCents, so a refund line cannot lower an order total. But nothing pins that either. Approve a small fix that adds a regression test (an order with a refunded line keeps the total of its other lines), so a later change to the totals reducer keeps it that way, and says in the README, where totals are described, that refunds are handled apart from them.', recommended: 'approve-fix', confidence: 'high' }, costUsd: 0.34 };
     }
     if (req.role === 'evaluator-verdict') {
       const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
@@ -70,7 +70,7 @@ function agents() {
       return { structured: { summary: 'Migration added.' }, costUsd: 0.37 };
     }
     if (/Free shipping/.test(brief)) {
-      return { structured: { summary: 'Need the threshold.', ask: { question: 'What order total should get free shipping?', options: ['$50', '$75', '$100'], recommendation: '$50' } }, costUsd: 0.12 };
+      return { structured: { summary: 'Need the threshold.', ask: { question: 'What order total should get free shipping?', options: ['$50', '$75', '$100'], recommendation: '$50', detail: 'Most orders in the fixtures are between $40 and $60.' } }, costUsd: 0.12 };
     }
     if (/Speed up totals/.test(brief)) {
       return { structured: { summary: 'Tried twice; the benchmark is not in the repo.' }, costUsd: 0.55 }; // commits nothing: rejected until blocked

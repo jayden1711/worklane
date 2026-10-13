@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
+import { RECOMMENDATION_PREFIX } from './decision-ask.js';
 import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload } from './events/types.js';
@@ -16,7 +17,7 @@ import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
-import { defaultRolePrompt, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
+import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
@@ -662,7 +663,7 @@ export class Coordinator extends Gardener {
     this.emit('run.finished', { issue: n, role: 'investigator', reason: r.reason, detail: r.detail.slice(0, 1000) });
     // Read-only means read-only: any change it left behind is discarded and reported.
     const touched = this.git(path, 'status', '--porcelain') || (this.git(path, 'rev-parse', 'HEAD') !== base ? 'commits' : '');
-    const s = r.structured as { summary: string; findings: { claim: string; evidence: string }[]; recommendation: string; confidence: string; unverified?: string[] } | undefined;
+    const s = r.structured as { summary: string; findings: { claim: string; evidence: string }[]; recommendation: string; recommended?: string; confidence: string; unverified?: string[] } | undefined;
     if (r.reason !== 'succeeded' || !s) {
       await this.block(n, owner, `investigation run ended: ${r.reason} (${r.detail.slice(0, 300)})`);
       return;
@@ -680,7 +681,8 @@ export class Coordinator extends Gardener {
     await this.d.backlog.comment(n, body);
     await this.d.backlog.removeLabel(n, 'agent:working');
     await this.d.backlog.addLabels(n, ['in-review']);
-    await this.ask('question', n, owner, 'How should this proceed?', ['approve-fix', 'investigate-more', 'close'], s.recommendation.slice(0, 200), [`confidence ${s.confidence}`, `${s.findings.length} finding(s)`]);
+    // The option it recommends is the recommendation; its reasoning, whole, is the detail's last line.
+    await this.ask('question', n, owner, 'How should this proceed?', [...INVESTIGATION_OPTIONS], s.recommended ?? '', [`confidence ${s.confidence}`, `${s.findings.length} finding(s)`, ...(s.recommendation?.trim() ? [`${RECOMMENDATION_PREFIX}${s.recommendation.trim()}`] : [])]);
   }
 
   private async reproduce(issue: Issue, doneWhen: DoneWhenList, base: string, workerPath: string): Promise<{ path: string; hash: string } & { unavailable?: string }> {
@@ -777,7 +779,7 @@ export class Coordinator extends Gardener {
     void pid;
     this.cost(n, 'worker', r);
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string }; raise_review?: Level; research_request?: unknown };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
@@ -809,7 +811,7 @@ export class Coordinator extends Gardener {
       return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1, noOpenModel);
     }
     if (s.ask) {
-      await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '']);
+      await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '', ...(s.ask.detail ? [`${RECOMMENDATION_PREFIX}${s.ask.detail}`] : [])]);
       return { stop: true as const };
     }
     if (s.blocked) {
