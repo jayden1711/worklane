@@ -10,6 +10,10 @@
 // review revise/reject rate, the flaky-check rate, cost per merged PR and verification time per tier, per risk
 // area (money path, auth, other) over 7 and 30 days. Measurement only: nothing here, nor in src/trust.ts that
 // reads it, changes slots, caps or merges (docs/design.md, the stage-3 waiver of 2026-10-13).
+//
+// And the delivery metrics (`deliveryMetrics`, the Metrics panel and its weekly digest): merges per day, the default
+// branch's red times and time to green, fix-forward versus revert, PR CI wall-clock, agent startup, the flake rate,
+// and the slowest tests. A source with nothing recorded yet is "not measured yet", never 0.
 
 /**
  * The events these read (their shapes, as recorded):
@@ -453,4 +457,222 @@ export function trustMetrics(events: MetricEvent[], o: { now?: Date } = {}): Tru
     return { days, since: new Date(since).toISOString(), total, byArea, failures, escapedMoney: byArea.money.escapedBugs };
   });
   return { until: new Date(now).toISOString(), windows };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Delivery metrics: how fast and how safely changes reach the default branch, for the Metrics panel and the weekly
+// digest (src/trust.ts metricsDigest). Each figure names its source; a source with nothing recorded yet is "not
+// measured yet" (`measured: false` and why), never a 0.
+
+/**
+ * Fix-forward (a red default branch fixed by a fix PR rather than reverted) isn't built yet. Its runs will record
+ * this event, `{ outcome: 'fixed' | 'reverted' | 'gave_up' }` at least, one per red default branch it took on; until
+ * one exists, the fix-forward figure says it is not measured yet.
+ */
+export const FIX_FORWARD_EVENT = 'fix_forward.finished';
+/** The windows the delivery metrics cover, in days. */
+export const DELIVERY_WINDOWS = [7, 30] as const;
+/** The slow tests are over this many days. */
+export const SLOW_TEST_DAYS = 7;
+/** How many of the slowest tests are listed. */
+export const SLOWEST = 20;
+/** At most this many over-budget tests are listed (and how many there are in all). */
+export const OVER_BUDGET_LISTED = 50;
+/** The merges-per-day series: this many days, today last. */
+export const PER_DAY_DAYS = 14;
+
+export type Measure<T> = ({ measured: true } & T) | { measured: false; why: string };
+
+export interface DeliveryWindow {
+  days: number;
+  since: string;
+  /** Merges to the default branch the log records: merged PRs and direct lands. */
+  merges: Measure<{ total: number; perDay: number }>;
+  /** Times the default branch went red after a merge (a red after a green, or the first; red again while red is the same time). */
+  mainRed: Measure<{ count: number; stillRed: boolean }>;
+  /** Minutes from the default branch going red to its next green, for each red time that went green. */
+  timeToGreen: Measure<{ minutes: number[]; medianMinutes: number | null }>;
+  /** Revert PRs opened (after a red default branch, or for a commit the main watch couldn't account for) and merged. */
+  reverts: Measure<{ opened: number; onRed: number; merged: number; redTimes: number; rate: number | null }>;
+  /** Fix-forward's outcomes, once it exists (FIX_FORWARD_EVENT). */
+  fixForward: Measure<{ attempts: number; fixed: number; reverted: number; successRate: number | null }>;
+  /** Merged PRs' CI wall-clock (ci.pr_timing). */
+  prCi: Measure<{ prs: number; medianMinutes: number | null; p90Minutes: number | null; slowest: { number: number; minutes: number }[] }>;
+  /** Seconds from a task being claimed to its agent's process starting (issue.claimed to run.started). */
+  startup: Measure<{ runs: number; medianSeconds: number | null; p90Seconds: number | null }>;
+  /** Re-runs of a red default branch's failing checks that found a flaky one, over all such re-runs (flaky.rerun_result). */
+  flake: Measure<{ reruns: number; flaky: number; rate: number | null; quarantined: number }>;
+}
+
+export interface SlowTest {
+  name: string;
+  medianMs: number;
+  maxMs: number;
+  runs: number;
+}
+
+export interface SlowTests {
+  days: number;
+  budgetS: number;
+  /** Runs (test-run tiers and CI jobs) in the window that printed durations this reads. */
+  runs: number;
+  slowest: SlowTest[];
+  overBudget: SlowTest[];
+  overBudgetTotal: number;
+}
+
+export interface DeliveryMetrics {
+  until: string;
+  windows: DeliveryWindow[];
+  /** Merges per day, the last PER_DAY_DAYS days (UTC), today last. Null when merges aren't measured yet. */
+  perDay: { day: string; merged: number }[] | null;
+  slowTests: Measure<SlowTests>;
+}
+
+const pctile = (xs: number[], q: number) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.max(0, Math.ceil(q * s.length) - 1))]!;
+};
+const prOfUrl = (u: unknown) => {
+  const m = typeof u === 'string' ? u.match(/\/pull\/(\d+)\b/) : null;
+  return m ? Number(m[1]) : null;
+};
+const MAIN_UNSEEN = "the default branch's checks after a merge (merge.main_result) haven't been recorded yet";
+
+/**
+ * The delivery metrics over each of DELIVERY_WINDOWS up to `now`, and the slow tests over SLOW_TEST_DAYS. Pure: the
+ * event log in, numbers out. `budgetS`: config.yaml metrics.slow_test_budget_s.
+ */
+export function deliveryMetrics(events: MetricEvent[], o: { now?: Date; budgetS: number }): DeliveryMetrics {
+  const now = (o.now ?? new Date()).getTime();
+  const T = (e: MetricEvent) => Date.parse(e.ts);
+  const evs = events.filter((e) => T(e) <= now).sort((a, b) => T(a) - T(b));
+  const P = (e: MetricEvent) => e.payload as Record<string, unknown>;
+  const has = (...types: string[]) => evs.some((e) => types.includes(e.type));
+
+  // Merges: one per PR (merge.done and pr.closed both record the harness's), and each direct land.
+  const merges = new Map<string, number>();
+  for (const e of evs) {
+    const p = P(e);
+    if ((e.type === 'merge.done' || (e.type === 'pr.closed' && p.merged === true)) && typeof p.number === 'number') {
+      if (!merges.has(`pr:${p.number}`)) merges.set(`pr:${p.number}`, T(e));
+    } else if (e.type === 'land.result' && p.outcome === 'landed') merges.set(`land:${String(p.issue)}:${String(p.landed)}`, T(e));
+  }
+  const mergesSeen = merges.size > 0;
+
+  // The default branch's red times: from a red result (after a green, or the first) to the next green.
+  const red: { at: number; green: number | null }[] = [];
+  let open: { at: number; green: number | null } | null = null;
+  for (const e of evs) {
+    if (e.type !== 'merge.main_result') continue;
+    const outcome = P(e).outcome;
+    if (outcome === 'red' && !open) red.push((open = { at: T(e), green: null }));
+    else if (outcome === 'green' && open) {
+      open.green = T(e);
+      open = null;
+    }
+  }
+  const mainSeen = has('merge.main_result');
+
+  // Revert PRs: opened on a red default branch (merge.stopped) or for an unaccounted commit (main_watch.unaccounted).
+  const reverts = new Map<string, { at: number; onRed: boolean; number: number | null }>();
+  for (const e of evs) {
+    const p = P(e);
+    if ((e.type === 'merge.stopped' || e.type === 'main_watch.unaccounted') && typeof p.revert === 'string' && p.revert && !reverts.has(p.revert))
+      reverts.set(p.revert, { at: T(e), onRed: e.type === 'merge.stopped', number: prOfUrl(p.revert) });
+  }
+  const revertNumbers = new Set([...reverts.values()].map((r) => r.number).filter((n): n is number => n !== null));
+  const revertMerged = new Map<number, number>();
+  for (const e of evs) {
+    const p = P(e);
+    if (typeof p.number !== 'number' || revertMerged.has(p.number)) continue;
+    const merged = e.type === 'merge.done' || (e.type === 'pr.closed' && p.merged === true);
+    if (merged && (revertNumbers.has(p.number) || (e.type === 'merge.done' && /^revert\b/i.test(String(p.title ?? ''))))) revertMerged.set(p.number, T(e));
+  }
+  const revertsSeen = mainSeen || has('main_watch.mode', 'main_watch.checked', 'main_watch.unaccounted', 'merge.stopped');
+
+  // Agent startup: each claim to the first agent process started on that issue after it (before it is claimed again).
+  const startups: { at: number; secs: number }[] = [];
+  const claimed = new Map<number, number>();
+  for (const e of evs) {
+    const p = P(e);
+    if (typeof p.issue !== 'number') continue;
+    if (e.type === 'issue.claimed') claimed.set(p.issue, T(e));
+    else if (e.type === 'run.started' && claimed.has(p.issue)) {
+      startups.push({ at: claimed.get(p.issue)!, secs: Math.max(0, (T(e) - claimed.get(p.issue)!) / 1000) });
+      claimed.delete(p.issue);
+    }
+  }
+
+  const fixForward = evs.filter((e) => e.type === FIX_FORWARD_EVENT);
+  const prCi = evs.filter((e) => e.type === 'ci.pr_timing' && typeof P(e).wall_ms === 'number');
+  const reruns = evs.filter((e) => e.type === 'flaky.rerun_result');
+
+  const windows = DELIVERY_WINDOWS.map((days): DeliveryWindow => {
+    const since = now - days * DAY_MS;
+    const inW = (t: number) => t > since && t <= now;
+    const evW = (e: MetricEvent) => inW(T(e));
+    const mergeCount = [...merges.values()].filter(inW).length;
+    const reds = red.filter((r) => inW(r.at));
+    const toGreen = reds.filter((r) => r.green !== null).map((r) => round1(minutes(r.green! - r.at)));
+    const rv = [...reverts.values()].filter((r) => inW(r.at));
+    const onRed = rv.filter((r) => r.onRed).length;
+    const ff = fixForward.filter(evW).map((e) => String(P(e).outcome));
+    const ci = prCi.filter(evW).map((e) => ({ number: Number(P(e).number), minutes: round1(minutes(Number(P(e).wall_ms))) }));
+    const st = startups.filter((s) => inW(s.at)).map((s) => round1(s.secs));
+    const rr = reruns.filter(evW);
+    const flaky = rr.filter((e) => ((P(e).flaky as unknown[]) ?? []).length > 0).length;
+    return {
+      days,
+      since: new Date(since).toISOString(),
+      merges: mergesSeen ? { measured: true, total: mergeCount, perDay: round1(mergeCount / days) } : { measured: false, why: 'no merge recorded yet' },
+      mainRed: mainSeen ? { measured: true, count: reds.length, stillRed: open !== null } : { measured: false, why: MAIN_UNSEEN },
+      timeToGreen: mainSeen ? { measured: true, minutes: toGreen, medianMinutes: median(toGreen) } : { measured: false, why: MAIN_UNSEEN },
+      reverts: revertsSeen
+        ? { measured: true, opened: rv.length, onRed, merged: [...revertMerged.values()].filter(inW).length, redTimes: reds.length, rate: rate(onRed, reds.length) }
+        : { measured: false, why: 'neither the check of the default branch after a merge nor the main watch has run yet' },
+      fixForward: fixForward.length
+        ? { measured: true, attempts: ff.length, fixed: ff.filter((x) => x === 'fixed').length, reverted: ff.filter((x) => x === 'reverted').length, successRate: rate(ff.filter((x) => x === 'fixed').length, ff.length) }
+        : { measured: false, why: `fix-forward isn't built yet; this fills from its ${FIX_FORWARD_EVENT} events once it is` },
+      prCi: prCi.length
+        ? { measured: true, prs: ci.length, medianMinutes: median(ci.map((c) => c.minutes)), p90Minutes: pctile(ci.map((c) => c.minutes), 0.9), slowest: [...ci].sort((a, b) => b.minutes - a.minutes).slice(0, 3) }
+        : { measured: false, why: "no merged PR's check runs have been read from GitHub yet" },
+      startup: startups.length ? { measured: true, runs: st.length, medianSeconds: median(st), p90Seconds: pctile(st, 0.9) } : { measured: false, why: 'no task has been claimed and its agent started yet' },
+      flake: reruns.length
+        ? { measured: true, reruns: rr.length, flaky, rate: rate(flaky, rr.length), quarantined: evs.filter((e) => e.type === 'flaky.quarantined' && evW(e)).length }
+        : { measured: false, why: "no re-run of a red default branch's failing checks recorded yet (flaky.rerun_result)" },
+    };
+  });
+
+  // Merges per day: the last PER_DAY_DAYS UTC days.
+  const day = (t: number) => new Date(t).toISOString().slice(0, 10);
+  const perDay = mergesSeen
+    ? Array.from({ length: PER_DAY_DAYS }, (_, i) => {
+        const d = day(now - (PER_DAY_DAYS - 1 - i) * DAY_MS);
+        return { day: d, merged: [...merges.values()].filter((t) => day(t) === d).length };
+      })
+    : null;
+
+  // Slow tests: every run's durations over SLOW_TEST_DAYS, by test name; a test's figure is the median of its runs.
+  const sinceSlow = now - SLOW_TEST_DAYS * DAY_MS;
+  const runs = evs.filter((e) => (e.type === 'testrun.durations' || e.type === 'ci.test_durations') && T(e) > sinceSlow);
+  const read = runs.filter((e) => Number(P(e).parsed) > 0);
+  const by = new Map<string, number[]>();
+  for (const e of read) for (const t of (P(e).tests as { name: string; ms: number }[]) ?? []) by.set(t.name, [...(by.get(t.name) ?? []), t.ms]);
+  const tests: SlowTest[] = [...by]
+    .map(([name, ms]) => ({ name, medianMs: round1(median(ms)!), maxMs: Math.max(...ms), runs: ms.length }))
+    .sort((a, b) => b.medianMs - a.medianMs || a.name.localeCompare(b.name));
+  const over = tests.filter((t) => t.medianMs > o.budgetS * 1000);
+  const slowTests: Measure<SlowTests> = read.length
+    ? { measured: true, days: SLOW_TEST_DAYS, budgetS: o.budgetS, runs: read.length, slowest: tests.slice(0, SLOWEST), overBudget: over.slice(0, OVER_BUDGET_LISTED), overBudgetTotal: over.length }
+    : {
+        measured: false,
+        why: runs.length && runs.every((e) => typeof P(e).error === 'string')
+          ? `the CI logs couldn't be read (${String(P(runs.at(-1)!).error)})`
+          : runs.length
+          ? `the last ${SLOW_TEST_DAYS} days' test output printed no per-test durations this reads (node:test, pytest --durations, go test -v, jest or vitest verbose)`
+          : `no test run or CI log with per-test durations in the last ${SLOW_TEST_DAYS} days`,
+      };
+  return { until: new Date(now).toISOString(), windows, perDay, slowTests };
 }

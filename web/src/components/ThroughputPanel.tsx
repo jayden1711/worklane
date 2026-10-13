@@ -35,7 +35,7 @@ export const throughputRefusal = (state: Pick<State, 'canReadThroughput' | 'owne
   state.canReadThroughput === false ? `throughput is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
 /** Merged PRs per day as one quiet series of bars (each hoverable), labelled at the ends. */
-function MergedBars({ days }: { days: Throughput['merged']['perDay'] }) {
+export function MergedBars({ days }: { days: Throughput['merged']['perDay'] }) {
   const max = Math.max(1, ...days.map((d) => d.merged));
   return (
     <div>

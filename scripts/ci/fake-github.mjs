@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// CI only (the "add-project (real systemd)" job in .github/workflows/ci.yml): the fake GitHub the manifest flow's
+// CI only (the "add-project (real systemd)" job in .github/workflows/ci-slow.yml): the fake GitHub the manifest flow's
 // tests use (test/fake-github.ts, built to dist/test), as a server, for add-project.sh end to end on a real host. The
 // App (id 91) is installed on <owner/repo> alone, with the agent App's permissions; the repo is served over git's
 // smart HTTP from <git root>, to the installation token only. Every request goes to <log file>, one line each, with

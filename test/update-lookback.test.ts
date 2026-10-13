@@ -229,3 +229,32 @@ test('a held commit is passed over for an older green one; a held tip with nothi
   assert.equal(await u.run(only.deps), 'held');
   assert.match(String(only.logs.at(-1)!.reason), /^rolled back at .*held until a newer commit/);
 });
+
+test('a commit with over 100 check runs: every page is read, so required checks on a later page count; a missing page installs nothing', async () => {
+  // The CI batch's scheduled run adds a check to main's tip every half hour; GitHub lists the newest first.
+  const [c1] = line(['green']);
+  const batchRuns = Array.from({ length: 100 }, (_, i) => ({ name: 'ci batch', status: 'completed', conclusion: 'success', started_at: `2026-10-13T1${i % 10}:00:00Z`, id: 100 + i }));
+  const paged = (page2: unknown) => {
+    const m = machine({ commits: [c1!], tip: c1!.sha });
+    const base = m.deps.fetchJson;
+    m.deps.fetchJson = async (url: string) => {
+      if (!url.includes('/check-runs')) return base(url);
+      m.calls.push(`fetch ${url.split('/repos/example-org/engine/')[1]}`);
+      const page = Number(new URL(url).searchParams.get('page') ?? '1');
+      return (page === 1 ? { total_count: 102, check_runs: batchRuns } : page === 2 ? page2 : { total_count: 102, check_runs: [] }) as never;
+    };
+    return m;
+  };
+  const m = paged({ total_count: 102, check_runs: runs('green') });
+  assert.equal(await u.run(m.deps), 'installed');
+  assert.equal(m.current(), c1!.sha);
+  assert.deepEqual(m.calls.filter((c) => c.includes('/check-runs')), [`fetch commits/${c1!.sha}/check-runs?per_page=100`, `fetch commits/${c1!.sha}/check-runs?per_page=100&page=2`], 'two pages, no third');
+  assert.deepEqual(m.sleeps.slice(0, 1), [u.CHECKS_SPACING_MS], 'the second page waits its turn');
+
+  const red = paged({ total_count: 102, check_runs: runs('red') });
+  assert.equal(await u.run(red.deps), 'refused', 'a red required check on page 2 counts');
+  assert.equal(red.current(), OLD);
+  const gone = paged(null);
+  assert.equal(await u.run(gone.deps), 'waiting', 'a page GitHub gave no answer for could hide a red check: wait');
+  assert.equal(gone.current(), OLD);
+});

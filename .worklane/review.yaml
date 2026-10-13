@@ -20,3 +20,10 @@ merge:
   max_lines: 800
   max_files: 20
   wait_categories: [engine, self-modification]
+
+# Agent PRs over this many changed lines (lockfiles and generated files not counted) go back to the worker to be
+# split, unless mechanical (only renames, moves and formatting). src/pr-rules.ts.
+max_pr_lines: 600
+# Docs-only PRs (only *.md and docs/**): the harness's merge call waits on just these light checks. GitHub's
+# ruleset still requires every required check before the merge goes through.
+docs_only_checks: [denylist, dco, push-gate, scan]
