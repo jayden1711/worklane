@@ -82,7 +82,6 @@ export function settingsProblems(s: InstanceSettings, limits: Limits, policy?: P
   return out;
 }
 
-/** The instance's eval_routing over the repo's routing: each key it sets, recorded as coming from policy.yaml. */
 function instanceEvalRouting(a: Config['agents'], e: NonNullable<InstanceSettings['eval_routing']>): Pick<Config['agents'], 'routing' | 'routing_from'> {
   const routing = { ...a.routing };
   const from = { ...a.routing_from };

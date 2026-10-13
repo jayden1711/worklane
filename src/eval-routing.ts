@@ -14,7 +14,6 @@ export interface EvalRouting {
 
 export const DEFAULT_EVAL_ROUTING: EvalRouting = { cheap_model: ROUTING.eval_cheap.default, cheap_levels: ROUTING.eval_cheap_levels.default, escalate: ROUTING.eval_escalate.default };
 
-/** The tiering for a config: agents.yaml `routing` eval_* keys (or the old `eval_routing`) over the defaults. */
 export function evalRouting(agents: Parameters<typeof route>[0]): EvalRouting {
   return { cheap_model: route(agents, 'eval_cheap').value, cheap_levels: route(agents, 'eval_cheap_levels').value, escalate: route(agents, 'eval_escalate').value };
 }

@@ -168,7 +168,7 @@ adds the issue's and the dashboard's links itself). Anything else, a run that en
 spend cap reached, posts the fixed template and the dashboard's link instead; which was used and why is recorded
 (`discord.explained`), once per thread.
 
-Summaries and thread runs are short runs on the routed models (`model_routing.intake_summary`, haiku, and
+Summaries and thread runs are short runs on the routed models (`routing.intake_summary`, haiku, and
 `intake_thread`, sonnet: on haiku its held-out eval score dropped), each counted against `intake.max_usd_per_day` and the daily budget. Over the cap, a summary is
 the template, and a reply that isn't an exact option is asked back without a run.
 

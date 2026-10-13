@@ -15,16 +15,17 @@ roles:
 # judge answers yes/no per rubric item and is never the model under test (defaults: the
 # workers' model under test, the evaluator's as judge).
 instruction_evals: { enabled: true, cap_usd: 10, samples: 3 }
-# Which model each kind of run uses, decided in code. Defaults: builds (worker, investigator, conflict fix)
-# on workers.model; an issue labelled size:L, money-path, review:L3 or high-risk, or a build that already
-# failed escalate_after times, on hard_issues_model (else opus); planning, research and eval answers on
-# sonnet, as are the stage-label judge and decision-thread questions; intake replies and decision summaries on haiku;
-# intake triage on the researcher's model (else the workers'). Override any key here; the instance's policy.yaml
-# settings.model_cap caps every model at a tier.
-# model_routing: { build: sonnet, build_high_risk: opus, escalate_after: 2, planner: sonnet, research: sonnet,
-#                  intake_triage: sonnet, intake_replier: haiku, intake_summary: haiku, intake_thread: sonnet,
-#                  stage_judge: sonnet, eval_answer: sonnet }
-# Tiered evaluation, decided in code: changes at cheap_levels (L0: docs-only, tests-only, comment-only) are
-# judged by cheap_model, the rest by the evaluator's model; a failed or uncertain cheap verdict is judged once
-# more by the evaluator's model. An instance can override it in policy.yaml settings.eval_routing.
-eval_routing: { cheap_model: sonnet, cheap_levels: [L0], escalate: true }
+# Routing: which model each kind of run uses, and the evaluator's tiering, decided in code. Defaults: builds
+# (worker, investigator, conflict fix) on workers.model; an issue labelled size:L, money-path, review:L3 or
+# high-risk, or a build that already failed escalate_after times, on hard_issues_model (else opus); planning,
+# research and eval answers on sonnet, as are the stage-label judge and decision-thread questions; intake replies
+# and decision summaries on haiku; intake triage on the researcher's model (else the workers'). Tiered evaluation:
+# changes at eval_cheap_levels (L0: docs-only, tests-only, comment-only) are judged by eval_cheap, the rest by the
+# evaluator's model; a failed or uncertain cheap verdict is judged once more by the evaluator's model. Override any
+# key here (the dashboard's Settings page shows each key in effect and where it came from); the instance's
+# policy.yaml settings.model_cap caps every model at a tier, and settings.eval_routing overrides the eval_* keys.
+# The older model_routing and eval_routing sections still load, as aliases.
+# routing: { build: sonnet, build_high_risk: opus, escalate_after: 2, planner: sonnet, research: sonnet,
+#            intake_triage: sonnet, intake_replier: haiku, intake_summary: haiku, intake_thread: sonnet,
+#            stage_judge: sonnet, eval_answer: sonnet }
+routing: { eval_cheap: sonnet, eval_cheap_levels: [L0], eval_escalate: true }

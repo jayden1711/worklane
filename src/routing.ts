@@ -1,11 +1,9 @@
-// Routing, one source: the model (and evaluation tiering) each task type uses. agents.yaml `routing` sets any key;
-// the older `model_routing` and `eval_routing` sections are read as aliases of it (src/config/schema.ts merges
-// them). Every default lives here; src/model-routing.ts and src/eval-routing.ts read their values through this.
+// INVARIANT (item 32): the one source of routing defaults; agents.yaml `routing` (and its aliases, merged in
+// src/config/schema.ts) overrides them, and src/model-routing.ts and src/eval-routing.ts read through route().
 import type { Level } from './review.js';
 
 export const DEFAULT_HIGH_RISK_LABELS = ['size:L', 'money-path', 'review:L3', 'high-risk'];
 
-/** Every routing key with its default and the task it routes. */
 export const ROUTING = {
   build: { default: 'sonnet' as string, task: 'L1/L2 builds (worker, investigator, conflict fix)' },
   build_high_risk: { default: 'opus' as string, task: 'L3 and high-risk builds, and a build past escalate_after failed attempts' },
@@ -30,7 +28,6 @@ export type RoutingKey = keyof typeof ROUTING;
 export type Routing = { -readonly [K in RoutingKey]: (typeof ROUTING)[K]['default'] };
 export const ROUTING_KEYS = Object.keys(ROUTING) as RoutingKey[];
 
-/** The old sections, each key's name in `routing`. */
 export const ROUTING_ALIASES = {
   model_routing: Object.fromEntries(ROUTING_KEYS.filter((k) => !k.startsWith('eval_') || k === 'eval_answer').map((k) => [k, k])) as Record<string, RoutingKey>,
   eval_routing: { cheap_model: 'eval_cheap', cheap_levels: 'eval_cheap_levels', escalate: 'eval_escalate' } as Record<string, RoutingKey>,
@@ -38,20 +35,17 @@ export const ROUTING_ALIASES = {
 
 interface RoutingSource {
   roles: { workers?: { model: string; hard_issues_model?: string | undefined; [k: string]: unknown } | undefined; researcher?: { model: string; [k: string]: unknown } | undefined; [k: string]: unknown };
-  /** What agents.yaml (or the instance) set, merged; absent keys take their fallback or default. */
   routing?: Partial<Routing>;
-  /** Where each set key came from, e.g. `routing.build` or `model_routing.build`. */
   routing_from?: Partial<Record<RoutingKey, string>>;
 }
 
 export interface RouteValue<K extends RoutingKey = RoutingKey> {
   key: K;
   value: Routing[K];
-  /** The config path it came from; null: the default in code. */
+  /** INVARIANT: null means the default in code. */
   from: string | null;
 }
 
-/** A key's effective value and where it came from: the set value, else a role's model that stood in for it before, else the default. */
 export function route<K extends RoutingKey>(a: RoutingSource, key: K): RouteValue<K> {
   const set = a.routing?.[key];
   if (set !== undefined) return { key, value: set as Routing[K], from: a.routing_from?.[key] ?? `routing.${key}` };
@@ -68,7 +62,6 @@ export function route<K extends RoutingKey>(a: RoutingSource, key: K): RouteValu
   return { key, value: ROUTING[key].default as Routing[K], from: null };
 }
 
-/** Every key's effective value, in ROUTING order. */
 export function effectiveRouting(a: RoutingSource): RouteValue[] {
   return ROUTING_KEYS.map((k) => route(a, k));
 }

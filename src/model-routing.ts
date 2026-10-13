@@ -39,7 +39,6 @@ export interface ModelRouting {
 
 export { DEFAULT_HIGH_RISK_LABELS } from './routing.js';
 
-/** The routing for a config: agents.yaml `routing` (or its old `model_routing` keys) over the defaults (src/routing.ts). */
 export function modelRouting(agents: Parameters<typeof route>[0]): ModelRouting {
   const v = <K extends keyof ModelRouting>(k: K) => route(agents, k).value as ModelRouting[K];
   return {
