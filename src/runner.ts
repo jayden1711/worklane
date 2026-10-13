@@ -192,19 +192,47 @@ export interface RunAs {
   path?: string;
 }
 
+/**
+ * The agent user's own identity and places: its home, its name, its Claude login and its XDG dirs under its home.
+ * The one source for every process run as the agent user that reads its login (agent runs, and every `claude auth
+ * status` probe), so a probe can't look in the coordinator's home while runs look in the agent's.
+ */
+export function agentUserEnv(r: RunAs): Record<string, string> {
+  const j = posix.join; // agent users exist on POSIX systems only
+  return {
+    HOME: r.home,
+    USER: r.user,
+    LOGNAME: r.user,
+    CLAUDE_CONFIG_DIR: r.claudeConfigDir ?? j(r.home, '.claude'),
+    XDG_CONFIG_HOME: j(r.home, '.config'),
+    XDG_DATA_HOME: j(r.home, '.local', 'share'),
+    XDG_CACHE_HOME: j(r.home, '.cache'),
+    XDG_STATE_HOME: j(r.home, '.local', 'state'),
+  };
+}
+
 /** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */
 export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
   return {
     ...env,
-    HOME: r.home,
-    USER: r.user,
-    LOGNAME: r.user,
-    CLAUDE_CONFIG_DIR: r.claudeConfigDir ?? posix.join(r.home, '.claude'), // agent users exist on POSIX systems only
+    ...agentUserEnv(r),
     // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
     GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_1: 'safe.directory',
     GIT_CONFIG_VALUE_1: '*',
   };
+}
+
+/**
+ * How to run `claude auth status --json`: as the agent user (through sudo, with that user's environment from
+ * agentUserEnv, as its runs get it), else as this process. The command, its arguments and spawn's own env.
+ */
+export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  const argv = ['auth', 'status', '--json'];
+  if (!runAs) return { file: bin, args: argv, env };
+  const [file, args] = asUser(runAs.user, bin, argv, { ...env, ...agentUserEnv(runAs) });
+  // As another user, sudo gets only PATH; the probe's environment is passed explicitly through env -i.
+  return { file, args, env: { PATH: env.PATH ?? '' } };
 }
 
 /** Which auth `claude` would use. The cli runtime refuses API-key billing it wasn't asked for. */
@@ -214,8 +242,8 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
 
 /** claude auth status: the auth method ('none' when signed out, 'unknown' when unreadable) and what it printed otherwise. */
 export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string } {
-  const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
-  const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
+  const c = authStatusCommand(env, runAs, bin);
+  const r = spawnSync(c.file, c.args, { encoding: 'utf8', env: c.env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string };
     return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '' };
@@ -229,8 +257,8 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
  * when the CLI reports one. Never the token (the command doesn't print it). Null when it couldn't be read.
  */
 export function claudeAuthStatusJson(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { loggedIn: boolean; expiresAt?: unknown } | null {
-  const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
-  const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
+  const c = authStatusCommand(env, runAs, bin);
+  const r = spawnSync(c.file, c.args, { encoding: 'utf8', env: c.env, timeout: 30_000 });
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: unknown; expiresAt?: unknown };
     return typeof j.loggedIn === 'boolean' ? { loggedIn: j.loggedIn, ...(j.expiresAt !== undefined ? { expiresAt: j.expiresAt } : {}) } : null;
