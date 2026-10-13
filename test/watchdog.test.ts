@@ -310,6 +310,31 @@ test('one poster per machine: of two coordinators, one runs the machine checks a
   assert.equal(b.w.posts.length, 1, 'the other took over and posted the resolution');
 });
 
+test('a stopping coordinator takes no part in the election: not from a pass under way, nor a later one; a running one takes over', async () => {
+  const a = world({ instance: 'alpha' });
+  const b = world({ instance: 'beta', dir: a.w.dir });
+  b.w.now = a.w.now;
+  // b's pass is under way (its GitHub token check is slow) when a stops and frees the machine role.
+  await a.pass();
+  assert.deepEqual(a.dog.elected, { machine: true, post: true });
+  let release!: () => void;
+  b.deps.githubToken = () => new Promise<string>((r) => (release = () => r('token')));
+  const taken: string[] = [];
+  b.deps.log = (l) => taken.push(l);
+  const passing = b.pass();
+  b.dog.stop();
+  a.dog.stop();
+  release();
+  await passing;
+  assert.deepEqual(b.dog.elected, { machine: false, post: false }, 'stopped mid-pass: it never takes the role');
+  await b.pass();
+  assert.deepEqual(b.dog.elected, { machine: false, post: false }, 'nor on a later pass');
+  assert.deepEqual(taken, [], 'and never logs that it runs the machine checks');
+  const c = world({ instance: 'gamma', dir: a.w.dir });
+  await c.pass();
+  assert.deepEqual(c.dog.elected, { machine: true, post: true }, 'a running coordinator takes over');
+});
+
 test('a coordinator that can\'t post never holds the post lock', async () => {
   const a = world({ poster: false });
   await a.pass();

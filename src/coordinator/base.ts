@@ -25,7 +25,7 @@ import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
-import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted, UsagePaused } from './shared.js';
+import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted, ShuttingDown, UsagePaused } from './shared.js';
 import { limitHit, pauseOf, resetWords, USAGE_INCIDENT, type LimitHit, type UsagePause } from '../usage-limit.js';
 import { cappedModel } from './model-routing.js';
 import { resolveProvider } from './providers.js';
@@ -89,8 +89,19 @@ export abstract class CoordinatorBase {
 
   protected stopped = false;
 
-  /** Aborted by an emergency stop: every agent run gets this signal. */
+  /** Aborted by an emergency stop, and by a shutdown: every agent run gets this signal. */
   protected halt = new AbortController();
+
+  /** Aborted once, by a shutdown (stop()): project commands get this signal, and the emergency check never lifts it. */
+  protected shutdown = new AbortController();
+
+  /** The tick step running now (stop() names it when the shutdown runs out of time). */
+  protected inStep: string | null = null;
+
+  /** Why a run stops now: the shutdown, or an emergency stop. */
+  protected haltError(): Halted {
+    return this.stopped ? new ShuttingDown() : new Halted();
+  }
 
   /** Open-model providers that hit their usage or rate limit, by label: skipped (their runs fall back) until then (ms). */
   protected providerLimited = new Map<string, number>();
@@ -102,7 +113,7 @@ export abstract class CoordinatorBase {
       ...d,
       runner: {
         run: async (asked): Promise<RunResult> => {
-          if (this.halt.signal.aborted) throw new Halted();
+          if (this.halt.signal.aborted) throw this.haltError();
           // A model that names an open-model provider goes to it, or to its fallback (recorded); then the instance's
           // model cap holds for every run on an Anthropic model, whatever chose it.
           const settings = this.d.settings?.().settings ?? {};
@@ -169,7 +180,7 @@ export abstract class CoordinatorBase {
             }
           }
           if (live.stoppedBy) throw new StoppedByOwner(live.stoppedBy);
-          if (this.halt.signal.aborted) throw new Halted();
+          if (this.halt.signal.aborted) throw this.haltError();
           if (r.reason === 'rate_limited') {
             const hit = r.limit ?? limitHit({ text: r.detail, now: this.nowMs() });
             this.emit('usage.limit_hit', { ...who, provider: req.provider?.name ?? null, reset_at: hit.resetAt, source: hit.source, kind: hit.kind, detail: r.detail.slice(0, 500) });
@@ -207,7 +218,7 @@ export abstract class CoordinatorBase {
   /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
   protected project(command: string, cwd: string) {
     const share = this.coreShare();
-    return sh(withCores(command, share), cwd, this.commandTimeoutMs, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share));
+    return sh(withCores(command, share), cwd, this.commandTimeoutMs, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share), this.shutdown.signal);
   }
 
   /** How long a project command or an agent run may take (tests.yaml command_timeout_s). */
