@@ -92,6 +92,7 @@ All config sits in `<project>/.worklane/` and is validated by zod schemas at sta
   tests.yaml          # test-runner adapter, tiers, money-path suites, baseline policy, worktree setup
   review.yaml         # review levels
   deploy.yaml         # environments, deploy adapter, verification
+  benchmarks.yaml     # optional: declared benchmarks for the weekly optimization pass (a name, a command, repeats, a metric)
   roles/<role>.md     # role prompts (override the engine defaults)
   skills/<skill>/SKILL.md + evals/
   lessons/            # proposed and accepted lessons (land via review)
@@ -104,9 +105,9 @@ Settings read once at start to build something that lives as long as the process
 
 | Live (next tick) | Restart only |
 |---|---|
-| `required_checks`, `protection`, `owners`, `reports`, `hotspots`, `combined_check`, `conflicts`, `corrections`, `gardener`, `research`, `agent_runtime.run_windows` | `project.name` (service label, slots, state), `project.repo` (the token's scope), `project.default_branch` (the push guard and hooks) |
+| `required_checks`, `protection`, `owners`, `reports`, `hotspots`, `combined_check`, `conflicts`, `corrections`, `gardener`, `optimize`, `research`, `agent_runtime.run_windows` | `project.name` (service label, slots, state), `project.repo` (the token's scope), `project.default_branch` (the push guard and hooks) |
 | `land_mode: direct` to `pr` (a tightening) | `land_mode: pr` to `direct` (the start-up protection gate and the hooks that allow the land) |
-| agents.yaml, guardrails.yaml, review.yaml, deploy.yaml, app.yaml, `roles/*.md` | `backlog` (the backlog client), `agent_runtime.kind` (the agent runner) |
+| agents.yaml, guardrails.yaml, review.yaml, deploy.yaml, app.yaml, benchmarks.yaml, `roles/*.md` | `backlog` (the backlog client), `agent_runtime.kind` (the agent runner) |
 | tests.yaml except the two on the right | `tests.worktree.root` (where worktrees and the pool live), `tests.test_run` (the sandbox set up and checked at start) |
 
 Instance-level files (`instance.yaml`, `credentials.yaml`, `intake.yaml`, ports and OS users) are not in the repo and are unaffected; `policy.yaml` is read on its own as before. Still read from the checkout: a review.yaml `money_path_source` file (a project file, not `.worklane/`), and the dashboard process's own copy of the config, loaded at its start.
@@ -438,6 +439,11 @@ How each level is cleared:
   - **Plans cite decisions** (the owner's rule). Every plan has a Decisions section: "Rests on:" the recorded entries it relies on, "Argues against:" the recorded entries that cut against it, each with why the plan goes ahead anyway, or exactly "nothing recorded on this", alone. Entries come from the decisions index: the decisions already made (cited `decision <id>`) and the sections of the decision records in the checkout (`decisions.md`, `DECISIONS.md`, `docs/decisions.md`, `.worklane/decisions.md`, a `decisions/`, `docs/decisions/` or `docs/adr/` folder, and `docs/design.md`; cited `<file> § <heading>`, or by an id such as `D-12`). The plan contract check (`src/plan-decisions.ts`) refuses a plan without the section or citing what the files don't hold. Plan review, a fresh read-only `plan-reviewer` run, gets the plan, the full text of every entry it cites and the index, and names each recorded decision the plan contradicts without arguing against it. A refused plan goes back to the planner once with why, then the task is blocked. A plan that argues against a recorded decision waits for the owner, like a design-level one.
   - Skills and slash commands cover repeated workflows.
   - A PostToolUse formatter runs only if the project has one.
+- **Weekly optimization pass** (`src/optimize.ts`, wired in `src/coordinator/optimize.ts`; config.yaml `optimize`, off by default: `{ enabled, weekday, at, budget_usd, max_prs, targets, slow_test_command, repeats }`).
+  - **Targets:** the benchmarks declared in `.worklane/benchmarks.yaml` (`name`, `command`, `repeats`, `metric`: `wall_ms` or a `pattern` whose capture group is the number, `lower_is_better`, an optional `profile` command), and `slowest_tests`: the slowest test the metrics recorded over the week (`testrun.durations`, `ci.test_durations` events), run alone by `slow_test_command` with `{name}` (made shell-safe: anything but letters, digits, `_` and `-` becomes `.`). `targets` lists them in priority order; empty means every benchmark, then the slowest test. The pass picks the first never tried, else the one tried longest ago. No benchmark framework: a command and a number.
+  - **The pass**, on `weekday` after `at` (local): the target's command `repeats` times on the default branch's tip, in a scratch worktree (median and MAD), then a normal task (label `optimize`, a `suite: full` contract) with the numbers, the profile (the `profile` command's output, else the last run's) and the rule: change only what improves this number, same behavior, every test passes. Only an `optimize` task this instance's own `optimize.pass` filed is dispatched without a writer's `ready`; the label alone makes nothing actionable. It builds on the high-risk build model (agents.yaml `model_routing.build_high_risk`, the strongest).
+  - **The gate:** after the normal checks and the evaluator, before landing, the coordinator runs the benchmark `repeats` times on the change (and on main again if the task's base moved). Only a median better than main's by more than the noise (2 x the larger MAD, at least 1% of main's median) goes on (`optimize.result` `improved`): the PR, a normal draft through every gate and the usual merge policy, carries the before and after table with every raw run. Anything else (no gain, within the noise, a failing benchmark) is `discarded`: closed with why and the numbers, no PR.
+  - **Budget:** a hard stop at `budget_usd` a week: the run.cost of the week's optimization tasks. No pass starts once it is spent, every worker run is capped at what is left, and no further attempt starts once it is gone (discarded with why). At most `max_prs` PRs a week, one task at a time, PR land mode only.
 
 ## 12. Guardrails
 
