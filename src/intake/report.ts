@@ -61,7 +61,7 @@ export interface IntakeSource {
   dm?(user: string, text: string): Promise<boolean>;
 }
 
-/** How a reply is sent: `mentions`, the users it pings (only discord.owners, only in the bot's own thread; the adapter enforces both). */
+/** How a reply is sent: `mentions`, the users it pings (only discord.owners, only in the bot's own thread or the ops channel; the adapter enforces both). */
 export interface ReplyOptions {
   mentions?: string[];
 }

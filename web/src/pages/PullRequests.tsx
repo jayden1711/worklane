@@ -188,6 +188,11 @@ export function PullRequestsView({ view }: { view: PrsView }) {
           <span>
             repo review.yaml: <span className="text-ink">{am.repo === null ? 'n/a' : am.repo ? 'on' : 'off'}</span>
           </span>
+          {view.hygiene && (
+            <span data-testid="prs-hygiene">
+              stale PR pass {ago(view.hygiene.at)}: <span className="text-ink">{view.hygiene.line}</span>
+            </span>
+          )}
           {lastStop && (
             <span>
               last stop {ago(lastStop.at)}: {lastStop.reason}

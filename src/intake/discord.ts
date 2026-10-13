@@ -38,8 +38,10 @@ export interface DiscordOptions {
   /** The only users whose messages are taken (discord.allowed_senders); anyone else's is dropped unread. */
   allowedSenders: string[];
   prefixes: string[];
-  /** discord.owners: the only users a post may ever mention, and only in the bot's own threads. */
+  /** discord.owners: the only users a post may ever mention, and only in the bot's own threads or the ops channel. */
   owners?: string[];
+  /** discord.ops_channel: the one channel (not a thread of the bot's) a post may mention owners in. */
+  opsChannel?: string;
   /** The machine-wide identify gate (discord-gate.ts). Absent: identify at once (tests). */
   gate?: () => Promise<GateResult>;
   connect?: (url: string) => Socket;
@@ -330,10 +332,12 @@ export class DiscordIntake {
 
   /**
    * Reply in the same channel, at most REPLY_CHARS, pinging nobody, except `mentions`: users among discord.owners,
-   * and only in one of the bot's own threads (anywhere else, or anyone else, is never pinged).
+   * and only in one of the bot's own threads or the ops channel (a direct push's alert; anywhere else, or anyone
+   * else, is never pinged).
    */
   async reply(threadId: string, content: string, mentions: string[] = []): Promise<boolean> {
-    const users = this.threads.has(threadId) ? [...new Set(mentions)].filter((u) => SNOWFLAKE.test(u) && (this.o.owners ?? []).includes(u)) : [];
+    const may = this.threads.has(threadId) || (!!this.o.opsChannel && threadId === this.o.opsChannel);
+    const users = may ? [...new Set(mentions)].filter((u) => SNOWFLAKE.test(u) && (this.o.owners ?? []).includes(u)) : [];
     const tail = users.length ? ` ${users.map((u) => `<@${u}>`).join(' ')}` : '';
     const r = await (this.o.fetch ?? fetch)(`${API}/channels/${encodeURIComponent(threadId)}/messages`, {
       method: 'POST',

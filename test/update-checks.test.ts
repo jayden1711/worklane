@@ -18,6 +18,46 @@ function defaults(): string[] {
   return [...m![1]!.matchAll(/"([^"]*)"/g)].map((x) => x[1]!);
 }
 
+/** A branch filter pattern (GitHub's glob: `*` within a path segment, `**` across them) matching a branch name. */
+const branchMatches = (pattern: string, branch: string) =>
+  new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*').replace(/\?/g, '.')}$`).test(branch);
+
+type PushFilter = { branches?: string[]; 'branches-ignore'?: string[]; tags?: string[]; 'tags-ignore'?: string[] } | null;
+
+/**
+ * Whether a workflow's `on:` runs it on a push to `branch`. A bare `push` runs on every branch; a push with tag
+ * filters and no branch filter runs on those tags only, never a branch; otherwise branches / branches-ignore decide.
+ */
+function pushRunsOn(on: unknown, branch = 'main'): boolean {
+  if (on === 'push') return true;
+  if (Array.isArray(on)) return on.includes('push');
+  if (!on || typeof on !== 'object' || !('push' in on)) return false;
+  const push = (on as { push: PushFilter }).push;
+  if (!push) return true;
+  if (push.branches) return push.branches.filter((p) => !p.startsWith('!')).some((p) => branchMatches(p, branch)) && !push.branches.filter((p) => p.startsWith('!')).some((p) => branchMatches(p.slice(1), branch));
+  if (push['branches-ignore']) return !push['branches-ignore'].some((p) => branchMatches(p, branch));
+  return !(push.tags || push['tags-ignore']);
+}
+
+test('which push triggers run on a push to main', () => {
+  assert.equal(pushRunsOn('push'), true);
+  assert.equal(pushRunsOn(['push', 'pull_request']), true);
+  assert.equal(pushRunsOn({ push: null }), true);
+  assert.equal(pushRunsOn({ push: { branches: ['main'] } }), true);
+  assert.equal(pushRunsOn({ push: { branches: ['release/*'] } }), false);
+  assert.equal(pushRunsOn({ push: { branches: ['**'] } }), true);
+  assert.equal(pushRunsOn({ push: { branches: ['*', '!main'] } }), false);
+  assert.equal(pushRunsOn({ push: { 'branches-ignore': ['main'] } }), false);
+  assert.equal(pushRunsOn({ push: { 'branches-ignore': ['dependabot/**'] } }), true);
+  assert.equal(pushRunsOn({ push: { paths: ['src/**'] } }), true);
+  // Tags only: a tag push, never a branch push.
+  assert.equal(pushRunsOn({ push: { tags: ['v*'] }, workflow_dispatch: null }), false);
+  assert.equal(pushRunsOn({ push: { 'tags-ignore': ['v*'] } }), false);
+  // Tags and branches: the branch filter decides.
+  assert.equal(pushRunsOn({ push: { tags: ['v*'], branches: ['main'] } }), true);
+  assert.equal(pushRunsOn({ pull_request: null }), false);
+});
+
 type Step = { run?: string; env?: Record<string, string> };
 type Job = { name?: string; if?: string; needs?: string | string[]; strategy?: { matrix?: Record<string, unknown[]> }; steps?: Step[] };
 /**
@@ -72,10 +112,16 @@ function checks(): Check[] {
   for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x))) {
     const wf = parse(readFileSync(join(dir, f), 'utf8')) as { on?: unknown; jobs?: Record<string, Job> };
     const on = wf.on as Record<string, { branches?: string[] } | null> | string[] | undefined;
-    const push = Array.isArray(on) ? on.includes('push') : on && 'push' in on ? (on.push?.branches ?? ['main']).includes('main') : false;
-    const pr = Array.isArray(on) ? on.includes('pull_request') : !!on && 'pull_request' in on;
+    const push = pushRunsOn(wf.on);
+    // Every pull request: a pull_request trigger without a paths filter (one with paths runs on some PRs only).
+    const prOn = Array.isArray(on) ? on.includes('pull_request') : !!on && 'pull_request' in on;
+    const prFilter = !Array.isArray(on) && on && typeof on === 'object' ? (on as Record<string, { paths?: string[] } | null>).pull_request : null;
+    const pr = prOn && !prFilter?.paths;
     // A batch: the workflow ci-batch.yml dispatches on main (test/ci-batch.test.ts: only ever on the default branch).
     const batched = f === batch.SLOW_WORKFLOW && !Array.isArray(on) && !!on && 'workflow_dispatch' in on;
+    // A workflow that runs neither on a push to main, nor on every PR, nor as a batch (tags only, paths-filtered PRs,
+    // ci-batch.yml's schedule) creates no check any of the lists holds.
+    if (!push && !pr && !batched) continue;
     for (const [key, job] of Object.entries(wf.jobs ?? {})) {
       if (HELPERS[f] === key) continue;
       const t = tier(f, key, job);

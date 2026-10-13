@@ -1,6 +1,7 @@
 // tests.yaml `deploy_gate:` (docs/deploy-gate.md): a branch the project's host deploys production from, which the
 // coordinator fast-forwards only to default-branch commits whose configured test-run tiers all passed on that exact
-// commit. Absent (the default): no gate, nothing runs, nothing moves.
+// commit. Absent (the default), or present without `enabled: true`: no gate, nothing runs, nothing moves; a present
+// block is still fully validated, so a mistake shows before the owner switches it on.
 import { z } from 'zod';
 
 /** The incident a deploy branch moved outside the gate raises (src/watchdog/incidents.ts KINDS). */
@@ -107,6 +108,11 @@ export const PostDeployConfig = z
 export type PostDeployConfig = z.infer<typeof PostDeployConfig>;
 
 export const DeployGateConfig = z.strictObject({
+  /**
+   * The off switch, off by default: until the owner sets `enabled: true` in a reviewed PR, nothing runs on the default
+   * branch for the gate, the deploy branch never moves, no post-deploy check runs, and a chat `deploy <sha>` is refused.
+   */
+  enabled: z.boolean().default(false),
   /** The branch the host's production services deploy from. Never the default branch (checked at start). */
   branch: branchName.default('deploy'),
   /** test_run tiers (fast or full) that must all pass on a default-branch commit before the branch moves to it. */
@@ -120,6 +126,9 @@ export const DeployGateConfig = z.strictObject({
   post_deploy: PostDeployConfig.optional(),
 });
 export type DeployGateConfig = z.infer<typeof DeployGateConfig>;
+
+/** Why the gate does nothing while `enabled` isn't true (the override's refusal, the gate's own refusals). */
+export const DEPLOY_GATE_OFF = 'the deploy gate is off (tests.yaml deploy_gate.enabled is not true); the owner turns it on in a reviewed PR';
 
 /** What the deploy gate needs of tests.yaml: test_run, and every tier it names in it. Each problem, with its path. */
 export function deployGateProblems(gate: DeployGateConfig | undefined, testRunTiers: string[] | null): { path: (string | number)[]; message: string }[] {

@@ -164,6 +164,8 @@ export interface PrsView {
   holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
+  /** The latest stale-PR pass: its counts and their line; null before the first (absent from an older server). */
+  hygiene?: { at: string; merged_in: number; conflicting: number; closed: number; held: number; skipped: number; line: string } | null;
 }
 
 export interface ServiceLog {
@@ -255,6 +257,12 @@ export interface State {
 /** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
 export interface DeployGate {
   branch: string;
+  /** tests.yaml deploy_gate.enabled: false (the default) means configured, off: nothing runs or moves. */
+  enabled: boolean;
+  /** The test_run tiers that must pass before the branch moves. */
+  tiers: string[];
+  /** Whether a post-deploy check is configured. */
+  postDeploy: boolean;
   deployed: { sha: string; url: string; at: string | null; by: string | null; override: boolean } | null;
   held: { sha: string; url: string; at: string; reason: string } | null;
   refused: { at: string; reason: string } | null;
@@ -272,6 +280,20 @@ export interface Protection {
   accepted?: AcceptedMerge[];
   /** Whether this person may accept one (an admin, while the main watch guards the branch). */
   canAccept?: boolean;
+  /** The last commit that landed without a PR, and its ops-channel alert (owners and writers). */
+  directPush?: DirectPush | null;
+}
+
+export interface DirectPush {
+  at: string;
+  sha: string;
+  url: string;
+  kind: 'direct' | 'rewrite';
+  pusher: string | null;
+  /** posted; pending (the ops posts' limit); not_posted (with `note` saying why); off (turned off). */
+  status: 'posted' | 'pending' | 'not_posted' | 'off';
+  mentioned: number;
+  note: string | null;
 }
 
 export interface AcceptedMerge {
@@ -916,6 +938,30 @@ export interface Trust {
   note: string;
   hidden: string[];
 }
+
+/**
+ * Flaky tests (GET /api/flaky, src/flaky.ts; owners and writers): the quarantined checks, those released lately, and
+ * the flake rate (flaky re-runs over red runs on the default branch) over 7 and 30 days.
+ */
+export interface FlakyTest {
+  test: string;
+  state: 'quarantined' | 'released';
+  firstSeen: string;
+  lastSeen: string;
+  sightings: number;
+  issue: number | null;
+  url: string | null;
+  passes: number;
+  released: { at: string; how: 'passes' | 'owner'; by: string } | null;
+}
+export interface Flaky {
+  releaseAfter: number;
+  quarantined: FlakyTest[];
+  released: FlakyTest[];
+  rates: { days: number; redRuns: number; flakyReruns: number; rate: number | null }[];
+  canClear: boolean;
+}
+export const clearFlaky = (test: string) => api<{ ok: boolean }>('/api/flaky/clear', { method: 'POST', body: JSON.stringify({ test }) });
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';

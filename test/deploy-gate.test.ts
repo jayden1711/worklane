@@ -75,7 +75,8 @@ function fakeRefs(bare: string) {
   return refs;
 }
 
-const GATE = DeployGateConfig.parse({ branch: 'deploy', tiers: ['chain', 'suite'] });
+/** The gate's config, on (parsed per use, so a schema change fails the tests that use it, not the whole file). */
+const GATE = () => DeployGateConfig.parse({ enabled: true, branch: 'deploy', tiers: ['chain', 'suite'] });
 
 /** A test run's result: each named tier passes unless it is in `red`. */
 const result = (req: TestRunRequest, red: string[] = []): TestRunResult => ({
@@ -87,7 +88,7 @@ const result = (req: TestRunRequest, red: string[] = []): TestRunResult => ({
   tiers: (req.tiers ?? []).map((t) => ({ tier: t, ok: !red.includes(t), durationMs: 10, summary: '', logRef: '' })),
 });
 
-function gate(o: { red?: string[] } = {}) {
+function gate(o: { red?: string[]; config?: DeployGateConfig } = {}) {
   const r = repos();
   const log = new EventLog(join(r.base, 'events.db'));
   const stateDir = join(r.base, 'state');
@@ -97,7 +98,7 @@ function gate(o: { red?: string[] } = {}) {
   const runs: TestRunRequest[] = [];
   const posted: { sha: string; ok: boolean }[] = [];
   const g = new DeployGate({
-    config: GATE,
+    config: o.config ?? GATE(),
     defaultBranch: 'main',
     git: gateGit(r.clone, 'origin', 'main', 'deploy'),
     refs,
@@ -209,7 +210,7 @@ test('deploy gate: off by default; when set, it needs test_run and names only it
   assert.equal(bad.success, false);
   assert.match(JSON.stringify(bad.error?.issues), /no test_run tier named nope/);
   const ok = TestsConfig.parse({ ...tests, test_run: testRun, deploy_gate: { tiers: ['chain', 'suite'] } });
-  assert.deepEqual(ok.deploy_gate, { branch: 'deploy', tiers: ['chain', 'suite'], notify: 'ops' });
+  assert.deepEqual(ok.deploy_gate, { enabled: false, branch: 'deploy', tiers: ['chain', 'suite'], notify: 'ops' });
   assert.equal(DeployGateConfig.safeParse({ branch: '../main', tiers: ['suite'] }).success, false);
   // A run of named tiers runs those, of either kind, and nothing else.
   const tr = TestRunConfig.parse(testRun);
@@ -269,7 +270,7 @@ const msg = (from: string, where: { kind: 'channel' | 'thread'; id: string }, te
   thread: where,
 });
 
-function overrideSetup(o: { red?: string[] } = {}) {
+function overrideSetup(o: { red?: string[]; config?: DeployGateConfig; noGate?: boolean } = {}) {
   const t = gate(o);
   const repo = join(t.base, 'checkout');
   cpSync(join(repoRoot, 'examples', 'basic'), repo, { recursive: true });
@@ -277,7 +278,7 @@ function overrideSetup(o: { red?: string[] } = {}) {
   git(repo, 'add', '-A');
   git(repo, ...ID, 'commit', '-q', '-m', 'init');
   const cfg = loadConfig(repo);
-  cfg.tests.deploy_gate = GATE;
+  cfg.tests.deploy_gate = o.config ?? GATE();
   const slotsDir = join(t.base, 'slots');
   mkdirSync(slotsDir);
   const src = chat();
@@ -293,7 +294,7 @@ function overrideSetup(o: { red?: string[] } = {}) {
     machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) },
     settings: () => ({ settings: {}, error: null }),
     intake: { config: () => CONFIG, sources: [src], pullMs: 0, roleOf: async (l) => ROLES[l] ?? 'viewer', name: 'example' },
-    deployGate: t.g,
+    ...(o.noGate ? {} : { deployGate: t.g }),
   });
   const pass = async (...m: IncomingReport[]) => {
     src.batches.push(m);
@@ -371,4 +372,108 @@ test('deploy override: fast-forward only, never back past where deploy is', asyn
   assert.equal(parseDeployCommand('deploy abc1234'), 'abc1234');
   assert.equal(parseDeployCommand('please deploy abc1234'), null);
   assert.equal(parseDeployCommand('deploy main'), null);
+});
+
+// ---------------------------------------------------------------- the off switch (deploy_gate.enabled)
+
+const OFF = () => DeployGateConfig.parse({ enabled: false, branch: 'deploy', tiers: ['chain', 'suite'] });
+const TESTS = { version: 1, runner: { kind: 'command', changed: 'npm test', full: 'npm test' }, test_run: { tiers: [{ name: 'chain', command: 'npm run chain', kind: 'fast' }, { name: 'suite', command: 'npm test', kind: 'full' }] } };
+const POST_DEPLOY = {
+  host: 'railway',
+  project: '00000000-0000-4000-8000-000000000001',
+  environment: '00000000-0000-4000-8000-000000000002',
+  services: [{ name: 'web', id: '00000000-0000-4000-8000-000000000003' }],
+  origin: 'https://app.example.com',
+  checks: [
+    { name: 'health', kind: 'health', url: 'https://app.example.com/api/health', expect_status: 200 },
+    { name: 'sign-in', kind: 'sign_in', url: 'https://app.example.com/sign-in', expect_status: 200 },
+    { name: 'api', kind: 'api', url: 'https://app.example.com/api/status', expect_status: 200 },
+  ],
+};
+
+/** A coordinator config with test runs set up, and `gate` as its deploy_gate. */
+function cfgWith(gate: unknown) {
+  const cfg = loadConfig(join(repoRoot, 'examples', 'basic'));
+  cfg.tests = TestsConfig.parse({ ...TESTS, deploy_gate: gate });
+  return cfg;
+}
+
+test('deploy gate off: a present block with enabled: false runs nothing, moves nothing, builds no gate and no post-deploy check', async () => {
+  const t = gate({ config: OFF() });
+  t.push();
+  await t.g.step();
+  await t.g.idle();
+  assert.deepEqual(t.runs, [], 'no test run on main for the gate');
+  assert.deepEqual(t.posted, [], 'no checks posted');
+  assert.deepEqual(t.refs.calls, [], 'no ref write');
+  assert.equal(t.deployAt(), t.c1, 'deploy stays');
+  const moved = await t.g.advance(t.c2, { by: 'gate', override: false, gate: 'green' });
+  assert.equal(moved.ok, false);
+  assert.match((moved as { reason: string }).reason, /the deploy gate is off/);
+  assert.deepEqual(t.refs.calls, [], 'not even a direct advance writes the ref');
+  assert.deepEqual(t.log.read(0).map((e) => e.type), [], 'no event at all');
+  // Wired up the way the coordinator starts it: no gate, so no post-deploy check (and no ask for the host token).
+  const cfg = cfgWith({ enabled: false, tiers: ['chain', 'suite'], post_deploy: POST_DEPLOY });
+  assert.equal(cfg.tests.deploy_gate?.enabled, false);
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'deploy-gate-off-')), 'events.db'));
+  assert.equal(setupDeployGate(cfg, { repo: 'example/repo', token: async () => 't', instance: 'example', secretsHome: mkdtempSync(join(tmpdir(), 'deploy-gate-home-')) }, { log, actor: 'c', root: '/nonexistent', stateDir: '/nonexistent', testRunsReady: true }), undefined, 'no gate is built');
+  assert.deepEqual(log.read(0).map((e) => e.type), [], 'nothing logged, no paste_secret ask');
+});
+
+test('deploy gate off: an absent enabled is off', async () => {
+  const absent = DeployGateConfig.parse({ branch: 'deploy', tiers: ['chain', 'suite'] });
+  assert.equal(absent.enabled, false);
+  assert.equal(cfgWith({ tiers: ['suite'] }).tests.deploy_gate?.enabled, false);
+  const t = gate({ config: absent });
+  await t.g.step();
+  await t.g.idle();
+  assert.deepEqual(t.runs, []);
+  assert.deepEqual(t.refs.calls, []);
+  assert.equal(t.deployAt(), t.c1);
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'deploy-gate-off-')), 'events.db'));
+  assert.equal(setupDeployGate(cfgWith({ tiers: ['chain', 'suite'] }), { repo: 'example/repo', token: async () => 't' }, { log, actor: 'c', root: '/nonexistent', stateDir: '/nonexistent', testRunsReady: true }), undefined);
+});
+
+test('deploy gate on: enabled: true builds the gate and it runs and moves as before', async () => {
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'deploy-gate-on-')), 'events.db'));
+  const built = setupDeployGate(cfgWith({ enabled: true, tiers: ['chain', 'suite'] }), { repo: 'example/repo', token: async () => 't' }, { log, actor: 'c', root: '/nonexistent', stateDir: '/nonexistent', testRunsReady: true });
+  assert.ok(built instanceof DeployGate, 'the gate is built');
+  const t = gate({ config: DeployGateConfig.parse({ enabled: true, branch: 'deploy', tiers: ['chain', 'suite'] }) });
+  await t.g.step();
+  await t.g.idle();
+  assert.deepEqual(t.runs.map((r) => r.sha), [t.c2]);
+  assert.equal(t.deployAt(), t.c2, 'moved to the green tip');
+});
+
+test('deploy gate off: the config is still fully validated, an invalid post_deploy is refused', () => {
+  assert.equal(TestsConfig.safeParse({ ...TESTS, deploy_gate: { enabled: false, tiers: ['suite'], post_deploy: POST_DEPLOY } }).success, true, 'a valid block, off');
+  const bad = TestsConfig.safeParse({ ...TESTS, deploy_gate: { enabled: false, tiers: ['suite'], post_deploy: { ...POST_DEPLOY, origin: 'http://app.example.com' } } });
+  assert.equal(bad.success, false);
+  const issues = bad.error!.issues;
+  assert.deepEqual(issues.map((i) => i.path.join('.')), ['deploy_gate.post_deploy.origin'], 'only the post_deploy mistake');
+  assert.match(issues[0]!.message, /https only/);
+  const noApi = TestsConfig.safeParse({ ...TESTS, deploy_gate: { tiers: ['suite'], post_deploy: { ...POST_DEPLOY, checks: POST_DEPLOY.checks.slice(0, 2).concat([{ ...POST_DEPLOY.checks[0]!, name: 'health2' }]) } } });
+  assert.equal(noApi.success, false, 'enabled absent (off): still refused');
+  assert.match(JSON.stringify(noApi.error?.issues), /needs a api check/);
+  assert.equal(TestsConfig.safeParse({ ...TESTS, deploy_gate: { enabled: false, tiers: ['nope'] } }).success, false, 'an unknown tier, off: refused');
+  assert.equal(TestsConfig.safeParse({ ...TESTS, deploy_gate: { enabled: 'yes', tiers: ['suite'] } }).success, false, 'enabled is a boolean');
+});
+
+test('deploy override: refused while the gate is off, saying so; nothing moves', async () => {
+  // As the coordinator runs it: the block is present, off, so no gate was built.
+  const t = overrideSetup({ config: OFF(), noGate: true });
+  await t.pass(msg(OWNER_ID, { kind: 'channel', id: CHANNEL }, `deploy ${t.c2}`));
+  assert.equal(t.src.threads.length, 0, 'no confirm thread');
+  assert.deepEqual(t.refs.calls, []);
+  assert.equal(t.deployAt(), t.c1);
+  assert.deepEqual(t.of('deploy_gate.override').map((p) => [p.by, p.stage]), [['example-owner', 'refused']]);
+  assert.match(t.src.posts.filter((p) => p.where === CHANNEL).at(-1)!.text, /Not deployed: the deploy gate is off/);
+  // And a gate object handed an off config refuses on its own.
+  const u = overrideSetup({ config: OFF() });
+  const own = gate({ config: OFF() });
+  assert.deepEqual(own.g.checkOverride(own.c2), { ok: false, reason: 'the deploy gate is off (tests.yaml deploy_gate.enabled is not true); the owner turns it on in a reviewed PR' });
+  await u.pass(msg(OWNER_ID, { kind: 'channel', id: CHANNEL }, `deploy ${u.c2}`));
+  assert.equal(u.src.threads.length, 0);
+  assert.deepEqual(u.refs.calls, []);
+  assert.match(u.src.posts.filter((p) => p.where === CHANNEL).at(-1)!.text, /Not deployed: the deploy gate is off/);
 });

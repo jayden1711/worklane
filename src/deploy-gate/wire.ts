@@ -148,11 +148,14 @@ export function postDeployFor(config: PostDeployConfig, branch: string, s: Deplo
   });
 }
 
-/** The gate, when tests.yaml has deploy_gate and the test runs are set up; else undefined (and why, in the log). */
+/**
+ * The gate, when tests.yaml has deploy_gate with `enabled: true` and the test runs are set up; else undefined (and,
+ * when it is on but can't start, why, in the log). Off: nothing is built, so nothing runs, moves, checks or asks.
+ */
 export function setupDeployGate(cfg: Config, s: DeployGateSetup, d: { log: EventLog; actor: string; root: string; stateDir: string; remote?: string; testRunsReady: boolean; incidents?: IncidentSink }): DeployGate | undefined {
   const config = cfg.tests.deploy_gate;
   const testRun = cfg.tests.test_run;
-  if (!config || !testRun) return undefined;
+  if (!config || !config.enabled || !testRun) return undefined;
   const fail = (message: string) => {
     d.log.append('coordinator.error', { instance: d.actor, where: 'deploy gate', kind: 'config', message }, d.actor);
     return undefined;

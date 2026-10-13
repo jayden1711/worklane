@@ -22,7 +22,7 @@ import type { EventPayload, EventType } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import type { IncidentSink } from '../usage-limit.js';
 import type { TestRunRequest, TestRunResult } from '../testrun/index.js';
-import { DEPLOY_GATE_INCIDENT, type DeployGateConfig } from './config.js';
+import { DEPLOY_GATE_INCIDENT, DEPLOY_GATE_OFF, type DeployGateConfig } from './config.js';
 import type { PostDeploy } from './post-deploy.js';
 
 /** What the gate reads with git, in the coordinator's clone. */
@@ -155,7 +155,8 @@ export class DeployGate {
    * a run on the default branch's tip when it is new and no run is going. The run is not waited for.
    */
   async step(): Promise<void> {
-    if (this.stopped.signal.aborted) return;
+    // Off (deploy_gate.enabled not true): no run, no move, no post-deploy check.
+    if (this.stopped.signal.aborted || !this.d.config.enabled) return;
     this.d.postDeploy?.step();
     if (this.running) return;
     const now = (this.d.now ?? Date.now)();
@@ -252,6 +253,7 @@ export class DeployGate {
    * where the branch is now, and the branch is where the gate left it or on the default branch's line. Never forced.
    */
   async advance(target: string, meta: { by: string; override: boolean; gate: string }): Promise<{ ok: true; from: string | null } | { ok: false; reason: string }> {
+    if (!this.d.config.enabled) return { ok: false, reason: DEPLOY_GATE_OFF };
     const tips = this.d.git.fetch();
     const f = this.read();
     const deploy = tips.deploy;
@@ -287,6 +289,7 @@ export class DeployGate {
    * gate's state for it, or why not. Moves nothing.
    */
   checkOverride(ref: string): { ok: true; sha: string; gate: GateState } | { ok: false; reason: string } {
+    if (!this.d.config.enabled) return { ok: false, reason: DEPLOY_GATE_OFF };
     if (!/^[0-9a-f]{7,40}$/.test(ref)) return { ok: false, reason: `${ref.slice(0, 50)} is not a commit sha` };
     const tips = this.d.git.fetch();
     const sha = this.d.git.resolve(ref);

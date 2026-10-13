@@ -88,6 +88,20 @@ export async function postPending(o: { poster: Poster; dashboardUrl?: string | n
   return { posted, waiting: todo.length - posted };
 }
 
+/**
+ * One ops post from elsewhere (a direct push's alert, src/direct-push-alert.ts), within the same machine-wide limit
+ * as the incident posts: true, and counted, when one may go now; false when the window is full (try again later).
+ */
+export function takeOpsPost(o: { dir?: string; now?: Date } = {}): boolean {
+  const t = (o.now ?? new Date()).getTime();
+  return withIncidents(o.dir, (f) => {
+    const recent = f.posts.filter((s) => t - Date.parse(s) < RATE.windowMs);
+    if (recent.length >= RATE.max) return false;
+    f.posts = [...recent, new Date(t).toISOString()];
+    return true;
+  });
+}
+
 /** A poster for one Discord channel with the bot's token: a plain message that pings nobody. */
 export function discordPoster(o: { token: () => string; channel: string; fetch?: typeof fetch; api?: string }): Poster {
   return async (content) => {
