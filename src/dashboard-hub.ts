@@ -25,7 +25,7 @@ import { createServer, request, type IncomingMessage, type Server, type ServerRe
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
-import { assertLoopbackHost, AUTH_AT_HEADER, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, DEVICE_HEADER, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
+import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, csrfFromProtocols, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 import { attachTerminal } from './console/terminal-server.js';
 import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
 import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
@@ -130,7 +130,7 @@ const readToken = (i: HubInstance): string | null => {
  * Only the headers the instance needs go upstream, built here: never a cookie, a CSRF token or a client's own login header.
  * `deviceOk`: Tailscale identified this write's device as an allowed console device (DEVICE_HEADER; machine changes need it).
  */
-function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null, authenticatedAt: number | null = null, deviceOk = false): void {
+function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null, deviceOk = false): void {
   const token = readToken(i);
   if (!token) return json(res, 502, { error: `can't read instance ${i.name}'s dashboard token (${i.tokenFile}): is its dashboard running, and the hub allowed to read it?` });
   search.delete('t');
@@ -138,7 +138,6 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'content-type': req.headers['content-type'] ?? 'application/json' };
   if (req.headers['last-event-id']) headers['last-event-id'] = String(req.headers['last-event-id']);
   if (login) headers[LOGIN_HEADER] = login;
-  if (login && authenticatedAt) headers[AUTH_AT_HEADER] = String(authenticatedAt);
   if (login && deviceOk) headers[DEVICE_HEADER] = '1';
   const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers }, (r) => {
     const h: Record<string, string> = { 'cache-control': 'no-store' };
@@ -234,18 +233,20 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     return p.role;
   };
   const writeOk = (req: IncomingMessage, sid: string) => (req.headers.origin === undefined || req.headers.origin === origin) && sessions!.csrfOk(sid, req.headers[CSRF_HEADER]);
+  /** The terminal's upgrade: from this site, with the session's CSRF token offered as a subprotocol (a browser can't set the header). */
+  const upgradeOk = (req: IncomingMessage, sid: string) => req.headers.origin === origin && sessions!.csrfOk(sid, csrfFromProtocols(req));
 
   /**
    * Who is asking on the hub's port, for the owner terminal: the signed-in person, their role on `instance` as
-   * that instance read it from its repo (null until the hub has asked, or once 5 minutes old: refused), when they
-   * signed in with GitHub, and whether the request carries this session's CSRF token from this site.
+   * that instance read it from its repo (null until the hub has asked, or once 5 minutes old: refused), and whether the
+   * request carries this session's CSRF token from this site: on the WebSocket upgrade, as a subprotocol.
    */
   const hubSession: SessionOf = (req, instance) => {
     if (!sessions) return null;
     const sid = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     const s = sid ? sessions.get(sid) : null;
     if (!s || !sid) return null;
-    return { login: s.login, role: byName.has(instance) ? (knownRole(instance, s.login)?.role ?? null) : null, authenticatedAt: s.created, csrfOk: writeOk(req, sid) };
+    return { login: s.login, role: byName.has(instance) ? (knownRole(instance, s.login)?.role ?? null) : null, csrfOk: req.headers.upgrade ? upgradeOk(req, sid) : writeOk(req, sid) };
   };
   const session = opts.terminal?.session ?? hubSession;
   const t = opts.terminal;
@@ -307,10 +308,10 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (m) {
           const inst = byName.get(m[1]!);
           if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${m[1]}` });
-          // A write says whether it came from an allowed console device (asked of Tailscale only for writes: they're
-          // rare), and so does the Add project view, which says before the form is filled whether a submit would pass.
-          const deviceOk = (write || m[2] === 'add-project') && deviceRefusal(req, devices).why === null;
-          return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, session.created, deviceOk);
+          // A write says whether it came from an allowed console device (asked of Tailscale only for writes, and for the
+          // views that say before anything is submitted whether a change would pass: DEVICE_VIEWS).
+          const deviceOk = (write || (req.method === 'GET' && isDeviceView(m[2]!))) && deviceRefusal(req, devices).why === null;
+          return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, deviceOk);
         }
         return json(res, 404, { error: 'not found: the hub serves /api/me, /api/hub and /api/i/<instance>/...' });
       }

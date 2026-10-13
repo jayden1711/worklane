@@ -261,7 +261,7 @@ roles:
   - A run with no event or tool call for `stall_minutes` is killed and requeued.
   - Per-run, per-role and daily budgets. When the daily budget is hit, nothing new starts; running work finishes or is checkpointed. Spend is visible on the Agents page.
   - `max_attempts` per issue, after which it becomes `blocked` with a decision for its owner.
-- **Auth.** There is no sign-in flow for agents; the harness never handles their credentials. (People sign in to the dashboard hub with GitHub; their role per instance is their permission on its repo: docs/dashboard.md.)
+- **Auth.** There is no sign-in flow for agents; the harness never handles their credentials. (People sign in to the dashboard hub with GitHub; their role per instance is their permission on its repo: docs/dashboard.md. Every action, the owner terminal and machine changes included, needs a live session (it ends after 12 hours idle or 7 days), never a recent sign-in; the terminal and machine changes also need an allowed console device.)
   - The `cli` runner uses whatever auth the user configured for Claude Code.
   - The `sdk` runner uses `ANTHROPIC_API_KEY`.
   - Budgets track estimated cost either way, from `total_cost_usd`.

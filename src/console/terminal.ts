@@ -4,8 +4,8 @@
 // shell (scripts/setup/console-shell.sh installs both; that's the owner's step), never arbitrary sudo.
 //
 // It opens only when all of these hold, and is refused, saying which, otherwise:
-// - the person is the owner of the instance it's opened from, and signed in with GitHub in the last 5 minutes
-//   (#197's session; until #197 lands no session has a sign-in time, so it never opens);
+// - the person is signed in (the hub's GitHub session, which ends after 12 hours idle or 7 days) and is the owner
+//   of the instance it's opened from, and the request carries the session's CSRF token;
 // - then, on top of those: it's opened from a Tailscale device the owner listed (console_devices: tags or node
 //   names), identified by Tailscale itself (terminal-devices.ts); an empty list, or a device that can't be
 //   identified, is refused;
@@ -23,7 +23,6 @@ import { ptyCommand } from '../os/index.js';
 import type { ConsoleSession } from './session.js';
 
 export const CONSOLE_SHELL = `/usr/local/libexec/${BRAND.cli}-console-shell`;
-export const FRESH_SIGN_IN_MS = 5 * 60_000;
 export const IDLE_MS = 10 * 60_000;
 /** A Unix login name, as useradd takes it. */
 export const CONSOLE_USER = /^[a-z_][a-z0-9_-]{0,31}$/;
@@ -77,11 +76,9 @@ export const shellArgv = (user: string) => ['sudo', '-n', '-u', user, CONSOLE_SH
 export const checkArgv = (user: string) => ['-n', '-u', user, CONSOLE_SHELL, 'check'];
 
 /** Why the terminal may not open for this person now, before anything runs; null when it may. */
-export function terminalRefusal(s: ConsoleSession | null, cfg: TerminalConfig, now: number): string | null {
+export function terminalRefusal(s: ConsoleSession | null, cfg: TerminalConfig): string | null {
   if (!s || !s.login) return 'not signed in';
   if (s.role !== 'owner') return `the terminal is the owner's alone; @${s.login} is ${s.role ?? 'not a member'} here`;
-  if (s.authenticatedAt === null) return 'the terminal needs a fresh GitHub sign-in, and this session has none (per-person sign-in, #197)';
-  if (now - s.authenticatedAt > FRESH_SIGN_IN_MS || s.authenticatedAt > now + 60_000) return 'the terminal needs a GitHub sign-in within the last 5 minutes: sign in again';
   if (!s.csrfOk) return 'missing or wrong CSRF token';
   if (!cfg.consoleUser) return 'no console user is configured for this hub (console_user in dashboards.sh)';
   if (!CONSOLE_USER.test(cfg.consoleUser) || cfg.consoleUser === 'root') return `console user ${cfg.consoleUser} isn't allowed (a login name, never root)`;
@@ -260,7 +257,7 @@ export function openTerminal(o: OpenTerminal): TerminalHandle | { refused: strin
     o.audit.record({ at: at(), login, instance: o.instance, kind: 'refused', why, ...(device ? { device } : {}) });
     return { refused: why };
   };
-  const why = terminalRefusal(o.session, o.config, now());
+  const why = terminalRefusal(o.session, o.config);
   if (why) return refuse(why);
   // On top of the owner checks: the Tailscale device it's opened from must be one the owner allowed.
   const d = o.device();

@@ -19,19 +19,48 @@ import {
   mayAnswerKind,
   repoPermission,
   roleFromPermission,
+  DEVICE_VIEWS,
   ROLE_CACHE_MS,
   SESSION_COOKIE,
+  TERMINAL_PROTOCOL,
   SESSION_IDLE_MS,
   SESSION_MAX_MS,
   Sessions,
   STATE_COOKIE,
 } from '../src/dashboard-auth.js';
+import { WebSocket } from 'ws';
 import { EventLog } from '../src/events/log.js';
+import { asks } from '../src/console/asks.js';
+import { CONSOLE_SHELL, type AuditEntry, type SpawnPty } from '../src/console/terminal.js';
+
+/**
+ * Open the owner terminal through the hub as a browser does: a real WebSocket upgrade from the hub's public origin
+ * (the Host is the public one, as Tailscale serve forwards it), offering `protocols`. What came back: refused and
+ * why, the HTTP status of a refused upgrade, or the subprotocol the hub answered with.
+ */
+function openTerminalWs(base: string, protocols: string[], headers: Record<string, string>, origin = PUBLIC) {
+  return new Promise<{ refused?: string; error?: string; protocol?: string }>((done) => {
+    const ws = new WebSocket(`${base.replace('http', 'ws')}/api/terminal?instance=a`, protocols, { origin, headers: { host: new URL(PUBLIC).host, ...headers } });
+    ws.on('message', (m) => {
+      const msg = JSON.parse(String(m)) as { type: string; why?: string };
+      if (msg.type === 'refused') done({ refused: msg.why! });
+    });
+    ws.on('unexpected-response', (_req, res) => done({ error: String(res.statusCode) }));
+    ws.on('error', (e) => done({ error: e.message }));
+    ws.on('open', () =>
+      setTimeout(() => {
+        const protocol = ws.protocol;
+        ws.close();
+        done({ protocol });
+      }, 150),
+    );
+  });
+}
 import { MACHINE_EVENTS, machineRequests } from '../src/machine-requests.js';
 import { BRAND } from '../src/brand.js';
 import { fullRunLock, tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { exampleProject, machineOwnersFile, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { exampleProject, machineOwnersFile, repoRoot, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
 
 const CLIENT_ID = 'Iv1.testclient01';
 const CLIENT_SECRET = 'client-secret-for-tests';
@@ -102,7 +131,7 @@ const MARKS: Record<'a' | 'b', InstanceMarks> = {
  * `machine`: as on a real machine, both instances share one slots dir, and each is seeded with items on every page
  * (MARKS), its coordinator holding an agent slot and a test slot there (b also the full-run lock).
  */
-async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string } } = {}) {
+async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string }; terminal?: { consoleUser: string; hubUser: string; spawnPty: SpawnPty; exec: () => string; audit: { record: (e: AuditEntry) => void } }; claudeAccountDir?: string; secretsHome?: string } = {}) {
   const gh = await fakeGitHub();
   const ownersFile = o.machineOwners ? machineOwnersFile(...o.machineOwners) : undefined;
   const clock = { t: Date.parse('2026-10-12T12:00:00Z') };
@@ -127,7 +156,7 @@ async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?:
     log.append('decision.asked', ask(`${name}-p`, 'plan'), 'c');
     log.append('decision.asked', ask(`${name}-l`, 'land'), 'c');
     const roleOf = cachedRoles(repoPermission({ repo: `example/${name}`, token: async () => INSTANCE_TOKEN, api: gh.url }), now);
-    const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf, instance: name, slotsDir: shared ?? join(dir, 'slots'), actor: m.actor, pollMs: 50, ...(ownersFile ? { machineOwnersFile: ownersFile } : {}) });
+    const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf, instance: name, slotsDir: shared ?? join(dir, 'slots'), actor: m.actor, pollMs: 50, ...(ownersFile ? { machineOwnersFile: ownersFile } : {}), ...(o.claudeAccountDir ? { claudeAccountDir: o.claudeAccountDir } : {}), ...(o.secretsHome ? { secretsHome: o.secretsHome } : {}) });
     return { d, log, dir, port: Number(new URL(d.url).port) };
   };
   const a = await instance('a');
@@ -139,7 +168,7 @@ async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?:
     { name: 'b', port: b.port, tokenFile: join(b.dir, 'dashboard-token') },
   ];
   const hubState = mkdtempSync(join(tmpdir(), 'auth-hub-'));
-  const h = await startHub({ instances, stateDir: hubState, webDir: web, now, signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { terminal: { devices: o.devices.allow, whois: o.devices.whois, peerUid: () => 0 } } : {}) });
+  const h = await startHub({ instances, stateDir: hubState, webDir: web, now, signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { terminal: { devices: o.devices.allow, whois: o.devices.whois, peerUid: () => 0, ...(o.terminal ?? {}) } } : {}) });
   const base = h.url.replace(/\/$/, '');
   const glass = h.breakGlassUrl.split('/?')[0]!;
 
@@ -557,11 +586,10 @@ test('every write is audited with login, role, instance and action; owners read 
   }
 });
 
-test('the session the setup console reads (SessionOf): login, the role from the repo, the sign-in time, and the CSRF check', async () => {
+test('the session the setup console reads (SessionOf): login, the role from the repo, and the CSRF check', async () => {
   const s = await setup();
   try {
     s.gh.perms.set('example/a:ada', 'admin');
-    const signedInAt = s.clock.t;
     const p = await s.signIn('ada');
     const req = (headers: Record<string, string>, method = 'POST') => ({ headers, method }) as unknown as import('node:http').IncomingMessage;
     assert.equal(s.h.session(req({}), 'a'), null, 'no cookie: no session');
@@ -569,7 +597,7 @@ test('the session the setup console reads (SessionOf): login, the role from the 
     assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a')!.role, null);
     await p.get('/api/hub');
     s.clock.t += 60_000;
-    assert.deepEqual(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a'), { login: 'ada', role: 'owner', authenticatedAt: signedInAt, csrfOk: true });
+    assert.deepEqual(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a'), { login: 'ada', role: 'owner', csrfOk: true });
     assert.equal(s.h.session(req({ cookie: p.cookie }), 'a')!.csrfOk, false, 'no CSRF token');
     assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': 'x'.repeat(43) }), 'a')!.csrfOk, false, 'a wrong one');
     assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf, origin: 'https://evil.example' }), 'a')!.csrfOk, false, 'from another site');
@@ -579,14 +607,14 @@ test('the session the setup console reads (SessionOf): login, the role from the 
     s.gh.perms.delete('example/a:ada');
     s.clock.t += ROLE_CACHE_MS;
     assert.equal(s.h.session(req({ cookie: p.cookie, 'x-csrf-token': p.csrf }), 'a')!.role, null);
-    // The instance's own server sees the same person, role and sign-in time through the hub (dashboardSession).
+    // The instance's own server sees the same person and role through the hub (dashboardSession).
     s.gh.perms.set('example/a:ada', 'admin');
     s.clock.t += ROLE_CACHE_MS;
     assert.equal(await status(p.get('/api/i/a/state')), 200);
-    const r = (await (await p.get('/api/i/a/role')).json()) as { login: string; role: string; authenticatedAt: number };
-    assert.deepEqual([r.login, r.role, r.authenticatedAt], ['ada', 'owner', signedInAt]);
-    const glass = (await (await fetch(`${s.glass}/api/i/a/role`, { headers: { authorization: `Bearer ${s.h.token}` } })).json()) as { role: string; authenticatedAt: unknown };
-    assert.deepEqual([glass.role, glass.authenticatedAt], ['owner', null], 'the break-glass never counts as a fresh sign-in');
+    const r = (await (await p.get('/api/i/a/role')).json()) as Record<string, unknown>;
+    assert.deepEqual(r, { login: 'ada', role: 'owner', via: 'session' }, 'no sign-in time: nothing reads it');
+    const glass = (await (await fetch(`${s.glass}/api/i/a/role`, { headers: { authorization: `Bearer ${s.h.token}` } })).json()) as { role: string; via: string };
+    assert.deepEqual([glass.role, glass.via], ['owner', 'break-glass']);
   } finally {
     await s.close();
   }
@@ -635,7 +663,7 @@ test('a request through the hub carries the person to the instance only in a hea
   }
 });
 
-test('a machine change through the hub: only a machine owner, signed in in the last 5 minutes, from an allowed console device; the hub alone says which device', async () => {
+test('a machine change through the hub: only a machine owner, signed in, from an allowed console device; the hub alone says which device', async () => {
   // Fake tailnet fixtures, built here so no address or node name is spelled out (the push gate's rules).
   const net = ['tail1234', 'ts', 'net'].join('.');
   const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
@@ -658,7 +686,7 @@ test('a machine change through the hub: only a machine owner, signed in in the l
     };
     for (const [what, value] of [['slots', 4], ['updates', true]] as const) {
       const ok = await change(ada, what, value, laptop);
-      assert.equal(ok.status, 200, `${what}: a machine owner, fresh, on an allowed device: ${JSON.stringify(ok.body)}`);
+      assert.equal(ok.status, 200, `${what}: a machine owner on an allowed device: ${JSON.stringify(ok.body)}`);
       assert.equal((await change(olu, what, value, laptop)).status, 200, `${what}: the second machine owner too`);
       const instanceOnly = await change(ivy, what, value, laptop);
       assert.equal(instanceOnly.status, 403, `${what}: an instance-only owner`);
@@ -679,22 +707,210 @@ test('a machine change through the hub: only a machine owner, signed in in the l
     assert.match((await adding(ada, stranger)).why ?? '', /allowed devices/, 'a device off the list');
     assert.match((await adding(ivy, laptop)).why ?? '', /@ivy isn't one/, 'an instance-only owner');
 
-    // A sign-in more than 5 minutes ago is stale for a machine change, though the session itself is still good.
-    s.clock.t = Date.now() - 6 * 60_000;
-    const stale = await s.signIn('ada');
-    s.clock.t = Date.now();
-    for (const [what, value] of [['slots', 4], ['updates', true]] as const) {
-      const r = await change(stale, what, value, laptop);
-      assert.equal(r.status, 403, `${what}: a stale sign-in`);
-      assert.match(r.body.error!, /sign-in within the last 5 minutes/);
-    }
-    assert.equal((await stale.get('/api/i/a/state')).status, 200, 'the stale session still reads');
-
     // The break-glass needs none of it.
     const glass = await fetch(`${s.glass}/api/i/a/machine`, { method: 'POST', headers: { authorization: `Bearer ${s.h.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ what: 'slots', value: 5 }) });
     assert.equal(glass.status, 200, await glass.clone().text());
     const requests = machineRequests(s.a.log.read(0, [...MACHINE_EVENTS]));
     assert.deepEqual(requests.map((r) => [r.by, r.args.join(' '), r.breakGlass]), [['ada', 'set-slots 4', false], ['olu', 'set-slots 4', false], ['ada', 'set-updates on', false], ['olu', 'set-updates on', false], ['example-owner', 'set-slots 5', true]], 'only the allowed ones were recorded');
+  } finally {
+    await s.close();
+  }
+});
+
+test('no fresh sign-in: a session signed in days ago (still within 12 h idle / 7 days) does every formerly fresh-gated action; role, device, CSRF, expiry and the audit still hold', { skip: process.platform === 'win32' }, async () => {
+  // Fake tailnet fixtures, built here so no address or node name is spelled out (the push gate's rules).
+  const net = ['tail1234', 'ts', 'net'].join('.');
+  const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
+  const nodes: Record<string, unknown> = { [ip(3)]: { Node: { Name: `laptop.${net}.`, Tags: [] } }, [ip(5)]: { Node: { Name: `someone-else.${net}.`, Tags: [] } } };
+  const whois = (a: string) => {
+    if (!nodes[a]) throw new Error('no such peer');
+    return JSON.stringify(nodes[a]);
+  };
+  // A Claude account switch waiting for its token from instance a's dashboard (claude-account.sh's progress file).
+  const accountDir = mkdtempSync(join(tmpdir(), 'auth-account-'));
+  const at = new Date().toISOString();
+  writeFileSync(join(accountDir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '1 instance(s): a; the token from the dashboard of a' }, { step: 'pause', state: 'done', instance: 'a', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: "paste the token in a's dashboard" }].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+  const termAudit: AuditEntry[] = [];
+  const spawned: string[][] = [];
+  const spawnPty: SpawnPty = (o) => {
+    spawned.push(o.argv);
+    return { write: () => {}, onData: () => {}, onExit: () => {}, kill: () => {} };
+  };
+  const s = await setup({
+    machineOwners: ['ada'],
+    devices: { allow: ['laptop'], whois },
+    terminal: { consoleUser: 'adminx', hubUser: 'wl-dash', spawnPty, exec: () => 'password-required\n', audit: { record: (e) => void termAudit.push(e) } },
+    claudeAccountDir: accountDir,
+    secretsHome: mkdtempSync(join(tmpdir(), 'auth-secrets-')),
+  });
+  try {
+    for (const l of ['ada', 'ivy']) s.gh.perms.set(`example/a:${l}`, 'admin');
+    s.gh.perms.set('example/a:wes', 'write');
+    const signedIn = s.clock.t;
+    const [ada, ivy, wes] = [await s.signIn('ada'), await s.signIn('ivy'), await s.signIn('wes')];
+    const idle = await s.signIn('ada');
+    // Days of use, never more than 12 h apart: the sessions stay valid, the sign-in is long past.
+    while (s.clock.t + 6 * 3_600_000 < signedIn + SESSION_MAX_MS - 3_600_000) {
+      s.clock.t += 6 * 3_600_000;
+      for (const p of [ada, ivy, wes]) assert.equal(await status(p.get('/api/hub')), 200);
+    }
+    assert.ok(s.clock.t - signedIn > 6 * 24 * 3_600_000, 'signed in more than 6 days ago');
+    assert.equal(await status(idle.get('/api/hub')), 401, 'a session idle over 12 h has expired: refused');
+
+    const laptop = { 'x-forwarded-for': ip(3) };
+    const stranger = { 'x-forwarded-for': ip(5) };
+    const post = async (p: typeof ada, path: string, body: unknown, headers = laptop, csrf?: null) => {
+      const r = await p.post(`/api/i/a/${path}`, body, { headers, ...(csrf === null ? { csrf: null } : {}) });
+      return { status: r.status, body: (await r.json()) as { error?: string } };
+    };
+    const step = asks(s.a.log).create({ instance: 'a', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
+    const actions: [string, string, unknown][] = [
+      ['machine settings', 'machine', { what: 'slots', value: 4 }],
+      ['add project', 'machine/add-project', { name: 'gamma', repo: 'example/gamma' }],
+      ['Claude account status', 'machine/claude-account', { action: 'status' }],
+      ['Claude account token paste', 'claude-account/token', { value: `sk-ant-oat01-${'Q'.repeat(40)}` }],
+      ['root step run', `asks/${step.id}/run`, {}],
+    ];
+    for (const [what, path, body] of actions) {
+      // Refused first, so nothing is recorded yet: no CSRF token, a device off the list, someone who isn't a machine owner, a writer.
+      const noCsrf = await post(ada, path, body, laptop, null);
+      assert.equal(noCsrf.status, 403, `${what}: no CSRF token`);
+      assert.match(noCsrf.body.error ?? '', /CSRF/i, `${what}: no CSRF token`);
+      const elsewhere = await post(ada, path, body, stranger);
+      assert.equal(elsewhere.status, 403, `${what}: a device off the list: ${JSON.stringify(elsewhere.body)}`);
+      assert.match(elsewhere.body.error ?? '', /allowed devices/, `${what}: a device off the list`);
+      const instanceOnly = await post(ivy, path, body);
+      assert.equal(instanceOnly.status, 403, `${what}: an instance owner who isn't a machine owner`);
+      assert.equal((await post(wes, path, body)).status, 403, `${what}: a writer`);
+      // The machine owner, signed in days ago, on an allowed device: allowed.
+      const ok = await post(ada, path, body);
+      assert.equal(ok.status, 200, `${what}: a stale but valid session: ${JSON.stringify(ok.body)}`);
+    }
+    // Every one of them is on record: the audit, and the root step's machine request names who asked.
+    const audited = s.a.log.read(0, ['dashboard.audit']).map((e) => e.payload as { login: string; via: string; action: string });
+    for (const action of ['machine.changed', 'machine.add_project', 'machine.claude_account', 'claude_account.token']) {
+      assert.ok(audited.some((a) => a.login === 'ada' && a.via === 'session' && a.action === action), `${action} audited: ${audited.map((a) => a.action).join(', ')}`);
+    }
+    assert.ok(audited.some((a) => a.login === 'ivy' && a.action === 'machine.add_project_refused'), 'a refused add-project is audited too');
+    const requests = machineRequests(s.a.log.read(0, [...MACHINE_EVENTS]));
+    assert.deepEqual(requests.map((r) => [r.by, r.args.join(' '), r.via]), [['ada', 'set-slots 4', 'settings'], ['ada', 'add-project gamma example/gamma', 'add-project'], ['ada', 'claude-account status', 'claude-account'], ['ada', 'set-slots 4', 'ask']]);
+
+    // The owner terminal: the same session opens it from the laptop, and nothing else does.
+    const term = (p: typeof ada | null, o: { headers?: Record<string, string>; csrf?: boolean } = {}) => openTerminalWs(s.base, p && o.csrf !== false ? [TERMINAL_PROTOCOL, `csrf.${p.csrf}`] : [TERMINAL_PROTOCOL], { ...laptop, ...(o.headers ?? {}), ...(p ? { cookie: p.cookie } : {}) });
+    // The hub's copy of each role is fresh (/api/hub, within the 5-minute role cache).
+    for (const p of [ada, ivy, wes]) await p.get('/api/hub');
+    assert.deepEqual(await term(ada), { protocol: TERMINAL_PROTOCOL }, 'a stale but valid session: the terminal opens');
+    assert.deepEqual(spawned, [['sudo', '-n', '-u', 'adminx', CONSOLE_SHELL, 'shell']]);
+    assert.match((await term(wes)).refused ?? '', /owner's alone/, 'a writer');
+    assert.match((await term(ada, { headers: stranger })).refused ?? '', /device|tailnet|allowed|console_devices/i, 'a device off the list');
+    assert.match((await term(ada, { csrf: false })).refused ?? '', /CSRF/, 'no CSRF token');
+    assert.equal(spawned.length, 1, 'only the one terminal started');
+    assert.ok(termAudit.some((e) => e.kind === 'opened' && e.login === 'ada'), 'the terminal is audited');
+    assert.ok(termAudit.filter((e) => e.kind === 'refused').length >= 3, 'its refusals too');
+
+    // Seven days after the sign-in the session ends, however active: everything is refused.
+    s.clock.t = signedIn + SESSION_MAX_MS;
+    assert.equal(await status(ada.get('/api/hub')), 401, 'past 7 days: expired');
+    const expired = await ada.post('/api/i/a/machine', { what: 'slots', value: 5 }, { headers: laptop });
+    assert.equal(expired.status, 401, 'an expired session changes nothing');
+    assert.match((await term(ada)).refused ?? '', /not signed in/, 'nor opens the terminal');
+    assert.equal(machineRequests(s.a.log.read(0, [...MACHINE_EVENTS])).length, 4, 'nothing more recorded');
+  } finally {
+    await s.close();
+  }
+});
+
+/** Fake tailnet fixtures, built here so no address or node name is spelled out (the push gate's rules). */
+function tailnet() {
+  const net = ['tail1234', 'ts', 'net'].join('.');
+  const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
+  const nodes: Record<string, unknown> = { [ip(3)]: { Node: { Name: `laptop.${net}.`, Tags: [] } }, [ip(5)]: { Node: { Name: `someone-else.${net}.`, Tags: [] } } };
+  const whois = (a: string) => {
+    if (!nodes[a]) throw new Error('no such peer');
+    return JSON.stringify(nodes[a]);
+  };
+  return { whois, laptop: { 'x-forwarded-for': ip(3) }, stranger: { 'x-forwarded-for': ip(5) } };
+}
+
+test("the terminal's upgrade through the hub takes the session's CSRF token as a subprotocol (a browser can't set the header), answers with the terminal's protocol alone, and refuses and audits anything else", { skip: process.platform === 'win32' }, async () => {
+  const { whois, laptop } = tailnet();
+  const termAudit: AuditEntry[] = [];
+  const spawned: string[][] = [];
+  const spawnPty: SpawnPty = (o) => {
+    spawned.push(o.argv);
+    return { write: () => {}, onData: () => {}, onExit: () => {}, kill: () => {} };
+  };
+  const s = await setup({ machineOwners: ['ada'], devices: { allow: ['laptop'], whois }, terminal: { consoleUser: 'adminx', hubUser: 'wl-dash', spawnPty, exec: () => 'password-required\n', audit: { record: (e) => void termAudit.push(e) } } });
+  try {
+    s.gh.perms.set('example/a:ada', 'admin');
+    s.gh.perms.set('example/a:olu', 'admin');
+    const ada = await s.signIn('ada');
+    const olu = await s.signIn('olu');
+    for (const p of [ada, olu]) await p.get('/api/hub');
+    const open = (protocols: string[], o: { origin?: string; cookie?: string } = {}) => openTerminalWs(s.base, protocols, { ...laptop, cookie: o.cookie ?? ada.cookie }, o.origin);
+    const refusals = () => termAudit.filter((e) => e.kind === 'refused').length;
+
+    const cases: [string, Promise<{ refused?: string; error?: string; protocol?: string }>, RegExp][] = [
+      ['no token', open([TERMINAL_PROTOCOL]), /CSRF/],
+      ['a wrong token', open([TERMINAL_PROTOCOL, `csrf.${'x'.repeat(ada.csrf.length)}`]), /CSRF/],
+      ["another session's token", open([TERMINAL_PROTOCOL, `csrf.${olu.csrf}`]), /CSRF/],
+      ['the token in the header only (what a browser cannot send)', openTerminalWs(s.base, [TERMINAL_PROTOCOL], { ...laptop, cookie: ada.cookie, 'x-csrf-token': ada.csrf }), /CSRF/],
+    ];
+    for (const [what, r, re] of cases) {
+      const before = refusals();
+      const got = await r;
+      assert.match(got.refused ?? '', re, `${what}: ${JSON.stringify(got)}`);
+      assert.equal(refusals(), before + 1, `${what}: audited`);
+    }
+    const before = refusals();
+    const cross = await open([TERMINAL_PROTOCOL, `csrf.${ada.csrf}`], { origin: 'https://evil.example' });
+    assert.equal(cross.error, '403', 'another Origin: the upgrade itself is refused');
+    assert.equal(refusals(), before + 1, 'another Origin: audited');
+    assert.equal(spawned.length, 0, 'none of them started anything');
+
+    // A valid session with its own token opens it, and the answer names the terminal's protocol, never the token.
+    const ok = await open([TERMINAL_PROTOCOL, `csrf.${ada.csrf}`]);
+    assert.deepEqual(ok, { protocol: TERMINAL_PROTOCOL });
+    assert.equal(spawned.length, 1);
+    assert.ok(termAudit.some((e) => e.kind === 'opened' && e.login === 'ada'));
+    assert.ok(!JSON.stringify(termAudit).includes(ada.csrf), 'the token is in no audit entry');
+    // The page offers exactly these subprotocols (web/src/api.ts terminalProtocols).
+    const web = readFileSync(join(repoRoot, 'web', 'src', 'api.ts'), 'utf8');
+    assert.ok(web.includes(`'${TERMINAL_PROTOCOL}'`) && web.includes('`csrf.${csrf}`'), 'the page sends the protocol and the token the hub reads');
+  } finally {
+    await s.close();
+  }
+});
+
+test('the views that say whether a machine change would pass get the device from the hub on a read too: the Machine page, Add project and the Claude account', async () => {
+  const { whois, laptop, stranger } = tailnet();
+  const accountDir = mkdtempSync(join(tmpdir(), 'auth-account-'));
+  const s = await setup({ machineOwners: ['ada'], devices: { allow: ['laptop'], whois }, claudeAccountDir: accountDir });
+  try {
+    s.gh.perms.set('example/a:ada', 'admin');
+    const ada = await s.signIn('ada');
+    const view = async (path: string, headers: Record<string, string>) => (await (await ada.get(`/api/i/a/${path}`, headers)).json()) as Record<string, unknown>;
+    // Every path in the shared list is one the instance serves, and each says the device when the hub does.
+    assert.deepEqual(Object.values(DEVICE_VIEWS).sort(), ['add-project', 'claude-account', 'machine']);
+    const fromLaptop = { machine: await view(DEVICE_VIEWS.machine, laptop), add: await view(DEVICE_VIEWS.addProject, laptop), account: await view(DEVICE_VIEWS.claudeAccount, laptop) };
+    assert.deepEqual([fromLaptop.machine.canChange, fromLaptop.machine.deviceReady], [true, true], 'the Machine page from an allowed device: changes may be made');
+    assert.deepEqual([fromLaptop.add.allowed, fromLaptop.add.why], [true, null]);
+    assert.deepEqual([fromLaptop.account.allowed, fromLaptop.account.why], [true, null], "the Claude account card doesn't say the device is wrong");
+    const elsewhere = { machine: await view(DEVICE_VIEWS.machine, stranger), add: await view(DEVICE_VIEWS.addProject, stranger), account: await view(DEVICE_VIEWS.claudeAccount, stranger) };
+    assert.equal(elsewhere.machine.deviceReady, false, 'the Machine page from a device off the list says so');
+    assert.match(String(elsewhere.add.why), /allowed devices/);
+    assert.match(String(elsewhere.account.why), /allowed devices/);
+    // The browser's own copy of the device header counts for nothing on a read either.
+    assert.equal((await view(DEVICE_VIEWS.machine, { ...stranger, 'x-dashboard-console-device': '1' })).deviceReady, false);
+
+    // And the real change agrees with the view: accepted from the laptop, refused from elsewhere.
+    const ok = await ada.post('/api/i/a/machine', { what: 'slots', value: 4 }, { headers: laptop });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    assert.equal(((await ok.json()) as { machine: { deviceReady: boolean } }).machine.deviceReady, true);
+    const no = await ada.post('/api/i/a/machine', { what: 'slots', value: 5 }, { headers: stranger });
+    assert.equal(no.status, 403);
+    assert.match(((await no.json()) as { error: string }).error, /allowed devices/);
+    assert.deepEqual(machineRequests(s.a.log.read(0, [...MACHINE_EVENTS])).map((r) => r.args.join(' ')), ['set-slots 4']);
   } finally {
     await s.close();
   }

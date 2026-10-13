@@ -6,8 +6,8 @@
 //   POST /api/machine/add-project    {name, repo}: the one way to start one (src/dashboard.ts, requestAddProject in
 //                                    src/machine-requests.ts), which checks all of this again
 //
-// Who may: the instance's owner who is one of the machine's owners, with a GitHub sign-in in the last 5 minutes and
-// an allowed console device, as for the terminal (src/machine-owners.ts); the break-glass too. The name and the
+// Who may: the instance's owner who is one of the machine's owners, signed in, on an allowed console device, as for
+// the terminal (src/machine-owners.ts); the break-glass too. The name and the
 // repo are checked in the page, by the dashboard, again by the coordinator (the helper's allowlist), and by the
 // helper itself.
 //
@@ -92,13 +92,13 @@ export function addProjectRuns(events: readonly StoredEvent[], role: Role | null
 }
 
 /** Why this person may not add a project now; null when they may. */
-export function addProjectGate(who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string; now?: number } = {}): string | null {
+export function addProjectGate(who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string } = {}): string | null {
   if (who.role !== 'owner') return `only an owner of this instance who is one of the machine's owners may add a project; @${who.requester.login} is ${who.role ? `a ${who.role}` : 'not on it'}`;
-  return machineChangeRefusal(who.requester, { file: o.ownersFile ?? MACHINE_OWNERS_FILE, ...(o.now !== undefined ? { now: o.now } : {}) });
+  return machineChangeRefusal(who.requester, { file: o.ownersFile ?? MACHINE_OWNERS_FILE });
 }
 
 /** The view: whether the form is enabled (and why not), the machine owners, and the runs, newest first. */
-export function addProjectView(events: readonly StoredEvent[], who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string; now?: number } = {}) {
+export function addProjectView(events: readonly StoredEvent[], who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string } = {}) {
   const why = addProjectGate(who, o);
   const runs = addProjectRuns(events, who.role).reverse();
   const busy = runs.find((r) => r.status === 'pending' || r.status === 'running') ?? null;

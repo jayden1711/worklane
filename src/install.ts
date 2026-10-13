@@ -123,6 +123,19 @@ function scaffoldWithinPolicies(cfgDir: string, repo: string): string[] {
   return [`agents.yaml starts within this machine's instance policy for ${repo} (budget $${budget}/day, at most ${workers} workers)`];
 }
 
+/**
+ * The config folder from the templates, at `cfgDir`: the project's name and repo filled in, and, when given, its
+ * owner (else the template's placeholder stays, for the person to set) and default branch.
+ */
+export function scaffoldConfig(cfgDir: string, o: { name: string; repo: string; owner?: string; defaultBranch?: string }): void {
+  cpSync(templatesDir(), cfgDir, { recursive: true });
+  const config = join(cfgDir, 'config.yaml');
+  let text = readFileSync(config, 'utf8').replaceAll('{{name}}', o.name).replaceAll('{{repo}}', o.repo);
+  if (o.owner) text = text.replaceAll('your-github-handle', o.owner);
+  if (o.defaultBranch) text = text.replace(/^( {2}default_branch: )\S+/m, `$1${o.defaultBranch}`);
+  writeFileSync(config, text);
+}
+
 export interface InstallOptions {
   root: string;
   /** Path to the engine's cli.js (defaults to this running engine). */
@@ -172,10 +185,8 @@ export function install(opts: InstallOptions): InstallReport {
   if (instanceHome && !existsSync(instanceHome)) throw new Error(`no instance "${opts.instance}" at ${instanceHome}; run \`${BRAND.cli} instance init\` first`);
   let scaffolded = false;
   if (!existsSync(cfgDir)) {
-    cpSync(templatesDir(), cfgDir, { recursive: true });
-    const config = join(cfgDir, 'config.yaml');
     const repo = gitRemoteRepo(root) ?? 'owner/repo';
-    writeFileSync(config, readFileSync(config, 'utf8').replaceAll('{{name}}', basename(root)).replaceAll('{{repo}}', repo));
+    scaffoldConfig(cfgDir, { name: basename(root), repo });
     notes.push(...scaffoldWithinPolicies(cfgDir, repo));
     scaffolded = true;
     notes.push(`created ${BRAND.configDir}/ from templates; edit owners, guardrails and tests, then run \`${BRAND.cli} doctor\``);

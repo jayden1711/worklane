@@ -18,35 +18,33 @@ import { EventLog } from '../src/events/log.js';
 import { MACHINE_HELPER } from '../src/machine.js';
 import { MachineRequestError, machineRequests, requestAddProject } from '../src/machine-requests.js';
 import type { MachineRequester } from '../src/machine-owners.js';
-import { asFreshPerson, asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFile } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const MIN = 60_000;
+const DAY = 24 * 60 * MIN;
 const TOKEN = `sk-ant-oat01-${'Z'.repeat(40)}`;
 
-test('add-project is refused for an instance-only owner, a stale sign-in and a disallowed device; two machine owners may each ask; one at a time', () => {
+test('add-project is refused for an instance-only owner and a disallowed device; two machine owners may each ask; one at a time', () => {
   const owners = machineOwnersFile('ada', 'olu');
-  const now = Date.now();
   const log = new EventLog(':memory:');
-  const ask = (requester: MachineRequester, name: unknown = 'alpha', repo: unknown = 'example/alpha') => () => requestAddProject(log, { name, repo, requester, ownersFile: owners, now });
+  const ask = (requester: MachineRequester, name: unknown = 'alpha', repo: unknown = 'example/alpha') => () => requestAddProject(log, { name, repo, requester, ownersFile: owners });
   const refused = (f: () => unknown, status: number, re: RegExp, what: string) => assert.throws(f, (e: Error) => e instanceof MachineRequestError && e.status === status && re.test(e.message), what);
-  refused(ask({ ...freshRequester('ivy'), authenticatedAt: now }), 403, /machine owners: @ada, @olu\); @ivy isn't one/, 'an instance-only owner');
-  refused(ask({ ...freshRequester('ada'), authenticatedAt: now - 6 * MIN }), 403, /sign-in within the last 5 minutes/, 'a stale sign-in');
-  refused(ask({ ...freshRequester('ada'), authenticatedAt: null }), 403, /sign-in within the last 5 minutes/, 'no sign-in time');
-  refused(ask({ ...freshRequester('ada'), authenticatedAt: now, deviceOk: false }), 403, /allowed devices/, 'a disallowed device');
-  refused(ask({ ...freshRequester('ada'), authenticatedAt: now }, 'Alpha'), 400, /the project's name/, 'a bad name');
-  refused(ask({ ...freshRequester('ada'), authenticatedAt: now }, 'alpha', 'example/alpha/x'), 400, /a GitHub owner\/name/, 'a bad repo');
+  refused(ask({ ...ownerRequester('ivy') }), 403, /machine owners: @ada, @olu\); @ivy isn't one/, 'an instance-only owner');
+  refused(ask({ ...ownerRequester('ada'), deviceOk: false }), 403, /allowed devices/, 'a disallowed device');
+  refused(ask({ ...ownerRequester('ada') }, 'Alpha'), 400, /the project's name/, 'a bad name');
+  refused(ask({ ...ownerRequester('ada') }, 'alpha', 'example/alpha/x'), 400, /a GitHub owner\/name/, 'a bad repo');
   assert.deepEqual(machineRequests(log.read(0)), [], 'nothing recorded for any of them');
 
-  const first = ask({ ...freshRequester('ada'), authenticatedAt: now - 4 * MIN })();
+  const first = ask({ ...ownerRequester('ada') })();
   assert.deepEqual([first.status, first.by, first.via, first.args], ['pending', 'ada', 'add-project', ['add-project', 'alpha', 'example/alpha']]);
-  refused(ask({ ...freshRequester('olu'), authenticatedAt: now }, 'beta', 'example/beta'), 409, /already pending/, 'a second while the first is open');
+  refused(ask({ ...ownerRequester('olu') }, 'beta', 'example/beta'), 409, /already pending/, 'a second while the first is open');
   log.append('machine.finished', { id: first.id, outcome: 'done', detail: 'added alpha' }, 'site', 'coordinator');
-  const second = ask({ ...freshRequester('OLU'), authenticatedAt: now }, 'beta', 'example/beta')();
+  const second = ask({ ...ownerRequester('OLU') }, 'beta', 'example/beta')();
   assert.deepEqual([second.status, second.by], ['pending', 'OLU'], 'the second machine owner, any case');
 });
 
-test('the dashboard records an add-project only for a machine owner, freshly signed in, on an allowed device', { skip: !posix }, async () => {
+test('the dashboard records an add-project only for a machine owner on an allowed device, however long ago they signed in', { skip: !posix }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'add-project-dash-'));
   const { dir: root } = exampleProject();
   const eventsDb = join(dir, 'events.db');
@@ -60,28 +58,29 @@ test('the dashboard records an add-project only for a machine owner, freshly sig
       const x = await r;
       return [x.status, ((await x.json()) as { error?: string }).error ?? ''] as const;
     };
-    const [s1, e1] = await status(post({ ...asPerson('example-owner'), 'x-dashboard-authenticated-at': String(Date.now() - 6 * MIN), 'x-dashboard-console-device': '1' }));
-    assert.equal(s1, 403);
-    assert.match(e1, /sign-in within the last 5 minutes/);
-    const [s2, e2] = await status(post({ ...asPerson('example-owner'), 'x-dashboard-authenticated-at': String(Date.now()) }));
-    assert.equal(s2, 403);
+    const [s2, e2] = await status(post(asPerson('example-owner')));
+    assert.equal(s2, 403, 'a disallowed device');
     assert.match(e2, /allowed devices/);
-    const [s3, e3] = await status(post(asFreshPerson('example-collaborator')));
+    const [s3, e3] = await status(post(asDevicePerson('example-collaborator')));
     assert.equal(s3, 403, 'a writer');
     assert.match(e3, /only the instance's owners/);
     writeFileSync(owners, `${JSON.stringify({ owners: ['olu'] })}\n`);
-    const [s4, e4] = await status(post(asFreshPerson('example-owner')));
+    const [s4, e4] = await status(post(asDevicePerson('example-owner')));
     assert.equal(s4, 403, 'the instance owner who is not a machine owner');
     assert.match(e4, /@example-owner isn't one/);
     writeFileSync(owners, `${JSON.stringify({ owners: ['olu', 'example-owner'] })}\n`);
-    const [s5] = await status(post(asFreshPerson('example-owner'), { name: 'alpha', repo: 'example/alpha; id' }));
+    const [s5] = await status(post(asDevicePerson('example-owner'), { name: 'alpha', repo: 'example/alpha; id' }));
     assert.equal(s5, 400);
-    const ok = await post(asFreshPerson('example-owner'));
-    assert.equal(ok.status, 200);
+    // An older hub still sends the sign-in time it used to (x-dashboard-authenticated-at): ignored, however old.
+    const ok = await post({ ...asDevicePerson('example-owner'), 'x-dashboard-authenticated-at': String(Date.now() - 6 * DAY) });
+    assert.equal(ok.status, 200, 'a sign-in 6 days ago, from an allowed device');
     const r = (await ok.json()) as { request: { args: string[]; status: string } };
     assert.deepEqual([r.request.status, r.request.args], ['pending', ['add-project', 'alpha', 'example/alpha']]);
     const log = new EventLog(eventsDb);
     assert.deepEqual(machineRequests(log.read(0)).map((x) => x.by), ['example-owner'], 'only the allowed one was recorded');
+    const audit = log.read(0, ['dashboard.audit']).map((e) => (e.payload as { action: string }).action);
+    assert.ok(audit.includes('machine.add_project'), `audited: ${audit.join(', ')}`);
+    assert.ok(audit.includes('machine.add_project_refused'), 'the refusals are audited too');
     log.close();
   } finally {
     await d.close();
@@ -114,7 +113,7 @@ test('the coordinator runs add-project through the helper, relays each step, mak
   const owners = machineOwnersFile('olive');
   const log = new EventLog(':memory:');
   const home = mkdtempSync(join(tmpdir(), 'add-project-home-'));
-  const r = requestAddProject(log, { name: 'alpha', repo: 'example/alpha', requester: freshRequester('olive'), ownersFile: owners });
+  const r = requestAddProject(log, { name: 'alpha', repo: 'example/alpha', requester: ownerRequester('olive'), ownersFile: owners });
   const started: string[][] = [];
   const fakeSpawn = (file: string, args: string[]) => (started.push([file, ...args]), spawn(process.execPath, ['-e', FAKE_HELPER, TOKEN], { stdio: ['pipe', 'pipe', 'pipe'] }));
   assert.equal(runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: fakeSpawn, home, pollMs: 20 }), 1);

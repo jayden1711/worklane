@@ -52,7 +52,7 @@ import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { trustForViewer, trustView } from './trust.js';
-import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
+import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { firstRunView, INIT_FILE } from './init.js';
@@ -192,8 +192,6 @@ export interface Who {
   login: string;
   role: Role;
   via: 'session' | 'break-glass';
-  /** When they signed in with GitHub, as the hub says (null for the break-glass: no sign-in). */
-  authenticatedAt: number | null;
   /** Whether the hub identified this request's device as an allowed console device (a write's only; false for the break-glass). */
   deviceOk: boolean;
 }
@@ -290,7 +288,7 @@ export function healthStats(o: { serviceUnit: string | null; root: string; state
  * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
  * the helper's change log and the updater's log, newest first.
  */
-export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine' | 'machineOwnersFile'> & { role?: Role | null; breakGlass?: boolean; requests?: MachineRequest[] }) {
+export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir' | 'machine' | 'machineOwnersFile'> & { role?: Role | null; breakGlass?: boolean; deviceOk?: boolean; requests?: MachineRequest[] }) {
   const owner = o.cfg.project.owners.default;
   const slots = slotStatus(o.slotsDir);
   const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
@@ -303,10 +301,12 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     machineOwners: machineOwners(ownersFile),
     /** Whether this person is one of them (true on the break-glass). */
     machineOwner,
-    /** An instance owner who is a machine owner; the server checks the sign-in time and the device again on each change. */
+    /** An instance owner who is a machine owner; the server checks the device again on each change. */
     canChange: isOwner(o.role) && machineOwner,
     /** What a change needs besides, for the page to say (nothing on the break-glass). */
-    needs: o.breakGlass ? null : 'a GitHub sign-in within the last 5 minutes, from one of the console\'s allowed devices',
+    needs: o.breakGlass ? null : 'one of the console\'s allowed devices',
+    /** Whether this request came from one (the hub says, on this view's read as on a change; always on the break-glass). */
+    deviceReady: !!o.breakGlass || !!o.deviceOk,
     helper: MACHINE_HELPER,
     slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
     testSlots: { cap: testSlotCap(o.slotsDir), running: testSlotsHeld(o.slotsDir).length, min: TEST_SLOTS_MIN, max: TEST_SLOTS_MAX },
@@ -753,11 +753,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       const fresh = url.pathname === '/api/role' && req.headers[FRESH_HEADER] === '1';
       const role = opts.roleOf ? await opts.roleOf(named, { fresh }) : null;
       if (!role) return { status: 403, login: named, error: `@${named} has no access to this instance: it needs at least read access to ${repo}` };
-      const at = Number(req.headers[AUTH_AT_HEADER]);
-      return { login: named, role, via: 'session', authenticatedAt: Number.isSafeInteger(at) && at > 0 ? at : null, deviceOk: req.headers[DEVICE_HEADER] === '1' };
+      return { login: named, role, via: 'session', deviceOk: req.headers[DEVICE_HEADER] === '1' };
     }
     if (!breakGlassAllowed(req)) return { status: 403, error: "the token is the owner's break-glass: accepted only on this machine, never through a proxy" };
-    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', authenticatedAt: null, deviceOk: false };
+    return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', deviceOk: false };
   };
 
   /** Every write a person makes, recorded with who (login and role), how they came in, the instance and what was done. */
@@ -822,12 +821,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);
         // The hub asks this of each instance, to list only the ones the person has a role on.
-        if (!('status' in id)) resolved.set(req, { login: id.login, role: id.role, authenticatedAt: id.authenticatedAt, csrfOk: true, breakGlass: id.via === 'break-glass', deviceOk: id.deviceOk });
+        if (!('status' in id)) resolved.set(req, { login: id.login, role: id.role, csrfOk: true, breakGlass: id.via === 'break-glass', deviceOk: id.deviceOk });
         const sessionOf = opts.session ?? dashboardSession;
         if (url.pathname === '/api/role' && req.method === 'GET') {
           if ('status' in id) return id.status === 403 && id.login ? json(res, 200, { login: id.login, role: null }) : json(res, id.status, { error: id.error });
           const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
-          return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via, authenticatedAt: s?.authenticatedAt ?? null });
+          return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via });
         }
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
@@ -1116,23 +1115,23 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
         // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.
-        if (url.pathname === '/api/add-project' && req.method === 'GET') {
+        if (url.pathname === `/api/${DEVICE_VIEWS.addProject}` && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
-          const requester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+          const requester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
           return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}));
         }
         // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
-        // instance's owner who is also a machine owner, freshly signed in on an allowed device (or the break-glass),
+        // instance's owner who is also a machine owner, on an allowed device (or the break-glass),
         // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
         // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
-        const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk, requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
         // The Machine page's Updates panel: the engine installed now, the last install, any rollback or hold and why,
         // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
         if (url.pathname === '/api/updates' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('engine updates are', who) });
           return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT)));
         }
-        if (url.pathname === '/api/machine' && req.method === 'GET') {
+        if (url.pathname === `/api/${DEVICE_VIEWS.machine}` && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
           return json(res, 200, machine());
         }
@@ -1144,7 +1143,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const log = new EventLog(opts.eventsDb);
           let r: MachineRequest;
           try {
-            r = requestMachineChange(log, { args, requester: { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk }, via: 'settings', ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+            r = requestMachineChange(log, { args, requester: { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk }, via: 'settings', ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
           } catch (e) {
             if (e instanceof MachineRequestError) return json(res, e.status, { error: e.message });
             throw e;
@@ -1156,7 +1155,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Add a project to this machine: the machine helper's add-project, run by the coordinator (it streams each step
         // into this log as add_project.step). The same gate as any machine change: this instance's owner, and a machine
-        // owner freshly signed in on an allowed device (or the break-glass).
+        // owner on an allowed device (or the break-glass).
         if (url.pathname === '/api/machine/add-project' && req.method === 'POST') {
           const body = ((await readBody(req)) ?? {}) as { name?: unknown; repo?: unknown };
           // A refusal is audited too: what was asked for (cut short), and why.
@@ -1168,7 +1167,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const log = new EventLog(opts.eventsDb);
           let r: MachineRequest;
           try {
-            r = requestAddProject(log, { name: body.name, repo: body.repo, requester: { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk }, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+            r = requestAddProject(log, { name: body.name, repo: body.repo, requester: { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk }, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
           } catch (e) {
             if (e instanceof MachineRequestError) return refused(e.status, e.message);
             throw e;
@@ -1180,10 +1179,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
         // expiry, and the switch, followed from claude-account.sh's own progress file. Hidden from everyone else.
-        const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+        const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
         const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
         const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
-        if (url.pathname === '/api/claude-account' && req.method === 'GET') {
+        if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
           if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
           const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
           return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));

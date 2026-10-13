@@ -10,7 +10,7 @@ import { asks } from '../src/console/asks.js';
 import { MACHINE_HELPER } from '../src/machine.js';
 import { machineRequests, requestMachineChange } from '../src/machine-requests.js';
 import { runMachineRequests, STALE_CLAIM_MS } from '../src/coordinator/machine-requests.js';
-import { asFreshPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFile, repoRoot } from './helpers.js';
+import { asDevicePerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 /** olive is the machine's owner in these tests. */
@@ -22,7 +22,7 @@ const recorder = () => {
 
 test('the coordinator runs an allowed request through the helper and records the outcome', () => {
   const log = new EventLog(':memory:');
-  const r = requestMachineChange(log, { args: ['set-slots', '4'], requester: freshRequester('olive'), ownersFile, via: 'settings' });
+  const r = requestMachineChange(log, { args: ['set-slots', '4'], requester: ownerRequester('olive'), ownersFile, via: 'settings' });
   assert.equal(r.status, 'pending');
   const x = recorder();
   assert.equal(runMachineRequests({ log, ownersFile, instance: 'site', exec: x.exec }), 1);
@@ -33,7 +33,7 @@ test('the coordinator runs an allowed request through the helper and records the
   assert.equal(started.length, 1);
   assert.equal((started[0]!.payload as { instance: string }).instance, 'site', 'which coordinator took it');
   // A failure is recorded too, with what an admin does.
-  requestMachineChange(log, { args: ['set-updates', 'on'], requester: freshRequester('olive'), ownersFile, via: 'settings' });
+  requestMachineChange(log, { args: ['set-updates', 'on'], requester: ownerRequester('olive'), ownersFile, via: 'settings' });
   runMachineRequests({
     log,
     ownersFile,
@@ -50,7 +50,7 @@ test('the coordinator runs an allowed request through the helper and records the
 test('a request off the allowlist is refused by the coordinator even when written straight into the log, and never reaches sudo', () => {
   const log = new EventLog(':memory:');
   // The dashboard refuses these before recording them...
-  for (const args of [['set-slots', '99'], ['bash', '-c', 'id'], ['set-updates', 'maybe'], []]) assert.throws(() => requestMachineChange(log, { args, requester: freshRequester('olive'), ownersFile, via: 'settings' }), String(args));
+  for (const args of [['set-slots', '99'], ['bash', '-c', 'id'], ['set-updates', 'maybe'], []]) assert.throws(() => requestMachineChange(log, { args, requester: ownerRequester('olive'), ownersFile, via: 'settings' }), String(args));
   // ...and a request written some other way is refused when the coordinator takes it.
   for (const [i, args] of [['set-slots', '99'], ['bash', '-c', 'id'], ['set-slots', '4', '; rm -rf /'], ['set-slots', '04']].entries()) log.append('machine.requested', { id: `forged-${i}`, args, by: 'olive', via: 'settings', ask: null }, 'olive', 'human');
   const x = recorder();
@@ -63,14 +63,14 @@ test('a request off the allowlist is refused by the coordinator even when writte
 
 test("a request isn't run twice: not on a later tick, not by a second taker, and not after a coordinator stopped mid-run", () => {
   const log = new EventLog(':memory:');
-  requestMachineChange(log, { args: ['set-slots', '5'], requester: freshRequester('olive'), ownersFile, via: 'settings' });
+  requestMachineChange(log, { args: ['set-slots', '5'], requester: ownerRequester('olive'), ownersFile, via: 'settings' });
   const x = recorder();
   runMachineRequests({ log, ownersFile, instance: 'site', exec: x.exec });
   runMachineRequests({ log, ownersFile, instance: 'site', exec: x.exec });
   assert.equal(x.calls.length, 1, 'once, over two ticks');
 
   // A second taker (the same log, another process) that read the request as pending loses the claim.
-  const r = requestMachineChange(log, { args: ['set-slots', '6'], requester: freshRequester('olive'), ownersFile, via: 'settings' });
+  const r = requestMachineChange(log, { args: ['set-slots', '6'], requester: ownerRequester('olive'), ownersFile, via: 'settings' });
   log.append('machine.started', { id: r.id, instance: 'site' }, 'site', 'coordinator');
   runMachineRequests({ log, ownersFile, instance: 'site', exec: x.exec });
   assert.equal(x.calls.length, 1, 'a request already claimed is left to its taker');
@@ -81,8 +81,8 @@ test("a request isn't run twice: not on a later tick, not by a second taker, and
 
   // A root-step ask has at most one request waiting.
   const ask = asks(log).create({ instance: 'site', kind: 'root_step', title: 'Seven slots', detail: 'x', command: 'set-slots', args: ['7'] });
-  requestMachineChange(log, { args: ['set-slots', '7'], requester: freshRequester('olive'), ownersFile, via: 'ask', ask: ask.id });
-  assert.throws(() => requestMachineChange(log, { args: ['set-slots', '7'], requester: freshRequester('olive'), ownersFile, via: 'ask', ask: ask.id }), /already has a machine change waiting/);
+  requestMachineChange(log, { args: ['set-slots', '7'], requester: ownerRequester('olive'), ownersFile, via: 'ask', ask: ask.id });
+  assert.throws(() => requestMachineChange(log, { args: ['set-slots', '7'], requester: ownerRequester('olive'), ownersFile, via: 'ask', ask: ask.id }), /already has a machine change waiting/);
   runMachineRequests({ log, ownersFile, instance: 'site', exec: x.exec });
   assert.equal(asks(log).get(ask.id)!.answer!.answer, 'ran', 'the coordinator answers the ask');
 });
@@ -102,7 +102,7 @@ test('the dashboard path never spawns sudo: Settings and root steps only record 
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: machineOwnersFile('example-owner'), slotsDir: join(dir, 'slots'), machine: { changesPath: join(dir, 'changes.jsonl'), updatesConfigPath: join(dir, 'updates.json'), updatesLogPath: join(dir, 'updates.jsonl') } });
   try {
     const base = d.url.split('/?')[0]!;
-    const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asFreshPerson('example-owner') };
+    const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asDevicePerson('example-owner') };
     assert.equal((await fetch(`${base}/api/machine`, { method: 'POST', headers: h, body: JSON.stringify({ what: 'slots', value: 4 }) })).status, 200);
     assert.equal((await fetch(`${base}/api/machine`, { method: 'POST', headers: h, body: JSON.stringify({ what: 'updates', value: true }) })).status, 200);
     const run = await fetch(`${base}/api/asks/${step.id}/run`, { method: 'POST', headers: h, body: '{}' });

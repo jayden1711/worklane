@@ -56,7 +56,7 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
-  init [<repo>] [--mode local|server] [--yes] [--reset] [--instance name]
+  init [<repo>] [--mode local|server] [--yes] [--reset] [--instance name] [--answer id=choice]
                                    the guided first setup, one checklist in order: tools, Claude login,
                                    GitHub, repo config, protection, then Discord (and Tailscale on a
                                    server), optional. Each step is checked before the next; rerun it to
@@ -284,13 +284,23 @@ async function main(argv: string[]): Promise<number> {
       }
       const yes = flag(args, '--yes');
       const reset = flag(args, '--reset');
+      // Auto-config's questions, answered up front: --answer <id>=<choice> (or <id>=custom:<command>), repeatable.
+      const answers: Record<string, string> = {};
+      for (let a = option(args, '--answer'); a !== undefined; a = option(args, '--answer')) {
+        const eq = a.indexOf('=');
+        if (eq < 1) {
+          console.error(`init: --answer takes <id>=<choice>, not "${a}"`);
+          return 2;
+        }
+        answers[a.slice(0, eq)] = a.slice(eq + 1);
+      }
       const target = args[1]?.startsWith('-') ? undefined : args[1];
       const unknown = args.slice(target ? 2 : 1);
       if (unknown.length) {
         console.error(`init: unexpected ${unknown.join(' ')}`);
         return 2;
       }
-      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: toolPrefix(), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: toolPrefix(), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), ...(Object.keys(answers).length ? { answers } : {}) });
     }
 
     case 'export': {

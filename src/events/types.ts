@@ -506,6 +506,10 @@ export const EventSchemas = {
   'worktree.pool_refilled': z.strictObject({ base: sha, created: z.array(z.string()), removed: z.array(z.string()), errors: z.array(z.string()) }),
   /** At start: state/ closed to other users (paths tightened, first 20 named) and old task files removed. */
   'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
+  /** A shutdown began (SIGTERM, SIGINT): runs in flight are aborted and their tasks requeued; `pending` is what was in flight. */
+  'coordinator.stopping': z.strictObject({ instance: z.string(), signal: z.string(), pending: z.array(z.string()) }),
+  /** The shutdown ended: `clean` when everything stopped in time; otherwise `pending` names what was left when it exited anyway. */
+  'coordinator.stopped': z.strictObject({ instance: z.string(), clean: z.boolean(), ms: z.number().int().nonnegative(), pending: z.array(z.string()) }),
   'coordinator.tick': z.strictObject({ instance: z.string(), dispatched: z.number().int(), reconciled: z.number().int() }),
   'report.posted': z.strictObject({ day: z.string(), slot: z.string(), issue: z.number().int().nullable() }),
   /** The daily "waiting on you" digest was posted (`items` waiting, `merged` on their own since the last one). */

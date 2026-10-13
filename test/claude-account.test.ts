@@ -16,11 +16,10 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { MACHINE_HELPER } from '../src/machine.js';
 import { MachineRequestError, machineRequests } from '../src/machine-requests.js';
-import { asFreshPerson, asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFile } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const TOKEN = `sk-ant-oat01-${'T'.repeat(40)}`;
-const MIN = 60_000;
 
 /** A switch's progress file as claude-account.sh writes it, up to a point. */
 function switchDir(lines: Partial<SwitchLine>[], from: string | null = 'alpha'): string {
@@ -61,14 +60,13 @@ test('switchView folds the lines per instance and user, and knows when it waits 
   assert.equal(switchView([]), null);
 });
 
-test('a refresh or a switch is a machine request for a machine owner only, freshly signed in; one switch at a time', () => {
+test('a refresh or a switch is a machine request for a machine owner only, on an allowed device; one switch at a time', () => {
   const owners = machineOwnersFile('ada');
   const log = new EventLog(':memory:');
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-none-'));
-  const ask = (login: string, action: unknown = 'switch', extra: Partial<ReturnType<typeof freshRequester>> = {}, d = dir) => () => requestClaudeAccount(log, { action, requester: { ...freshRequester(login), ...extra }, dir: d, ownersFile: owners });
+  const ask = (login: string, action: unknown = 'switch', extra: Partial<ReturnType<typeof ownerRequester>> = {}, d = dir) => () => requestClaudeAccount(log, { action, requester: { ...ownerRequester(login), ...extra }, dir: d, ownersFile: owners });
   const refused = (f: () => unknown, status: number, re: RegExp) => assert.throws(f, (e: Error) => e instanceof MachineRequestError && e.status === status && re.test(e.message), re.source);
   refused(ask('ivy'), 403, /@ivy isn't one/);
-  refused(ask('ada', 'switch', { authenticatedAt: Date.now() - 6 * MIN }), 403, /last 5 minutes/);
   refused(ask('ada', 'switch', { deviceOk: false }), 403, /allowed devices/);
   refused(ask('ada', 'rm -rf'), 400, /status or switch/);
   const r = ask('ada')();
@@ -96,7 +94,7 @@ test('the coordinator runs the request through the machine helper, and refuses o
 test('the token is taken only while the switch waits for it from this instance, only a setup token, for this user only', { skip: !posix }, () => {
   const owners = machineOwnersFile('ada');
   const home = mkdtempSync(join(tmpdir(), 'claude-account-home-'));
-  const who: { role: 'owner' | 'writer'; requester: ReturnType<typeof freshRequester> } = { role: 'owner', requester: freshRequester('ada') };
+  const who: { role: 'owner' | 'writer'; requester: ReturnType<typeof ownerRequester> } = { role: 'owner', requester: ownerRequester('ada') };
   const store = (dir: string, value = TOKEN, instance = 'alpha', w = who) => () => storeSwitchToken({ value, instance, who: w, dir, home, ownersFile: owners });
   const refused = (f: () => unknown, status: number, re: RegExp) =>
     assert.throws(f, (e: Error) => {
@@ -106,8 +104,8 @@ test('the token is taken only while the switch waits for it from this instance, 
   refused(store(mkdtempSync(join(tmpdir(), 'none-'))), 409, /no Claude account switch is waiting/);
   const waiting = switchDir(WAITING);
   refused(store(waiting, TOKEN, 'beta'), 409, /alpha's dashboard, not this one/);
-  refused(store(waiting, TOKEN, 'alpha', { role: 'owner', requester: freshRequester('ivy') }), 403, /@ivy isn't one/);
-  refused(store(waiting, TOKEN, 'alpha', { role: 'writer', requester: freshRequester('ada') }), 403, /only an owner of this instance/);
+  refused(store(waiting, TOKEN, 'alpha', { role: 'owner', requester: ownerRequester('ivy') }), 403, /@ivy isn't one/);
+  refused(store(waiting, TOKEN, 'alpha', { role: 'writer', requester: ownerRequester('ada') }), 403, /only an owner of this instance/);
   refused(store(waiting, `not-a-token-${'x'.repeat(30)}`), 400, /not a token from claude setup-token/);
   const file = store(waiting)();
   assert.equal(file, join(secretsDir('alpha', home), CLAUDE_ACCOUNT_CREDENTIAL));
@@ -138,26 +136,26 @@ test('the dashboard: the panel is a machine owner\'s only; the token goes nowher
     writeFileSync(owners, `${JSON.stringify({ owners: ['olu'] })}\n`);
     assert.equal((await call('/api/claude-account', asPerson('example-owner'))).status, 403);
     writeFileSync(owners, `${JSON.stringify({ owners: ['example-owner'] })}\n`);
-    const view = await call('/api/claude-account', asFreshPerson('example-owner'));
+    const view = await call('/api/claude-account', asDevicePerson('example-owner'));
     assert.equal(view.status, 200);
     const v = JSON.parse(view.text) as { machineOwner: boolean; allowed: boolean; canPasteToken: boolean; status: { users: { account: string; tokenId: string }[] }; switch: { waitingForToken: boolean } };
     assert.deepEqual([v.machineOwner, v.allowed, v.canPasteToken, v.switch.waitingForToken, v.status.users[0]!.account, v.status.users[0]!.tokenId], [true, true, true, true, 'agents@example.com', '0123abcd']);
-    // A stale sign-in sees it, read-only.
+    // Off an allowed device: sees it, read-only.
     const stale = JSON.parse((await call('/api/claude-account', asPerson('example-owner'))).text) as { allowed: boolean; canPasteToken: boolean };
     assert.deepEqual([stale.allowed, stale.canPasteToken], [false, false]);
 
-    // The token: refused for a writer before its body is read, and for a bad one; stored for a fresh machine owner.
-    assert.equal((await call('/api/claude-account/token', asFreshPerson('example-collaborator'), { value: TOKEN })).status, 403);
-    const bad = await call('/api/claude-account/token', asFreshPerson('example-owner'), { value: `not-a-token-${'y'.repeat(30)}` });
+    // The token: refused for a writer before its body is read, and for a bad one; stored for a machine owner.
+    assert.equal((await call('/api/claude-account/token', asDevicePerson('example-collaborator'), { value: TOKEN })).status, 403);
+    const bad = await call('/api/claude-account/token', asDevicePerson('example-owner'), { value: `not-a-token-${'y'.repeat(30)}` });
     assert.equal(bad.status, 400);
     assert.ok(!bad.text.includes('not-a-token'));
-    const ok = await call('/api/claude-account/token', asFreshPerson('example-owner'), { value: TOKEN });
+    const ok = await call('/api/claude-account/token', asDevicePerson('example-owner'), { value: TOKEN });
     assert.equal(ok.status, 200, ok.text);
     assert.ok(!ok.text.includes(TOKEN));
     const file = join(secretsDir(cfg.project.project.name, home), CLAUDE_ACCOUNT_CREDENTIAL);
     assert.equal(readFileSync(file, 'utf8'), TOKEN);
     // A switch from the dashboard, recorded for the coordinator.
-    const sw = await call('/api/machine/claude-account', asFreshPerson('example-owner'), { action: 'status' });
+    const sw = await call('/api/machine/claude-account', asDevicePerson('example-owner'), { action: 'status' });
     assert.equal(sw.status, 200, sw.text);
     const log = new EventLog(eventsDb);
     try {
@@ -169,7 +167,7 @@ test('the dashboard: the panel is a machine owner\'s only; the token goes nowher
       log.close();
     }
     // A writer can't start one.
-    assert.equal((await call('/api/machine/claude-account', asFreshPerson('example-collaborator'), { action: 'switch' })).status, 403);
+    assert.equal((await call('/api/machine/claude-account', asDevicePerson('example-collaborator'), { action: 'switch' })).status, 403);
   } finally {
     await d.close();
   }
@@ -177,8 +175,8 @@ test('the dashboard: the panel is a machine owner\'s only; the token goes nowher
 
 test('the view: a machine owner may switch when nothing runs; anyone else gets nothing to act on', () => {
   const owners = machineOwnersFile('ada');
-  const v = claudeAccountView({ dir: mkdtempSync(join(tmpdir(), 'claude-account-empty-')), events: [], who: { role: 'owner', requester: freshRequester('ada') }, instance: 'alpha', ownersFile: owners });
+  const v = claudeAccountView({ dir: mkdtempSync(join(tmpdir(), 'claude-account-empty-')), events: [], who: { role: 'owner', requester: ownerRequester('ada') }, instance: 'alpha', ownersFile: owners });
   assert.deepEqual([v.machineOwner, v.allowed, v.canSwitch, v.status, v.switch], [true, true, true, null, null]);
-  const other = claudeAccountView({ dir: switchDir(WAITING), events: [], who: { role: 'owner', requester: freshRequester('ivy') }, instance: 'alpha', ownersFile: owners });
+  const other = claudeAccountView({ dir: switchDir(WAITING), events: [], who: { role: 'owner', requester: ownerRequester('ivy') }, instance: 'alpha', ownersFile: owners });
   assert.deepEqual([other.machineOwner, other.allowed, other.canSwitch, other.canPasteToken], [false, false, false, false]);
 });

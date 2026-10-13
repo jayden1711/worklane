@@ -120,7 +120,7 @@ export function SwitchSteps({ s, canPasteToken, onChanged }: { s: SwitchView; ca
               </>
             ) : (
               <p className="text-[12px] text-ink-3" data-testid="claude-switch-token-elsewhere">
-                {s.tokenFrom ? `Paste it in ${s.tokenFrom}'s dashboard, where the switch was started (you need a fresh sign-in there).` : 'Paste it in the terminal where the switch was started.'}
+                {s.tokenFrom ? `Paste it in ${s.tokenFrom}'s dashboard, where the switch was started.` : 'Paste it in the terminal where the switch was started.'}
               </p>
             ))}
           {err && <p className="text-[12.5px] text-red" data-testid="claude-switch-token-error">{err}</p>}

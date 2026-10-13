@@ -8,7 +8,7 @@ import { machineView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { MACHINE_HELPER } from '../src/machine.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
-import { asFreshPerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
+import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
 
 function setup(o: { updates?: boolean | null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dash-machine-'));
@@ -44,7 +44,7 @@ test('the machine settings: the slot cap and its bounds, engine updates, who may
 async function serve(s: ReturnType<typeof setup>, user: string) {
   const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: s.slotsDir, machine: s.machine, machineOwnersFile: s.machineOwnersFile });
   const base = d.url.split('/?')[0]!;
-  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asFreshPerson(user) };
+  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asDevicePerson(user) };
   const post = (what: string, value: unknown) => fetch(`${base}/api/machine`, { method: 'POST', headers: h, body: JSON.stringify({ what, value }) });
   const view = async () => (await (await fetch(`${base}/api/machine`, { headers: h })).json()) as { requests: { args: string[]; status: string; detail: string }[] };
   return { d, base, h, post, view };

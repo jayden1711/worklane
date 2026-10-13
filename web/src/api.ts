@@ -442,6 +442,16 @@ async function authHeaders(): Promise<Record<string, string>> {
   return { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(csrf ? { 'x-csrf-token': csrf } : {}), 'content-type': 'application/json' };
 }
 
+/**
+ * The subprotocols the owner terminal's WebSocket offers: its own (src/dashboard-auth.ts TERMINAL_PROTOCOL) and the
+ * session's CSRF token as `csrf.<token>` (CSRF_PROTOCOL_PREFIX), since a browser can't set headers on the upgrade.
+ * The token never goes in the URL; the hub answers with the terminal's protocol alone.
+ */
+export async function terminalProtocols(): Promise<string[]> {
+  await me;
+  return ['terminal.v1', ...(csrf ? [`csrf.${csrf}`] : [])];
+}
+
 /** A stream's URL: the break-glass token on it (EventSource sends no headers); a session's cookie goes by itself. */
 export const streamUrl = (path: string) => (token ? `${path}?t=${encodeURIComponent(token)}` : path);
 
@@ -687,6 +697,32 @@ export interface FirstRun {
   updatedAt: string | null;
   finishedAt: string | null;
   command: string;
+  /** Auto-config (src/auto-config.ts): its open questions with their choices, each command's run on the default branch, the setup PR. */
+  autoConfig: FirstRunAutoConfig | null;
+}
+export interface FirstRunQuestion {
+  id: string;
+  ask: string;
+  choices: { id: string; label: string; command?: string }[];
+  custom: boolean;
+  about?: string;
+}
+export interface FirstRunVerification {
+  slot: 'setup' | 'full' | 'changed' | 'one';
+  command: string;
+  base: string;
+  code: number | null;
+  passed: boolean;
+  ms: number;
+  tail: string;
+  at: string;
+}
+export interface FirstRunAutoConfig {
+  questions: FirstRunQuestion[];
+  verified: FirstRunVerification[];
+  pr: { number: number | null; url: string } | null;
+  /** The command that answers a question. */
+  answer: string;
 }
 export const getFirstRun = () => api<FirstRun>('/api/first-run');
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });

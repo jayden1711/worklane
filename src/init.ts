@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
+import { autoConfigure, emptyAutoConfig, type AutoConfigState, type Question, type Verification } from './auto-config.js';
 import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
@@ -70,6 +71,8 @@ export interface InitState {
   steps: Partial<Record<StepId, StepRecord>>;
   /** server: add-project.sh's last state per step. */
   handoff: Record<string, string>;
+  /** Local mode: auto-config's answers, open questions, command results and setup PR (src/auto-config.ts). */
+  autoConfig?: AutoConfigState;
   updatedAt: string;
   finishedAt: string | null;
 }
@@ -146,6 +149,10 @@ export interface InitContext {
   interactive: boolean;
   io: InitIo;
   state: InitState;
+  /** Answers to auto-config's questions given on the command line (`--answer id=choice`). */
+  answers?: Record<string, string>;
+  /** Keep the state now (runInit sets it): auto-config saves each answer and result as it comes. */
+  save?: () => void;
 }
 
 export interface StepResult {
@@ -211,7 +218,7 @@ async function handoff(c: InitContext, id: StepId, act: boolean): Promise<StepRe
   const what: Record<string, string> = {
     claude: `the agent's Claude login, stored for its user only (add-project: claude-token)`,
     github: `the instance, its GitHub App (made through the manifest flow) and the checkout (add-project: instance, app, checkout)`,
-    'repo-config': `the checkout's ${BRAND.configDir}/ and the instance's policy (add-project: checkout, policy); auto-config comes later`,
+    'repo-config': `the checkout's ${BRAND.configDir}/ and the instance's policy (add-project: checkout, policy), from the templates; auto-config (detected, checked commands) runs in local mode so far`,
   };
   if (done()) return { status: 'done', detail: what[id]! };
   if (!act) return { status: 'failed', detail: `not yet: ${need.filter((s) => c.state.handoff[s] !== 'done').join(', ')} (add-project)` };
@@ -267,20 +274,45 @@ async function github(c: InitContext, act: boolean): Promise<StepResult> {
 }
 
 /**
- * Where auto-config will go: detect the project's commands, draft config.yaml and tests.yaml, verify them on main and
- * open the scaffold as a PR. Until then, nothing is drafted and the step checks what is there.
+ * Auto-config, for a checkout with no config folder: detect the project's commands on the default branch, ask what
+ * can't be settled without the person, run each command there, and propose the config as a PR from its own branch
+ * (src/auto-config.ts). null: the config is on the default branch now (its PR merged) and this checkout has it, so
+ * the hooks can be installed from it.
  */
-export type AutoConfig = (root: string) => StepResult | null;
-export const autoConfig: AutoConfig | null = null;
+export type AutoConfig = (c: InitContext) => Promise<StepResult | null>;
+export const autoConfig: AutoConfig = async (c) => {
+  if (!c.repo) return { status: 'failed', detail: `no GitHub origin: the config is proposed as a PR on GitHub (the GitHub step)` };
+  c.state.autoConfig ??= emptyAutoConfig();
+  const r = await autoConfigure({
+    root: c.root!,
+    repo: c.repo,
+    state: c.state.autoConfig,
+    ...(c.answers ? { given: c.answers } : {}),
+    io: { git: (args, cwd) => c.io.run('git', args, { cwd }), gh: (args, cwd) => c.io.run('gh', args, { cwd }), ask: (q) => (c.interactive ? c.io.ask(q) : Promise.resolve(null)), say: c.io.say },
+    save: () => c.save?.(),
+  });
+  if (r.kind !== 'merged') return { status: 'failed', detail: r.detail };
+  // Merged: bring this checkout up to it when it's on the default branch (a fast-forward only), else say so.
+  const on = c.io.run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: c.root! }).stdout.trim();
+  if (on !== r.branch) return { status: 'failed', detail: `the config is on origin/${r.branch} now, but this checkout is on ${on}: switch to ${r.branch} and pull, then run \`${BRAND.cli} init\` again` };
+  const ff = c.io.run('git', ['merge', '--ff-only', '-q', `origin/${r.branch}`], { cwd: c.root! });
+  if (ff.status !== 0) return { status: 'failed', detail: `the config is on origin/${r.branch} now, but ${r.branch} here can't fast-forward to it (${ff.stderr.trim().split('\n')[0] ?? ''}): pull it, then run \`${BRAND.cli} init\` again` };
+  c.io.say(`   the config PR merged: fast-forwarded ${r.branch} to origin/${r.branch}`);
+  return null;
+};
 
 function repoConfigStatus(c: InitContext): StepResult {
   const root = c.root!;
-  if (!existsSync(join(root, BRAND.configDir, 'config.yaml'))) return { status: 'failed', detail: `no ${BRAND.configDir}/config.yaml` };
+  if (!existsSync(join(root, BRAND.configDir, 'config.yaml'))) {
+    const pr = c.state.autoConfig?.pr;
+    const open = c.state.autoConfig?.questions.length ?? 0;
+    return { status: 'failed', detail: `no ${BRAND.configDir}/config.yaml${pr ? `: proposed in ${pr.url}, to merge` : open ? `: ${open} question${open === 1 ? '' : 's'} to answer (\`${BRAND.cli} init\`)` : ''}` };
+  }
   if (!existsSync(join(root, '.claude', 'settings.json'))) return { status: 'failed', detail: 'the hooks for local runs are not installed (.claude/settings.json)' };
   try {
     const cfg = loadConfig(root);
     const placeholders = /your-github-handle|owner\/repo/.test(JSON.stringify(cfg.project)) ? `; still has template placeholders: set the owners in ${BRAND.configDir}/config.yaml` : '';
-    return { status: 'done', detail: `${BRAND.configDir}/ valid (${cfg.project.project.repo}), hooks installed${placeholders}; auto-config (the project's commands, drafted as a PR) comes later` };
+    return { status: 'done', detail: `${BRAND.configDir}/ valid (${cfg.project.project.repo}), hooks installed${placeholders}` };
   } catch (e) {
     return { status: 'failed', detail: (e as Error).message.split('\n')[0] ?? 'invalid config' };
   }
@@ -290,8 +322,11 @@ async function repoConfig(c: InitContext, act: boolean): Promise<StepResult> {
   if (c.mode === 'server') return handoff(c, 'repo-config', act);
   const v = repoConfigStatus(c);
   if (v.status === 'done' || !act) return v;
-  const drafted = autoConfig?.(c.root!);
-  if (drafted) return drafted;
+  // No config folder at all: auto-config proposes one (a folder already here is the person's, used as it is).
+  if (!existsSync(join(c.root!, BRAND.configDir))) {
+    const drafted = await autoConfig(c);
+    if (drafted) return drafted;
+  }
   try {
     const r = install({ root: c.root! });
     c.io.say(`   ${r.scaffolded ? 'scaffolded' : 'kept'} ${BRAND.configDir}/; hooks merged into ${r.settingsPath}`);
@@ -388,6 +423,7 @@ export async function runInit(c: InitContext, file: string): Promise<number> {
     c.state.updatedAt = now();
     writeInitState(file, c.state);
   };
+  c.save = save;
   const doneEarlier = steps.filter((s) => ['done', 'skipped'].includes(c.state.steps[s.id]?.status ?? '')).length;
   c.io.say(`${BRAND.cli} init, ${c.mode} mode: ${c.mode === 'local' ? c.root : `${c.repo} as instance ${c.instance}`}`);
   if (doneEarlier) c.io.say(`resuming: ${doneEarlier} of ${steps.length} steps done earlier (${file})`);
@@ -495,6 +531,8 @@ export interface InitArgs {
   cwd: string;
   prefix: string;
   interactive: boolean;
+  /** `--answer id=choice`, for auto-config's questions. */
+  answers?: Record<string, string>;
 }
 
 /**
@@ -539,7 +577,7 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
     let state = readInitState(file);
     if (!state || a.reset) state = newState('local', localRoot, null, null);
     state.repo = localRepo(localRoot);
-    return runInit({ mode, root: localRoot, repo: state.repo, instance: null, prefix: a.prefix, yes: a.yes, interactive: a.interactive, io, state }, file);
+    return runInit({ mode, root: localRoot, repo: state.repo, instance: null, prefix: a.prefix, yes: a.yes, interactive: a.interactive, io, state, ...(a.answers ? { answers: a.answers } : {}) }, file);
   }
   // server
   const repo = a.target ?? '';
@@ -575,6 +613,8 @@ export interface FirstRunView {
   finishedAt: string | null;
   /** The command that walks (or resumes) the checklist. */
   command: string;
+  /** Auto-config (local mode): the questions still open, each command's result on the default branch, the setup PR. */
+  autoConfig: { questions: Question[]; verified: Verification[]; pr: { number: number | null; url: string } | null; answer: string } | null;
 }
 
 export function firstRunView(file: string, o: { root: string; repo: string; instance: string | null; has?: (cmd: string) => boolean }): FirstRunView {
@@ -592,5 +632,13 @@ export function firstRunView(file: string, o: { root: string; repo: string; inst
     updatedAt: state?.updatedAt ?? null,
     finishedAt: state?.finishedAt ?? null,
     command,
+    autoConfig: state?.autoConfig
+      ? {
+          questions: state.autoConfig.questions,
+          verified: state.autoConfig.verified.filter((v) => v.base === state.autoConfig!.base),
+          pr: state.autoConfig.pr ? { number: state.autoConfig.pr.number, url: state.autoConfig.pr.url } : null,
+          answer: `${BRAND.cli} init ${o.root} --answer <id>=<choice>`,
+        }
+      : null,
   };
 }

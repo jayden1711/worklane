@@ -8,14 +8,13 @@
 // It's checked three times: by the dashboard before it records a machine request (src/machine-requests.ts), by
 // the coordinator again before it runs one (src/coordinator/machine-requests.ts: the request names who asked),
 // and never for the owner's break-glass (the token, on this machine only), which stays allowed. A machine change
-// also needs what the owner terminal needs: a GitHub sign-in in the last 5 minutes and an allowed console device.
+// also needs what the owner terminal needs: a signed-in session and an allowed console device.
 //
 // Fails closed: no file, a file anyone but root (or this user) owns or may write, or one that doesn't parse, or
 // that names anything but GitHub logins, means no machine owners, so only the break-glass may change the machine.
 import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';
 import { fileAccess } from './os/index.js';
-import { FRESH_SIGN_IN_MS } from './console/terminal.js';
 
 export const MACHINE_OWNERS_FILE = `/etc/${BRAND.cli}/machine-owners.json`;
 
@@ -59,8 +58,6 @@ export interface MachineRequester {
   login: string;
   /** The owner's break-glass (the token, on this machine only): allowed without the checks below. */
   breakGlass: boolean;
-  /** When they signed in with GitHub (ms since the epoch), as the hub says; null: unknown. */
-  authenticatedAt: number | null;
   /** Whether the hub identified this request's Tailscale device as one allowed to open the console. */
   deviceOk: boolean;
 }
@@ -69,17 +66,13 @@ export interface MachineRequester {
 export const ownersText = (owners: string[]) => (owners.length ? owners.map((o) => `@${o}`).join(', ') : 'none set (an admin runs dashboards.sh --machine-owner <login>)');
 
 /**
- * Why this person may not ask for a machine change now; null when they may. The same rules as the owner terminal
- * (src/console/terminal.ts): a GitHub sign-in in the last 5 minutes, and an allowed console device; on top, a
- * machine owner. The break-glass is allowed.
+ * Why this person may not ask for a machine change now; null when they may. The same device rule as the owner
+ * terminal (src/console/terminal.ts): an allowed console device; on top, a machine owner. The break-glass is allowed.
  */
-export function machineChangeRefusal(r: MachineRequester, o: { now?: number; file?: string } = {}): string | null {
+export function machineChangeRefusal(r: MachineRequester, o: { file?: string } = {}): string | null {
   if (r.breakGlass) return null;
-  const now = o.now ?? Date.now();
   const file = o.file ?? MACHINE_OWNERS_FILE;
   if (!isMachineOwner(r.login, file)) return `only the machine's owners may change the machine (machine owners: ${ownersText(machineOwners(file))}); @${r.login} isn't one`;
-  if (r.authenticatedAt === null) return 'a machine change needs a GitHub sign-in within the last 5 minutes, and this session has none: sign in again';
-  if (now - r.authenticatedAt > FRESH_SIGN_IN_MS || r.authenticatedAt > now + 60_000) return 'a machine change needs a GitHub sign-in within the last 5 minutes: sign in again';
   if (!r.deviceOk) return "a machine change needs one of the console's allowed devices (dashboards.sh --console-devices, the same as the terminal); this request didn't come from one";
   return null;
 }

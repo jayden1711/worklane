@@ -106,7 +106,7 @@ test('the terminal checks the device on top of the owner checks: an owner from a
     now: () => 1_000_000,
     spawnPty: () => ((spawned = true), { write() {}, onData() {}, onExit() {}, kill() {} }) as Pty,
   };
-  const owner = { login: 'olive', role: 'owner' as const, authenticatedAt: 1_000_000 - 1000, csrfOk: true };
+  const owner = { login: 'olive', role: 'owner' as const, csrfOk: true };
   const device = (ip: string, allow: string[]) => () => (looked++, deviceRefusal(req({ 'x-forwarded-for': ip }), opts(allow)));
   const r = openTerminal({ ...base, session: owner, device: device(ip(5), ['laptop']) });
   assert.ok('refused' in r && /isn't one of the devices allowed/.test(r.refused));
@@ -136,7 +136,7 @@ test('on the hub: refused (and audited) without an allowed device, open from one
       devices: ['laptop'],
       whois,
       peerUid: () => uid,
-      session: () => ({ login: 'olive', role: 'owner', authenticatedAt: Date.now(), csrfOk: true }),
+      session: () => ({ login: 'olive', role: 'owner', csrfOk: true }),
       audit: { record: (e) => void audit.push(e) },
       exec: () => 'password-required',
       spawnPty: () => ({ write() {}, onData() {}, onExit() {}, kill() {} }) as Pty,

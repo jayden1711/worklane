@@ -25,7 +25,7 @@ import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
-import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
+import { CliRunner, type AgentRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
 import { instanceConfigProblems, instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
 import { startConfig } from './config/live.js';
@@ -227,7 +227,26 @@ export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?
   return runSite(site, { ...opts, label: 'coordinator', liveConfig: { tree: start.tree }, ...(protection ? { protection } : {}) });
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+/** How long a shutdown (SIGTERM, SIGINT) may take before the process exits anyway, naming what was still pending. */
+export const SHUTDOWN_MS = 20_000;
+
+/** A sleep that a shutdown ends at once. */
+function wakeableSleep() {
+  let wake = () => {};
+  return {
+    sleep: (ms: number) =>
+      new Promise<void>((r) => {
+        const t = setTimeout(r, ms);
+        wake = () => {
+          clearTimeout(t);
+          r();
+        };
+      }),
+    wake: () => wake(),
+  };
+}
+
+export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -263,10 +282,40 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());
   const requeued = await coordinator.recover();
   if (requeued.length) console.log(`recovered: requeued ${requeued.map((n) => `#${n}`).join(', ')}`);
+  // Shutdown (SIGTERM from the service manager on a restart or an update, SIGINT from a terminal): nothing new
+  // starts, and everything in flight is aborted, its task requeued (Coordinator.stop). The watchdog steps down from
+  // its machine roles at once, the timers stop, the log and the lock are closed and released, and the process exits.
+  // Whatever is still pending after shutdownMs is named in the log and on stderr, and the process exits anyway.
   let stopping = false;
-  const stop = () => {
+  const nap = wakeableSleep();
+  let watchdog: { stop: () => void } | null = null;
+  let deadline: NodeJS.Timeout | undefined;
+  const stoppingSince = { at: 0 };
+  const forceExit = (why: string) => {
+    const pending = coordinator.pending();
+    const message = `shutdown: ${why}; exiting with ${pending.length ? `still pending: ${pending.join(', ')}` : 'nothing named pending'}`;
+    console.error(message);
+    try {
+      log.append('coordinator.stopped', { instance: instanceId(), clean: false, ms: Date.now() - stoppingSince.at, pending }, instanceId());
+      log.close();
+    } catch {
+      // the log is already closed: the message above still says why
+    }
+    lock.lock.release();
+    process.exit(1);
+  };
+  const stop = (signal: NodeJS.Signals) => {
+    if (stopping) return forceExit(`${signal} again`);
     stopping = true;
+    stoppingSince.at = Date.now();
+    console.error(`${signal}: stopping (aborting runs in flight; their tasks requeue)`);
+    log.append('coordinator.stopping', { instance: instanceId(), signal, pending: coordinator.pending() }, instanceId());
+    watchdog?.stop();
+    clearInterval(watch);
     coordinator.stop();
+    nap.wake();
+    // Kept referenced: work that hangs on nothing the event loop holds still ends here, not in a silent exit.
+    deadline = setTimeout(() => forceExit(`not stopped after ${Math.round((opts.shutdownMs ?? SHUTDOWN_MS) / 1000)} s`), opts.shutdownMs ?? SHUTDOWN_MS);
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
@@ -283,23 +332,27 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
     void coordinator.checkIntake();
   }, 5_000);
   watch.unref();
-  const watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
+  watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
   let lastBackup = 0;
   try {
-    do {
+    while (!stopping) {
       await coordinator.tick();
-      if (Date.now() - lastBackup > 3600_000) {
+      if (!stopping && Date.now() - lastBackup > 3600_000) {
         const b = await backup(log, dirStore(backupDir));
         if (!b.ok) log.append('coordinator.error', { instance: instanceId(), where: 'backup', kind: 'backup_failed', message: b.error ?? 'unknown' }, instanceId());
         // Off the machine too, when the owner set it up: encrypted, and verified by reading the remote copy back.
         if (offsiteConfig) await maybeOffsiteBackup(log, offsiteConfig, instanceId()).catch((e: Error) => log.append('coordinator.error', { instance: instanceId(), where: 'offsite backup', kind: 'error', message: e.message.slice(0, 500) }, instanceId()));
         lastBackup = Date.now();
       }
-      if (opts.once) break;
-      await new Promise((r) => setTimeout(r, (opts.intervalMs ?? 60_000) + Math.random() * 5_000));
-    } while (!stopping);
+      if (opts.once || stopping) break;
+      await nap.sleep((opts.intervalMs ?? 60_000) + Math.random() * 5_000);
+    }
     await coordinator.idle();
+    if (stopping) log.append('coordinator.stopped', { instance: instanceId(), clean: true, ms: Date.now() - stoppingSince.at, pending: [] }, instanceId());
   } finally {
+    clearTimeout(deadline);
+    process.off('SIGTERM', stop);
+    process.off('SIGINT', stop);
     clearInterval(watch);
     watchdog?.stop();
     intake?.stop();

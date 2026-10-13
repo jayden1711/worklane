@@ -665,6 +665,8 @@ ExecStart=${spec.program.map(q).join(' ')}
 WorkingDirectory=${spec.workingDir}
 Restart=always
 RestartSec=30
+# The coordinator exits within SHUTDOWN_MS (20 s) of SIGTERM (src/service.ts); this leaves it room before a SIGKILL.
+TimeoutStopSec=30
 StandardOutput=append:${spec.logFile}
 StandardError=append:${spec.logFile}
 ${Object.entries(spec.env ?? {}).map(([k, v]) => `Environment=${q(`${k}=${v}`)}`).join('\n')}

@@ -50,7 +50,12 @@ export class Watchdog {
   private postLock: Lock | null = null;
   private history: RestartHistory = new Map();
   private auth: { at: number; value: ReturnType<NonNullable<WatchdogDeps['auth']>> } | null = null;
+  /** When the probe first said signed out, of the probes in a row that say so; null while it says signed in. */
+  private authFailingSince: number | null = null;
   private running = false;
+
+  /** Stopped (its coordinator is shutting down): it never takes a role again, even from a pass already under way. */
+  private stopped = false;
 
   constructor(private d: WatchdogDeps) {}
 
@@ -65,6 +70,8 @@ export class Watchdog {
 
   /** Take `which` if it's free (or its holder is dead); keep it once held. */
   private take(which: 'machine' | 'post'): boolean {
+    // A coordinator that is shutting down takes no part in the election: a running one takes over.
+    if (this.stopped) return false;
     const held = which === 'machine' ? this.machineLock : this.postLock;
     if (held) return true;
     const r = tryLock(join(this.dir, which === 'machine' ? 'watchdog.lock' : 'watchdog-post.lock'), `watchdog ${this.d.instance} ${process.pid}`);
@@ -77,7 +84,7 @@ export class Watchdog {
 
   /** One pass: this instance's checks; the machine's, if elected; the posts, if elected to post. */
   async pass(): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     this.running = true;
     try {
       const now = (this.d.now ?? (() => new Date()))();
@@ -106,6 +113,7 @@ export class Watchdog {
       }
       // Not asked successfully: keep what was known (a login doesn't expire because a check couldn't run).
       if (value || !this.auth) this.auth = { at: now.getTime(), value };
+      if (value) this.authFailingSince = value.loggedIn ? null : (this.authFailingSince ?? now.getTime());
     }
     let githubTokenError: string | null = null;
     if (this.d.githubToken) {
@@ -115,7 +123,7 @@ export class Watchdog {
         githubTokenError = (e as Error).message.split('\n')[0]!.slice(0, 300);
       }
     }
-    const facts: InstanceFacts = { instance: this.d.instance, events: this.d.events(), now: now.getTime(), stallHours: cfg.stallHours, stop: this.d.stop(), auth: this.auth?.value ?? null, githubTokenError, emergency: this.d.emergency() };
+    const facts: InstanceFacts = { instance: this.d.instance, events: this.d.events(), now: now.getTime(), stallHours: cfg.stallHours, stop: this.d.stop(), auth: this.auth?.value ?? null, ...(this.authFailingSince !== null ? { authFailingSince: this.authFailingSince } : {}), githubTokenError, emergency: this.d.emergency() };
     // A login's expiry is this probe's to resolve only when it knows one (another module may report it otherwise).
     const kinds = facts.auth?.expiresAt ? INSTANCE_KINDS : INSTANCE_KINDS.filter((k) => k !== 'claude_login_expiring');
     reconcile(instanceFindings(facts), { kinds, instance: this.d.instance }, opts);
@@ -135,6 +143,7 @@ export class Watchdog {
   }
 
   stop() {
+    this.stopped = true;
     this.machineLock?.release();
     this.postLock?.release();
     this.machineLock = this.postLock = null;

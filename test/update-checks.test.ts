@@ -83,8 +83,9 @@ function pushChecks(): string[] {
  * Push-to-main checks the updater deliberately does not wait for. Only these may differ; any other drift fails.
  * - bootstrap (macos-latest): the owner's decision. It is required to merge (.worklane/config.yaml), but engine
  *   updates on servers must not wait on the macOS run.
+ * - bootstrap (windows-wsl): owner: macOS/Windows jobs don't gate updates. Not a required check either.
  */
-const UPDATER_EXCLUDED = ['bootstrap (macos-latest)'];
+const UPDATER_EXCLUDED = ['bootstrap (macos-latest)', 'bootstrap (windows-wsl)'];
 
 test('the updater\'s default required checks are exactly the checks a push to main runs (no PR-only ones), minus the named exclusions', () => {
   const push = pushChecks();

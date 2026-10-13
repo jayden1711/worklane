@@ -115,7 +115,7 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
       ask = storeSecret(log, id, { by: who.login, role: who.role, value, dir: secretsDir(asks(log).get(id)?.instance ?? ctx.instance, ctx.secretsHome) });
     } else if (what === 'run') {
       req.resume();
-      const requester = { login: who.login, breakGlass: who.breakGlass === true, authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk === true };
+      const requester = { login: who.login, breakGlass: who.breakGlass === true, deviceOk: who.deviceOk === true };
       ask = requestRootStep(log, id, { by: who.login, role: who.role, requester, ...(ctx.machineOwnersFile ? { ownersFile: ctx.machineOwnersFile } : {}) }).ask;
     } else {
       const body = await readJson(req);

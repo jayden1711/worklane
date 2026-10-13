@@ -23,6 +23,9 @@ export function ghToken(): string {
 
 type Fetch = typeof fetch;
 
+/** How long one GitHub request may take: a request that hangs never holds the coordinator's tick (or its shutdown) for longer. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
 export class GitHubBacklog implements Backlog {
   constructor(
     readonly repo: string,
@@ -46,6 +49,7 @@ export class GitHubBacklog implements Backlog {
         ...(body ? { 'content-type': 'application/json' } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (res.status === 204) return undefined as T;
     const text = await res.text();
