@@ -17,6 +17,7 @@ import type { RoleOf } from '../dashboard-auth.js';
 import type { MainWatchApi } from '../main-watch.js';
 import type { MergePostsApi } from '../merge-posts.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
+import type { JournalRead } from '../superfan/digest.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -61,6 +62,11 @@ export interface CoordinatorDeps {
    * usage-limit pause raises and resolves its incident there. Absent: the pause reports only through its events.
    */
   incidents?: IncidentSink;
+  /**
+   * The superfan's view of this instance (src/coordinator/superfan.ts): its name (the incidents' `instance`) and its
+   * own service log, read as the coordinator's user (never sudo). Absent (a checkout's coordinator): no superfan.
+   */
+  superfan?: { name: string; journal?: () => Promise<JournalRead | null> };
   /**
    * The config follows the default branch (src/config/live.ts): `tree`, the config tree `cfg` was loaded from
    * (absent: the checkout's HEAD); `check`, checks beyond the schema a new config must pass (an instance's policy).

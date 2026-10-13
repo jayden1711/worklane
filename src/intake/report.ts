@@ -75,6 +75,8 @@ export interface IntakeCaps {
 export const INTAKE_DEFAULT_CAPS: IntakeCaps = { reports_per_sender_per_day: 10, drafts_per_day: 20, max_usd_per_day: 2 };
 /** The chat channels' defaults (intake.yaml discord.chat_model, discord.chat_max_usd_per_day). */
 export const CHAT_DEFAULTS = { model: 'haiku', max_usd_per_day: 2 } as const;
+/** The superfan's defaults (intake.yaml superfan.every_minutes, superfan.daily_budget_usd). */
+export const SUPERFAN_DEFAULTS = { every_minutes: 30, daily_budget_usd: 2 } as const;
 
 export const TRIAGE_KINDS = ['bug', 'feature', 'question', 'duplicate', 'not_actionable', 'needs_info'] as const;
 export type TriageKind = (typeof TRIAGE_KINDS)[number];
@@ -236,6 +238,25 @@ export const IntakeConfig = z.strictObject({
         .default([]),
     })
     .prefault({}),
+  /**
+   * The superfan (src/superfan/): a watcher that reads this instance's event log, incidents, test runs, health and
+   * service log every `every_minutes`, and posts in `channel` only when a cheap model finds something new or odd. It
+   * may file an issue, or a `ready` fix task the normal pipeline builds; it never merges and never reads a secret.
+   * `machine_channel`: this instance also competes to be the machine's engine-and-updater superfan (one on the
+   * machine), posting there. `model`: the agents.yaml model_routing intake_summary model (the cheap tier) when unset.
+   * Off by default; it needs discord on.
+   */
+  superfan: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      channel: snowflake('channel').optional(),
+      every_minutes: z.number().int().min(5).max(1440).default(SUPERFAN_DEFAULTS.every_minutes),
+      daily_budget_usd: z.number().positive().max(20).default(SUPERFAN_DEFAULTS.daily_budget_usd),
+      model: z.enum(['haiku', 'sonnet', 'opus']).optional(),
+      machine_channel: snowflake('channel').optional(),
+    })
+    .refine((s) => !s.enabled || s.channel, { message: 'superfan.channel is required when superfan is enabled', path: ['channel'] })
+    .prefault({}),
   /** Defaults for the caps; the instance settings (intake.*) win over these. */
   caps: z
     .strictObject({
@@ -250,6 +271,12 @@ export const IntakeConfig = z.strictObject({
   }
   for (const id of Object.keys(c.discord.people)) {
     if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['discord', 'people'], message: `${id} is mapped to a GitHub login but not in discord.allowed_senders; a mapped person must be allowed` });
+  }
+  if (c.superfan.enabled) {
+    if (!c.discord.enabled) ctx.addIssue({ code: 'custom', path: ['superfan', 'enabled'], message: 'the superfan posts through the Discord bot: discord.enabled must be true' });
+    for (const [k, ch] of [['channel', c.superfan.channel], ['machine_channel', c.superfan.machine_channel]] as const) {
+      if (ch && (c.discord.channels.includes(ch) || c.discord.chat_channels.includes(ch) || ch === c.discord.asks_channel)) ctx.addIssue({ code: 'custom', path: ['superfan', k], message: `${ch} is a channel the bot reads (discord.channels, chat_channels or asks_channel); a superfan needs a channel of its own` });
+    }
   }
   for (const id of c.discord.owners) {
     if (!Object.hasOwn(c.discord.people, id)) ctx.addIssue({ code: 'custom', path: ['discord', 'owners'], message: `${id} is in discord.owners but not mapped to a GitHub login in discord.people; every Discord owner must be mapped (to a GitHub admin)` });
