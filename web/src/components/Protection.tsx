@@ -1,8 +1,9 @@
 // How the default branch is guarded (src/main-watch.ts): "GitHub enforced", or the harness's own guard (the main
 // watch) with the last commit it checked; and, on every page, an unaccounted commit's alert, which only an admin
-// clears. A viewer is sent the mode only, so that is all this shows them.
+// clears. A viewer is sent the mode only, so that is all this shows them. An admin may accept a hand merge as a
+// bootstrap merge (by sha, or by PR number before it merges); owners and writers see what was accepted.
 import { useState } from 'react';
-import { clearAutoMergeStop, type Protection } from '../api';
+import { acceptBootstrapMerge, clearAutoMergeStop, type Protection } from '../api';
 import { ago, Badge, Button } from './ui';
 
 export function modeLabel(mode: Protection['mode'], brand: string): string {
@@ -44,7 +45,78 @@ export function ProtectionStatus({ protection, brand }: { protection: Protection
           )}
         </div>
       )}
+      {protection.mode === 'main_watch' && <AcceptedMerges protection={protection} />}
     </section>
+  );
+}
+
+/**
+ * Bootstrap merges: while a required check can't run yet, an admin's hand merge would trip the watch. An admin accepts
+ * it here first (a commit on the branch not checked yet, or a PR's merge to come, pinned to its head now); the watch
+ * then counts it accounted. It never clears a stop. Owners and writers see the list; only an admin gets the field.
+ */
+export function AcceptedMerges({ protection }: { protection: Protection }) {
+  const [target, setTarget] = useState('');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  if (!protection.accepted && !protection.canAccept) return null;
+  const list = protection.accepted ?? [];
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      await acceptBootstrapMerge(target, reason);
+      setDone(`Accepted ${target.trim()}.`);
+      setTarget('');
+      setReason('');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const field = 'h-7 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]';
+  return (
+    <div className="rounded-card bg-surface px-3 py-2.5 text-[12.5px] text-ink-2 shadow-card" data-testid="main-watch-accepted">
+      <div className="text-[12.5px] font-medium text-ink">Accepted bootstrap merges</div>
+      {list.length ? (
+        <ul className="mt-1 space-y-0.5">
+          {list.map((a) => (
+            <li key={a.id} data-testid="main-watch-accepted-row">
+              <span className="font-mono text-ink">{a.pr ? `#${a.pr} at ${(a.head ?? '').slice(0, 8)}` : (a.sha ?? '').slice(0, 8)}</span>
+              {` by @${a.by}, ${ago(a.at)}: ${a.reason}`}
+              <span className="text-ink-3">{a.appliedTo ? ` (accounted: ${a.appliedTo.slice(0, 8)})` : ' (not reached yet)'}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="mt-1 text-ink-3">None.</div>
+      )}
+      {protection.canAccept && (
+        <form
+          className="mt-2 flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+          data-testid="main-watch-accept"
+        >
+          <input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="sha or PR number" aria-label="commit sha or PR number to accept" className={`${field} w-40 font-mono`} data-testid="main-watch-accept-target" />
+          <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="reason (recorded in the audit)" aria-label="reason" className={`${field} min-w-0 flex-1`} data-testid="main-watch-accept-reason" />
+          <Button size="sm" variant="outline" type="submit" disabled={busy || !target.trim() || !reason.trim()} data-testid="main-watch-accept-submit">
+            Accept as bootstrap merge
+          </Button>
+          {error && <span className="text-[12px] text-red">{error}</span>}
+          {done && <span className="text-[12px] text-ink-3">{done}</span>}
+          <div className="w-full text-[12px] text-ink-3">
+            A commit on the branch not checked yet, or a PR before you merge it (pinned to its head now). It doesn't clear a stop.
+          </div>
+        </form>
+      )}
+    </div>
   );
 }
 

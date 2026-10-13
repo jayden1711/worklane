@@ -25,7 +25,7 @@
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
 // --with-prs (add pull-request history for the PR views), --with-usage-pause (pause the demo on the Claude usage
 // limit, resetting in 2 h: the banner and the Overview's usage line), --viewport <w>x<h> (default 1440x1000; under
-// 768 wide, a phone), --keep (leave the temporary directory),
+// 768 wide, e.g. 390x844, a phone), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
 // demo's owner, example-owner; the token is the owner's break-glass, so this only names who answers),
 // --as owner|writer|viewer (through the hub instead: sign in with GitHub, a fake one, as that role; see signin-fake.mjs).
@@ -49,6 +49,12 @@ const positional = argv.filter((a, i) => !a.startsWith('--') && !VALUE_OPTIONS.i
 const [command = 'help', ...rest] = positional;
 const engine = resolve(option('--engine', fileURLToPath(new URL('../..', import.meta.url))));
 const theme = option('--theme', 'light');
+/** --viewport <width>x<height>: the page's size (default 1440x1000); under 768 wide it is emulated as a phone. */
+const viewport = (() => {
+  const m = /^(\d{3,4})x(\d{3,4})$/.exec(option('--viewport', '1440x1000'));
+  if (!m) throw new Error('--viewport takes <width>x<height>, e.g. 390x844');
+  return { width: Number(m[1]), height: Number(m[2]) };
+})();
 const say = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 
 /** Chrome or Chromium: --chrome, CHROME, then the usual places (src/browser/cdp.ts, shared with the project-app runner). */
@@ -111,7 +117,7 @@ async function start() {
       '--no-default-browser-check',
       '--disable-gpu',
       '--hide-scrollbars',
-      '--window-size=1440,1000',
+      `--window-size=${viewport.width},${viewport.height}`,
       '--force-prefers-reduced-motion',
       ...(flag('--no-chrome-sandbox') ? ['--no-sandbox'] : []),
       ...(theme === 'dark' ? ['--force-dark-mode', '--blink-settings=preferredColorScheme=0'] : ['--blink-settings=preferredColorScheme=1']),
@@ -174,7 +180,11 @@ async function seedPrs(root, issues) {
     ['ci_fix.started', { issue: b, number: 102, head: h(2), checks: ['test'], attempt: 1, lease: h(9) }],
     ['ci_fix.finished', { issue: b, number: 102, outcome: 'no_push', head: null, detail: 'the failure is in a test this change does not touch' }],
     ['ci_fix.gave_up', { issue: b, number: 102, head: h(2), reason: 'the worker showed the failure is not caused by this change' }],
-    ['merge.decided', { issue: b, number: 102, head: h(2), auto: false, reasons: ['a CI fix run happened on this PR', 'high-risk: migrations'] }],
+    ['merge.decided', {
+      issue: b, number: 102, head: h(2), auto: false,
+      reasons: ['a CI fix run happened on this PR', 'high-risk: migration (db/migrations/002_orders.sql)', 'high-risk: self-modification (src/merge-policy.ts)'],
+      why: [{ category: 'migration', text: 'changes a database migration: db/migrations/002_orders.sql' }, { category: 'self-modification', text: 'changes the merge policy: src/merge-policy.ts' }],
+    }],
     ['pr.opened', { issue: c, number: 103, url: url(103), head: h(3), draft: true }],
     ['pr.status', { issue: c, number: 103, head: h(3), ready: true, reasons: [], checks: [{ name: 'lint', outcome: 'pass' }, { name: 'test', outcome: 'pass' }] }],
     ['pr.ready', { issue: c, number: 103, head: h(3) }],
@@ -233,8 +243,7 @@ class Controller {
     await c.send('Page.enable');
     await c.send('Runtime.enable');
     await c.send('Log.enable');
-    const [width, height] = (option('--viewport', '1440x1000') ?? '1440x1000').split('x').map(Number);
-    await c.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: width < 768 ? 2 : 1, mobile: width < 768 });
+    await c.send('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: viewport.width < 768 ? 2 : 1, mobile: viewport.width < 768 });
   }
   async eval(expr) {
     const r = await this.cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });

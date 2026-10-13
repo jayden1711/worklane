@@ -383,7 +383,7 @@ export const EventSchemas = {
     held_out_error: z.string().optional(),
   }),
   /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
-  'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),
+  'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()), why: z.array(z.strictObject({ category: z.string(), text: z.string() })).optional() }),
   /** Auto-merged: a merge commit `sha` of the evaluated `head`. */
   /**
    * An owner approved a PR the merge policy left to them, at this head (from a Discord thread: `via`): it merges on
@@ -408,6 +408,11 @@ export const EventSchemas = {
   'main_watch.mode': z.strictObject({ mode: z.enum(['github', 'main_watch', 'off']), detail: z.string() }),
   /** A commit on the default branch, accounted for: the harness's merge, or a mapped admin's or writer's, green at merge time. */
   'main_watch.checked': z.strictObject({ sha, how: z.enum(['harness', 'person']), number: z.number().int().positive() }),
+  /**
+   * A commit on the default branch an admin accepted as a bootstrap merge before the watch judged it (by its sha, or
+   * by its PR's number and head; src/main-watch.ts acceptMerge): accounted, with no stop, alert or revert PR.
+   */
+  'main_watch.accepted': z.strictObject({ sha, how: z.literal('accepted'), number: z.number().int().positive().nullable(), id: z.string(), by: z.string(), reason: z.string() }),
   /**
    * A commit on the default branch nothing accounts for (a direct push, a merge with checks not green, an unknown
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.

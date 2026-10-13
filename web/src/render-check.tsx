@@ -2,13 +2,14 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
+import type { AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
+import { UpdatesPanelView, type UpdatesPanelData } from './components/UpdatesPanel';
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
 import { TrustView } from './components/TrustPanel';
@@ -34,6 +35,7 @@ import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
 import { ClaudeAccountView } from './components/ClaudeAccount';
+import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
 
@@ -53,6 +55,7 @@ export const pages = {
   prs: (s: State) => <PullRequests state={s} />,
   board: (s: State) => <BoardPage state={s} pulse={0} />,
   machine: (s: State) => <MachinePage state={s} />,
+  health: () => <HealthPage />,
 };
 
 export function renderPage(name: keyof typeof pages, state: State): string {
@@ -62,13 +65,17 @@ export function renderPage(name: keyof typeof pages, state: State): string {
 export const renderIssue = (state: State, issue: number) => renderToStaticMarkup(<IssueDetail state={state} issue={issue} />);
 export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks runs={runs} />);
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);
-export const renderInstances = (hub: HubInfo, current: string, all = false) => renderToStaticMarkup(<InstanceList hub={hub} current={current} all={all} onSelect={() => {}} />);
+export const renderInstances = (hub: HubInfo, current: string, all = false, status?: Record<string, HealthStatus>) => renderToStaticMarkup(<InstanceList hub={hub} current={current} all={all} onSelect={() => {}} {...(status ? { status } : {})} />);
+export const renderHealthPage = (all: InstanceIncidents[], target?: string) => renderToStaticMarkup(<IncidentsHealthView all={all} {...(target ? { target } : {})} />);
+export { loadIncidents, mergeIncidents, statusOf } from './api';
 export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsView view={view} />);
 export { probeHub } from './api';
 export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => renderToStaticMarkup(<HealthPanelView view={view} {...(instances ? { instances } : {})} />);
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
 export { boundsOf, LABEL, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
+export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
+export { duration } from './components/UpdatesPanel';
 export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToStaticMarkup(<LiveFeedView items={items} ended={ended} />);
 export const renderConsole = (data: ConsoleData) => renderToStaticMarkup(<ConsolePanel data={data} run="r" />);
 export const renderAgents = (state: State, live: LiveList | null) => renderToStaticMarkup(<Agents state={state} live={live} />);

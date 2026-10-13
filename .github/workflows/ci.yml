@@ -480,9 +480,20 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
           tar -xzf "$f" gitleaks && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: gate the commits
+        # A PR's own commits only: merge-base(base, head)..head, the PR head rather than the test merge,
+        # so commits already on main are not rescanned. A push scans what it brought, as before.
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: node scripts/push-gate.mjs --range "${BASE}..${GITHUB_SHA}"
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            BASE="$(git merge-base "$PR_BASE" "$PR_HEAD")"
+            node scripts/push-gate.mjs --range "${BASE}..${PR_HEAD}"
+          else
+            node scripts/push-gate.mjs --range "${BEFORE}..${GITHUB_SHA}"
+          fi
 
   denylist:
     # No project-specific details in the engine repo (see scripts/check-denylist.mjs).

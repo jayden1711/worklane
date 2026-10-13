@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { hub, instanceScope, needsSignIn, selectAllInstances, selectInstance, signOut, useLiveState, type HubInfo, type InstanceScope, type State } from './api';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { hub, instanceScope, loadIncidents, needsSignIn, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { MainWatchAlert } from './components/Protection';
@@ -27,6 +27,7 @@ import { SettingsPage } from './pages/Settings';
 import { LogsPage, logsRefusal } from './pages/Logs';
 import { RunDetail, runsRefusal } from './pages/RunDetail';
 import { PullRequests } from './pages/PullRequests';
+import { HealthPage, StatusDot } from './pages/Health';
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -96,6 +97,7 @@ const NAV = [
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
   { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
   { to: '/logs', label: 'Logs', icon: ScrollText, chord: 'j', testId: 'nav-logs' },
+  { to: '/health', label: 'Health', icon: HeartPulse, chord: 'h', testId: 'nav-health' },
   { to: '/machine', label: 'Machine', icon: Server, chord: 'm', testId: 'nav-machine' },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',', testId: 'nav-settings' },
 ];
@@ -242,6 +244,7 @@ function Dashboard() {
   const now = useNow(usage.some((u) => u.paused));
   const [theme, toggleTheme] = useTheme();
   const [menu, setMenu] = useState(false);
+  const health = useHealth();
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -302,6 +305,7 @@ function Dashboard() {
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
   else if (path === '/settings') page = <SettingsPage />;
   else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
+  else if (path === '/health') page = <HealthPage />;
   else if (path === '/machine') page = <MachinePage state={state} />;
   else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
@@ -315,8 +319,14 @@ function Dashboard() {
             <div className="truncate text-[13.5px] font-medium leading-4 text-ink">{state?.project.name ?? '…'}</div>
             <div className="truncate text-[11px] leading-4 text-ink-3">{state?.brand.name}</div>
           </div>
+          {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}
+          {health && !health.hub && (
+            <a href="/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/health'))} title="Health">
+              <StatusDot status={health.status[''] ?? 'green'} testId="instance-status-dot" />
+            </a>
+          )}
         </div>
-        <InstanceSwitcher />
+        <InstanceSwitcher status={health?.status ?? {}} />
         <button data-testid="search-button" onClick={() => setMenu(true)} className="mx-2 mt-2 flex h-8 items-center gap-2 rounded-control bg-surface px-2 text-[12.5px] text-ink-3 shadow-btn transition-colors hover:text-ink">
           <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
         </button>
@@ -369,14 +379,14 @@ function Dashboard() {
  * chosen: the Board and its test runs then show every instance, each item labelled; every other page stays on the
  * selected instance.
  */
-export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void }) {
+export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {}, status = {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void; status?: Record<string, HealthStatus> }) {
   return (
     <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher data-testid="instance-switcher" data-scope={all ? 'all' : current}>
       <div className="px-2 pt-1 pb-1 text-[11.5px] font-medium text-ink-3">Instances</div>
       {info.instances.map((i) => (
         <SidebarRow
           key={i.name}
-          icon={<span className={cx('size-2 rounded-full', i.up ? 'bg-green' : 'bg-red')} />}
+          icon={<StatusDot status={i.up ? (status[i.name] ?? 'green') : 'red'} testId="instance-dot" />}
           label={i.up ? i.name : `${i.name} (not answering)`}
           title={i.error ?? undefined}
           active={!all && i.name === current}
@@ -398,13 +408,29 @@ export function InstanceList({ hub: info, current, all = false, onSelect, onSele
 }
 
 /** On a hub: which instance this page shows (or All instances, for the Board), and a switch to the others (each served by its own dashboard). */
-function InstanceSwitcher() {
+function InstanceSwitcher({ status }: { status: Record<string, HealthStatus> }) {
   const [info, setInfo] = useState<{ hub: HubInfo; scope: InstanceScope } | null>(null);
   useEffect(() => {
     void Promise.all([hub, instanceScope]).then(([h, scope]) => h && scope.current && setInfo({ hub: h, scope }));
   }, []);
   if (!info) return null;
-  return <InstanceList hub={info.hub} current={info.scope.current!} all={info.scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} />;
+  return <InstanceList hub={info.hub} current={info.scope.current!} all={info.scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} status={status} />;
+}
+
+/** Each instance's status dot (green, amber, red) from its watchdog incidents, read again every minute. */
+function useHealth(): { hub: HubInfo | null; status: Record<string, HealthStatus> } | null {
+  const [health, setHealth] = useState<{ hub: HubInfo | null; status: Record<string, HealthStatus> } | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => void hub.then(async (h) => ({ hub: h, status: statusOf(await loadIncidents(h)) })).then((x) => live && setHealth(x));
+    load();
+    const t = setInterval(load, 60_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, []);
+  return health;
 }
 
 /** Read-only: an emergency stop in force on this machine, shown on every page. It is lifted on the machine itself. */
