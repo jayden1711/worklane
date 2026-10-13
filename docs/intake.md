@@ -99,7 +99,24 @@ discord:
   chat_model: haiku                      # its model (default haiku)
   chat_max_usd_per_day: 2                # its own daily cap (default 2, at most 20)
   owners: ["100000000000000011", "100000000000000012"]  # optional: high-risk approvals and setup links (2.1.4, 2.1.5)
+  ops_channel: "100000000000000005"    # optional: watchdog incidents and the weekly trust digest (below; needs dashboard_url)
 ```
+
+**Ops channel.** `ops_channel` only receives posts (the bot never reads it, so instances may share one); it needs
+`dashboard_url`. Two things post there:
+
+- **Incidents.** The machine's watchdog (`src/watchdog/`) posts each incident: a service down or crash-looping, an
+  engine update rolled back or held, a Claude sign-in failing or a login about to expire, runs paused on the Claude usage limit, the GitHub App's token or
+  permissions failing, ready work that hasn't moved for `stall_hours`, the main watch stopping auto-merge, a disk over
+  85%, the test sandbox check failing. One post when it opens (what broke, what was already tried, the one fix, a link
+  to it on the Health page) and one when it is resolved; at most 5 posts per 10 minutes, machine-wide, and never a
+  secret. One coordinator on the machine posts, whichever instances set an ops channel. The machine-level
+  `/etc/<cli>/watchdog.json` may set the thresholds (`stall_hours`, `disk_pct`) and, for instances without their own,
+  `ops_channel` and `dashboard_url`.
+- **The weekly trust digest.** Once a week, the instance's trust numbers and recommendation (src/trust.ts; see
+  docs/dashboard.md, "Trust").
+
+Absent: neither is posted from this instance.
 
 A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
 (admin: owner; maintain or write: writer; triage or read: viewer; none or an error: no access). Every mapped id
@@ -342,6 +359,24 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
 - Credentials for a project's production read are the owner's to create, and stay off until the owner says
   so. Everything here is built and tested against fakes first.
 
+### 2.3 Production alerts
+
+- A second fixed read-only query on the same production read path (`prod-read`), beside the bug reports
+  (`src/intake/alerts.ts`): the same read-only role, the same single-statement `READ ONLY` transaction, and the
+  same validated cursor (a number or an ISO timestamp, never free text). The query is built by the engine from
+  the table and column names in `intake.yaml` (`alerts.table`, `alerts.columns`), each a plain identifier:
+  `SELECT id, kind, message, created_at FROM <table> WHERE id > :after ORDER BY id LIMIT <batch>`.
+- Rows aren't reports one for one. Kinds already in the table when it is first read are learned, not reported.
+  After that, a kind never seen before becomes one report, and so does a spike: more than `alerts.spike.threshold`
+  rows of one kind within `alerts.spike.window_minutes`, once per window. Every other row only updates the counts.
+- Secrets are taken out of an alert's kind and message before anything is stored; the pipeline below then
+  redacts personal data, dedupes against open issues and recent reports, and drafts the five-part issue as for
+  any report. The sender is the alert's kind: a kind listed in `trusted.alerts` is filed `ready`; any other kind's
+  draft is an Inbox decision.
+- Off by default. It runs only with `alerts.enabled: true` in `intake.yaml` and the project's production read path
+  (`deploy.yaml` `prod_read`, the owner's platform login and the read-only role on the production service); with
+  either missing, nothing is read.
+
 ## 3. Pipeline
 
 1. **Receive.** The adapter yields a report. Unaddressed channel messages never get this far.
@@ -372,14 +407,16 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
    closed ```` ```done_when ```` block, commands as YAML block scalars) and **Review point** (the expected review
    level, L0 to L3, and what would make it wait for the owner). The engine's contract parser checks all five. An invalid draft is refused and retried once with the reason,
    then dropped to the Inbox for the owner or a writer.
-9. **Trust.**
+9. **Risk.** A draft whose Sources name a file on the project's money paths (`review.yaml` `money_path_source`)
+   is labelled `money-path` and says so, so its work is high-risk (L3) whichever files it ends up touching.
+10. **Trust.**
    - Senders on the instance's trusted list (the owner by default; others added by Discord user id in
      `intake.yaml`, each also an allowed sender) have their drafts filed directly with `ready`.
    - Every other allowed sender's drafts become Inbox decisions for the owner or a writer: approve, edit (opens the draft
      to change), or reject. One tap each.
    - Not actionable and needs-more-info reports never become issues: the sender gets a polite reply asking
      for what's missing.
-10. **Reply** on the same channel: when the issue is filed, when its fix merges, and when it's deployed.
+11. **Reply** on the same channel: when the issue is filed, when its fix merges, and when it's deployed.
     Untrusted senders get a short status ("we've logged this", "a fix is merged", "the fix is live") with no
     internal links; trusted senders also get the issue link.
     - **Casual replies** (off by default; `casual_replies: true` in `intake.yaml`): the `intake-replier` role
@@ -457,16 +494,19 @@ test with an injection-style report.
 2. **In-product reports:** create a read-only database role limited to the bug-report table or view, store
    its connection string on the production service (as for `prod-read`), and set the query in the project's
    config. Only when the owner gives the go for that project.
-3. **Enable** each source per instance in `intake.yaml` (Discord also needs the server id), list the allowed
+3. **Production alerts:** grant the same read-only role SELECT on the alerts table (only the columns named in
+   `alerts.columns`), set `alerts.table` and `alerts.columns` in `intake.yaml`, and the spike threshold. Only when
+   the owner gives the go for that project.
+4. **Enable** each source per instance in `intake.yaml` (Discord also needs the server id), list the allowed
    senders (`discord.allowed_senders`) and, among them, the trusted ones, by Discord user id.
-4. **Discord as a channel** (2.1.1): map each person's Discord user id to their GitHub login
+5. **Discord as a channel** (2.1.1): map each person's Discord user id to their GitHub login
    (`discord.people`), and set `discord.asks_channel` and `discord.dashboard_url`.
-5. **Chat channels** (2.1.3): list them in `discord.chat_channels`, and give the bot read and send permissions
+6. **Chat channels** (2.1.3): list them in `discord.chat_channels`, and give the bot read and send permissions
    there; restart the instance.
-6. **High-risk approvals and setup links** (2.1.4, 2.1.5): list the owners' Discord user ids in
+7. **High-risk approvals and setup links** (2.1.4, 2.1.5): list the owners' Discord user ids in
    `discord.owners`, each mapped in `discord.people` to a GitHub admin of the repo; each owner allows direct
    messages from the server's members (for the links). Restart the instance.
-7. **One bot for several instances** (2.1.6): invite it to each server, install the same token for each
+8. **One bot for several instances** (2.1.6): invite it to each server, install the same token for each
    instance, and give each instance its own server and channels in its own `intake.yaml`.
 
 ## 11. Build order

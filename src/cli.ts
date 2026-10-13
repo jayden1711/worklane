@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
+import { initCommand, MODES, type Mode } from './init.js';
+import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
+import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
@@ -31,7 +34,8 @@ import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, policiesForRepo } from './instance.js';
+import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
@@ -51,12 +55,26 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
+  init [<repo>] [--mode local|server] [--yes] [--reset] [--instance name]
+                                   the guided first setup, one checklist in order: tools, Claude login,
+                                   GitHub, repo config, protection, then Discord (and Tailscale on a
+                                   server), optional. Each step is checked before the next; rerun it to
+                                   pick up where it stopped. Asks for the mode when not given. local: this
+                                   checkout (default: here), as you; server: <owner/repo>, as root, through
+                                   scripts/setup/add-project.sh. --yes installs missing tools as shown
+  export [--instance name] [--out file]
+                                   one file with this checkout's (or instance's) config and history (the
+                                   event log, init's checklist, findings); never secrets, locks or logs
+  import <file> [--instance name] [--force]
+                                   take an export here (a laptop's, onto a server: no ssh between them);
+                                   refuses a target with history of its own unless --force
   install [--instance name] [--git-hooks] [--engine path] | install --git-hooks-only
                                    scaffold ${BRAND.configDir}/; with --instance, write the hooks and rules
                                    for that instance's agent runs only (in its home); without, merge them
                                    into .claude/settings.json for local runs
-  doctor [--agentshield] [--json] [--policy file] [--instance name]
-                                   verify the install, and the config against any local instance's policy
+  doctor [--agentshield] [--json] [--policy file] [--instance name] [--mode local|server]
+                                   verify the install, and the config against any local instance's policy;
+                                   init's checklist, and what the mode can't do
   guardrails check                 run rules against their must-block/ask/allow examples
   guardrails refresh               fetch production fingerprints (stores hashes only)
   guardrails eval '<command>'      show what the rules decide for a shell command
@@ -103,6 +121,9 @@ usage: ${BRAND.cli} <command> [options]
   tune <instance> [--full] [--dry-run]
                                    profile the test suite at 1/2/4/all cores' workers and open a PR
                                    with the recommended worker settings (run as the coordinator user)
+  canary file|check --instance name --repo owner/repo [--reason update|daily] [--issue n] --json
+                                   (the engine updater runs these as the canary instance's user) file the
+                                   canary issue on the scratch repo, or say how far it got (docs/canary.md)
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
                                    (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
@@ -239,13 +260,107 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'init': {
+      const modeOpt = option(args, '--mode');
+      if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
+        console.error('init: --mode is local or server');
+        return 2;
+      }
+      const yes = flag(args, '--yes');
+      const reset = flag(args, '--reset');
+      const target = args[1]?.startsWith('-') ? undefined : args[1];
+      const unknown = args.slice(target ? 2 : 1);
+      if (unknown.length) {
+        console.error(`init: unexpected ${unknown.join(' ')}`);
+        return 2;
+      }
+      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: process.env[`${BRAND.envPrefix}_PREFIX`] ?? join(homeDir(), '.local'), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+    }
+
+    case 'export': {
+      const out = option(args, '--out');
+      let site: { stateDir: string; root: string; repo: string | null; name: string };
+      if (instanceOpt) {
+        const i = loadInstance(instanceOpt);
+        site = { stateDir: i.stateDir, root: i.repo.path, repo: i.config.project.project.repo, name: i.name };
+      } else {
+        let repo: string | null = null;
+        try {
+          repo = loadConfig(root).project.project.repo;
+        } catch {
+          // a checkout without config: its history only
+        }
+        site = { stateDir: projectStateDir(root), root, repo, name: basename(root) };
+      }
+      const file = resolve(out ?? `${BRAND.cli}-${site.name}-${new Date().toISOString().slice(0, 10)}.bundle`);
+      const r = exportBundle({ stateDir: site.stateDir, root: existsSync(site.root) ? site.root : null, repo: site.repo, host: hostname(), out: file });
+      console.log(`exported ${r.files.length} files to ${r.file} (yours only, 0600)`);
+      for (const l of r.left) console.log(`  left out ${l.path}: ${l.why}`);
+      console.log(`on the other machine: ${BRAND.cli} import ${basename(r.file)}${instanceOpt ? '' : ' --instance <name>'} (as that instance's coordinator user, with it stopped)`);
+      return 0;
+    }
+
+    case 'import': {
+      const file = args[1];
+      const force = flag(args, '--force');
+      if (!file || file.startsWith('-')) {
+        console.error('usage: import <file> [--instance name] [--force]');
+        return 2;
+      }
+      const target = instanceOpt ? (() => { const i = loadInstance(instanceOpt); return { stateDir: i.stateDir, root: i.repo.path }; })() : { stateDir: projectStateDir(root), root };
+      let r: ImportResult;
+      try {
+        r = importBundle({ file: resolve(file), stateDir: target.stateDir, root: existsSync(target.root) ? target.root : null, instance: Boolean(instanceOpt), force });
+      } catch (e) {
+        console.error(`import: ${(e as Error).message}`);
+        return 1;
+      }
+      console.log(`imported ${r.state.length} state files into ${target.stateDir}${r.config.length ? `, and ${r.config.length} config files into ${join(target.root, BRAND.configDir)}` : ''}`);
+      for (const s of r.skipped) console.log(`  skipped ${s.path}: ${s.why}`);
+      if (r.configDiffers.length) console.log(`the checkout's config differs from the bundle's in: ${r.configDiffers.join(', ')}; the config is the repo's: commit what you want of it in a PR`);
+      console.log(`next: ${BRAND.cli} doctor${instanceOpt ? ` --instance ${instanceOpt}` : ''} (pending migrations of an older history show there)`);
+      return 0;
+    }
+
+    case 'canary': {
+      // Only the canary instance's own repo, named again by the machine config, and never a repo another instance runs on.
+      const repo = option(args, '--repo') ?? '';
+      const reason = option(args, '--reason') === 'update' ? 'update' : 'daily';
+      const issue = Number(option(args, '--issue'));
+      const out = (j: unknown) => (console.log(JSON.stringify(j)), 0);
+      if (!instanceOpt || (sub !== 'file' && sub !== 'check') || (sub === 'check' && !(Number.isInteger(issue) && issue > 0))) {
+        console.error(`usage: ${BRAND.cli} canary file|check --instance <name> --repo <owner/repo> [--reason update|daily] [--issue <n>] --json`);
+        return 2;
+      }
+      try {
+        const i = loadInstance(instanceOpt);
+        const refusal = canaryRefusal({ instance: i.name, instanceRepo: i.repo.repo, canaryRepo: repo, others: policiesForRepo(repo).map((p) => ({ name: p.name, repo })) });
+        if (refusal) return (out({ ok: false, error: refusal }), 1);
+        const backlog = backlogFor(i.config, i.repo.path, i.stateDir, instanceTokens(i, instanceEnv(i)));
+        if (sub === 'file') return out({ ok: true, ...(await fileCanary(backlog, repo, reason, new Date())) });
+        const log = new EventLog(join(i.stateDir, 'events.db'));
+        try {
+          return out({ ok: true, ...(await checkCanary(backlog, repo, issue, log.read(0, ['issue.seen', 'issue.claimed', 'plan.posted', 'pr.opened', 'pr.closed']))) });
+        } finally {
+          log.close();
+        }
+      } catch (e) {
+        return (out({ ok: false, error: String((e as Error).message ?? e).split('\n')[0]!.slice(0, 500) }), 1);
+      }
+    }
+
     case 'doctor': {
       const json = flag(args, '--json');
       const policy = option(args, '--policy');
+      const modeOpt = option(args, '--mode');
+      if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
+        console.error('doctor: --mode is local or server');
+        return 2;
+      }
       const instance = instanceOpt;
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}) });
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}), ...(modeOpt ? { mode: modeOpt as Mode } : {}) });
       if (json) console.log(JSON.stringify(checks, null, 2));
-      else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
+      else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : c.level === 'off' ? 'off ' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;
     }
 

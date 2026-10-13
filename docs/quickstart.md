@@ -8,6 +8,44 @@ You need:
 - a GitHub repo you can push to;
 - a Claude login (`claude`, then `/login`). See [auth.md](auth.md).
 
+## Local or server
+
+You choose where it runs. `worklane init` and the bootstrap take `--mode local` or `--mode server`, and ask when you don't say.
+
+| | local | server |
+|---|---|---|
+| Where | your own machine: macOS, Linux, or Windows through WSL2 | a Linux server (Debian or Ubuntu, systemd) |
+| As whom | you: no separate OS users, no ssh, no root | root sets it up; each project runs as users of its own |
+| GitHub | your `gh` login | a GitHub App per project, made through the manifest flow |
+| Always on | while your machine is | yes |
+| Set up with | `bash scripts/bootstrap.sh --mode local <repo>` | `sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>` |
+
+What local mode can't do, `worklane doctor` and the dashboard's First-run page say plainly, each with why:
+- **separate OS users**: the agents run as you, with your files and logins;
+- **root-run add-project**: the dashboard's Add project needs root and the machine helper, so you set up another repo with `worklane init <repo>` instead;
+- **the test sandbox without Docker**: test runs need Docker in local mode.
+
+### Moving to a server later
+
+Start on your laptop and move to an always-on server when you want, with no ssh between the two:
+
+1. On the laptop: `worklane down`, then `worklane export --out shop.bundle`. That's one file (yours only, `0600`) with the history (the event log, as a whole snapshot), init's checklist, and the repo's `.worklane/`. Secrets, locks, logs and worktrees never go in it; it lists what it left out.
+2. Carry the file over however you like.
+3. On the server, after `add-project` has set the project up: as the instance's coordinator user, with it stopped, `worklane import shop.bundle --instance <name>`. It refuses an instance that already has history of its own (`--force` replaces it). The config stays the repo's: if the checkout's `.worklane/` differs from the bundle's, it lists the files, to commit in a PR.
+
+## The checklist: `worklane init`
+
+`worklane init [<repo>] [--mode local|server]` walks one checklist in order. It checks each step first, does only what isn't done, and checks it again before moving on:
+
+1. **Tools present.** git, gitleaks, Claude Code and, in local mode, gh. A missing one is shown first (its URL, the checksum pinned in the engine, where it goes) and installed only when you say yes (or pass `--yes`). The download is checked against that checksum before anything is unpacked, and refused if it doesn't match. On a server, installing tools stays the owner's step (`bootstrap --hardened`).
+2. **Claude login.** Checked with `claude auth status`; if you're not signed in, it opens `claude auth login` and checks again.
+3. **GitHub.** Local: `gh auth status`, then whether your login can push to the repo (it opens `gh auth login` if needed). Server: it hands off to `scripts/setup/add-project.sh`, which makes the instance, the GitHub App, the agent's Claude token and the checkout.
+4. **Repo config.** `.worklane/` (scaffolded if missing) and the hooks for local runs. Detecting your project's commands comes later.
+5. **Protection.** Reports whether GitHub protects the default branch.
+6. **Discord** (optional), and **Tailscale** (optional, server mode).
+
+It's resumable: if a step stops it (a login missing, say), fix what it says and run `worklane init` again. The steps already done are checked, not redone, and it picks up there. `worklane doctor` shows the same checklist, and so does the dashboard's **First run** page (from the Setup console).
+
 ## Mac
 
 1. Install [Homebrew](https://brew.sh) if you don't have it. The bootstrap uses it for Node.js and never pipes an installer into a shell.
@@ -24,7 +62,7 @@ The bootstrap does the following:
 2. Installs gitleaks, pinned and checked against its sha256.
 3. Installs Claude Code at a pinned version through npm.
 4. Installs the engine at the release tag pinned in the script, by its commit, into `~/.local`.
-5. Runs `worklane install` in your repo, then `worklane doctor`.
+5. Runs `worklane init --mode local` in your repo (the checklist above), then `worklane doctor`.
 
 Run it again whenever you like: each step checks first, and nothing is done twice. Add `--dry-run` to see what it would do without changing anything.
 
@@ -70,7 +108,7 @@ That command mounts your Claude login. Sign in once with `docker run -it ... wor
 
 ## Setting up a project by hand
 
-`worklane install` (which the bootstrap runs) scaffolds `.worklane/` in a repo that has none, and leaves one that exists alone. Before the first run, look over what it wrote:
+`worklane install` (which `init` runs) scaffolds `.worklane/` in a repo that has none, and leaves one that exists alone. Before the first run, look over what it wrote:
 
 1. In **`.worklane/config.yaml`**:
    - `project.repo` must be the repo's `owner/name` on GitHub (filled in from its `origin` remote when there is one);
@@ -82,7 +120,7 @@ That command mounts your Claude login. Sign in once with `docker run -it ... wor
    - `vacuity.test_globs` matches your test files.
 3. Run `worklane doctor --root <repo>` again until it passes, and commit `.worklane/`.
 
-To add another repo later, run the bootstrap again with that repo, or just `worklane install --root <repo>` and the same three steps.
+To add another repo later, run `worklane init <repo>` (or the bootstrap again with that repo) and the same three steps.
 
 ## Your first issue
 

@@ -9,7 +9,9 @@
 // For the commits being pushed it scans the added lines and the message with
 // the denylist rules (personal names, internal hosts and addresses, home
 // paths, emails, ntfy topics; scripts/lib/denylist.mjs), the whole tree at
-// each pushed tip, and runs gitleaks over the commits.
+// each pushed tip, and runs gitleaks over the commits. One allowance: in the
+// subject of a GitHub merge commit ("Merge pull request #<n> from <owner>/<branch>")
+// the repo's own owner (from GITHUB_REPOSITORY or the origin URL) is not a leak.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { loadRules, scanText, SKIP } from './lib/denylist.mjs';
@@ -51,13 +53,48 @@ function addedLines(sha) {
   return byFile;
 }
 
-function scanCommit(rules, sha) {
+/**
+ * The repo's own GitHub owner, from GITHUB_REPOSITORY (CI) or the origin remote's URL; null if neither names one.
+ * Derived at runtime so no handle is written into the gate.
+ */
+function repoOwner() {
+  const fromEnv = /^([A-Za-z0-9-]+)\/[^/\s]+$/.exec(process.env.GITHUB_REPOSITORY ?? '');
+  if (fromEnv) return fromEnv[1].toLowerCase();
+  let url;
+  try {
+    url = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return null; // no origin: no allowance
+  }
+  const m = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([A-Za-z0-9-]+)\/[^/\s]+$/.exec(url);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// GitHub's own merge-button subject. For a same-repo PR its head owner is the repo's owner.
+const GITHUB_MERGE_SUBJECT = /^(Merge pull request #\d+ from )([A-Za-z0-9-]+)(\/\S+)$/;
+
+/**
+ * Drop the repo owner's handle from a GitHub merge commit's subject, and only there: the commit must be a merge,
+ * its subject exactly `Merge pull request #<n> from <owner>/<branch>`, and <owner> the repo's own owner.
+ * The branch, the rest of the message and any other owner's handle are still scanned.
+ */
+function withoutOwnMergeSubject(msg, owner, isMerge) {
+  if (!owner || !isMerge) return msg;
+  const nl = msg.indexOf('\n');
+  const subject = nl === -1 ? msg : msg.slice(0, nl);
+  const m = GITHUB_MERGE_SUBJECT.exec(subject);
+  if (!m || m[2].toLowerCase() !== owner) return msg;
+  return `${m[1]}${m[3]}${nl === -1 ? '' : msg.slice(nl)}`;
+}
+
+function scanCommit(rules, sha, owner) {
   const short = sha.slice(0, 8);
   const hits = [];
   for (const [file, text] of addedLines(sha)) if (!text.includes('\0')) hits.push(...scanText(rules, file, text).map((h) => `${short} ${h}`));
   // A commit's own author and committer identity (and its sign-off) are inherent to it; anything else in the message is scanned.
   const [an, ae, cn, ce] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce', sha).trim().split('\0');
-  let msg = git('log', '-1', '--format=%B', sha);
+  const isMerge = git('log', '-1', '--format=%P', sha).trim().split(' ').length > 1;
+  let msg = withoutOwnMergeSubject(git('log', '-1', '--format=%B', sha), owner, isMerge);
   for (const id of [ae, ce, an, cn].filter(Boolean)) msg = msg.split(id).join('');
   hits.push(...scanText(rules, 'COMMIT_MSG', msg).map((h) => `${short} ${h}`));
   return hits;
@@ -85,7 +122,8 @@ try {
   const all = targets(process.argv.slice(2));
   const hits = [];
   const commits = [...new Set(all.flatMap((t) => t.commits))];
-  for (const sha of commits) hits.push(...scanCommit(rules, sha));
+  const owner = repoOwner();
+  for (const sha of commits) hits.push(...scanCommit(rules, sha, owner));
   for (const t of all) hits.push(...scanTree(rules, t.tip));
   if (hits.length) fail(`private details in what would be pushed:\n${[...new Set(hits)].map((h) => `  ${h}`).join('\n')}\nReword generically, or add an intentional mention to .denylist-allow.`);
   gitleaks(commits);

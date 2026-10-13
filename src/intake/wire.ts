@@ -12,6 +12,8 @@ import { slotsDir } from '../os/index.js';
 import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import { claimDiscord } from './discord-claims.js';
 import { identifyGate, sessionStartLimit } from './discord-gate.js';
+import { AlertsIntake } from './alerts.js';
+import type { ReadOnlyQuery } from './bug-store.js';
 import { DiscordIntake, type DiscordOptions } from './discord.js';
 import type { IntakeConfig, IntakeSource } from './report.js';
 
@@ -85,6 +87,13 @@ export function intakeForInstance(o: {
   discord?: Pick<DiscordOptions, 'connect' | 'fetch' | 'setInterval' | 'clearInterval' | 'setTimeout'> & { now?: () => number; sleep?: (ms: number) => Promise<void>; alive?: (pid: number) => boolean };
   roleOf?: RoleOf;
   log?: (line: string) => void;
+  /**
+   * The production read path (deploy.yaml prod_read, through the owner's platform login and the read-only role on the
+   * production service), or undefined when the project has none: then no production source is wired.
+   */
+  prodRead?: ReadOnlyQuery | undefined;
+  /** The instance's state directory (where a production source keeps its cursor); required with prodRead. */
+  stateDir?: string;
 }): IntakeWiring | null {
   const file = join(o.home, INTAKE_FILE);
   const first = loadIntakeConfig(file);
@@ -136,6 +145,14 @@ export function intakeForInstance(o: {
         bot.stop();
         release();
       };
+    }
+  }
+  // Production alerts: only when intake.yaml turns them on and the project has the owner's production read path.
+  if (first.config.alerts.enabled) {
+    if (!o.prodRead || !o.stateDir) say('intake: alerts are on but the project has no production read path (deploy.yaml prod_read); alerts are not pulled');
+    else {
+      const alerts = new AlertsIntake({ stateDir: o.stateDir, config: () => config()?.alerts ?? first.config.alerts, run: o.prodRead });
+      sources.push({ name: alerts.name, take: () => alerts.take(), ack: (ids) => alerts.ack(ids), reply: () => alerts.reply() });
     }
   }
   return { config, sources, name, ...(roleOf ? { roleOf } : {}), start, stop };

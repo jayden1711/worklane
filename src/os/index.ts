@@ -296,6 +296,16 @@ export function detectOs(setting: OsSetting = 'auto'): OsKind {
   return 'linux';
 }
 
+/**
+ * The platform a downloaded tool must be built for (src/tool-pins.ts), or null where none is pinned: native Windows
+ * (local mode there runs inside WSL2, which is Linux) and anything but x64 and arm64.
+ */
+export function toolPlatform(platform: string = process.platform, arch: string = process.arch): { os: 'linux' | 'darwin'; arch: 'x64' | 'arm64' } | null {
+  const os = platform === 'linux' ? 'linux' : platform === 'darwin' ? 'darwin' : null;
+  const a = arch === 'x64' ? 'x64' : arch === 'arm64' ? 'arm64' : null;
+  return os && a ? { os, arch: a } : null;
+}
+
 /** Agents only run where Bash can be sandboxed; native Windows can't. */
 export function canRunAgents(os: OsKind): boolean {
   return os !== 'windows';
@@ -679,15 +689,44 @@ function launch(args: string[]): { started: boolean; detail: string } {
   }
 }
 
+const launchctlOk = (args: string[]) => {
+  try {
+    execFileSync('launchctl', args, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+};
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Unload a per-user launchd agent and wait until launchd no longer lists it. `bootout` can return while the job is
+ * still listed (one waiting out its KeepAlive throttle, say); then it is booted out again by its plist. True once it
+ * is gone; false if it is still listed after `waitMs`.
+ */
+export function launchdUnload(label: string, plist: string, o: { uid?: number; run?: (args: string[]) => boolean; sleep?: (ms: number) => void; waitMs?: number } = {}): boolean {
+  const uid = o.uid ?? process.getuid?.() ?? 0;
+  const run = o.run ?? launchctlOk;
+  const sleep = o.sleep ?? sleepSync;
+  const waitMs = o.waitMs ?? 10_000;
+  const target = `gui/${uid}/${label}`;
+  const loaded = () => run(['print', target]);
+  if (!loaded()) return true;
+  run(['bootout', target]);
+  for (let waited = 0; ; waited += 250) {
+    if (!loaded()) return true;
+    if (waited >= waitMs) return false;
+    if (waited === 1000) run(['bootout', `gui/${uid}`, plist]);
+    sleep(250);
+  }
+}
+
 export function uninstallService(label: string): string {
   if (process.platform === 'darwin') {
     const path = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
-    try {
-      execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 0}/${label}`], { stdio: 'ignore' });
-    } catch {
-      // not loaded
-    }
+    const gone = launchdUnload(label, path);
     rmSync(path, { force: true });
+    if (!gone) throw new Error(`removed ${path}, but launchd still lists ${label}: run \`launchctl bootout gui/${process.getuid?.() ?? 0}/${label}\``);
     return path;
   }
   if (process.platform === 'linux') {

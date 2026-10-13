@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -30,7 +30,7 @@ export function slotCeiling(): number {
   return typeof max === 'function' ? max() : max;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, add-project <name> <owner/repo>. Nothing else. */
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>. Nothing else. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -55,6 +55,13 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     usage: `set-test-slots <${TEST_SLOTS_MIN}..${TEST_SLOTS_MAX}>`,
     allows: (a) => a.length === 1 && /^[1-9][0-9]*$/.test(a[0]!) && Number(a[0]) >= TEST_SLOTS_MIN && Number(a[0]) <= TEST_SLOTS_MAX,
     run: (a, exec) => setTestSlotCap(Number(a[0]), exec),
+  },
+  {
+    command: 'claude-account',
+    what: "the agents' Claude account: refresh each agent user's account and expiry (status), or switch every agent on the machine to another account (switch)",
+    usage: 'claude-account status|switch',
+    allows: (a) => a.length === 1 && (a[0] === 'status' || a[0] === 'switch'),
+    run: (a, exec) => claudeAccount(a[0] as 'status' | 'switch', exec),
   },
   {
     command: 'add-project',

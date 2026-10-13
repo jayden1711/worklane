@@ -23,6 +23,9 @@ import { childEnv, which } from '../src/os/index.js';
 import { findChrome, freePort, portInUse } from '../src/browser/cdp.js';
 import { AppConfig } from '../src/config/schema.js';
 import { repoRoot, STDIN_LINE } from './helpers.js';
+import { SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
+import { globToRegExp } from '../src/guardrails/glob.js';
+import { isProtectedPath } from '../src/guardrails/engine.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -1430,18 +1433,24 @@ const failing = (id: number) => [{ name: 'ci', source: 'check_run' as const, sta
 const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
 
 /** PR mode with one required check and fix runs on; runs the task until its PR is open. */
-async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void } = {}) {
+async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void; body?: string; approveLanding?: boolean } = {}) {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   if (opts.fixes !== false) f.cfg.agents.roles.ci_repair = { enabled: true, model: 'sonnet', max_fixes_per_pr: 2 };
   opts.edit?.(f.cfg);
-  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: opts.body ?? BUG, author: 'example-owner', labels: ['ready'] });
   const runner = agents(over);
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}) });
   await c.tick();
   await c.idle();
   await c.tick();
+  if (opts.approveLanding) {
+    // An L3 change asks the owner before its PR opens: the owner approves it there.
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} approve`);
+    await c.tick(); // records the answer and queues landing
+    await c.tick(); // opens the PR
+  }
   const opened = f.log.read(0, ['pr.opened']).at(-1)!.payload as { number: number; head: string };
   const remoteHead = () => git(f.repo, 'ls-remote', 'origin', `refs/heads/${BRAND.cli}/issue-${n}`).split('\t')[0]!;
   const pr = () => f.backlog.prs().find((p) => p.number === opened.number)!;
@@ -1741,6 +1750,67 @@ test("auto-merge: the repo's own high-risk category waits, naming the path", { s
   await green(t);
   assert.deepEqual(reasonsOf(t).reasons, ['high-risk: pricing (src/price.js)']);
   assert.ok(!t.pr().merged && t.pr().labels.includes('needs-owner'));
+});
+
+/**
+ * Every self-modification glob (review.ts), each with the first real engine file it matches: a harness PR touching
+ * only that file, under a review.yaml that tries everything to let it through (the category redefined to nothing,
+ * nothing at L3, nothing waiting, nothing protected), still waits for the owner, says why plainly, and isn't merged.
+ * The config folder's own files (the built-in protected paths) and CI workflows (the push check) are refused before
+ * a PR can exist: never merged either.
+ */
+test('self-modification: a harness PR touching only one of the harness\'s own controls waits for the owner and is never auto-merged, whatever review.yaml says', { skip }, async () => {
+  const files = git(repoRoot, 'ls-files').split('\n').filter(Boolean);
+  const loose = (cfg: ReturnType<typeof fixture>['cfg']) => {
+    const r = cfg.review!;
+    r.categories = { [SELF_MODIFICATION]: [] };
+    r.levels.L3_human.when = [];
+    r.levels.L2_notify.when = [];
+    r.merge.wait_categories = [];
+    r.merge.max_lines = 100_000;
+    r.merge.max_files = 1000;
+    cfg.guardrails.protected_paths = [];
+  };
+  const body = 'Tighten one of the controls.\n\n```done_when\n- command: node --test\n```\n';
+  for (const part of SELF_MODIFICATION_PARTS) {
+    for (const glob of part.globs) {
+      const path = files.find((f) => globToRegExp(glob).test(f))!;
+      let attempt = 0;
+      const worker = (req: RunRequest) => {
+        mkdirSync(dirname(join(req.cwd, path)), { recursive: true });
+        writeFileSync(join(req.cwd, path), `// a change to the harness's own controls, attempt ${++attempt}\n`);
+        commitAll(req.cwd, `Change ${path}`);
+        return { summary: `changed ${path}` };
+      };
+      // Refused before any PR: the config folder's files by the built-in protected paths, workflows by the push check.
+      const refusal = isProtectedPath(path, { protected_paths: [] }) ? `changes protected harness files: ${path}` : path.startsWith('.github/workflows/') ? `it can't be pushed: changes CI workflows (${path})` : null;
+      if (refusal) {
+        const f = fixture();
+        f.cfg.project.land_mode = 'pr';
+        loose(f.cfg);
+        f.backlog.open({ title: `Change ${path}`, body, author: 'example-owner', labels: ['ready'] });
+        const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents({ worker, 'evaluator-verdict': approve() }), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
+        await c.tick();
+        await c.idle();
+        await c.tick();
+        assert.ok(f.log.read(0, ['change.rejected']).some((e) => (e.payload as { why: string }).why.startsWith(refusal)), path);
+        assert.equal(f.log.read(0, ['pr.opened', 'merge.done', 'land.result']).length, 0, `${path}: never a PR, never merged`);
+        continue;
+      }
+      const t = await openPr({ worker, 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: loose, body, approveLanding: true });
+      const proposed = lastOf(t.f.log, 'change.proposed') as { files: string[] };
+      assert.deepEqual(proposed.files, [path], `${glob}: the PR touches only ${path}`);
+      // Always L3: the owner was asked before the PR even opened (and approved it, above).
+      assert.equal((t.f.log.read(0, ['review.level_set']).at(-1)!.payload as { level: string }).level, 'L3', `${path}: always L3`);
+      assert.ok(t.f.log.read(0, ['decision.asked']).some((e) => (e.payload as { kind: string }).kind === 'land'), `${path}: the owner was asked`);
+      await green(t);
+      const d = lastOf(t.f.log, 'merge.decided') as { auto: boolean; reasons: string[]; why: { category: string; text: string }[] };
+      assert.equal(d.auto, false, path);
+      assert.ok(d.reasons.includes(`high-risk: ${SELF_MODIFICATION} (${path})`), `${path}: ${d.reasons.join(' | ')}`);
+      assert.deepEqual(d.why, [{ category: SELF_MODIFICATION, text: `changes ${part.what}: ${path}` }], path);
+      assert.ok(!t.pr().merged && t.f.log.read(0, ['merge.done']).length === 0, `${path}: never auto-merged`);
+    }
+  }
 });
 
 test("auto-merge: the evaluator's design-change flag is binding", { skip }, async () => {

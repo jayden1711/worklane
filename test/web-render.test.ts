@@ -3,7 +3,7 @@
 // data; decisions are still answerable only where the server says so.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -20,6 +20,11 @@ import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFi
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
+import { claudeAccountView } from '../src/claude-account.js';
+import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
+import { trustForViewer, trustView } from '../src/trust.js';
+import { VIEWER_EVENTS } from '../src/viewer-events.js';
+import { firstRunView } from '../src/init.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -33,10 +38,14 @@ interface Render {
   intakeRefusal(state: unknown): string | null;
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
+  renderTrust(t: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderFirstRun(f: unknown): string;
+  renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
+  renderClaudeAccount(data: unknown, now?: number): string;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
@@ -44,6 +53,10 @@ interface Render {
   runsRefusal(state: unknown): string | null;
   renderRunResearch(data: unknown): string;
   renderStopBanner(state: State): string;
+  renderUsageBanner(usage: unknown[], now: number): string;
+  renderUsageLines(usage: unknown[], now: number): string;
+  renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
+  countdown(resetAt: string, now: number): string;
   renderProtection(protection: unknown, brand: string): string;
   renderMainWatchAlert(protection: unknown): string;
   renderPrs(view: unknown): string;
@@ -52,6 +65,8 @@ interface Render {
   renderAgents(state: State, live: unknown): string;
   renderHealth(view: unknown, instances?: unknown[]): string;
   renderMachine(data: unknown): string;
+  renderUpdatesPanel(data: unknown): string;
+  duration(ms: number | null): string;
   renderInstanceSettings(data: unknown): string;
   parseEntry(key: string, raw: string): unknown;
   showValue(key: string, v: unknown): string;
@@ -62,7 +77,9 @@ interface Render {
   renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], now?: number): string;
   renderBoardTestRuns(boards: { name: string | null; data: unknown; error: string | null }[]): string;
   renderTestRuns(data: unknown, compact?: boolean): string;
-  renderInstances(hub: unknown, current: string, all?: boolean): string;
+  renderInstances(hub: unknown, current: string, all?: boolean, status?: Record<string, string>): string;
+  renderHealthPage(all: unknown[], target?: string): string;
+  loadIncidents(hub: unknown, get: (name: string | null, path: string) => Promise<unknown>): Promise<unknown[]>;
   scopeOf(hub: unknown, saved: string | null, all: boolean): { current: string | null; all: boolean; instances: (string | null)[] };
   loadBoards(scope: unknown, get: (instance: string | null, path: string) => Promise<unknown>): Promise<{ name: string | null; data: unknown; error: string | null }[]>;
   onInstance(instance: string | null, path: string, init: unknown, scope: Promise<unknown>): Promise<unknown>;
@@ -527,6 +544,37 @@ test('the research settings: readable names, bounds from the machine\'s limits, 
   assert.deepEqual(SETTING_KEYS.filter((k) => !r.LABEL[k]), []);
 });
 
+test('the Updates panel: the engine installed, the last update, a rollback held because the canary failed, and the canary with its duration and PR link', () => {
+  const at = new Date(Date.now() - 3 * 3600_000).toISOString();
+  const data = {
+    configured: true,
+    enabled: true,
+    installed: { sha: 'a'.repeat(40), version: '0.4.1' },
+    lastInstall: { at, from: 'a'.repeat(40), to: 'b'.repeat(40) },
+    rollback: { at, sha: 'b'.repeat(40), reason: 'rollback: canary failed: timed out after 121 minutes at "pr": PR #7 open', held: true, canary: true },
+    canary: {
+      settings: { instance: 'canary', repo: 'example-org/canary-scratch', timeLimitMinutes: 120 },
+      running: null,
+      last: { at, passed: false, trigger: 'update', stage: 'pr', why: 'timed out after 121 minutes at "pr": PR #7 open', durationMs: 121 * 60_000, timedOut: true, issue: { number: 6, url: 'https://github.com/example-org/canary-scratch/issues/6' }, pr: { number: 7, url: 'https://github.com/example-org/canary-scratch/pull/7' }, sha: 'b'.repeat(40) },
+    },
+  };
+  const html = r.renderUpdatesPanel(data);
+  for (const id of ['updates-panel', 'updates-installed', 'updates-last', 'updates-rollback', 'updates-rollback-reason', 'updates-canary', 'updates-canary-last', 'updates-canary-why']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="updates-installed"[\s\S]*?v0\.4\.1[\s\S]*?aaaaaaaaaaaa/);
+  assert.match(html, /data-testid="updates-last"[\s\S]*?aaaaaaaaaaaa → bbbbbbbbbbbb/);
+  assert.match(html, /rolled back: canary failed[\s\S]*?held[\s\S]*?timed out after 121 minutes/);
+  assert.match(html, /data-testid="updates-canary-last"[\s\S]*?timed out[\s\S]*?after installing bbbbbbbbbbbb · 2 h 01 min[\s\S]*?href="https:\/\/github\.com\/example-org\/canary-scratch\/pull\/7"[^>]*>PR #(<!-- -->)?7/);
+  // Passed, a daily one, and nothing rolled back.
+  const ok = r.renderUpdatesPanel({ ...data, rollback: null, canary: { ...data.canary, running: { at, trigger: 'daily', issue: 9, url: 'https://github.com/example-org/canary-scratch/issues/9', deadline: at }, last: { ...data.canary.last, passed: true, timedOut: false, trigger: 'daily', durationMs: 17 * 60_000, why: 'PR #7 merged with 1 green check' } } });
+  assert.match(ok, /data-testid="updates-rollback"[\s\S]*?none/);
+  assert.match(ok, /passed[\s\S]*?daily · 17 min/);
+  assert.doesNotMatch(ok, /data-testid="updates-canary-why"/, 'a pass shows no failure reason');
+  assert.match(ok, /data-testid="updates-canary-running"[\s\S]*?issue #(<!-- -->)?9/);
+  // No canary configured: where to read how.
+  assert.match(r.renderUpdatesPanel({ ...data, canary: { settings: null, running: null, last: null } }), /not set up: see[\s\S]*docs\/canary\.md/);
+  assert.deepEqual([r.duration(42_000), r.duration(17 * 60_000), r.duration(65 * 60_000), r.duration(null)], ['42s', '17 min', '1 h 05 min', '–']);
+});
+
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {
   const data = {
     owner: 'example-owner',
@@ -666,6 +714,36 @@ test('checks render as a table with failures tinted and their output; instances 
   assert.match(r.renderStopBanner({ ...asOwner, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: null, lastStop: null, lastResume: null } }), /Emergency stop in force/);
 });
 
+test('the usage-limit pause: a banner per paused instance counting down to its reset, and a usage line per instance on the Overview', () => {
+  const now = Date.parse('2026-10-13T10:00:00Z');
+  const running = { instance: 'site', paused: null, today: { runs: 12, limitHits: 0 }, lastHit: null };
+  const paused = { instance: 'code', paused: { since: '2026-10-13T09:00:00Z', resetAt: '2026-10-13T12:05:09Z', source: 'claude', kind: 'five_hour' }, today: { runs: 4, limitHits: 1 }, lastHit: '2026-10-13T09:00:00Z' };
+  // The countdown, to the second, and "now" once the reset has passed.
+  assert.equal(r.countdown(paused.paused.resetAt, now), '2 h 05 min 09 s');
+  assert.equal(r.countdown(paused.paused.resetAt, now + 2 * 3600_000 + 5 * 60_000), '0 min 09 s');
+  assert.equal(r.countdown(paused.paused.resetAt, now + 3 * 3600_000), 'now');
+  // No banner while nothing is paused; one per paused instance, with its countdown.
+  assert.equal(r.renderUsageBanner([running], now), '');
+  const banner = r.renderUsageBanner([running, paused], now);
+  assert.equal((banner.match(/data-testid="usage-banner"/g) ?? []).length, 1);
+  assert.match(banner, /data-instance="code"/);
+  assert.match(banner, /Paused on the Claude usage limit/);
+  assert.match(banner, /data-testid="usage-countdown"[^>]*>resumes in 2 h 05 min 09 s</);
+  assert.match(banner, /requeued, not failed/);
+  assert.doesNotMatch(banner, /default wait/, 'claude named the reset');
+  assert.match(r.renderUsageBanner([{ ...paused, paused: { ...paused.paused, source: 'default' } }], now), /default wait/);
+  assert.match(r.renderUsageBanner([paused], now + 3 * 3600_000), />resuming now</);
+  // The Overview: a line per instance, running or paused, with today's runs and limit hits.
+  const lines = r.renderUsageLines([running, paused], now);
+  assert.equal((lines.match(/data-testid="usage-line"/g) ?? []).length, 2);
+  assert.match(lines, /12 runs today/);
+  assert.match(lines, /1 usage-limit hit today/);
+  assert.match(lines, /data-instance="code"[\s\S]*paused until [^<]*\(2 h 05 min 09 s\)/);
+  assert.match(lines, /data-instance="site"[\s\S]*>running</);
+  assert.match(r.renderOverviewWithUsage(asOwner, [running, paused], now), /data-testid="overview-usage"/);
+  assert.doesNotMatch(r.renderPage('overview', asOwner), /overview-usage/, 'no usage read yet: no line');
+});
+
 test('the protection mode on the Machine page, the last commit checked for writers, and the alert with its clear for an admin', () => {
   const sha = 'c'.repeat(40);
   const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: { sha, url: `https://github.com/o/r/commit/${sha}`, at: new Date().toISOString() }, alert: null, stopped: null, canClear: false };
@@ -680,6 +758,20 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+});
+
+test('bootstrap merges on the Machine page: an admin gets the accept field, a writer the list read-only, a viewer neither', () => {
+  const sha = 'c'.repeat(40);
+  const accepted = [{ id: 'a1', sha: null, pr: 22, head: 'd'.repeat(40), by: 'example-owner', reason: "suite can't run yet", at: new Date().toISOString(), appliedTo: sha }];
+  const watch = { mode: 'main_watch' as const, detail: '', lastChecked: null, alert: null, stopped: null, canClear: false, accepted };
+  const admin = r.renderProtection({ ...watch, canAccept: true }, BRAND.name);
+  assert.match(admin, /data-testid="main-watch-accept-target"/);
+  assert.match(admin, /data-testid="main-watch-accept-submit"[^>]*>Accept as bootstrap merge/);
+  assert.match(admin, /#22 at dddddddd[\s\S]*suite can&#x27;t run yet[\s\S]*accounted: cccccccc/);
+  const writer = r.renderProtection({ ...watch, canAccept: false }, BRAND.name);
+  assert.match(writer, /data-testid="main-watch-accepted-row"/, 'the list');
+  assert.doesNotMatch(writer, /main-watch-accept-target|Accept as bootstrap merge/, 'read-only');
+  assert.doesNotMatch(r.renderProtection({ mode: 'main_watch' }, BRAND.name), /main-watch-accepted/, "a viewer's: the mode only");
 });
 
 test('a chat answer: citations as links, a draft preview with a two-step file, proposals that open their confirm flows, read-only for others', () => {
@@ -891,6 +983,27 @@ test('a research run on its page: each search, each page fetched or refused (lin
   assert.match(r.renderRunResearch({ searches: [], fetches: [], capped: [] }), /No searches or fetches recorded/);
 });
 
+test('waiting on you: a high-risk PR says plainly why it waits, naming the category and its first file', () => {
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  const item = {
+    kind: 'needs_owner', since: new Date(now - 3_600_000).toISOString(), issue: 3, pr: 31, title: 'Tighten the merge rule',
+    detail: 'high-risk: self-modification (src/merge-policy.ts, src/review.ts)',
+    why: [
+      { category: 'self-modification', text: 'changes the merge policy: src/merge-policy.ts and 1 more' },
+      { category: 'migration', text: 'changes a database migration: db/migrations/002.sql' },
+    ],
+  };
+  const w = { at: new Date(now).toISOString(), items: [item], markdown: '', mergedSince: new Date(now).toISOString(), merged: [] };
+  const html = r.renderWaiting(w, now);
+  const whys = [...html.matchAll(/data-testid="waiting-why" data-category="([a-z-]+)"[\s\S]*?<\/li>/g)];
+  assert.deepEqual(whys.map((m) => m[1]), ['self-modification', 'migration']);
+  assert.match(whys[0]![0], />self-modification<[\s\S]*?>changes the merge policy: src\/merge-policy\.ts and 1 more</);
+  assert.match(whys[1]![0], />migration<[\s\S]*?>changes a database migration: db\/migrations\/002\.sql</);
+  assert.match(html, /PR #31[\s\S]*?data-testid="waiting-why"[\s\S]*?data-testid="waiting-detail"/, 'the plain reason first, then the detail');
+  // Nothing high-risk (or a decision recorded before the reason was): no reason line.
+  assert.doesNotMatch(r.renderWaiting({ ...w, items: [{ ...item, why: undefined }] }, now), /waiting-why/);
+});
+
 test('waiting on you: every owner-held state grouped in the digest\'s order, each with its issue or PR and how long it has waited; the digest\'s Markdown; refused to anyone else without asking', () => {
   const now = Date.parse('2026-10-15T12:00:00Z');
   const ago = (h: number) => new Date(now - h * 3_600_000).toISOString();
@@ -932,6 +1045,40 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   assert.equal((asOther as unknown as { canReadDigest: boolean }).canReadDigest, false);
   assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
+});
+
+test("the first-run page: init's checklist in order with each status, where it stopped and how to pick up, what local mode lacks; viewers refused", () => {
+  // The view as the server makes it (src/init.ts firstRunView) from a state file init wrote.
+  const file = join(mkdtempSync(join(tmpdir(), 'web-render-init-')), 'init.json');
+  const at = '2026-10-13T10:00:00.000Z';
+  writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: { tools: { status: 'done', detail: 'node 24.21.0, git, gitleaks, claude, gh', at }, claude: { status: 'failed', detail: 'not signed in, per `claude auth status`', at } }, handoff: {}, updatedAt: at, finishedAt: null }));
+  const f = firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null, has: () => false });
+  const html = r.renderFirstRun(f);
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-step" data-step="([a-z-]+)" data-status="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['tools:done', 'claude:failed', 'github:pending', 'repo-config:pending', 'protection:pending', 'discord:pending']);
+  assert.match(html, /data-testid="first-run-mode" data-mode="local">Local mode: on this machine, as you\. No server, no ssh, no root\./);
+  assert.match(html, /1 of 6 steps done/);
+  assert.match(html, /role="progressbar" aria-valuemin="0" aria-valuemax="6" aria-valuenow="1"/);
+  assert.match(html, /Tools present[\s\S]*?done[\s\S]*?node 24\.21\.0, git, gitleaks, claude, gh/);
+  assert.match(html, /Claude login[\s\S]*?stopped here[\s\S]*?not signed in/);
+  assert.doesNotMatch(html, /not reached yet/, 'a step not reached shows no detail');
+  assert.match(html, /data-testid="first-run-resume"[\s\S]*?Stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
+  assert.match(html, /data-testid="first-run-unavailable"[\s\S]*?Not available in local mode[\s\S]*?separate OS users[\s\S]*?root-run add-project[\s\S]*?test sandbox[\s\S]*?needs Docker/);
+  assert.doesNotMatch(html, /first-run-none|first-run-finished/);
+  // Never run here: the command to start, nothing done.
+  const none = r.renderFirstRun(firstRunView(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: null }));
+  assert.match(none, /data-testid="first-run-none"[\s\S]*?<code[^>]*>worklane init --mode local \/r<\/code>/);
+  assert.doesNotMatch(none, /first-run-unavailable/, 'no mode yet: nothing claimed missing');
+  // Finished: said, no resume card.
+  const done = r.renderFirstRun({ ...f, steps: f.steps.map((x) => ({ ...x, status: x.optional ? 'skipped' : 'done' })), done: 6, finishedAt: at });
+  assert.match(done, /data-testid="first-run-finished"/);
+  assert.doesNotMatch(done, /first-run-resume/);
+  // Server mode: the per-project steps live on the Setup console; nothing listed as missing.
+  const server = r.renderFirstRun(firstRunView(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop' }));
+  assert.match(server, /Server mode[\s\S]*?Setup console/);
+  assert.doesNotMatch(server, /first-run-unavailable/);
+  // Anyone but the owner and the writers: told, not asked.
+  assert.match(r.renderFirstRunPage(asOther), /data-testid="first-run-refused"[^>]*>The first-run checklist is for the instance(&#x27;|')s owners and writers/);
+  assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
 });
 
 test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
@@ -1249,4 +1396,122 @@ test("two instances on one machine: with one selected, no page shows any of the 
   } finally {
     for (const d of Object.values(servers)) await d.close();
   }
+});
+
+test('Claude account: a machine owner sees each agent user and the switch step by step, with the token box only where it is taken; anyone else nothing', () => {
+  const ownersFile = machineOwnersFile('ada');
+  const dir = mkdtempSync(join(tmpdir(), 'claude-account-render-'));
+  const at = new Date().toISOString();
+  writeFileSync(join(dir, 'status.json'), JSON.stringify({ at, users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: new Date(Date.now() + 200 * 86_400_000).toISOString() }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: false, logged_in: false, auth_method: 'none', error: 'claude auth status says it is not logged in' }] }));
+  const lines = (more: object[]) =>
+    writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from the dashboard of shop' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+  const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: freshRequester(login) }, instance, ownersFile });
+  lines([]);
+  const html = r.renderClaudeAccount(view('ada'));
+  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-account-switch', 'claude-switch', 'claude-switch-token']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="claude-account-user" data-user="wl-shop-agent" data-signed-in="yes"/);
+  assert.match(html, /agents@example\.com/);
+  assert.match(html, /token 0123abcd/);
+  assert.match(html, /data-user="wl-shop-eval" data-signed-in="no"[\s\S]*not logged in/);
+  assert.deepEqual([...html.matchAll(/data-testid="claude-switch-step" data-phase="([a-z]+)"/g)].map((m) => m[1]), ['running', 'running', 'pending', 'pending'], 'pause (runs finishing), token waiting, check, resume');
+  assert.match(html, /<button[^>]*disabled=""[^>]*data-testid="claude-account-switch"/, 'no second switch while one runs');
+  // In another instance's dashboard the box isn't there: it says where to paste it.
+  const elsewhere = r.renderClaudeAccount(view('ada', 'web'));
+  assert.doesNotMatch(elsewhere, /data-testid="claude-switch-token"/);
+  assert.match(elsewhere, /data-testid="claude-switch-token-elsewhere">Paste it in shop&#x27;s dashboard/);
+  // Each instance's result as it comes: one resumed, one left paused.
+  lines([{ step: 'token', state: 'done', detail: 'received' }, { step: 'wait', state: 'done', instance: 'shop', detail: 'finished' }, { step: 'wait', state: 'done', instance: 'web', detail: 'finished' }, { step: 'install', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'stored' }, { step: 'check', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'signed in' }, { step: 'check', state: 'failed', instance: 'web', user: 'wl-web-agent', detail: 'not logged in' }, { step: 'resume', state: 'done', instance: 'shop', detail: 'running again' }, { step: 'resume', state: 'failed', instance: 'web', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: web' }]);
+  const done = r.renderClaudeAccount(view('ada'));
+  assert.match(done, /data-testid="claude-switch" data-status="failed"/);
+  assert.deepEqual([...done.matchAll(/data-testid="claude-switch-resume" data-instance="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['shop:done', 'web:failed']);
+  assert.match(done, /data-testid="claude-switch-result">not resumed: web/);
+  assert.doesNotMatch(done, /data-testid="claude-switch-token"/);
+  // Not a machine owner: nothing at all (the server refuses them the data too).
+  assert.equal(r.renderClaudeAccount(view('ivy')), '');
+});
+
+test('Health: open incidents with what broke, since when, what was tried and the fix; resolved ones folded into a history; a viewer sees no detail; each instance has its dot', async () => {
+  const slots = mkdtempSync(join(tmpdir(), 'web-render-incidents-'));
+  const now = new Date();
+  const hour = (h: number) => new Date(now.getTime() - h * 3600_000);
+  const down = raiseIncident('unit_down', 'svc-demo.service', 'instance demo\'s coordinator is failed', 'start it: sudo systemctl start svc-demo.service', { dir: slots, instance: 'demo', tried: ['systemd restarted it 5 times before giving up'], now: hour(2) }).incident;
+  const disk = raiseIncident('disk_full', '/srv', 'the volume holding /srv is 91% full', 'free space on that volume', { dir: slots, now: hour(1) }).incident;
+  const old = raiseIncident('github_auth', 'demo', 'GitHub refused the token', 'check the App', { dir: slots, instance: 'demo', now: hour(30) }).incident;
+  resolveIncident('github_auth', 'demo', { dir: slots, now: hour(29) });
+  const { dir: root } = exampleProject();
+  const stateDir = mkdtempSync(join(tmpdir(), 'web-render-incidents-state-'));
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: slots, instance: 'demo' });
+  try {
+    const as = (login: string) => async (_name: string | null, path: string) => (await fetch(`${d.url.split('/?')[0]}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(login) } })).json();
+    const hub = { instances: [{ name: 'demo', up: true, error: null }, { name: 'gone', up: false, error: 'down' }] };
+    const owner = r.renderHealthPage(await r.loadIncidents(hub, as('example-owner')), disk.id);
+    // Open, oldest first, each anchored for the ops channel's link; the linked one marked.
+    assert.ok(owner.indexOf(`id="incident-${down.id}"`) >= 0 && owner.indexOf(`id="incident-${down.id}"`) < owner.indexOf(`id="incident-${disk.id}"`), 'open incidents, oldest first, each anchored');
+    assert.match(owner, new RegExp(`id="incident-${disk.id}"[^>]*data-targeted="true"`), 'the linked incident is marked');
+    assert.match(owner, /data-testid="incident-detail"[^>]*>instance demo&#x27;s coordinator is failed/);
+    assert.match(owner, /data-testid="incident-tried"[^>]*>systemd restarted it 5 times before giving up/);
+    assert.match(owner, /data-testid="incident-fix"[^>]*>start it: sudo systemctl start svc-demo.service/);
+    assert.match(owner, /data-testid="incident-since"[^>]*>since 2h ago/);
+    assert.match(owner, /machine/, 'a machine-wide incident says so');
+    // Resolved: folded (a closed <details>), unless the link points into it.
+    assert.match(owner, /<details[^>]*data-testid="incident-history"(?![^>]*open)/, 'the history is folded');
+    assert.match(owner, new RegExp(`id="incident-${old.id}"[^>]*data-testid="incident-resolved"`));
+    assert.match(r.renderHealthPage(await r.loadIncidents(hub, as('example-owner')), old.id), /<details[^>]*open=""[^>]*data-testid="incident-history"|<details[^>]*data-testid="incident-history"[^>]*open=""/, 'a link to a resolved incident opens the history');
+    // Each instance's dot: red here (an open red incident), red for one not answering.
+    assert.match(owner, /data-status="red"[^>]*data-testid="health-instance-dot"[\s\S]*demo/);
+    assert.match(owner, /gone<span[^>]*>not readable/);
+    // A viewer: that it broke, where and since when; never the detail, what was tried or the fix.
+    const viewer = r.renderHealthPage(await r.loadIncidents(hub, as('someone-else')));
+    assert.match(viewer, /A service is down/);
+    assert.match(viewer, /data-testid="incident-detail-hidden"/);
+    for (const secretish of ['coordinator is failed', 'systemctl start', '91% full', 'restarted it']) assert.ok(!viewer.includes(secretish), `a viewer doesn't see "${secretish}"`);
+    // Nothing open: says so.
+    resolveIncident('unit_down', 'svc-demo.service', { dir: slots });
+    resolveIncident('disk_full', '/srv', { dir: slots });
+    const clear = r.renderHealthPage(await r.loadIncidents({ instances: [{ name: 'demo', up: true, error: null }] }, as('example-owner')));
+    assert.match(clear, /data-testid="health-all-clear"/);
+    assert.match(clear, /data-status="green"/);
+  } finally {
+    await d.close();
+  }
+  // The sidebar: each instance's row has its status dot; one that isn't answering is red.
+  const nav = r.renderInstances({ instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: true, error: null }, { name: 'c', up: true, error: null }, { name: 'd', up: false, error: 'down' }] }, 'a', false, { a: 'green', b: 'amber', c: 'red', d: 'green' });
+  const dots = [...nav.matchAll(/data-status="(\w+)"[^>]*data-testid="instance-dot"/g)].map((m) => m[1]);
+  assert.deepEqual(dots, ['green', 'amber', 'red', 'red']);
+});
+
+test('the trust panel: the recommendation and its rules, each figure over 7 and 30 days, each area with its advice and verification time; a viewer gets the allowlisted figures only, never cost', () => {
+  const now = new Date('2026-10-13T12:00:00.000Z');
+  const ts = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+  const events = [
+    { ts: ts(9), type: 'review.level_set', payload: { issue: 1, reasons: ['money-path: src/pay.ts'] } },
+    { ts: ts(9), type: 'change.proposed', payload: { issue: 1, files: ['src/pay.ts'] } },
+    { ts: ts(8), type: 'merge.done', payload: { issue: 1, number: 11, sha: 'a'.repeat(40), title: 'Pay out' } },
+    { ts: ts(8), type: 'merge.main_result', payload: { issue: 1, number: 11, outcome: 'red' } },
+    { ts: ts(7.9), type: 'merge.main_result', payload: { issue: 9, number: 19, outcome: 'green' } },
+    { ts: ts(2), type: 'merge.done', payload: { issue: 2, number: 12, sha: 'b'.repeat(40), title: 'Copy' } },
+    { ts: ts(2), type: 'run.cost', payload: { issue: 2, role: 'worker', usd: 1.2, tokens_in: 30_000, tokens_out: 2_000 } },
+    { ts: ts(2), type: 'run.cost', payload: { issue: 2, role: 'evaluator-verdict', usd: 0.3, secs: 240 } },
+  ];
+  const full = trustView(events, { agents: 2, now });
+  const html = r.renderTrust(full);
+  assert.match(html, /data-testid="trust-panel"/);
+  assert.match(html, /data-testid="trust-recommendation" data-action="keep"[\s\S]*?Keep 2 agents/);
+  assert.equal((html.match(/data-testid="trust-rule"/g) ?? []).length, 3);
+  assert.match(html, /data-testid="trust-rule" data-met="true"[\s\S]*?no escaped money-path bug/);
+  assert.match(html, /data-testid="trust-note"[^>]*>A recommendation only: nothing here changes/);
+  assert.deepEqual([...html.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges', 'cfr', 'escaped', 'restore', 'review', 'flaky', 'cost']);
+  assert.match(html, /data-figure="cfr"[\s\S]*?data-testid="trust-figure-7"[^>]*>0%[\s\S]*?30 days: <span[^>]*>50%/);
+  assert.match(html, /data-figure="cost"[\s\S]*?~\$1\.50/);
+  assert.deepEqual([...html.matchAll(/data-testid="trust-area" data-area="([a-z]+)"/g)].map((m) => m[1]), ['money', 'auth', 'other']);
+  assert.match(html, /data-area="money"[\s\S]*?data-advice="too_few"/);
+  assert.match(html, /data-area="other"[\s\S]*?data-testid="trust-tier"[\s\S]*?evaluator[\s\S]*?4 min median/);
+  assert.match(html, /data-testid="trust-failure" data-kind="main_red"[^>]*>#1 \(PR #11\) broke the default branch/);
+  assert.match(html, /data-testid="trust-definitions"/);
+  assert.doesNotMatch(html, /data-testid="trust-hidden"/);
+  // A viewer: the merges only, no cost, no areas or recommendation, and why.
+  const viewer = r.renderTrust(trustForViewer(full, VIEWER_EVENTS));
+  assert.deepEqual([...viewer.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges']);
+  assert.doesNotMatch(viewer, /trust-recommendation|trust-area|~\$/);
+  assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
 });

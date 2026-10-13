@@ -82,11 +82,19 @@ export const VIEWER_PROTECTION_FIELDS: readonly string[] = Object.freeze(['mode'
 /** The machine's slots as a viewer sees them: how many are in use and how many there are, not which agents hold them. */
 export const VIEWER_SLOT_FIELDS: readonly string[] = Object.freeze(['cap', 'running']);
 
+/**
+ * A watchdog incident as a viewer sees it (GET /api/health/incidents): that something broke, its fixed title, where
+ * and since when; never its detail, its key, what was tried or the fix (paths, units, commits, errors).
+ */
+export const VIEWER_INCIDENT_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'instance', 'severity', 'title', 'since', 'resolvedAt']);
+
 const pick = (o: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(keys.filter((k) => Object.hasOwn(o, k)).map((k) => [k, o[k]]));
 const each = (keys: readonly string[]) => (xs: unknown) => (Array.isArray(xs) ? xs.map((x) => pick(x as Record<string, unknown>, keys)) : []);
 const tasksOnly = each(VIEWER_TASK_FIELDS);
 const decisionsOnly = each(VIEWER_DECISION_FIELDS);
 const batchesOnly = each(VIEWER_BATCH_FIELDS);
+/** Incidents with only the fields a viewer may see. */
+export const incidentsForViewer = each(VIEWER_INCIDENT_FIELDS);
 
 /**
  * A state as a viewer may have it: only the allowlisted keys; tasks and decisions (also the inbox's) with only

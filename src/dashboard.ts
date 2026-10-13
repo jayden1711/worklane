@@ -19,7 +19,7 @@ import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
-import { protectionView } from './main-watch.js';
+import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, siteForInstance, siteForRoot } from './service.js';
@@ -32,6 +32,7 @@ import { testRunsView } from './testrun/status.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
+import { usageView } from './usage-limit.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount, flockHolders } from './os/index.js';
@@ -40,7 +41,7 @@ import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
-import { UPDATES_CONFIG, UPDATES_LOG, updateLog, updateSettings } from './updates.js';
+import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
 import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
@@ -49,10 +50,16 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
-import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
+import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
+import { trustForViewer, trustView } from './trust.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
+import { firstRunView, INIT_FILE } from './init.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { readSecretBody } from './console/secrets.js';
+import { AskError } from './console/asks.js';
+import { incidentsView } from './watchdog/view.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -131,11 +138,15 @@ export interface DashboardOptions {
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
-  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string };
+  /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
+  acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
   /** The machine owners file (src/machine-owners.ts); the system's when unset (tests). */
   machineOwnersFile?: string;
+  /** Where claude-account.sh writes status.json and switch.jsonl (src/claude-account.ts); the system's when unset (tests). */
+  claudeAccountDir?: string;
 }
 
 /**
@@ -403,6 +414,17 @@ export function settingSource(key: SettingKey, instance: unknown, repo: (file: s
   return place && defines(repo(place.file), place.path) ? 'repo' : 'engine';
 }
 
+/** The instance's agents (workers) in effect: its policy's setting, else the repo's; read only, for the Trust panel. */
+export function instanceAgents(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>): number {
+  let settings = {};
+  try {
+    if (o.policyFile) settings = PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings;
+  } catch {
+    // an unreadable policy: the repo's value
+  }
+  return Number(currentValue(o.cfg, settings, 'workers'));
+}
+
 /**
  * The Settings page's instance section: each setting's value in effect and where it comes from (the
  * instance's policy, the repo's config, or the engine's default), the bounds a new value must keep (the machine's limits and
@@ -501,7 +523,29 @@ export function protectionState(o: { stateDir: string; repo: string; events: Sto
   const last = o.events.filter((e) => e.type === 'main_watch.unaccounted').at(-1);
   const p = last?.payload as EventPayload<'main_watch.unaccounted'> | undefined;
   const alert = stop && stop.by === 'main_watch' && p ? { at: last!.ts, sha: p.sha, url: p.url, reason: p.reason, number: p.number, revert: p.revert } : null;
-  return { ...view, alert, stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop };
+  // Each acceptance, and the commit the watch applied it to (main_watch.accepted), if it has yet.
+  const applied = new Map(o.events.filter((e) => e.type === 'main_watch.accepted').map((e) => [(e.payload as EventPayload<'main_watch.accepted'>).id, (e.payload as EventPayload<'main_watch.accepted'>).sha]));
+  const accepted = view.accepted.map((a) => ({ id: a.id, sha: a.sha, pr: a.pr, head: a.head, by: a.by, reason: a.reason, at: a.at, appliedTo: applied.get(a.id) ?? null }));
+  return { ...view, accepted, alert, stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop, canAccept: isOwner(o.role) && view.mode === 'main_watch' };
+}
+
+/** The PRs whose merge the main watch has judged already (accounted, accepted or not): none of them can be accepted. */
+export function judgedPrs(events: StoredEvent[]): number[] {
+  const out = new Set<number>();
+  for (const e of events) {
+    if (e.type !== 'main_watch.checked' && e.type !== 'main_watch.unaccounted' && e.type !== 'main_watch.accepted') continue;
+    const n = (e.payload as { number: number | null }).number;
+    if (n) out.add(n);
+  }
+  return [...out];
+}
+
+/** What an accept request names: `pr` (a number), or `sha`; null when neither, or both. */
+export function acceptTarget(body: { sha?: unknown; pr?: unknown }): AcceptTarget | null {
+  const hasSha = body.sha !== undefined && body.sha !== null && body.sha !== '';
+  const hasPr = body.pr !== undefined && body.pr !== null && body.pr !== '';
+  if (hasSha === hasPr) return null;
+  return hasSha ? { sha: String(body.sha) } : { pr: Number(body.pr) };
 }
 
 function readStopFile(stateDir: string): { reason: string; by: string | null } | null {
@@ -788,6 +832,25 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
+        // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
+        // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
+        if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
+          const body = (await readBody(req)) as { sha?: unknown; pr?: unknown; reason?: unknown };
+          const target = acceptTarget(body);
+          const reason = typeof body.reason === 'string' ? body.reason.slice(0, 600) : '';
+          const refuse = (status: number, error: string) => {
+            audit(who, 'main_watch.accept_refused', { target, reason, status, error });
+            return json(res, status, { error });
+          };
+          if (!isOwnerHere) return refuse(403, `only the instance's owners (admin on ${repo}) may accept a commit as a bootstrap merge; @${who.login} is a ${who.role}`);
+          if (!target) return refuse(400, 'name either a commit sha or a PR number');
+          const branch = opts.cfg.project.project.default_branch;
+          const r = acceptMerge({ stateFile: join(opts.stateDir, 'main-watch.json'), git: opts.acceptGit ?? acceptGit(opts.root, 'origin', branch), branch, target, reason, by: who.login, judgedPrs: judgedPrs(readEvents(opts.eventsDb)) });
+          if (!r.ok) return refuse(r.status, r.error);
+          const a = r.acceptance;
+          audit(who, 'main_watch.accept', { id: a.id, sha: a.sha, pr: a.pr, head: a.head, base: a.base, reason: a.reason });
+          return json(res, 200, { ok: true, acceptance: a });
+        }
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
@@ -997,12 +1060,25 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
         }
+        // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
+        // A viewer gets only the figures the viewer-events allowlist permits, and never cost.
+        if (url.pathname === '/api/trust') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'the trust numbers are read-only' });
+          const view = trustView(readEvents(opts.eventsDb), { agents: instanceAgents(opts) });
+          return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
+        }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
           if (!mayReadDigest(who.role)) return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
           const digest = waitingOnYou(readEvents(opts.eventsDb));
           return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
+        }
+        // Usage: the Claude usage-limit pause in force (its reset time, for the banner's countdown) and today's runs and
+        // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
+        if (url.pathname === '/api/usage' && req.method === 'GET') {
+          const v = usageView(readEvents(opts.eventsDb));
+          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null });
         }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;
@@ -1016,6 +1092,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
           return json(res, 200, { ...view, usage, docs: { backups: docsUrl('backups') } });
         }
+        // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
+        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).
+        if (url.pathname === '/api/health/incidents' && req.method === 'GET') return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, full: isWriter(who.role) }));
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
         if (url.pathname === '/api/instance-settings' && req.method === 'POST') {
@@ -1030,6 +1109,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
+        // The first-run page: init's checklist as it recorded it (src/init.ts), and what this mode can't do. Read-only.
+        if (url.pathname === '/api/first-run' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          return json(res, 200, firstRunView(join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null }));
+        }
         // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
         // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.
         if (url.pathname === '/api/add-project' && req.method === 'GET') {
@@ -1042,6 +1126,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
         // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
         const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        // The Machine page's Updates panel: the engine installed now, the last install, any rollback or hold and why,
+        // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
+        if (url.pathname === '/api/updates' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('engine updates are', who) });
+          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT)));
+        }
         if (url.pathname === '/api/machine' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
           return json(res, 200, machine());
@@ -1087,6 +1177,57 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           audit(who, 'machine.add_project', { name: r.args[1], repo: r.args[2], request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
+        // expiry, and the switch, followed from claude-account.sh's own progress file. Hidden from everyone else.
+        const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+        const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
+        const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
+        if (url.pathname === '/api/claude-account' && req.method === 'GET') {
+          if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
+          const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
+          return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
+        }
+        // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
+        if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { action?: unknown };
+          const action = String(body.action ?? '').slice(0, 20);
+          if (!isOwnerHere) {
+            audit(who, 'machine.claude_account_refused', { action, why: 'not an owner here' });
+            return json(res, 403, { error: `only the instance's owners (admin on ${repo}) who are machine owners may switch the Claude account; @${who.login} is a ${who.role}` });
+          }
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestClaudeAccount(log, { action: body.action, requester: accountRequester, dir: accountDir, ...ownersOpt });
+          } catch (e) {
+            if (e instanceof MachineRequestError) {
+              auditWrite(log, who, opts.instance ?? null, 'machine.claude_account_refused', { action, why: e.message.slice(0, 300) });
+              return json(res, e.status, { error: e.message });
+            }
+            throw e;
+          } finally {
+            log.close();
+          }
+          audit(who, 'machine.claude_account', { action, request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // The new account's token, for the running switch: its own body handling, so the value never reaches readBody,
+        // an error, an event or the audit (which records only that it was stored).
+        if (url.pathname === '/api/claude-account/token' && req.method === 'POST') {
+          if (!isOwnerHere) {
+            req.resume();
+            return json(res, 403, { error: `only the instance's owners who are machine owners may paste the token; @${who.login} is a ${who.role}` });
+          }
+          try {
+            const value = await readSecretBody(req);
+            storeSwitchToken({ value, instance: opts.instance ?? opts.cfg.project.project.name, who: { role: who.role, requester: accountRequester }, dir: accountDir, ...(opts.secretsHome ? { home: opts.secretsHome } : {}), ...ownersOpt });
+          } catch (e) {
+            if (e instanceof ClaudeTokenError || e instanceof AskError) return json(res, e.status, { error: e.message });
+            return json(res, 500, { error: "the token couldn't be stored" });
+          }
+          audit(who, 'claude_account.token', { stored: true });
+          return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
