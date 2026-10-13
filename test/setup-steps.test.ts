@@ -193,6 +193,15 @@ test("server: what the coordinator's user can't see is read from init's record; 
   assert.match(stepIn(v, 'config-on-main')!.detail, /pull\/4 to merge \(add-project: service\)/);
   const none = checkSetup(f.ctx('server', { instanceFacts: () => ({ error: 'unreadable' }), handoff: { 'claude-token': 'failed' } }), probeFor(world()));
   assert.equal(stepIn(none, 'claude-token')!.done, false, 'only a recorded done counts');
+  // The instance loads, but its credentials.yaml names no Claude login (add-project keeps it in the agent user's home):
+  // init's record says, as CI's server run found after the setup PR merged.
+  const facts = { home: f.home, credentials: { github: { kind: 'app' as const, key_path: join(f.home, 'app.pem') } } };
+  const loaded = checkSetup(f.ctx('server', { instanceFacts: () => facts, handoff: { 'claude-token': 'done' } }), probeFor(world()));
+  assert.equal(stepIn(loaded, 'claude-token')!.done, true);
+  assert.match(stepIn(loaded, 'claude-token')!.detail, /as init recorded it \(add-project: claude-token\)/);
+  const unrecorded = checkSetup(f.ctx('server', { instanceFacts: () => facts, handoff: {} }), probeFor(world()));
+  assert.equal(stepIn(unrecorded, 'claude-token')!.done, false);
+  assert.match(stepIn(unrecorded, 'claude-token')!.detail, /names no Claude login/);
 });
 
 test('a step for the other mode is not shown; linger only where loginctl answers', () => {

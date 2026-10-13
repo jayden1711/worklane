@@ -414,7 +414,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       if (isErr(i)) return recorded(k, 'claude-token', "the agents' Claude login") ?? no(i.error);
       if (i.credentials.claude) return existsSync(i.credentials.claude.config_dir) ? ok(`the agents' Claude login is stored (${i.credentials.claude.config_dir})`) : (recorded(k, 'claude-token', "the agents' Claude login") ?? no(`Claude config dir ${i.credentials.claude.config_dir} not found`));
       if (i.credentials.agent_api_key) return ok('the agents bill to an API key (credentials.yaml agent_api_key)');
-      return no("credentials.yaml names no Claude login for the agents");
+      // No entry in credentials.yaml: add-project keeps the agents' login in the agent user's own home, out of this user's sight.
+      return recorded(k, 'claude-token', "the agents' Claude login") ?? no('credentials.yaml names no Claude login for the agents');
     },
   },
   // GitHub
