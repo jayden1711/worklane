@@ -26,6 +26,8 @@ export interface DiscordOptions {
   /** The one server (guild) the bot reads; a message from any other is dropped. */
   guild: string;
   channels: string[];
+  /** Chat channels (intake.yaml discord.chat_channels): every message from an allowed sender there is taken, no mention needed. */
+  chatChannels?: string[];
   /** The only users whose messages are taken (discord.allowed_senders); anyone else's is dropped unread. */
   allowedSenders: string[];
   prefixes: string[];
@@ -125,10 +127,12 @@ export class DiscordIntake {
     if (!this.o.allowedSenders.includes(m.author.id)) return drop('sender');
     // A DM has no guild: dropped like any message outside the configured server.
     const inThread = this.threads.has(m.channel_id);
-    if (m.guild_id !== this.o.guild || (!inThread && !this.o.channels.includes(m.channel_id))) return drop('place');
+    const inChat = !inThread && (this.o.chatChannels ?? []).includes(m.channel_id);
+    if (m.guild_id !== this.o.guild || (!inThread && !inChat && !this.o.channels.includes(m.channel_id))) return drop('place');
     const mentions = this.botId ? [`<@${this.botId}>`, `<@!${this.botId}>`] : [];
-    // In the bot's own thread every message is a reply to it; in a channel, only an addressed one counts.
-    const text = inThread ? m.content.trim() || null : addressed(m.content, this.o.prefixes, mentions);
+    // In the bot's own thread every message is a reply to it, and in a chat channel every message is to it (a
+    // mention, if any, removed); in a channel, only an addressed one counts.
+    const text = inThread ? m.content.trim() || null : inChat ? addressed(m.content, [], mentions) ?? (m.content.trim() || null) : addressed(m.content, this.o.prefixes, mentions);
     if (!text) return drop('unaddressed');
     this.queue.push({
       source: 'discord',
@@ -136,7 +140,7 @@ export class DiscordIntake {
       sender: { source: 'discord', id: m.author.id, ...(m.author.global_name || m.author.username ? { name: m.author.global_name ?? m.author.username! } : {}) },
       text,
       receivedAt: (this.o.now ?? (() => new Date()))().toISOString(),
-      thread: { kind: inThread ? 'thread' : 'channel', id: m.channel_id },
+      thread: { kind: inThread ? 'thread' : inChat ? 'chat' : 'channel', id: m.channel_id },
     });
   }
 

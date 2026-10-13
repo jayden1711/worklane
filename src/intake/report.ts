@@ -23,8 +23,11 @@ export interface IncomingReport {
   sender: Sender;
   text: string;
   receivedAt: string;
-  /** Where replies go: the channel it came from, or the bot's own thread it was a reply in (src/intake/channel.ts). */
-  thread?: { kind: 'channel' | 'thread'; id: string };
+  /**
+   * Where replies go: the channel it came from, the bot's own thread it was a reply in (src/intake/channel.ts), or a
+   * chat channel (`chat`: never a report; src/coordinator/channel-chat.ts).
+   */
+  thread?: { kind: 'channel' | 'thread' | 'chat'; id: string };
 }
 
 /** A source as the coordinator uses it: new reports since the last take, and a reply into a report's thread. */
@@ -50,6 +53,8 @@ export interface IntakeCaps {
   max_usd_per_day: number;
 }
 export const INTAKE_DEFAULT_CAPS: IntakeCaps = { reports_per_sender_per_day: 10, drafts_per_day: 20, max_usd_per_day: 2 };
+/** The chat channels' defaults (intake.yaml discord.chat_model, discord.chat_max_usd_per_day). */
+export const CHAT_DEFAULTS = { model: 'haiku', max_usd_per_day: 2 } as const;
 
 export const TRIAGE_KINDS = ['bug', 'feature', 'question', 'duplicate', 'not_actionable', 'needs_info'] as const;
 export type TriageKind = (typeof TRIAGE_KINDS)[number];
@@ -104,8 +109,20 @@ export const IntakeConfig = z.strictObject({
       conversation: z.boolean().default(false),
       /** The dashboard's address, for the links a post carries (a secret ask, a high-risk merge): https only. */
       dashboard_url: z.string().regex(/^https:\/\/[^\s/]+(?:\/[^\s]*)?$/, 'an https URL').optional(),
+      /**
+       * Chat channels (src/coordinator/channel-chat.ts): in these, the bot is a conversational assistant for mapped
+       * admins and writers, replying to each of their messages (no mention needed), with read-only access to the
+       * checkout's code and the instance's state. It can never file, answer, change or start anything. Each must be
+       * none of `channels` or `asks_channel`. Empty (the default): no chat.
+       */
+      chat_channels: z.array(snowflake('channel')).default([]),
+      /** The chat's model (capped by the instance's model_cap like every run). */
+      chat_model: z.enum(['haiku', 'sonnet', 'opus']).default(CHAT_DEFAULTS.model),
+      /** The chat's own daily spend cap, in dollars; its runs count against the instance's daily budget too. */
+      chat_max_usd_per_day: z.number().positive().max(20).default(CHAT_DEFAULTS.max_usd_per_day),
     })
     .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
+    .refine((d) => !d.chat_channels.some((c) => d.channels.includes(c) || c === d.asks_channel), { message: 'a chat channel must not also be an ideas channel (discord.channels) or the asks channel', path: ['chat_channels'] })
     .refine((d) => !d.asks_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.asks_channel (posts link to it)', path: ['dashboard_url'] })
     .prefault({}),
   'bug-store': z

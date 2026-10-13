@@ -15,7 +15,7 @@ import { acceptTriage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
-import { Conversation } from './conversation.js';
+import { ChannelChat } from './channel-chat.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';
 
@@ -28,7 +28,7 @@ const INTAKE_OUTCOMES = ['intake.filed', 'intake.awaiting', 'intake.commented', 
 /** What a sender is told when a restart cut off their report. */
 const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Could you send it again?";
 
-export abstract class Intake extends Conversation {
+export abstract class Intake extends ChannelChat {
   // ---------------------------------------------------------------- intake
 
   /**
@@ -130,7 +130,9 @@ export abstract class Intake extends Conversation {
       }
       const sorted = mine.filter((r) => isAllowed(r.sender, cfg)).sort((a, b) => (a.thread?.id ?? '').localeCompare(b.thread?.id ?? '') || a.receivedAt.localeCompare(b.receivedAt) || a.sourceId.localeCompare(b.sourceId));
       // The chat channel first (src/coordinator/channel.ts): replies in its threads, and anyone unmapped ignored.
-      const { rest: batch, ignored } = src.name === 'discord' ? await this.channelInbound(cfg, sorted) : { rest: sorted, ignored: [] as IncomingReport[] };
+      const { rest: inbound, ignored } = src.name === 'discord' ? await this.channelInbound(cfg, sorted) : { rest: sorted, ignored: [] as IncomingReport[] };
+      // Only a message in an ideas channel (or a source with no threads) is ever a report: never a chat-channel one.
+      const batch = inbound.filter((r) => !r.thread || r.thread.kind === 'channel');
       for (const r of batch) {
         if (this.halt.signal.aborted || this.stopped) break;
         try {
