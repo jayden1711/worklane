@@ -110,6 +110,7 @@ export class Coordinator extends Gardener {
     await this.d.prTestRuns?.idle();
     await this.chatQueue;
     await this.intakeQueue;
+    await this.quickIdle();
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;

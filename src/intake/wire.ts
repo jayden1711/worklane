@@ -18,6 +18,20 @@ export interface IntakeWiring {
   stop: () => void;
 }
 
+/** The Discord bot as the coordinator's chat source: what it takes, how it answers, and its wake-up on arrival. */
+export function discordSource(bot: DiscordIntake): IntakeSource {
+  return {
+    name: 'discord',
+    take: async () => bot.take(),
+    takeNow: async (which) => bot.takeWhere(which),
+    onArrival: (fn) => bot.onArrival(fn),
+    typing: (where) => bot.typing(where),
+    reply: (t, text) => bot.reply(t.id, text),
+    openThread: (c, text, name, from) => bot.openThread(c, text, name, from),
+    watch: (t) => bot.watch(t),
+  };
+}
+
 /**
  * The intake deps for one instance, or null when it has no intake.yaml (intake off). A config that is refused
  * (unsafe permissions, invalid) is reported and leaves intake off. Discord connects only when its config enables
@@ -58,7 +72,7 @@ export function intakeForInstance(o: {
       const bot = new DiscordIntake({ token: readFileSync(o.tokenFile, 'utf8').trim(), guild: d.guild, channels: d.channels, chatChannels: d.chat_channels, allowedSenders: d.allowed_senders, prefixes: d.prefixes, ...(o.discord ?? {}) });
       bot.start();
       stop = () => bot.stop();
-      sources.push({ name: 'discord', take: async () => bot.take(), reply: (t, text) => bot.reply(t.id, text), openThread: (c, text, name, from) => bot.openThread(c, text, name, from), watch: (t) => bot.watch(t) });
+      sources.push(discordSource(bot));
     }
   }
   const roleOf = Object.keys(d.people).length ? cachedRoles(repoPermission({ repo: o.repo, token: o.githubToken, ...(o.githubApi ? { api: o.githubApi } : {}) })) : undefined;
