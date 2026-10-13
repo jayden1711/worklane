@@ -17,6 +17,7 @@ import { redactString } from '../events/redact.js';
 import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
 import { USAGE_INCIDENT } from '../usage-limit.js';
+import { CONFIG_INCIDENT } from '../config/live.js';
 
 export const INCIDENTS_FILE = 'incidents.json';
 const LOCK_FILE = 'incidents.lock';
@@ -42,6 +43,8 @@ export const KINDS = {
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
+  // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.
+  [CONFIG_INCIDENT]: { title: 'The config on the default branch is invalid', severity: 'amber' },
 } as const satisfies Record<string, { title: string; severity: Severity }>;
 export type WatchdogKind = keyof typeof KINDS;
 
