@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { repoRoot } from './helpers.js';
+
+const batch = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'batch.mjs')).href)) as { SLOW_JOBS: Record<string, string[]>; SLOW_WORKFLOW: string };
 
 const lib = join(repoRoot, 'scripts', 'setup', 'lib.sh');
 
@@ -17,17 +20,24 @@ function defaults(): string[] {
 
 type Step = { run?: string; env?: Record<string, string> };
 type Job = { name?: string; if?: string; needs?: string | string[]; strategy?: { matrix?: Record<string, unknown[]> }; steps?: Step[] };
-/** both: every PR and every push to main. pr-only: never on main. main-only: every push to main, a PR only sometimes. */
-type Tier = 'both' | 'pr-only' | 'main-only';
-type Check = { name: string; key: string; tier: Tier; push: boolean; pr: boolean };
+/**
+ * both: every PR and every run of its workflow on main. pr-only: never on main. slow: a ci-slow.yml job, run when
+ * the scope job lists its key: every job in each batch on main (a dispatch with job=all), on a PR only sometimes.
+ */
+type Tier = 'both' | 'pr-only' | 'slow';
+/** push: every push to main runs it. batch: each batch on main does (ci-slow.yml, dispatched on main by ci-batch.yml). */
+type Check = { name: string; key: string; file: string; tier: Tier; push: boolean; batch: boolean; pr: boolean };
 
 const PR_ONLY = /^github\.event_name == 'pull_request'$/;
-/** Always on a push; on a PR only when the scope job says so (what the PR touches, or the full-ci label). */
-const MAIN_ONLY = /^\$\{\{ !cancelled\(\) && \(github\.event_name == 'push' \|\| needs\.scope\.outputs\.[a-z]+ == 'true'\) \}\}$/;
+/** ci-slow.yml's jobs: each runs when the scope job (scripts/ci/slow-jobs.sh) lists its own key. */
+const SLOW = /^\$\{\{ !cancelled\(\) && contains\(needs\.scope\.outputs\.run, ' ([a-z0-9-]+) '\) \}\}$/;
 /** A summary job runs whatever its needs did, so a failed, cancelled or skipped need fails it rather than skipping it. */
 const ALWAYS = /^\$\{\{ always\(\) \}\}$/;
-/** ci.yml's PR-only helper that picks the main-only jobs a PR runs: not a check anything requires. */
-const HELPERS = ['scope'];
+/**
+ * Not checks anything requires: ci-slow.yml's scope job (which slow jobs a run runs) and ci-batch.yml's own run
+ * (it starts the batches; its check lands on main's tip and never fails, scripts/ci/batch.mjs).
+ */
+const HELPERS: Record<string, string> = { 'ci-slow.yml': 'scope', 'ci-batch.yml': 'batch' };
 /**
  * ci.yml's unit test shards, each with the summary job that gates them. The shards are left out of the updater's
  * list and the required checks on purpose: the summary, under the required name test (ubuntu-latest, <node>), is
@@ -38,9 +48,12 @@ const SHARDS: Record<string, string> = { 'test-shard-22': 'test-22', 'test-shard
 function tier(file: string, key: string, job: Job): Tier {
   if (!job.if) return 'both';
   if (PR_ONLY.test(job.if)) return 'pr-only';
-  if (MAIN_ONLY.test(job.if)) {
-    assert.ok(([] as string[]).concat(job.needs ?? []).includes('scope'), `${file} ${key}: a main-only job needs the scope job`);
-    return 'main-only';
+  const slow = SLOW.exec(job.if);
+  if (slow) {
+    assert.equal(file, batch.SLOW_WORKFLOW, `${file} ${key}: the slow jobs are ci-slow.yml's, the workflow a batch runs`);
+    assert.equal(slow[1], key, `${file} ${key}: runs when the scope job lists its own key`);
+    assert.deepEqual(([] as string[]).concat(job.needs ?? []), ['scope'], `${file} ${key}: a slow job needs the scope job`);
+    return 'slow';
   }
   if (ALWAYS.test(job.if)) {
     assert.ok(Object.values(SHARDS).includes(key), `${file} ${key}: always() is for the shard summary jobs only`);
@@ -61,8 +74,10 @@ function checks(): Check[] {
     const on = wf.on as Record<string, { branches?: string[] } | null> | string[] | undefined;
     const push = Array.isArray(on) ? on.includes('push') : on && 'push' in on ? (on.push?.branches ?? ['main']).includes('main') : false;
     const pr = Array.isArray(on) ? on.includes('pull_request') : !!on && 'pull_request' in on;
+    // A batch: the workflow ci-batch.yml dispatches on main (test/ci-batch.test.ts: only ever on the default branch).
+    const batched = f === batch.SLOW_WORKFLOW && !Array.isArray(on) && !!on && 'workflow_dispatch' in on;
     for (const [key, job] of Object.entries(wf.jobs ?? {})) {
-      if (HELPERS.includes(key)) continue;
+      if (HELPERS[f] === key) continue;
       const t = tier(f, key, job);
       const name = job.name ?? key;
       const axes = Object.entries(job.strategy?.matrix ?? {}).filter(([k]) => k !== 'include' && k !== 'exclude');
@@ -74,7 +89,7 @@ function checks(): Check[] {
           ? name.replace(/\$\{\{ matrix\.([a-z]+) \}\}/g, (_, k: string) => vars[k] ?? assert.fail(`${f} ${key}: no matrix.${k}`))
           : c.length ? `${name} (${c.join(', ')})` : name;
         assert.doesNotMatch(named, /\$\{\{/, `${f} ${key}: a name expression this test doesn't expand`);
-        out.push({ name: named, key, tier: t, push: !!push, pr });
+        out.push({ name: named, key, file: f, tier: t, push: !!push && t !== 'slow', batch: batched && t !== 'pr-only', pr });
       }
     }
   }
@@ -83,25 +98,77 @@ function checks(): Check[] {
 
 /** Every check run a push to main creates, but the shards (their summary jobs gate them). */
 const pushChecks = () => checks().filter((c) => c.push && c.tier !== 'pr-only' && !(c.key in SHARDS)).map((c) => c.name).sort();
+/** Every check run each batch on main creates (on main's newest commit, at most every 30 minutes). */
+const batchChecks = () => checks().filter((c) => c.batch).map((c) => c.name).sort();
 /** Every check run every pull request creates, but the shards (their summary jobs gate them). */
-const prChecks = () => checks().filter((c) => c.pr && c.tier !== 'main-only' && !(c.key in SHARDS)).map((c) => c.name).sort();
+const prChecks = () => checks().filter((c) => c.pr && c.tier !== 'slow' && !(c.key in SHARDS)).map((c) => c.name).sort();
 
-const MAIN_ONLY_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)'];
+const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)'];
 
-test('the updater\'s default required checks are exactly the checks a push to main runs (no PR-only ones)', () => {
-  assert.deepEqual([...defaults()].sort(), pushChecks());
-  assert.ok(!defaults().includes('dco'), 'dco runs on pull requests only, so on main it is always skipped');
-  for (const x of MAIN_ONLY_CHECKS) {
-    assert.equal(checks().find((c) => c.name === x)?.tier, 'main-only', `${x} runs on every push to main, on a PR only when it touches what it tests`);
+test('the updater\'s default required checks are exactly what a batched main commit gets: every push\'s checks and the batch\'s', () => {
+  assert.deepEqual([...defaults()].sort(), [...pushChecks(), ...batchChecks()].sort());
+  assert.equal(defaults().length, 13);
+  assert.deepEqual(batchChecks(), [...SLOW_CHECKS].sort(), 'a batch runs every slow job, and only those');
+  for (const x of SLOW_CHECKS) {
+    assert.ok(!pushChecks().includes(x), `${x}: not on every push to main, only in a batch`);
+    assert.equal(checks().find((c) => c.name === x)?.tier, 'slow', `${x}: batched on main, on a PR only when it touches what it tests`);
     assert.ok(defaults().includes(x), `${x} gates the updater: a PR may not have run it`);
   }
+  for (const x of pushChecks()) assert.ok(!batchChecks().includes(x), `${x}: one source of truth on a main commit`);
+  assert.ok(!defaults().includes('dco'), 'dco runs on pull requests only, so on main it is always skipped');
+  for (const [f, key] of Object.entries(HELPERS)) {
+    const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', f), 'utf8')) as { jobs: Record<string, Job> };
+    const name = wf.jobs[key]?.name ?? key;
+    assert.ok(!defaults().includes(name), `${f} ${key}: a helper, not something the updater requires`);
+  }
+});
+
+test('a batch runs every slow job: scope lists every slow job\'s key for a dispatch with job=all, one key for job=<key>', { skip: process.platform === 'win32' && 'bash' }, () => {
+  const keys = [...new Set(checks().filter((c) => c.tier === 'slow').map((c) => c.key))].sort();
+  assert.deepEqual(keys, Object.keys(batch.SLOW_JOBS).sort(), 'batch.mjs knows every slow job, by the key a dispatch names');
+  for (const k of keys) assert.deepEqual(checks().filter((c) => c.key === k).map((c) => c.name).sort(), [...batch.SLOW_JOBS[k]!].sort(), `${k}: the check runs batch.mjs bisects`);
+  const scope = (env: Record<string, string>) => {
+    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', GITHUB_OUTPUT: '/dev/stdout', ...env } });
+    const line = r.stdout.split('\n').find((l) => l.startsWith('run='));
+    return { status: r.status, keys: line ? line.slice(4).trim().split(/\s+/).filter(Boolean).sort() : null, err: r.stderr };
+  };
+  assert.deepEqual(scope({ EVENT: 'workflow_dispatch', JOB: 'all', SHA: 'a'.repeat(40) }).keys, keys);
+  assert.deepEqual(scope({ EVENT: 'workflow_dispatch', JOB: '', SHA: 'a'.repeat(40) }).keys, keys, 'no job given: all of them');
+  for (const k of keys) assert.deepEqual(scope({ EVENT: 'workflow_dispatch', JOB: k, SHA: 'b'.repeat(40), WANT_SHA: 'b'.repeat(40) }).keys, [k]);
+  const wrongSha = scope({ EVENT: 'workflow_dispatch', JOB: keys[0]!, SHA: 'b'.repeat(40), WANT_SHA: 'c'.repeat(40) });
+  assert.equal(wrongSha.status, 1, 'a bisect step on another commit than it asked for runs nothing');
+  assert.match(wrongSha.err, /asked to test c{40}, but this run is on b{40}/);
+  assert.equal(scope({ EVENT: 'workflow_dispatch', JOB: 'nope', SHA: 'a'.repeat(40) }).status, 1);
+  assert.equal(scope({ EVENT: 'push', SHA: 'a'.repeat(40) }).status, 1, 'never on a push');
+
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', batch.SLOW_WORKFLOW), 'utf8')) as { on: { workflow_dispatch: { inputs: { job: { options: string[]; default: string } } } }; concurrency: Record<string, string> };
+  assert.deepEqual(wf.on.workflow_dispatch.inputs.job.options, ['all', ...Object.keys(batch.SLOW_JOBS)], 'a dispatch can name all, or any one slow job');
+  assert.equal(wf.on.workflow_dispatch.inputs.job.default, 'all');
+  assert.match(wf.concurrency.group ?? '', /github\.ref \}\}$/, 'one batch at a time on main; each bisect branch its own group');
+  assert.equal(wf.concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}", 'a batch is never cancelled: the updater refuses a cancelled check');
+});
+
+test('ci-batch.yml looks every 30 minutes and whenever a ci-slow.yml run ends, and never fails its own check', () => {
+  const slowName = (parse(readFileSync(join(repoRoot, '.github', 'workflows', batch.SLOW_WORKFLOW), 'utf8')) as { name: string }).name;
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci-batch.yml'), 'utf8')) as {
+    on: { schedule: { cron: string }[]; workflow_dispatch: unknown; workflow_run: { workflows: string[]; types: string[] } };
+    jobs: Record<string, Job & { permissions?: Record<string, string> }>;
+  };
+  assert.deepEqual(wf.on.schedule, [{ cron: '*/30 * * * *' }]);
+  assert.ok('workflow_dispatch' in wf.on);
+  assert.deepEqual(wf.on.workflow_run, { workflows: [slowName], types: ['completed'] });
+  assert.deepEqual(Object.keys(wf.jobs), ['batch']);
+  const run = (wf.jobs.batch!.steps ?? []).map((s) => s.run ?? '').join('\n');
+  assert.match(run, /^node scripts\/ci\/batch\.mjs$/m);
+  assert.deepEqual(wf.jobs.batch!.permissions, { actions: 'write', contents: 'write', issues: 'write', 'pull-requests': 'write' });
+  assert.ok(!('on' in wf && 'push' in wf.on), 'not on a push');
 });
 
 test('the engine repo requires to merge exactly the checks every pull request runs, never a main-only one a PR may skip', () => {
   const cfg = parse(readFileSync(join(repoRoot, '.worklane', 'config.yaml'), 'utf8')) as { required_checks: string[] };
   assert.deepEqual([...cfg.required_checks].sort(), prChecks());
   for (const x of ['dco', 'scan', 'desktop', 'test (ubuntu-latest, 22)']) assert.ok(prChecks().includes(x), x);
-  for (const x of MAIN_ONLY_CHECKS) assert.ok(!prChecks().includes(x), x);
+  for (const x of SLOW_CHECKS) assert.ok(!prChecks().includes(x), x);
 });
 
 test('each Node version\'s 4 test shards gate through a summary job under the required name, and nothing requires a shard', () => {

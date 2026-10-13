@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// CI only (the "test-run sandbox (real systemd)" job in .github/workflows/ci.yml), as root, as the updater runs: one
+// CI only (the "test-run sandbox (real systemd)" job in .github/workflows/ci-slow.yml), as root, as the updater runs: one
 // red main tip doesn't block updates. The updater's run() picks the newest green commit on main's first-parent line,
 // its memo of older commits' red verdicts is a real root-owned 0644 file written beside the others in /var/lib, and
 // the next run reads it back instead of asking GitHub again. GitHub and the build are stand-ins (no network here);
