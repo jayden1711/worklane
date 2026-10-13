@@ -194,6 +194,13 @@ jobs:
           case "$cg" in "$unit"/daemon | "$unit"/daemon/*) echo "in the daemon's own cgroup, not one of its own" >&2; exit 1 ;; "$unit"/*) ;; *) echo "not inside $unit" >&2; exit 1 ;; esac
           for k in cpu io memory pids; do grep -qw "$k" "/sys/fs/cgroup$cg/cgroup.controllers" || { echo "no $k controller in its cgroup" >&2; exit 1; }; done
           echo "CG=$cg" >> "$GITHUB_ENV"
+      - name: the run's Postgres has the max_connections db-start was given (250), asked inside the database
+        run: |
+          c="$(cat "$T/ids.db")"
+          got="$(sudo -u wl-test-ci env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock \
+            /opt/worklane-test/docker/docker exec "$c" psql -U postgres -d test -tAc 'SHOW max_connections')"
+          echo "SHOW max_connections in $c: $got"
+          [ "$got" = 250 ] || { echo "expected 250" >&2; exit 1; }
       - name: wipe, as wl-ci
         run: |
           sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \

@@ -8,7 +8,8 @@
 #   worklane-testrun <name> file <id> changed-files           the change's paths (stdin) for {changed_files}
 #   worklane-testrun <name> cache <cache> <key>               a cache's directory for this key (printed)
 #   worklane-testrun <name> shared <dir>                      a directory all runs share, never wiped (printed)
-#   worklane-testrun <name> db-start <id> <image> <db> <ready_s>   the run's own Postgres: prints "<port> <password>"
+#   worklane-testrun <name> db-start <id> <image> <db> <ready_s> <max_connections>
+#                                                             the run's own Postgres: prints "<port> <password>"
 #   worklane-testrun <name> exec <id> <timeout_s> [--env K=V]... -- <command>
 #   worklane-testrun <name> wipe <id>                         the run's units, containers, volumes and files
 #   worklane-testrun <name> check                             the boundaries, as the test user and in the sandbox
@@ -134,12 +135,14 @@ shared() {
 }
 
 db_start() {
-  local id="${1:-}" image="${2:-}" db="${3:-}" ready="${4:-}" c pw port i
-  [ "$#" -eq 4 ] || die "usage: db-start <id> <image@sha256:...> <db> <ready_s>"
+  local id="${1:-}" image="${2:-}" db="${3:-}" ready="${4:-}" maxconn="${5:-}" c pw port i
+  [ "$#" -eq 5 ] || die "usage: db-start <id> <image@sha256:...> <db> <ready_s> <max_connections>"
   valid_id "$id"
   [[ "$image" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || die "the image must be pinned to its digest, got $image"
   [[ "$db" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || die "a lowercase database name, got $db"
   [[ "$ready" =~ ^[1-9][0-9]{0,2}$ ]] || die "ready_s: seconds, got $ready"
+  # A number in range (test_run.database.max_connections's bounds), never free text: it goes on Postgres's command line.
+  [[ "$maxconn" =~ ^[1-9][0-9]{1,3}$ ]] && [ "$maxconn" -ge 20 ] && [ "$maxconn" -le 2000 ] || die "max_connections: 20 to 2000, got $maxconn"
   [ -d "$(run_dir "$id")" ] || die "no run $id"
   [ -S "$sock_dir/docker.sock" ] || { echo "worklane-testrun: $user's Docker isn't running (systemctl status worklane-test-$name-docker)" >&2; exit 1; }
   c="worklane-test-$name-$id"
@@ -147,7 +150,8 @@ db_start() {
   docker_as_user image inspect "$image" >/dev/null 2>&1 || docker_as_user pull -q "$image" >/dev/null
   # A unique name and a port the daemon picks, on loopback only: any number of runs at once, never a fixed port.
   docker_as_user run -d --name "$c" --label "$LABEL=$name-$id" -p 127.0.0.1::5432 \
-    --tmpfs /var/lib/postgresql/data:rw -e POSTGRES_PASSWORD="$pw" -e POSTGRES_DB="$db" "$image" >/dev/null
+    --tmpfs /var/lib/postgresql/data:rw -e POSTGRES_PASSWORD="$pw" -e POSTGRES_DB="$db" "$image" \
+    -c max_connections="$maxconn" >/dev/null
   port="$(docker_as_user port "$c" 5432/tcp | sed -n 's/^127\.0\.0\.1:\([0-9]\{1,5\}\)$/\1/p' | head -1)"
   [[ "$port" =~ ^[0-9]+$ ]] || { echo "worklane-testrun: no loopback port for $c" >&2; exit 1; }
   for i in $(seq "$ready"); do
