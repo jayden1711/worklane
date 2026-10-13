@@ -44,20 +44,6 @@ if [ -n "$name" ]; then
   coord="wl-$name"
   id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
   say "instance home for $name, as $coord"
-  run_as "$coord" '
-    agent="wl-$1-agent" agent_home="$4"
-    [ -n "$agent_home" ] || { echo "no home for $agent in the user database; run instance.sh $1 first" >&2; exit 1; }
-    if worklane instance list | grep -qx "$1"; then
-      # An instance made earlier (or by hand) may name another agent user: point it at this one.
-      f="$HOME/.local/state/worklane/instances/$1/instance.yaml"
-      if grep -qx "  agent_user: $agent" "$f"; then echo "instance $1 exists; agents run as $agent"; exit 0; fi
-      sed -e "s|^  agent_user: .*|  agent_user: $agent|" -e "s|^  agent_home: .*|  agent_home: $agent_home|" "$f" > "$f.new"
-      cat "$f.new" > "$f" && rm -f "$f.new"
-      grep -qx "  agent_user: $agent" "$f" || { echo "could not set run_as in $f; edit it by hand" >&2; exit 1; }
-      echo "instance $1 exists; run_as now $agent"
-      exit 0
-    fi
-    worklane instance init "$1" --repo "$2" --github "$3" --agent-user "$agent" --agent-home "$agent_home"
-  ' "$name" "/srv/worklane/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
+  ensure_instance_home "$name" "$repo"
   echo "next: credentials.sh $name github-app ..., then checkout.sh $name $repo"
 fi

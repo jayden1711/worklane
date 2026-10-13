@@ -77,7 +77,13 @@ refuse_if_open() {
 # The sudoers rule for the machine helper: each coordinator user named may run exactly the 26
 # allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
+#
+# And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
+# two arguments of those shapes (sudo's anchored regular expression, sudo 1.9.10 or later; an older sudo matches it
+# literally, so never), which the helper checks again, strictly, before it runs add-project.sh.
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
+MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
+ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
 machine_sudoers() {
   local u n cmds=()
   [ "$#" -ge 1 ] || { echo "machine_sudoers: no users" >&2; return 1; }
@@ -87,7 +93,8 @@ machine_sudoers() {
   for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
-  printf '# Coordinators may change the machine slot caps and the update switch, through one validating helper.\n'
+  cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+  printf '# Coordinators may change the machine slot caps and the update switch, and add a project, through one validating helper.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -95,10 +102,98 @@ machine_sudoers() {
   printf '\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\n' "$users"
 }
 
+# The instances the installed machine helper rule names (wl-<name> -> <name>), one per line.
+helper_instances() {
+  [ -f "$MACHINE_SUDOERS" ] || return 0
+  sed -n 's/^\(wl-[-a-z0-9, ]*\) ALL=(root) NOPASSWD: WORKLANE_MACHINE$/\1/p' "$MACHINE_SUDOERS" | tr ',' '\n' | sed -e 's/^ *wl-//' -e 's/ *$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true
+}
+
+# The dashboard hub's unit, as dashboards.sh writes it, and one option of its ExecStart (nothing when it has none).
+HUB_UNIT=/etc/systemd/system/worklane-dashboard-hub.service
+hub_option() {
+  [ -f "$HUB_UNIT" ] || return 0
+  sed -n 's/^ExecStart=.* '"$1"' \([^ ]*\).*$/\1/p' "$HUB_UNIT" | head -1
+}
+# The instances the hub serves (its --hub <name>=<state>,...), one per line.
+hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true; }
+
+# Where the instances' checkouts live (instance.sh makes $SRV_ROOT/<name>), and the engine's command.
+SRV_ROOT=/srv/worklane
+ENGINE_CLI=/usr/local/bin/worklane
+ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
+user_exists() { id -u "$1" >/dev/null 2>&1; }
+unit_active() { systemctl is-active -q "$1"; }
+
+# An instance's home, as its coordinator: `worklane instance init` the first time; an existing one is pointed at its
+# agent user (one made earlier, or by hand, may name another).
+ensure_instance_home() {
+  local name="$1" repo="$2"
+  run_as "wl-$name" '
+    agent="wl-$1-agent" agent_home="$4"
+    [ -n "$agent_home" ] || { echo "no home for $agent in the user database; run instance.sh $1 first" >&2; exit 1; }
+    if worklane instance list | grep -qx "$1"; then
+      f="$HOME/.local/state/worklane/instances/$1/instance.yaml"
+      if grep -qx "  agent_user: $agent" "$f"; then echo "instance $1 exists; agents run as $agent"; exit 0; fi
+      sed -e "s|^  agent_user: .*|  agent_user: $agent|" -e "s|^  agent_home: .*|  agent_home: $agent_home|" "$f" > "$f.new"
+      cat "$f.new" > "$f" && rm -f "$f.new"
+      grep -qx "  agent_user: $agent" "$f" || { echo "could not set run_as in $f; edit it by hand" >&2; exit 1; }
+      echo "instance $1 exists; run_as now $agent"
+      exit 0
+    fi
+    worklane instance init "$1" --repo "$2" --github "$3" --agent-user "$agent" --agent-home "$agent_home"
+  ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
+}
+
+# An instance name add-project takes: instance.sh's shape, never one whose users would collide with another's
+# (wl-dash is the viewer; wl-<x>-agent, -eval and -work belong to instance <x>). The helper checks the same.
+instance_name_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,20}$ && "$1" != dash && ! "$1" =~ -(agent|eval|work)$ ]]; }
+# A GitHub repo, owner/name, strictly: the owner a GitHub login, the name letters, digits, '.', '_' and '-'.
+repo_ok() {
+  local owner="${1%%/*}" rest="${1#*/}"
+  [[ "$1" == */* && "$rest" != */* ]] && github_login_ok "$owner" && [[ "${#rest}" -le 100 && "$rest" =~ ^[A-Za-z0-9_.-]+$ && "$rest" != . && "$rest" != .. ]]
+}
+
+# The agent's Claude login, from `claude setup-token`'s token on stdin, written as that user's own Claude
+# credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude), keeping the file's other entries. The
+# token goes from stdin to that file and nowhere else: never an argument, an environment variable or a log line.
+install_claude_token() {
+  (cd / && sudo -H -u "$1" "$(command -v node)" --input-type=module -e '
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+const token = readFileSync(0, "utf8").trim();
+if (!/^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,500}$/.test(token)) {
+  console.error("that is not a token from claude setup-token (sk-ant-oat01-...); nothing installed");
+  process.exit(1);
+}
+const dir = join(homedir(), ".claude");
+const file = join(dir, ".credentials.json");
+mkdirSync(dir, { recursive: true, mode: 0o700 });
+chmodSync(dir, 0o700);
+let c = {};
+try {
+  c = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+} catch {
+  c = {};
+}
+// A setup-token login: a year long, inference only, nothing to refresh.
+c.claudeAiOauth = { accessToken: token, refreshToken: null, expiresAt: Date.now() + 365 * 24 * 3600 * 1000, scopes: ["user:inference"], subscriptionType: null };
+const tmp = `${file}.tmp-${process.pid}`;
+writeFileSync(tmp, `${JSON.stringify(c)}\n`, { mode: 0o600 });
+renameSync(tmp, file);
+console.log(`installed ${file} (0600, this user only)`);
+')
+}
+# Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes).
+claude_login_ok() {
+  command -v claude >/dev/null 2>&1 || return 0
+  (cd / && sudo -H -u "$1" claude auth status --json) | grep -q '"loggedIn": *true'
+}
+
 # The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
 # joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
 # updater refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("agentshield" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
+UPDATE_DEFAULT_CHECKS=("add-project (real systemd)" "agentshield" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {

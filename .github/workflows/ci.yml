@@ -244,6 +244,120 @@ jobs:
           sudo journalctl --no-pager -n 100 -u worklane-test-ci-docker.service || true
           sudo journalctl --no-pager -n 50 _SYSTEMD_UNIT=init.scope -g worklane-test || true
 
+  add-project-real-systemd:
+    # scripts/setup/add-project.sh end to end on a real host, as root, against a fake GitHub (test/fake-github.ts, the
+    # manifest flow's, served by scripts/ci/fake-github.mjs): a first run stops at the App step (no hub yet) naming its
+    # retry; the App by hand (credentials.sh github-app), then the rerun goes on from there with a stand-in Claude
+    # token: the checkout cloned through the App's credential helper, the coordinator's service active, the machine
+    # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step.
+    name: add-project (real systemd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_FAKE: http://127.0.0.1:8999
+      HELPER: /usr/local/libexec/worklane-machine
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci && npm run build && npm run build:web
+      - name: the machine (machine.sh) and this commit's engine, root-owned, as engine.sh installs it
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q acl
+          sudo install -m 0755 "$(command -v node)" /usr/local/bin/node
+          sudo bash scripts/setup/machine.sh
+          sha="$(git rev-parse HEAD)"
+          sudo install -d -m 0755 /opt/worklane
+          sudo cp -a "$GITHUB_WORKSPACE" "/opt/worklane/$sha"
+          sudo chown -R root:root "/opt/worklane/$sha" && sudo chmod -R a+rX,go-w "/opt/worklane/$sha"
+          sudo ln -sfn "/opt/worklane/$sha" /opt/worklane/current
+          sudo chmod 0755 "/opt/worklane/$sha/dist/src/cli.js"
+          sudo ln -sfn /opt/worklane/current/dist/src/cli.js /usr/local/bin/worklane
+          worklane --version
+      - name: a fake GitHub, with the repo (examples/basic) behind the App's installation token
+        run: |
+          f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
+          git init -q --bare -b main "$f/git/example/alpha.git"
+          cp -r examples/basic "$f/seed" && git -C "$f/seed" init -q -b main && git -C "$f/seed" add -A
+          git -C "$f/seed" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
+          git -C "$f/seed" push -q "$f/git/example/alpha.git" main
+          nohup node scripts/ci/fake-github.mjs "$GITHUB_WORKSPACE/dist" 8999 "$f/git" example/alpha "$f/requests.log" > "$f/server.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null && break; sleep 1; done
+          curl -sf "$GH_FAKE/repos/example/alpha"
+          # The App's key, as one would download it (the fake checks the JWT's App id, not its signature).
+          openssl genrsa -traditional -out "$f/app.pem" 2048 2>/dev/null || openssl genrsa -out "$f/app.pem" 2048
+          echo "F=$f" >> "$GITHUB_ENV"
+          # The fake is reached through these, as the engine reads them: kept through sudo, and set for the units.
+          printf 'Defaults env_keep += "WORKLANE_GITHUB_API WORKLANE_GITHUB_WEB"\n' > "$f/sudoers" && sudo visudo -cf "$f/sudoers" && sudo install -m 0440 "$f/sudoers" /etc/sudoers.d/ci-fake-github
+          for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do
+            sudo install -d "/etc/systemd/system/$u.service.d"
+            printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE" "$GH_FAKE" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
+          done
+          # The dashboard sign-in App's secrets (credentials.sh dashboard-signin), for the hub dashboards.sh starts.
+          printf 'cisigninclientsecret0123456789\n' | sudo bash scripts/setup/credentials.sh dashboard-signin
+      - name: first run, no hub yet; stops at the App step and names the retry
+        run: |
+          echo "CLAUDE_TOKEN=sk-ant-oat01-$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          set +e
+          sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test < /dev/null > "$F/run1.jsonl" 2> "$F/run1.err"
+          rc=$?
+          set -e
+          cat "$F/run1.jsonl"; tail -n 20 "$F/run1.err"
+          [ "$rc" = 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
+          jq -e 'select(.step=="instance" and .state=="done")' "$F/run1.jsonl" >/dev/null
+          last="$(tail -n 1 "$F/run1.jsonl")"
+          jq -e '.step=="app" and .state=="failed" and (.detail|test("no dashboard hub")) and (.retry|test("add-project.sh ci example/alpha .*credentials.sh ci github-app"))' <<<"$last"
+          id wl-ci && id wl-ci-agent
+      - name: the App by hand (the manual way), then the rerun goes on from the App step to the end
+        run: |
+          echo n | sudo env WORKLANE_GITHUB_API="$GH_FAKE" bash scripts/setup/credentials.sh ci github-app 91 4242 "$F/app.pem" example/alpha
+          printf '%s\n' "$CLAUDE_TOKEN" | sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test > "$F/run2.jsonl" 2> "$F/run2.err" || { cat "$F/run2.jsonl"; tail -n 60 "$F/run2.err"; exit 1; }
+          cat "$F/run2.jsonl"
+          for s in instance app; do jq -se --arg s "$s" 'map(select(.step==$s and .state=="done")) | length == 1' "$F/run2.jsonl"; done
+          [ "$(jq -sc 'map(select(.state=="started") | .step)' "$F/run2.jsonl")" = '["instance","app","claude-token","checkout","policy","service","test-user","machine-helper","dashboards"]' ]
+          jq -se 'map(select(.state=="failed")) | length == 0' "$F/run2.jsonl"
+          jq -se 'map(select(.step=="claude-token" and .state=="ask" and .ask.kind=="paste_secret")) | length == 1' "$F/run2.jsonl"
+          jq -se 'map(select(.step=="policy" and .state=="done" and (.detail|startswith("auto_merge off, $20/day, 2 workers")))) | length == 1' "$F/run2.jsonl"
+          if grep -qF "$CLAUDE_TOKEN" "$F/run1.jsonl" "$F/run1.err" "$F/run2.jsonl" "$F/run2.err"; then echo "the token was echoed" >&2; exit 1; fi
+      - name: the instance, the token for the agent only, the checkout through the App, the services, the helper
+        run: |
+          sudo test -f "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/instance.yaml"
+          c="$(getent passwd wl-ci-agent | cut -d: -f6)/.claude/.credentials.json"
+          [ "$(sudo stat -c '%U %a' "$c")" = "wl-ci-agent 600" ]
+          sudo grep -qF "$CLAUDE_TOKEN" "$c"
+          if sudo -u wl-ci test -r "$c"; then echo "the coordinator can read the agent's Claude login" >&2; exit 1; fi
+          d=/srv/worklane/ci/alpha
+          sudo test -f "$d/.worklane/config.yaml"
+          [ "$(sudo git -C "$d" config --get remote.origin.url)" = "$GH_FAKE/example/alpha.git" ]
+          sudo git -C "$d" config --get-all credential.helper | grep -qx '!/usr/local/bin/worklane git-credential --instance ci'
+          grep -q '^git as x-access-token: POST /example/alpha.git/git-upload-pack$' "$F/requests.log"
+          if grep '^git as ' "$F/requests.log" | grep -v '^git as x-access-token:'; then echo "git authenticated as someone else" >&2; exit 1; fi
+          grep -q "^POST /app/installations/4242/access_tokens$" "$F/requests.log"
+          for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do systemctl is-active "$u.service"; done
+          sleep 15 && systemctl is-active worklane-ci.service
+          sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
+          if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
+          if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
+      - name: through the machine helper, as the coordinator, every step is skipped as done
+        run: |
+          sudo -u wl-ci sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }
+          cat "$F/run3.jsonl"
+          jq -se 'length == 18 and (map(select(.state=="done")) | length == 9) and (map(select(.state=="ask" or .state=="failed")) | length == 0)' "$F/run3.jsonl"
+          sudo grep -q '"what":"add-project".*"to":"ci example/alpha"' /var/lib/worklane/machine-changes.jsonl
+          if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
+      - name: the units and the fake's log, on failure
+        if: failure()
+        run: |
+          sudo systemctl --no-pager status worklane-ci.service worklane-dashboard-ci.service worklane-dashboard-hub.service || true
+          sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service || true
+          tail -n 80 "$F/requests.log" "$F/server.log" || true
+          tail -n 80 "$F"/run*.err || true
+
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.
     runs-on: ubuntu-latest
