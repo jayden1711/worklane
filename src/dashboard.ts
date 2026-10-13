@@ -55,7 +55,7 @@ import { trustForViewer, trustView } from './trust.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
-import { firstRunView, INIT_FILE } from './init.js';
+import { firstRunView, INIT_FILE, serverInitFile } from './init.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError } from './console/asks.js';
@@ -1111,7 +1111,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // The first-run page: init's checklist as it recorded it (src/init.ts), and what this mode can't do. Read-only.
         if (url.pathname === '/api/first-run' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
-          return json(res, 200, firstRunView(join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null }));
+          return json(res, 200, firstRunView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null }));
         }
         // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
         // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.

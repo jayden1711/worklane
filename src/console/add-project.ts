@@ -23,7 +23,7 @@ import { ADD_PROJECT_STEPS, type AddProjectStep as AddProjectStepName } from '..
 import { ASK_EVENTS, asksFrom, mayAnswerAsk, type Ask, type Role } from './asks.js';
 
 export { ADD_PROJECT_STEPS };
-export type AddProjectStepState = 'pending' | 'started' | 'done' | 'failed' | 'ask';
+export type AddProjectStepState = 'pending' | 'started' | 'done' | 'failed' | 'ask' | 'waiting';
 export const ADD_PROJECT_EVENTS = [...MACHINE_EVENTS, ...ASK_EVENTS, 'add_project.step'] as const;
 
 export interface AddProjectStep {

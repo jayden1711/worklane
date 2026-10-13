@@ -644,7 +644,7 @@ export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}
 /** The setup console's Add project (src/console/add-project.ts), as GET /api/add-project serves it. */
 export interface AddProjectStep {
   step: string;
-  state: 'pending' | 'started' | 'done' | 'failed' | 'ask';
+  state: 'pending' | 'started' | 'done' | 'failed' | 'ask' | 'waiting';
   detail: string;
   /** A failed step: how to try again (absent from older servers). */
   retry?: string | null;
