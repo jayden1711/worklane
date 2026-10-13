@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { initCommand, MODES, type Mode } from './init.js';
+import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
+import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
@@ -59,6 +61,12 @@ usage: ${BRAND.cli} <command> [options]
                                    pick up where it stopped. Asks for the mode when not given. local: this
                                    checkout (default: here), as you; server: <owner/repo>, as root, through
                                    scripts/setup/add-project.sh. --yes installs missing tools as shown
+  export [--instance name] [--out file]
+                                   one file with this checkout's (or instance's) config and history (the
+                                   event log, init's checklist, findings); never secrets, locks or logs
+  import <file> [--instance name] [--force]
+                                   take an export here (a laptop's, onto a server: no ssh between them);
+                                   refuses a target with history of its own unless --force
   install [--instance name] [--git-hooks] [--engine path] | install --git-hooks-only
                                    scaffold ${BRAND.configDir}/; with --instance, write the hooks and rules
                                    for that instance's agent runs only (in its home); without, merge them
@@ -263,6 +271,51 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: process.env[`${BRAND.envPrefix}_PREFIX`] ?? join(homeDir(), '.local'), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+    }
+
+    case 'export': {
+      const out = option(args, '--out');
+      let site: { stateDir: string; root: string; repo: string | null; name: string };
+      if (instanceOpt) {
+        const i = loadInstance(instanceOpt);
+        site = { stateDir: i.stateDir, root: i.repo.path, repo: i.config.project.project.repo, name: i.name };
+      } else {
+        let repo: string | null = null;
+        try {
+          repo = loadConfig(root).project.project.repo;
+        } catch {
+          // a checkout without config: its history only
+        }
+        site = { stateDir: projectStateDir(root), root, repo, name: basename(root) };
+      }
+      const file = resolve(out ?? `${BRAND.cli}-${site.name}-${new Date().toISOString().slice(0, 10)}.bundle`);
+      const r = exportBundle({ stateDir: site.stateDir, root: existsSync(site.root) ? site.root : null, repo: site.repo, host: hostname(), out: file });
+      console.log(`exported ${r.files.length} files to ${r.file} (yours only, 0600)`);
+      for (const l of r.left) console.log(`  left out ${l.path}: ${l.why}`);
+      console.log(`on the other machine: ${BRAND.cli} import ${basename(r.file)}${instanceOpt ? '' : ' --instance <name>'} (as that instance's coordinator user, with it stopped)`);
+      return 0;
+    }
+
+    case 'import': {
+      const file = args[1];
+      const force = flag(args, '--force');
+      if (!file || file.startsWith('-')) {
+        console.error('usage: import <file> [--instance name] [--force]');
+        return 2;
+      }
+      const target = instanceOpt ? (() => { const i = loadInstance(instanceOpt); return { stateDir: i.stateDir, root: i.repo.path }; })() : { stateDir: projectStateDir(root), root };
+      let r: ImportResult;
+      try {
+        r = importBundle({ file: resolve(file), stateDir: target.stateDir, root: existsSync(target.root) ? target.root : null, instance: Boolean(instanceOpt), force });
+      } catch (e) {
+        console.error(`import: ${(e as Error).message}`);
+        return 1;
+      }
+      console.log(`imported ${r.state.length} state files into ${target.stateDir}${r.config.length ? `, and ${r.config.length} config files into ${join(target.root, BRAND.configDir)}` : ''}`);
+      for (const s of r.skipped) console.log(`  skipped ${s.path}: ${s.why}`);
+      if (r.configDiffers.length) console.log(`the checkout's config differs from the bundle's in: ${r.configDiffers.join(', ')}; the config is the repo's: commit what you want of it in a PR`);
+      console.log(`next: ${BRAND.cli} doctor${instanceOpt ? ` --instance ${instanceOpt}` : ''} (pending migrations of an older history show there)`);
+      return 0;
     }
 
     case 'doctor': {

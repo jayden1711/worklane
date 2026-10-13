@@ -25,6 +25,14 @@ What local mode can't do, `worklane doctor` and the dashboard's First-run page s
 - **root-run add-project**: the dashboard's Add project needs root and the machine helper, so you set up another repo with `worklane init <repo>` instead;
 - **the test sandbox without Docker**: test runs need Docker in local mode.
 
+### Moving to a server later
+
+Start on your laptop and move to an always-on server when you want, with no ssh between the two:
+
+1. On the laptop: `worklane down`, then `worklane export --out shop.bundle`. That's one file (yours only, `0600`) with the history (the event log, as a whole snapshot), init's checklist, and the repo's `.worklane/`. Secrets, locks, logs and worktrees never go in it; it lists what it left out.
+2. Carry the file over however you like.
+3. On the server, after `add-project` has set the project up: as the instance's coordinator user, with it stopped, `worklane import shop.bundle --instance <name>`. It refuses an instance that already has history of its own (`--force` replaces it). The config stays the repo's: if the checkout's `.worklane/` differs from the bundle's, it lists the files, to commit in a PR.
+
 ## The checklist: `worklane init`
 
 `worklane init [<repo>] [--mode local|server]` walks one checklist in order. It checks each step first, does only what isn't done, and checks it again before moving on:
