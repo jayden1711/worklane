@@ -314,7 +314,11 @@ install_cmd() {
   mv -f "$(dirname "$helper")/.worklane-testrun.tmp" "$helper"
 
   say "state in $root: runs, caches and Docker's data, the test user's"
-  install -d -o root -g root -m 0711 /var/lib/worklane-test "$root" "$root/runs"
+  install -d -o root -g root -m 0711 /var/lib/worklane-test
+  # $root and its runs: entered by this instance's test user only (group), never by another instance's.
+  # chown/chmod as well, so a re-run fixes directories an older install made 0711.
+  install -d -o root -g "$user" -m 0710 "$root" "$root/runs"
+  chown root:"$user" "$root" "$root/runs"; chmod 0710 "$root" "$root/runs"
   install -d -o "$user" -g "$user" -m 0700 "$root/cache" "$root/docker" "$root/docker-home"
 
   say "units: worklane-test.slice (CPUs $cpus, CPUQuota $((ncpus * 100))%, MemoryMax $memory_max, CPU weight $cpu_weight), $docker_unit_name"

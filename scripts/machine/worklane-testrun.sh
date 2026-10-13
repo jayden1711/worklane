@@ -94,7 +94,7 @@ create() {
   [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$branch" != *..* ]] || die "not a branch name: $branch"
   [ "$head" = "refs/worklane/test-run/$id/head" ] && [ "$base" = "refs/worklane/test-run/$id/base" ] || die "not run $id's bundle refs"
   [ ! -e "$d" ] || die "run $id exists; wipe it first"
-  install -d -o root -g root -m 0711 "$root/runs"
+  install -d -o root -g "$user" -m 0710 "$root/runs"
   install -d -o "$user" -g "$user" -m 0700 "$d" "$d/work" "$d/tmp" "$d/home"
   # The bundle (a copy of the objects, never the coordinator's .git) arrives on stdin; the clone is made from it as
   # the test user, so nothing in it is ever written as root and the test user owns it all.
