@@ -100,6 +100,12 @@ rest += raw.stderr.slice(at);
 assert.equal(rest, '', 'every line of systemd-run\'s is recognised');
 assert.ok(own.stats.memPeakMb !== null && own.stats.cpuS !== null, JSON.stringify(own.stats));
 
+step('exec: a tier command\'s shell-only ${...} is bash\'s, not systemd\'s');
+const shellVars = await host.exec(id, 'x=hello; set -- one two; echo "got ${x} ${x%lo} ${#x} ${2} $x ${HOME:+home}"', {}, 60_000);
+console.log(JSON.stringify(shellVars.out));
+assert.equal(shellVars.code, 0);
+assert.match(shellVars.out, /^got hello hel 5 two hello home$/m, 'every ${...} expanded by bash');
+
 step('exec: stdout, stderr and planted summary-like lines, through the coordinator\'s host');
 const cmd = [
   'echo out-line',

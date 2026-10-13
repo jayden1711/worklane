@@ -260,7 +260,7 @@ export const METRICS_DEFINITIONS = [
   'Main red: times the default branch went red in the check after a merge (red again while still red is the same time).',
   'Time to green: the median minutes from the default branch going red to its next green check.',
   'Reverts: revert PRs opened after a red default branch or for a commit the main watch could not account for, and how many merged; the revert rate is reverts opened on a red default branch over the times it went red.',
-  "Fix-forward: a red default branch fixed by a fix PR instead of a revert. Not built yet: its figure fills from fix-forward's own events once it is.",
+  "Fix-forward: a red default branch fixed by a fix PR instead of a revert. Its figure is fixed over every red default branch fix-forward took on (fixed, reverted, or gave up).",
   'PR CI wall-clock: on a merged PR\'s head, from the first check run starting to the last required check (config.yaml required_checks; every check when none) completing, read from GitHub once per PR.',
   'Agent startup: seconds from a task being claimed to its agent\'s process starting.',
   'Flake rate: of the re-runs of a red default branch\'s failing checks, how many found a flaky check (passed on the re-run).',

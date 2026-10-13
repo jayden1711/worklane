@@ -7,7 +7,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Role } from '../src/dashboard-auth.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber } from '../src/main-watch.js';
+import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -63,6 +64,8 @@ function fakeGitHub() {
   const runs = new Map<string, CheckRunAt[]>();
   const statuses = new Map<string, StatusAt[]>();
   const roles = new Map<string, Role | null>();
+  /** GitHub's compare, by `base...head`; not set: head is behind base (not in that merge). */
+  const compares = new Map<string, Compared>();
   const g = { protection: 'none' as 'enforced' | 'none', now: 0 };
   const call = (what: string) => calls.push({ at: g.now, what });
   const api: MainWatchApi = {
@@ -72,6 +75,7 @@ function fakeGitHub() {
     checkRuns: async (sha) => (call(`runs ${sha.slice(0, 7)}`), runs.get(sha) ?? []),
     statuses: async (sha) => (call(`statuses ${sha.slice(0, 7)}`), statuses.get(sha) ?? []),
     role: async (login) => (call(`role ${login}`), roles.get(login) ?? null),
+    compare: async (base, head) => (call(`compare ${base.slice(0, 7)}...${head.slice(0, 7)}`), compares.get(`${base}...${head}`) ?? { status: 'behind', aheadBy: 0, behindBy: 1 }),
   };
   /** A PR merged at `at` by `by`, its merge commit `merge`, its head `head`. */
   const pr = (number: number, merge: string, head: string, at: string, by: string | null, bot = false): MergedPull => {
@@ -80,7 +84,7 @@ function fakeGitHub() {
     prs.set(number, p);
     return p;
   };
-  return { api, calls, pulls, prs, runs, statuses, roles, g, pr };
+  return { api, calls, pulls, prs, runs, statuses, roles, compares, g, pr };
 }
 
 const T = Date.parse('2026-10-12T10:00:00Z');
@@ -179,17 +183,56 @@ test('main watch: with no config.yaml readable at the first parent, the startup 
   }
 });
 
-test('main watch: a direct push is unaccounted (with a revert), found with one call', async () => {
+test('main watch: a direct push is unaccounted (with a revert) once its commit-to-PR link stayed empty for LINK_LAG_MS, a call a minute', async () => {
   const s = await started();
   const before = s.gh.calls.length;
   const sha = s.w.directPush();
-  await run(s.gh, s.watch, 2);
+  await run(s.gh, s.watch, 1);
+  assert.equal(s.unaccounted.length, 0, 'not on the first empty answer: the link may just lag');
+  await run(s.gh, s.watch, 3);
   assert.equal(s.unaccounted.length, 1);
   assert.equal(s.unaccounted[0]!.sha, sha);
   assert.equal(s.unaccounted[0]!.revert, true, 'a revert PR is asked for');
   assert.match(s.unaccounted[0]!.reason, /was pushed to main directly: no merged PR has it/);
-  assert.deepEqual(s.gh.calls.slice(before).map((c) => c.what), [`pulls ${sha.slice(0, 7)}`], 'one call told');
+  const asked = s.gh.calls.slice(before);
+  assert.deepEqual(asked.map((c) => c.what), Array(1 + LINK_LAG_MS / MAIN_WATCH_CALL_MS).fill(`pulls ${sha.slice(0, 7)}`), 'only the link, asked until LINK_LAG_MS after its first answer');
+  assert.equal(asked.at(-1)!.at - asked[0]!.at, LINK_LAG_MS);
   assert.deepEqual(s.checked, []);
+});
+
+test('regression: a squash merge whose commit-to-PR link lags is accounted once GitHub links it, never a direct push', async () => {
+  // A squash merge has one parent and a subject GitHub doesn't own ("Title (#N)"), so no merge subject names the PR;
+  // judged on the first empty answer, it was a direct push and got a revert PR.
+  const s = await started();
+  const sha = s.w.directPush(); // a squash merge is one commit on main, like a push
+  s.gh.prs.set(41, { number: 41, url: 'https://github.com/example-org/example-shop/pull/41', mergedAt: iso(T), mergeCommit: sha, mergedBy: 'example-collaborator', mergedByBot: false, head: 'f'.repeat(40), base: 'main' });
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set('f'.repeat(40), [ci()]);
+  await run(s.gh, s.watch, 1); // the link is still empty
+  assert.equal(s.gh.calls.filter((c) => c.what === `pulls ${sha.slice(0, 7)}`).length, 1);
+  s.gh.pulls.set(sha, [s.gh.prs.get(41)!]); // GitHub links it a few seconds later
+  await run(s.gh, s.watch, 6);
+  assert.deepEqual(s.unaccounted, [], 'no revert PR for a normal squash merge');
+  assert.deepEqual(s.checked, [{ sha, how: 'person', number: 41 }]);
+});
+
+test('regression: a commit inside a rebase merge is the PR\'s by GitHub\'s compare; an earlier direct push the PR\'s merge descends from is not', async () => {
+  // Git ancestry said both were "in" the PR's merge: every earlier commit on main is an ancestor of a later merge.
+  const s = await started();
+  const pushed = s.w.directPush(); // a direct push, before the PR merged
+  const r1 = s.w.directPush(); // the PR's two commits, rebased onto main
+  const r2 = s.w.directPush();
+  const pr = { number: 42, url: 'https://github.com/example-org/example-shop/pull/42', mergedAt: iso(T), mergeCommit: r2, mergedBy: 'example-collaborator', mergedByBot: false, head: 'e'.repeat(40), base: 'main', commits: 2 };
+  s.gh.prs.set(42, pr);
+  for (const c of [pushed, r1, r2]) s.gh.pulls.set(c, [pr]); // GitHub's link lists the PR for the pushed commit too (its branch had it)
+  s.gh.compares.set(`${pushed}...${r2}`, { status: 'ahead', aheadBy: 2, behindBy: 0 });
+  s.gh.compares.set(`${r1}...${r2}`, { status: 'ahead', aheadBy: 1, behindBy: 0 });
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set('e'.repeat(40), [ci()]);
+  await run(s.gh, s.watch, 20);
+  assert.deepEqual(s.unaccounted.map((u) => u.sha), [pushed], 'the push before the PR merged is a direct push');
+  assert.match(s.unaccounted[0]!.reason, /#42's merge .* doesn't include it: 2 commit\(s\) ahead of it, and the PR has 2/);
+  assert.deepEqual(s.checked.map((c) => [c.sha, c.number]), [[r1, 42], [r2, 42]], 'both rebased commits are the PR\'s');
 });
 
 test('regression: a merge commit GitHub has not linked to its PR yet is judged by the PR its subject names, never as a direct push', async () => {
@@ -308,8 +351,9 @@ test('main watch: at most one API call a minute, across many commits and a resta
 test('main watch: a restart neither checks a commit again nor skips one', async () => {
   const s = await started();
   const a = s.w.directPush();
-  await run(s.gh, s.watch, 2);
+  await run(s.gh, s.watch, 4);
   assert.deepEqual(s.unaccounted.map((u) => u.sha), [a]);
+  const askedA = s.gh.calls.filter((x) => x.what === `pulls ${a.slice(0, 7)}`).length;
   const b = s.w.mergedPr();
   const c = s.w.directPush();
   s.gh.pr(30, b.merge, b.head, iso(T), 'example-owner');
@@ -320,7 +364,7 @@ test('main watch: a restart neither checks a commit again nor skips one', async 
   await run(s.gh, again.watch, 10);
   assert.deepEqual(again.checked.map((x) => x.sha), [b.merge], 'b, once');
   assert.deepEqual(again.unaccounted.map((u) => u.sha), [c], 'c, and not a again');
-  assert.equal(s.gh.calls.filter((x) => x.what === `pulls ${a.slice(0, 7)}`).length, 1, 'a was asked about once');
+  assert.equal(s.gh.calls.filter((x) => x.what === `pulls ${a.slice(0, 7)}`).length, askedA, 'a was not asked about again');
   assert.equal(readWatchState(s.w.stateFile).last, c);
 });
 
@@ -544,4 +588,17 @@ test('judge: an accepted sha is accounted at once; an accepted PR only at the he
   assert.ok(w.done && !w.accounted, 'another head: judged as any merge');
   const h = judge('d'.repeat(40), { harness: { number: 5, head: 'b'.repeat(40), at } }, o);
   assert.ok(h.done && h.accounted && h.how === 'accepted', "the harness's own merge of it too");
+});
+
+test("GitHubMainWatchApi: compare reads GitHub's ahead/behind counts; a PR carries its commit count", async () => {
+  const urls: string[] = [];
+  const f = (async (url: string) => {
+    urls.push(url);
+    if (url.includes('/compare/')) return new Response(JSON.stringify({ status: 'ahead', ahead_by: 1, behind_by: 0, commits: [] }));
+    return new Response(JSON.stringify({ number: 9, html_url: 'https://github.com/x/y/pull/9', merged_at: iso(T), merge_commit_sha: 'b'.repeat(40), merged_by: { login: 'example-owner', type: 'User' }, head: { sha: 'c'.repeat(40) }, base: { ref: 'main' }, commits: 3 }));
+  }) as unknown as typeof fetch;
+  const api = new GitHubMainWatchApi('x/y', async () => 't', f);
+  assert.deepEqual(await api.compare('a'.repeat(40), 'b'.repeat(40)), { status: 'ahead', aheadBy: 1, behindBy: 0 });
+  assert.ok(urls[0]!.endsWith(`/repos/x/y/compare/${'a'.repeat(40)}...${'b'.repeat(40)}?per_page=1`), urls[0]);
+  assert.equal((await api.pull(9)).commits, 3);
 });

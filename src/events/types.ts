@@ -711,6 +711,50 @@ export const EventSchemas = {
   'flaky.observed': z.strictObject({ test: z.string(), sha, ok: z.boolean(), passes: z.number().int().nonnegative() }),
   /** A test left quarantine (it blocks again): after `passes` passes in a row, or an owner cleared it. */
   'flaky.released': z.strictObject({ test: z.string(), how: z.enum(['passes', 'owner']), by: z.string(), passes: z.number().int().nonnegative() }),
+  // fix-forward (src/fix-forward.ts, coordinator/fix-forward.ts): a real red default branch, its culprit, fix tasks, and the revert only if they fail
+  /**
+   * The default branch went red on `sha` (after the flaky re-run said real): `failed` checks; `last_green` the last
+   * commit known green before it; `candidates` the first-parent commits after it up to `sha`, oldest first, each with
+   * the PR it merged (when its subject names one).
+   */
+  'fix_forward.started': z.strictObject({
+    sha,
+    number: z.number().int().positive().nullable(),
+    failed: z.array(z.string()),
+    last_green: sha.nullable(),
+    candidates: z.array(z.strictObject({ sha, number: z.number().int().positive().nullable(), title: z.string() })).max(50),
+  }),
+  /** One candidate of red `sha` tested on its own commit: asked for (`verdict` pending, `via` how), then its verdict. */
+  'fix_forward.tested': z.strictObject({ sha, candidate: sha, verdict: z.enum(['pending', 'good', 'bad', 'skip']), via: z.enum(['checks', 'test_run', 'actions', 'none']), ids: z.array(z.number().int()), detail: z.string() }),
+  /** The culprit of red `sha`: `how` only (one candidate), bisect, or range (untestable commits left: `culprit` null, from..to). `revert_first`: why it is reverted at once. */
+  'fix_forward.culprit': z.strictObject({
+    sha,
+    culprit: sha.nullable(),
+    number: z.number().int().positive().nullable(),
+    title: z.string(),
+    how: z.enum(['only', 'bisect', 'range']),
+    range: z.strictObject({ from: sha, to: sha }).nullable(),
+    revert_first: z.array(z.string()),
+  }),
+  /** Fix task `attempt` for red `sha`: issue `issue`, worked like any task; its PR goes through the normal gates. */
+  'fix_forward.attempt': z.strictObject({ sha, attempt: z.number().int().positive(), issue, culprit: z.number().int().positive().nullable() }),
+  /** Fix task `attempt` didn't make the default branch green: why. */
+  'fix_forward.attempt_failed': z.strictObject({ sha, attempt: z.number().int().positive(), issue, why: z.string() }),
+  /**
+   * Fix-forward's outcome for red `sha` (the delivery metrics read it): fixed (green again by fix PR `by`, or by
+   * another merge), reverted (the culprit's revert PR opened), gave_up (no culprit to revert, or the revert failed).
+   */
+  'fix_forward.finished': z.strictObject({
+    sha,
+    outcome: z.enum(['fixed', 'reverted', 'gave_up']),
+    attempts: z.number().int().nonnegative(),
+    culprit: z.number().int().positive().nullable(),
+    by: z.number().int().positive().nullable(),
+    revert: z.strictObject({ url: z.string(), number: z.number().int().positive() }).nullable(),
+    detail: z.string(),
+  }),
+  /** The default branch is green again on `tip` after red `sha`: by a fix PR (`fixed_by`), the revert of `reverted`, or neither. */
+  'fix_forward.green': z.strictObject({ sha, tip: sha, fixed_by: z.number().int().positive().nullable(), reverted: z.number().int().positive().nullable() }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;
