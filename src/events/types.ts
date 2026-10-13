@@ -406,6 +406,12 @@ export const EventSchemas = {
   'merge.approved': z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string(), via: z.enum(['discord']) }),
   'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
+  /**
+   * The merge train (src/merge-policy-train.ts) put off merging PR `number` at `head` until `retry_at`: GitHub requires
+   * it up to date with its base (strict protection), or its base moved under the merge. Not a failure and not the
+   * owner's call; tried again then, with a growing backoff.
+   */
+  'merge.deferred': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string(), retry_at: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
   /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
   'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()) }),
