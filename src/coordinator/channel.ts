@@ -14,7 +14,7 @@ import { answerDecision, auditWrite, firstAnswer } from '../decide.js';
 import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { alreadyText, askBack, askPost, commentText, decidedText, decisionPost, parseChoice, readConfirm, type ChannelPost } from '../intake/channel.js';
+import { alreadyText, askBack, askPost, commentText, decidedText, decisionPost, mainWatchPost, parseChoice, readConfirm, type ChannelPost } from '../intake/channel.js';
 import { REPLY_CHARS } from '../intake/discord.js';
 import { acceptThread, checkSummary, confirmText, fallbackSummary, noAnswerText, notYourConfirmText, summaryRun, threadRun, threadRunDir, type ThreadRecord } from '../intake/explain.js';
 import { redactString } from '../events/redact.js';
@@ -442,6 +442,11 @@ export abstract class Channel extends ResearchOnDemand {
     for (const a of all) {
       if (a.status !== 'open' || posted.has(`ask:${a.id}`)) continue;
       await this.channelSend(src, `ask:${a.id}`, { channel }, askPost(a, o));
+    }
+    // The main watch's alerts: one notice per unaccounted commit.
+    for (const e of this.d.log.read(0, ['main_watch.unaccounted'])) {
+      const u = e.payload as EventPayload<'main_watch.unaccounted'>;
+      if (!posted.has(`main-watch:${u.sha}`)) await this.channelSend(src, `main-watch:${u.sha}`, { channel }, mainWatchPost(u, o));
     }
     // Each new thread explained in plain language, once.
     await this.explainThreads(cfg, src);

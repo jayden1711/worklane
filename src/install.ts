@@ -15,6 +15,7 @@ import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
 import { writeOwnerOnly } from './os/index.js';
+import { installPrePushHook } from './push-guard.js';
 
 export { HOOK_MARKER };
 export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
@@ -137,6 +138,8 @@ export interface InstallReport {
   scaffolded: boolean;
   settingsPath: string;
   gitHook?: string;
+  /** The pre-push hook that refuses a push to the default branch. */
+  prePushHook?: string;
   notes: string[];
 }
 
@@ -195,9 +198,22 @@ export function install(opts: InstallOptions): InstallReport {
     writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
   }
   const report: InstallReport = { scaffolded, settingsPath, notes };
-  if (opts.gitHooks) report.gitHook = installGitHook(root);
-  else notes.push('git pre-commit secret scan not installed (pass --git-hooks); it applies to every worktree of the repo');
+  if (opts.gitHooks) {
+    report.gitHook = installGitHook(root);
+    // land_mode direct lands by pushing the default branch: there the hook would refuse the landing itself.
+    if (cfg.project.land_mode === 'direct') notes.push('no pre-push hook: land_mode direct lands by pushing the default branch');
+    else report.prePushHook = installCheckoutPrePush(root, [cfg.project.project.default_branch], resolve(opts.engineCli ?? running));
+  } else notes.push('git pre-commit secret scan not installed (pass --git-hooks); it applies to every worktree of the repo');
   return report;
+}
+
+/**
+ * The pre-push hook in the repo's common hooks dir (every worktree's), refusing any push to the default branch:
+ * `branches` (the config's, when there is one) and whatever origin/HEAD names at push time.
+ */
+export function installCheckoutPrePush(root: string, branches: string[], engineCli?: string): string {
+  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node: process.execPath, ...(engineCli ? { engine: engineCli } : {}) });
 }
 
 /** gitleaks pre-commit hook in the repo's common hooks dir, chaining any existing hook. */

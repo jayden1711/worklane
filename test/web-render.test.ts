@@ -38,6 +38,8 @@ interface Render {
   renderRunResearch(data: unknown): string;
   renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
+  renderProtection(protection: unknown, brand: string): string;
+  renderMainWatchAlert(protection: unknown): string;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
@@ -603,6 +605,22 @@ test('checks render as a table with failures tinted and their output; instances 
   assert.match(nav, /disabled=""/, 'an instance that isn\'t answering can\'t be picked');
   assert.equal(r.renderStopBanner({ ...asOwner, emergency: { inForce: null, halted: null, lastStop: null, lastResume: null } }), '');
   assert.match(r.renderStopBanner({ ...asOwner, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: null, lastStop: null, lastResume: null } }), /Emergency stop in force/);
+});
+
+test('the protection mode on the Machine page, the last commit checked for writers, and the alert with its clear for an admin', () => {
+  const sha = 'c'.repeat(40);
+  const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: { sha, url: `https://github.com/o/r/commit/${sha}`, at: new Date().toISOString() }, alert: null, stopped: null, canClear: false };
+  const html = r.renderProtection(watch, BRAND.name);
+  assert.match(html, new RegExp(`data-testid="protection-mode"[^>]*>${BRAND.name} guard \\(main watch\\)`));
+  assert.match(html, /Last commit checked:[\s\S]*cccccccc/);
+  assert.match(r.renderProtection({ mode: 'github' }, BRAND.name), /GitHub enforced/);
+  assert.doesNotMatch(r.renderProtection({ mode: 'main_watch' }, BRAND.name), /Last commit checked/, "a viewer's: the mode only");
+  assert.equal(r.renderMainWatchAlert(watch), '', 'no alert, no banner');
+  const alert = { ...watch, alert: { at: new Date().toISOString(), sha, url: watch.lastChecked.url, reason: 'cccccccc was pushed to main directly', number: null, revert: 'https://github.com/o/r/pull/9' }, stopped: 'main watch: x' };
+  const banner = r.renderMainWatchAlert(alert);
+  assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
+  assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
+  assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
 });
 
 test('a chat answer: citations as links, a draft preview with a two-step file, proposals that open their confirm flows, read-only for others', () => {

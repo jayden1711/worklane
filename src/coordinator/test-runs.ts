@@ -1,7 +1,8 @@
 // The coordinator's fast test runs (src/testrun/): one tick step that runs tests.yaml test_run's fast tiers on every
 // open PR's head, the harness's, the owner's and bots' alike, and posts them as checks. A PR whose head moves gets a
-// new run, and the superseded one is cancelled. Full tiers run per batch of approved PRs (PR mode, Track PB); a bot's
-// PR gets those only once the owner approved it (fullRunAllowed).
+// new run, and the superseded one is cancelled. Full tiers run per batch of approved PRs (PR mode, Track PB): the
+// harness's, and people's PRs from this listing (merge-flow.ts batchPeoplesPrs): a mapped admin's or writer's once its
+// fast checks pass; a bot's or an unmapped author's only once an admin approved it.
 import { execFileSync } from 'node:child_process';
 import { BRAND } from '../brand.js';
 import type { EventLog } from '../events/log.js';
@@ -77,6 +78,8 @@ export class PrTestRuns {
   /** pr -> heads whose fast run finished (from the log, so a restart doesn't run them again). */
   private finished = new Map<number, Set<string>>();
   private lastPoll = 0;
+  /** The latest listing of open PRs (the coordinator batches people's PRs from it: no listing of its own). */
+  private openPrs: OpenPr[] = [];
   /** Aborted when the coordinator stops: every run from here, and the batches' (batchTestRuns), is cancelled and wiped. */
   readonly stopped = new AbortController();
 
@@ -126,6 +129,7 @@ export class PrTestRuns {
     if (now - this.lastPoll < (this.d.pollMs ?? 90_000)) return out;
     this.lastPoll = now;
     const prs = await this.d.listPrs();
+    this.openPrs = prs;
     const open = new Map(prs.map((p) => [p.number, p]));
     for (const [n, f] of this.inFlight) {
       const pr = open.get(n);
@@ -177,6 +181,11 @@ export class PrTestRuns {
       // A missing permission is recorded (testrun.checks_failed) and shown in health; anything else is an error.
       if (!(e instanceof ChecksPermissionMissing)) this.d.log.append('coordinator.error', { instance: this.d.actor, where: `checks for #${pr.number}`, kind: 'error', message: (e as Error).message.slice(0, 500) }, this.d.actor);
     }
+  }
+
+  /** The open PRs as last listed (empty before the first listing). */
+  listing(): OpenPr[] {
+    return this.openPrs;
   }
 
   /** Wait for the runs in flight (tests and shutdown). */

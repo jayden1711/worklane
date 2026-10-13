@@ -365,3 +365,18 @@ test("channel: an instance can't answer through another instance's thread or map
   assert.equal(b.log.read(0, ['intake.received']).length, 0);
   assert.deepEqual(rawFiles(b.stateDir), []);
 });
+
+test("channel: the main watch's alert posts once in the asks channel, a notice with the commit's and the revert's links and no secret", async () => {
+  const t = setup();
+  const sha = 'a1b2c3d'.padEnd(40, '0');
+  t.log.append('main_watch.unaccounted', { sha, url: `https://github.com/example-org/example-shop/commit/${sha}`, reason: `${sha.slice(0, 8)} was pushed to main directly: no merged PR has it (token ghp_${'x'.repeat(36)})`, number: null, revert: 'https://github.com/example-org/example-shop/pull/9' }, 'coordinator');
+  await t.pass();
+  await t.pass();
+  const posts = t.chat.posts.filter((p) => p.where === ASKS_CHANNEL);
+  assert.equal(posts.length, 1, 'posted once');
+  assert.equal(t.chat.threads.length, 0, 'a notice, not a thread');
+  assert.match(posts[0]!.text, new RegExp(`commit/${sha}`));
+  assert.match(posts[0]!.text, /Revert PR, for a human to approve: https:\/\/github\.com\/example-org\/example-shop\/pull\/9/);
+  assert.ok(posts[0]!.text.includes(`${DASH}/prs`));
+  assert.doesNotMatch(posts[0]!.text, /ghp_x{36}/, 'redacted');
+});

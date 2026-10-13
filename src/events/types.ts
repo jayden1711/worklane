@@ -208,6 +208,11 @@ export const EventSchemas = {
   'change.rejected': z.strictObject({ issue, why: z.string() }),
   /** A change hit the push limits: at stage 'change' (before verifying; the worker is told) or 'push' (refused at the push). */
   'push.refused': z.strictObject({ issue, head: sha, stage: z.enum(['change', 'push']), reasons: z.array(z.string()) }),
+  /**
+   * A push to the default branch, refused (push-guard.ts): by the coordinator's push code, or by the pre-push hook
+   * (`via` hook: whoever pushed from the checkout, or the coordinator's git). `head`: what it would have pushed.
+   */
+  'push.blocked': z.strictObject({ ref: z.string(), head: z.string().nullable(), via: z.enum(['coordinator', 'hook']) }),
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
   /** The browser checks a verify ran (src/coordinator/browser.ts): the PR description's BROWSER CHECKS section. */
   'browser.evidence': z.strictObject({ issue, head: sha, lines: z.array(z.string().max(1000)).max(300) }),
@@ -355,6 +360,18 @@ export const EventSchemas = {
   /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
   'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
+  /**
+   * Main watch (src/main-watch.ts): how the default branch is guarded. github: GitHub enforces its protection;
+   * main_watch: GitHub doesn't, and the watch checks every new commit; off: neither (`detail` says why).
+   */
+  'main_watch.mode': z.strictObject({ mode: z.enum(['github', 'main_watch', 'off']), detail: z.string() }),
+  /** A commit on the default branch, accounted for: the harness's merge, or a mapped admin's or writer's, green at merge time. */
+  'main_watch.checked': z.strictObject({ sha, how: z.enum(['harness', 'person']), number: z.number().int().positive() }),
+  /**
+   * A commit on the default branch nothing accounts for (a direct push, a merge with checks not green, an unknown
+   * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
+   */
+  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable() }),
   /** No more fix runs on this PR; the owner is asked to look. */
   /** The combined-state check started: the default branch moved and touched what this PR touches (overlap). */
   'light_check.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()) }),
@@ -381,8 +398,12 @@ export const EventSchemas = {
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
-  /** PR mode with batching (coordinator/pr-batch.ts): a PR ready on its fast checks waits, at this head, for a batch. */
-  'pr_batch.queued': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  /**
+   * PR mode with batching (coordinator/pr-batch.ts): a PR ready on its fast checks waits, at this head, for a batch.
+   * `by`: a person's PR (a mapped admin or writer opened it, not the harness): `issue` is then the PR's own number,
+   * and the harness never merges it.
+   */
+  'pr_batch.queued': z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string().optional() }),
   /**
    * One step of a PR batch. built: the batch's merge commit (`sha`, on `base`) of `prs`, in queue order; green/red: its
    * full run (`run`); checks_posted: the passing full check posted on that PR's head; culprit: the PR the bisection
@@ -396,7 +417,7 @@ export const EventSchemas = {
   'pr_batch.step': z.strictObject({
     id: z.string(),
     step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale']),
-    prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha })),
+    prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string().optional() })),
     sha: sha.nullable(),
     base: sha.nullable(),
     parent: z.string().nullable(),

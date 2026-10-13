@@ -118,6 +118,11 @@ export const PolicyFile = z.strictObject({
    * takes effect without a restart.
    */
   auto_merge: z.boolean().default(false),
+  /**
+   * The main watch (src/main-watch.ts): auto, it guards the default branch whenever GitHub doesn't protect it (the
+   * protection API answers 403 or 404); off, it doesn't. Read on every pass.
+   */
+  main_watch: z.enum(['auto', 'off']).default('auto'),
   /** Instance settings that win over the repo's: worker count, daily budget, CI fix runs, run windows. */
   settings: InstanceSettings.default({}),
   /**

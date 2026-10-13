@@ -34,6 +34,8 @@ export const VIEWER_EVENTS: Readonly<Record<string, readonly string[]>> = Object
   'deploy.failed': ['issue', 'env', 'sha', 'why'],
   // A test run's outcome: each tier's pass or fail (results holds { tier, ok } only), never its log or summary.
   'testrun.finished': ['id', 'sha', 'kind', 'prs', 'ok', 'outcome', 'results'],
+  // How the default branch is guarded (GitHub, the main watch, off): the mode only, never why or what it found.
+  'main_watch.mode': ['mode'],
 });
 
 export const viewerMaySee = (type: string) => Object.hasOwn(VIEWER_EVENTS, type);
@@ -63,7 +65,7 @@ export function viewerActivity(events: StoredEvent[]) {
  */
 export const VIEWER_STATE_KEYS: readonly string[] = Object.freeze([
   'brand', 'project', 'user', 'role', 'via', 'owners', 'slots', 'lastId', 'tasks', 'decisions', 'landedToday', 'baseline', 'deploys',
-  'coordinator', 'activity', 'landQueue', 'batches', 'governor', 'emergency', 'reports', 'inbox', 'prCounts', 'costBasis',
+  'coordinator', 'activity', 'landQueue', 'batches', 'governor', 'emergency', 'reports', 'inbox', 'prCounts', 'costBasis', 'protection',
   'canReadIntake', 'canReadThroughput', 'canReadReports', 'canReadRuns', 'canReadDigest', 'canReadLogs', 'canReadMachine', 'canWrite', 'canReadAudit',
 ]);
 export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
@@ -75,6 +77,8 @@ export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
 export const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'issue', 'owner', 'question', 'options', 'recommendation', 'askedAt', 'answer', 'canAnswer']);
 /** A batch as a viewer sees it: its status and what is in it, never its detail (test output, culprits' tiers) or commit. */
 export const VIEWER_BATCH_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'issues', 'prs', 'outcome', 'at']);
+/** The default branch's protection as a viewer sees it: GitHub enforced, the main watch, or off. */
+export const VIEWER_PROTECTION_FIELDS: readonly string[] = Object.freeze(['mode']);
 /** The machine's slots as a viewer sees them: how many are in use and how many there are, not which agents hold them. */
 export const VIEWER_SLOT_FIELDS: readonly string[] = Object.freeze(['cap', 'running']);
 
@@ -98,6 +102,8 @@ export function stateForViewer(state: Record<string, unknown>): Record<string, u
     const ib = out.inbox as Record<string, unknown>;
     out.inbox = { decisions: decisionsOnly(ib.decisions), blocked: tasksOnly(ib.blocked), notify: tasksOnly(ib.notify) };
   }
+  // How the default branch is guarded: the mode only, never the commits checked or an alert's detail.
+  if (out.protection && typeof out.protection === 'object') out.protection = pick(out.protection as Record<string, unknown>, VIEWER_PROTECTION_FIELDS);
   if (Array.isArray(state.errors)) out.errorCount = state.errors.length;
   return out;
 }
