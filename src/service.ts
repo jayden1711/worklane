@@ -31,7 +31,6 @@ import { instanceTargets, migrationGate, projectConfigFiles } from './migrations
 import { settingsReader } from './settings.js';
 import { batchTestRuns, setupTestRuns, type TestRunSetup } from './testrun/setup.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
-import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -177,9 +176,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   console.error(`commits as: ${identity.name} <${identity.email}>`);
   const testRun: TestRunSetup = { instance: i.name, repo: i.repo.repo, token: tokens, api: githubApi(), ...(gh.kind === 'app' ? { app: { appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path } } : {}) };
   // Intake (docs/intake.md): this instance's own intake.yaml and bot token only; none means intake off.
-  // A production intake source reads only through the owner's production read path, when the project has one.
-  const pr = i.config.deploy?.prod_read;
-  const intake = () => intakeForInstance({ home: i.home, repo: i.repo.repo, instance: i.name, tokenFile: i.credentials.intake?.discord_token, githubToken: tokens, githubApi: githubApi(), stateDir: i.stateDir, prodRead: pr ? (sql: string) => prodRead(pr, sql, i.repo.path) : undefined });
+  const intake = () => intakeForInstance({ home: i.home, repo: i.repo.repo, instance: i.name, tokenFile: i.credentials.intake?.discord_token, githubToken: tokens, githubApi: githubApi() });
   // The main watch (GitHub only), and whose PRs get the full run: both from repo permissions, read with the instance's own token.
   const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
   const watchApi = new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi());

@@ -322,7 +322,7 @@ test('injection: the agent\'s output cannot carry labels, trust, decisions or co
   assert.deepEqual(Object.keys(ok.triage).sort(), ['draft', 'kind']);
   const d = decide({ report: report({ text: INJECTION }), redacted: INJECTION, triage: ok.triage, trusted: false, shown: [] });
   assert.equal(d.action, 'decision', 'an untrusted report always waits for the owner, whatever it says');
-  assert.deepEqual(d.action === 'decision' && d.labels, ['bug'], "only the engine's own labels: never ready, nor the agent's");
+  assert.ok(!('labels' in d));
   assert.equal(acceptTriage({ kind: 'merge_now' }).ok, false);
 });
 
