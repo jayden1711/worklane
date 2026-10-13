@@ -89,6 +89,13 @@ export interface TestRunDeps {
   helper?: HelperState;
   /** test_run.select: imports's plan for a change (tests inject one); default ./select.ts importsPlan. */
   plan?: (repo: string, sha: string, changed: readonly string[]) => Plan;
+  /** Directories left out of the workspace (tests.yaml checkout.sparse_exclude), unless a tier of the run sets full_checkout. */
+  sparseExclude?: readonly string[];
+}
+
+/** What a run's workspace leaves out: the project's sparse_exclude, or nothing when one of its tiers needs a full checkout. */
+export function workspaceExclude(tiers: readonly TestRunTier[], sparseExclude: readonly string[] = []): readonly string[] {
+  return tiers.some((t) => t.full_checkout) ? [] : sparseExclude;
 }
 
 /**
@@ -191,7 +198,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     emit('testrun.started', { id, slot: slot.path.split(/[\\/]/).pop()!.replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom) });
     created = true;
     stage = 'create';
-    await createWorkspace(d.host, d.repo, req.sha, id);
+    await createWorkspace(d.host, d.repo, req.sha, id, workspaceExclude(tiers, d.sparseExclude));
     stage = 'changed-files';
     const changed = req.changedFiles ? await d.host.changedFiles(id, req.changedFiles) : null;
     stage = 'caches';

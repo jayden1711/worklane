@@ -44,7 +44,7 @@ import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
-import { refillPool, takeFromPool } from './worktree-pool.js';
+import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
@@ -595,8 +595,10 @@ export class Coordinator extends Optimizer {
       try {
         spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
         const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-        const r = await refillPool(this.wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb });
-        if (r.created.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
+        const wt = this.wt;
+        const keyFiles = this.d.cfg.tests.worktree.setup_key;
+        const r = await refillPool(wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb, key: (b) => setupKey(wt, b, keyFiles) });
+        if (r.created.length || r.moved.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, moved: r.moved, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
       } catch (e) {
         this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree pool', kind: 'error', message: (e as Error).message.slice(0, 500) });
       } finally {

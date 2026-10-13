@@ -7,6 +7,7 @@ import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
+import { SparseExclude } from '../checkout.js';
 import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
@@ -448,6 +449,24 @@ export const TestsConfig = z.strictObject({
       dep_cache: z.boolean().default(true),
       /** Worktrees kept ready on main, set up, for tasks to start in (0: off). Bounded by free disk. */
       pool: z.number().int().min(0).max(4).default(0),
+      /**
+       * The files whose contents decide what the setup steps produce (the lockfiles, and anything an install step
+       * generates from, such as an ORM schema). When main moves and none of them changed, a pooled worktree is
+       * moved to the new main and kept, its installed dependencies with it, instead of being set up again. Empty:
+       * every main change sets the pool up afresh.
+       */
+      setup_key: z.array(z.string().min(1).refine((p) => !p.startsWith('/') && !p.split(/[\\/]/).includes('..'), 'a path inside the repo (relative, no ..)')).default([]),
+    })
+    .prefault({}),
+  /** What the harness's own checkouts of the project hold (src/checkout.ts). */
+  checkout: z
+    .strictObject({
+      /**
+       * Directories left out of every agent worktree and test-run workspace (sparse checkout), e.g. design files and
+       * art no agent or test reads. They stay in the repo. The project's checks run in the worktree too: leave out
+       * only what they never read. A test-run tier that needs them sets `full_checkout`.
+       */
+      sparse_exclude: SparseExclude,
     })
     .prefault({}),
   land: z
