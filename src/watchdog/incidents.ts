@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { redactString } from '../events/redact.js';
 import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
+import { USAGE_INCIDENT } from '../usage-limit.js';
 
 export const INCIDENTS_FILE = 'incidents.json';
 const LOCK_FILE = 'incidents.lock';
@@ -27,7 +28,7 @@ export const HISTORY = 200;
 /** red: something is down or unsafe and work stops; amber: it will be, or work is slow, unless someone acts. */
 export type Severity = 'red' | 'amber';
 
-/** The kinds the watchdog raises itself, each with its fixed title and severity. Other modules may raise their own. */
+/** The kinds the watchdog raises itself (and the usage pause the coordinator raises), each with its fixed title and severity. Other modules may raise their own. */
 export const KINDS = {
   unit_down: { title: 'A service is down', severity: 'red' },
   crash_loop: { title: 'A service is crash-looping', severity: 'red' },
@@ -39,6 +40,8 @@ export const KINDS = {
   auto_merge_stopped: { title: 'The main watch stopped auto-merge', severity: 'red' },
   disk_full: { title: 'Disk almost full', severity: 'red' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
+  // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
+  [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
 } as const satisfies Record<string, { title: string; severity: Severity }>;
 export type WatchdogKind = keyof typeof KINDS;
 

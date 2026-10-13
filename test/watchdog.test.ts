@@ -13,7 +13,9 @@ import { parseUnitState, unitStates } from '../src/os/stats.js';
 import { which } from '../src/os/index.js';
 import { unitFindings } from '../src/watchdog/probes.js';
 import type { UpdateEntry } from '../src/updates.js';
-import { raiseIncident, readIncidents, resolveIncident, REOPEN_MS, healthStatus } from '../src/watchdog/incidents.js';
+import { KINDS, raiseIncident, readIncidents, resolveIncident, REOPEN_MS, healthStatus } from '../src/watchdog/incidents.js';
+import { incidentSink } from '../src/watchdog/wire.js';
+import { USAGE_INCIDENT } from '../src/usage-limit.js';
 import { postPending, RATE, scrub } from '../src/watchdog/post.js';
 import { Watchdog, type WatchdogDeps } from '../src/watchdog/watchdog.js';
 import { watchdogConfig } from '../src/watchdog/config.js';
@@ -350,4 +352,22 @@ test('GET /api/health/incidents: this instance\'s and the machine\'s incidents w
   } finally {
     await d.close();
   }
+});
+
+test("the usage-limit pause raises a real incident through the coordinator's sink: its own title, amber, this instance's; resolved when it resumes", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'watchdog-usage-'));
+  assert.deepEqual(KINDS[USAGE_INCIDENT], { title: 'Claude usage limit reached: runs are paused', severity: 'amber' });
+  const sink = incidentSink('demo', dir);
+  sink.raiseIncident(USAGE_INCIDENT, 'agent@host', 'Claude usage limit reached; no new runs until 2026-10-13 14:00 UTC (in 2 h 0 min)', 'Nothing to do: it resumes on its own at the reset.');
+  const [open] = readIncidents(dir).incidents;
+  assert.equal(open?.title, 'Claude usage limit reached: runs are paused');
+  assert.equal(open?.severity, 'amber');
+  assert.equal(open?.instance, 'demo');
+  assert.equal(open?.resolvedAt, null);
+  sink.resolveIncident(USAGE_INCIDENT, 'agent@host');
+  assert.ok(readIncidents(dir).incidents[0]?.resolvedAt, 'resolved when the pause ends');
+  // A store it can't write never throws into the coordinator.
+  const bad = join(dir, 'not-a-dir');
+  writeFileSync(bad, 'x');
+  assert.doesNotThrow(() => incidentSink('demo', bad).raiseIncident(USAGE_INCIDENT, 'k', 'd', 'f'));
 });

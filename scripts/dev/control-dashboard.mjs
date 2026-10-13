@@ -22,8 +22,10 @@
 //   trace <file.json> | {"op":"trace","file":"t.json","ms":3000,"page":"issues"}   a performance trace (Chrome trace format)
 //   eval <js expression>                                   its value (JSON)
 //
-// Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark, --viewport <w>x<h> (390x844: a phone),
-// --with-prs (add pull-request history for the PR views), --keep (leave the temporary directory),
+// Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
+// --with-prs (add pull-request history for the PR views), --with-usage-pause (pause the demo on the Claude usage
+// limit, resetting in 2 h: the banner and the Overview's usage line), --viewport <w>x<h> (default 1440x1000; under
+// 768 wide, e.g. 390x844, a phone), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
 // demo's owner, example-owner; the token is the owner's break-glass, so this only names who answers),
 // --as owner|writer|viewer (through the hub instead: sign in with GitHub, a fake one, as that role; see signin-fake.mjs).
@@ -103,6 +105,7 @@ async function start() {
     const issue = state.tasks.find((t) => t.status === 'awaiting_decision')?.issue ?? state.tasks[0]?.issue;
     const run = await seedRun(root, issue);
     if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
+    if (flag('--with-usage-pause')) await seedUsagePause(root, issue);
 
     const profile = join(work, 'chrome');
     mkdirSync(profile);
@@ -195,6 +198,24 @@ async function seedPrs(root, issues) {
       // An older engine doesn't know the event: left out, and said so.
       console.error(`--with-prs: ${type} not recorded (${e.message.split('\n')[0]})`);
     }
+  }
+}
+
+/** --with-usage-pause: a run hit the Claude usage limit and the instance is paused until 2 h from now. */
+async function seedUsagePause(root, issue) {
+  const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
+  const svc = join(engine, 'dist', 'src', 'service.js');
+  if (!existsSync(logMod) || !existsSync(svc)) return;
+  const { EventLog } = await import(pathToFileURL(logMod).href);
+  const { logPath } = await import(pathToFileURL(svc).href);
+  const log = new EventLog(logPath(root));
+  const reset = new Date(Math.floor(Date.now() / 1000) * 1000 + 2 * 3600_000).toISOString();
+  const detail = "usage or rate limit reached: You've hit your limit";
+  try {
+    log.append('usage.limit_hit', { issue: issue ?? null, role: 'worker', model: 'sonnet', provider: null, reset_at: reset, source: 'claude', kind: 'five_hour', detail }, 'demo');
+    log.append('usage.paused', { reset_at: reset, source: 'claude', kind: 'five_hour', issue: issue ?? null, role: 'worker', detail }, 'demo');
+  } catch (e) {
+    console.error(`--with-usage-pause: not recorded (${e.message.split('\n')[0]})`);
   }
 }
 

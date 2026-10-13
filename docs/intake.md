@@ -106,7 +106,7 @@ discord:
 `dashboard_url`. Two things post there:
 
 - **Incidents.** The machine's watchdog (`src/watchdog/`) posts each incident: a service down or crash-looping, an
-  engine update rolled back or held, a Claude sign-in failing or a login about to expire, the GitHub App's token or
+  engine update rolled back or held, a Claude sign-in failing or a login about to expire, runs paused on the Claude usage limit, the GitHub App's token or
   permissions failing, ready work that hasn't moved for `stall_hours`, the main watch stopping auto-merge, a disk over
   85%, the test sandbox check failing. One post when it opens (what broke, what was already tried, the one fix, a link
   to it on the Health page) and one when it is resolved; at most 5 posts per 10 minutes, machine-wide, and never a

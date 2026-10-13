@@ -11,7 +11,9 @@ import { unitStates } from '../os/stats.js';
 import { claudeAuthStatusJson, type RunAs } from '../runner.js';
 import { emergencyStop } from '../slots.js';
 import { updateLog } from '../updates.js';
+import type { IncidentSink } from '../usage-limit.js';
 import { watchdogConfig } from './config.js';
+import { raiseIncident, resolveIncident } from './incidents.js';
 import { discordPoster } from './post.js';
 import { startWatchdog, type WatchdogDeps } from './watchdog.js';
 
@@ -97,4 +99,29 @@ export function watchdogForInstance(o: {
     ...(o.say ? { log: o.say } : {}),
   };
   return startWatchdog(deps);
+}
+
+/**
+ * The incident sink a coordinator reports into (the usage-limit pause, src/usage-limit.ts): each incident is this
+ * instance's, in the machine's store the watchdog posts from and the Health page lists. Never throws: a store that
+ * can't be written leaves the pause to its own events and banner.
+ */
+export function incidentSink(instance: string, dir?: string): IncidentSink {
+  const o = { instance, ...(dir ? { dir } : {}) };
+  return {
+    raiseIncident: (kind, key, detail, fix) => {
+      try {
+        raiseIncident(kind, key, detail, fix, o);
+      } catch {
+        // the pause still shows on the dashboard and in its events
+      }
+    },
+    resolveIncident: (kind, key) => {
+      try {
+        resolveIncident(kind, key, dir ? { dir } : {});
+      } catch {
+        // as above
+      }
+    },
+  };
 }
