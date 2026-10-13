@@ -83,7 +83,16 @@ export interface RunRequest {
    * stops a run (reason 'stuck'); dry-run only reports. The run record keeps the longest streak either way.
    */
   stuck?: { mode: StuckMode; onVerdict?: (v: StuckVerdict, action: 'log' | 'stop') => void };
+  /**
+   * An earlier session to continue (`claude --resume <id>`), with its context: the one that wrote the change a fix
+   * run works on. Sessions live in the Claude login's home (the agent user's), so the run must go to the same lane.
+   * A session that is gone ends the run failed at turn 0 ("No conversation found"); the caller falls back to a fresh run.
+   */
+  resume?: string;
 }
+
+/** What a session id looks like (claude's are UUIDs): anything else is never put on the command line. */
+export const SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z_-]{0,127}$/;
 
 export interface RunResult {
   reason: TerminalReason;
@@ -373,6 +382,8 @@ export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: s
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
   if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
+  // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
+  if (req.resume && SESSION_ID.test(req.resume)) args.push('--resume', req.resume);
   return args;
 }
 
@@ -492,6 +503,7 @@ export class CliRunner implements AgentRunner {
     const laneName = req.lane ?? 'default';
     const lane = this.lanes?.[laneName];
     if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
+    if (req.resume !== undefined && !SESSION_ID.test(req.resume)) return { reason: 'failed', detail: `not a session id: ${JSON.stringify(req.resume.slice(0, 80))}; not starting`, costUsd: 0, turns: 0, model: req.model };
     const runAs = lane ? lane.runAs : this.runAs;
     const runEnv = runAs ? runAsEnv(env, runAs) : env;
     // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
@@ -529,7 +541,7 @@ export class CliRunner implements AgentRunner {
       if (providerDir) rmSync(providerDir, { recursive: true, force: true });
     };
     // What the agent did, for the dashboard: written by this process into the coordinator's state dir (the dashboard can't read the agent user's home).
-    const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}) }) : null;
+    const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}), ...(req.resume ? { resumed: req.resume } : {}) }) : null;
     // The live view of the same run, under the record's id: redacted and capped, ended when the run ends.
     const feed = record && req.stateDir ? new RunFeed(req.stateDir, { run: record.id, issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model, cwd: req.cwd }) : null;
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
@@ -666,7 +678,7 @@ export class CliRunner implements AgentRunner {
         const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}), ...(tokens ? { tokens } : {}), ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}), ...(req.provider ? { provider: req.provider.name } : {}) };
         const done = (o: RunResult) => {
           const out: RunResult = { ...o, ...(refusals.refused.length ? { refusedHosts: refusals.refused } : {}), ...(o.reason === 'stuck' && stuck?.stopped ? { stuck: stuck.stopped } : {}) };
-          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}), ...(stuck ? { stuck: { ...stuck.detector.longest } } : {}) });
+          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}), ...(stuck ? { stuck: { ...stuck.detector.longest } } : {}), ...(out.sessionId ? { sessionId: out.sessionId } : {}) });
           feed?.end({ reason: out.reason, costUsd: out.costUsd, turns: out.turns });
           resolve(out);
         };
