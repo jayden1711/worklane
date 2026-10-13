@@ -2200,7 +2200,9 @@ test('flaky: main red after an auto-merge is re-run on the same commit first; gr
 });
 
 test('flaky: main red, and red again on the re-run of the same commit: real, stopped and reverted as before', { skip }, async () => {
-  const { t, done } = await redAfterMerge();
+  const { t, done, reruns } = await redAfterMerge();
+  assert.deepEqual(reruns, [[94]], 're-run first');
+  assert.equal(t.f.log.read(0, ['merge.main_result', 'merge.stopped']).length, 0, 'nothing judged, stopped or reverted before the re-run is in');
   t.f.backlog.setChecks(done.sha, failing(96));
   await t.c.tick();
   assert.deepEqual(lastOf(t.f.log, 'merge.main_result'), { issue: t.n, number: t.opened.number, sha: done.sha, outcome: 'red', failed: ['ci'] });
