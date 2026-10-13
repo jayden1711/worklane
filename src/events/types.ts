@@ -84,6 +84,15 @@ export const EventSchemas = {
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
   'settings.applied': z.strictObject({ settings: z.record(z.string(), z.unknown()), error: z.string().nullable() }),
+  /**
+   * The default branch's config (read from git at `sha`, src/config/live.ts) replaced the running one; `changed`: the
+   * sections that differ. `restart_needed`: settings read only at start, kept at their running value until a restart.
+   */
+  'config.applied': z.strictObject({ sha: z.string(), changed: z.array(z.string()), restart_needed: z.array(z.strictObject({ path: z.string(), running: z.unknown(), wanted: z.unknown() })) }),
+  /** The default branch's config at `sha` failed validation: never applied, the last good one stays; `errors`: why. */
+  'config.invalid': z.strictObject({ sha: z.string(), errors: z.array(z.string()) }),
+  /** The default branch's config is valid again (fixed, or reverted to the running one) after an invalid one. */
+  'config.recovered': z.strictObject({ sha: z.string().nullable() }),
   /** A dashboard chat turn: who asked, whether they got a read-only answer, what it carried, what it cost; or why it was refused. */
   'chat.turn': z.strictObject({
     id: z.string(),

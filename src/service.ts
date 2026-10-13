@@ -27,7 +27,8 @@ import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
 import { CliRunner, type CommitIdentity, type RunAs } from './runner.js';
 import { latestBaseline } from './baseline.js';
-import { instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, type Instance, type InstanceSettings } from './instance.js';
+import { instanceConfigProblems, instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
+import { startConfig } from './config/live.js';
 import { instanceTargets, migrationGate, projectConfigFiles } from './migrations.js';
 import { settingsReader } from './settings.js';
 import { batchTestRuns, setupTestRuns, type TestRunSetup } from './testrun/setup.js';
@@ -130,7 +131,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     console.error(`instance ${name} not started: ${gate}`);
     return 1;
   }
-  const i = loadInstance(name);
+  let i = loadInstance(name);
   const missing = instanceProblems(i);
   if (missing.length) {
     console.error(`instance ${name} not started:\n${missing.map((m) => `  ${m}`).join('\n')}`);
@@ -165,6 +166,16 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (i.runAs) process.umask(INSTANCE_UMASK);
   for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
   Object.assign(process.env, env);
+  // The config as the default branch has it (fetched with the instance's own credentials), not the checkout's copy,
+  // which nothing updates: the coordinator then follows it (src/config/live.ts). Hooks are rewritten for it.
+  const home = i.home;
+  const policyNow = (fallback: PolicyFile) => readPolicy(join(home, 'policy.yaml')).policy ?? fallback;
+  const check = (c: Config) => instanceConfigProblems(c, i.repo.repo, policyNow(i.policy));
+  const start = startConfig({ repo: i.repo.path, remote: 'origin', fallback: i.config, check });
+  if (start.note) console.error(start.note);
+  i = { ...i, config: start.cfg };
+  writeInstanceHooks(i);
+  const liveConfig = { tree: start.tree, check };
   const gh = i.credentials.github;
   const warn = gh.kind === 'app' ? appKeyWarning(appKeyAge(gh.key_path)) : tokenWarning(scope.expiresAt);
   if (warn) console.error(warn.replaceAll('**', ''));
@@ -191,7 +202,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // The machine watchdog (src/watchdog/): this instance's checks, and the machine's and the posting if elected.
   const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(i.runAs ? { runAs: i.runAs } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
-  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
@@ -206,13 +217,17 @@ export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?
     console.error(`coordinator not started: ${gate}`);
     return Promise.resolve(1);
   }
-  const site = siteForRoot(root);
+  const checkout = siteForRoot(root);
+  // The config as the default branch has it, not the checkout's copy; the coordinator then follows it (src/config/live.ts).
+  const start = startConfig({ repo: root, remote: 'origin', fallback: checkout.cfg });
+  if (start.note) console.error(start.note);
+  const site = { ...checkout, cfg: start.cfg };
   // A remote on GitHub: its protection, asked with the gh login (direct-land.ts); a local path has none to ask.
   const protection = localRemote(root, 'origin') ? undefined : new GitHubMainWatchApi(site.cfg.project.project.repo, async () => execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim(), fetch, githubApi());
-  return runSite(site, { ...opts, label: 'coordinator', ...(protection ? { protection } : {}) });
+  return runSite(site, { ...opts, label: 'coordinator', liveConfig: { tree: start.tree }, ...(protection ? { protection } : {}) });
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -242,7 +257,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
   // The coordinator's own test runs of every PR (tests.yaml test_run), once the sandbox's check passed.
   const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.protection ? { protection: opts.protection } : {}), ...(opts.incidents ? { incidents: opts.incidents } : {}), ...(opts.accountSwitched ? { accountSwitched: opts.accountSwitched } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.protection ? { protection: opts.protection } : {}), ...(opts.incidents ? { incidents: opts.incidents } : {}), ...(opts.accountSwitched ? { accountSwitched: opts.accountSwitched } : {}), ...(opts.liveConfig ? { liveConfig: opts.liveConfig } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());

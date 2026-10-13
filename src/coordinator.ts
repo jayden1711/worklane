@@ -33,6 +33,7 @@ import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow } from './settings.js';
+import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
 import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
@@ -83,6 +84,8 @@ export class Coordinator extends Gardener {
     this.checkEmergency();
     this.checkConsole();
     void this.checkChat();
+    // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
+    await step('config', () => this.refreshConfig(), undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     // A usage-limit pause whose reset has passed ends here, before anything below would start a run.
     await step('usage', () => this.resumeIfDue(), false);
@@ -328,6 +331,36 @@ export class Coordinator extends Gardener {
       this.emit('console.message_queued', { ...who, id: q.id, by: q.by, text });
       this.writeLive();
     }
+  }
+
+  private liveCfg: LiveConfig | null = null;
+
+  /**
+   * Follow the default branch's config: fetch it, and when its config changed, swap the new one in whole (one
+   * assignment: every reader after it sees the new config) with the instance's settings over it. An invalid one is
+   * never applied: the last good one stays, recorded once (and raised as an incident when there's a watchdog).
+   */
+  refreshConfig(): void {
+    this.liveCfg ??= new LiveConfig({ repo: this.d.repo, remote: this.remote, branch: this.branch, ...(this.d.liveConfig?.tree !== undefined ? { tree: this.d.liveConfig.tree } : {}), ...(this.d.liveConfig?.check ? { check: this.d.liveConfig.check } : {}) });
+    spawnSync('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 60_000 });
+    const r = this.liveCfg.poll(this.repoCfg);
+    if (r.kind === 'same') return;
+    if (r.kind === 'invalid') {
+      const errors = r.errors.slice(0, 20).map((e) => `${e.file}${e.path ? ` at ${e.path}` : ''}: ${e.message}`.slice(0, 500));
+      this.emit('config.invalid', { sha: r.sha, errors });
+      this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch} at ${r.sha.slice(0, 8)} is invalid; running on the last good config: ${errors.join('; ').slice(0, 800)}`, `Fix ${BRAND.configDir}/ on ${this.branch}; it is applied on the next tick.`);
+      return;
+    }
+    if (r.kind === 'recovered') {
+      this.emit('config.recovered', { sha: r.sha });
+      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      return;
+    }
+    this.repoCfg = r.cfg;
+    this.d.cfg = this.d.settings ? applySettings(r.cfg, this.d.settings().settings) : r.cfg;
+    this.emit('config.applied', { sha: r.sha, changed: r.changed, restart_needed: r.restart });
+    this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+    if (r.restart.length) console.error(`restart needed: ${r.restart.map((s) => s.path).join(', ')} changed on ${this.branch}; running with the old values until a restart`);
   }
 
   refreshSettings(): void {
@@ -670,7 +703,7 @@ export class Coordinator extends Gardener {
       ...laneOf(issue),
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, this.answers(n)),
-      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'investigator'),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'investigator'),
       cwd: path,
       model,
       allowedTools: ['Read', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
@@ -720,7 +753,7 @@ export class Coordinator extends Gardener {
         role: 'evaluator-repro',
         stateDir: this.d.stateDir,
         prompt: issueBrief(issue, doneWhen),
-        appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-repro'),
+        appendSystemPrompt: rolePrompt(this.d.cfg, 'evaluator-repro'),
         cwd: path,
         model: role.model,
         allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'],
@@ -784,7 +817,7 @@ export class Coordinator extends Gardener {
       ...laneOf(issue),
       stateDir: this.d.stateDir,
       prompt: issueBrief(issue, doneWhen, extra),
-      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'worker'),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'worker'),
       cwd: path,
       model,
       route,
@@ -1082,7 +1115,7 @@ export class Coordinator extends Gardener {
             role: 'evaluator-verdict',
             stateDir: this.d.stateDir,
             prompt: issueBrief(issue, doneWhen, brief),
-            appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'evaluator-verdict'),
+            appendSystemPrompt: rolePrompt(this.d.cfg, 'evaluator-verdict'),
             cwd: path,
             model,
             allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],

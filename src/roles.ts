@@ -316,8 +316,13 @@ export function defaultRolePrompt(role: string): string {
   return DEFAULTS[role] ?? '';
 }
 
-export function rolePrompt(projectDir: string, role: string): string {
-  const custom = join(projectDir, 'roles', `${role}.md`);
+/**
+ * A role's prompt: the project's roles/<role>.md, else the engine default. A config read from the default branch
+ * carries its role prompts (`roles`, src/config/live.ts) and those are used; otherwise the file in `dir`.
+ */
+export function rolePrompt(project: string | { dir: string; roles?: Record<string, string> }, role: string): string {
+  if (typeof project !== 'string' && project.roles) return project.roles[role] ?? DEFAULTS[role] ?? '';
+  const custom = join(typeof project === 'string' ? project : project.dir, 'roles', `${role}.md`);
   return existsSync(custom) ? readFileSync(custom, 'utf8') : DEFAULTS[role] ?? '';
 }
 

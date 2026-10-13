@@ -233,6 +233,13 @@ export function policyViolations(cfg: Config, policy: PolicyFile): ConfigError[]
   return out;
 }
 
+/** What an instance requires of its repo's config beyond the schema: its own repo, and only tightening its policy. */
+export function instanceConfigProblems(config: Config, repo: string, policy: PolicyFile): ConfigError[] {
+  const errors: ConfigError[] = [];
+  if (config.project.project.repo !== repo) errors.push({ file: `${BRAND.configDir}/config.yaml`, path: 'project.repo', message: `${config.project.project.repo} is not the instance's repo ${repo}` });
+  return [...errors, ...policyViolations(config, policy)];
+}
+
 /** Load an instance and its repo config. Throws ConfigInvalid listing every problem, including any loosening. */
 export function loadInstance(instanceName: string, dir = instancesDir()): Instance {
   const home = join(dir, instanceName);
@@ -245,8 +252,7 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (errors.length || !inst || !policy || !credentials) throw new ConfigInvalid(errors);
   const repo = { ...inst.repos[0]!, path: resolve(home, inst.repos[0]!.path) };
   const config = loadConfig(repo.path);
-  if (config.project.project.repo !== repo.repo) errors.push({ file: `${BRAND.configDir}/config.yaml`, path: 'project.repo', message: `${config.project.project.repo} is not the instance's repo ${repo.repo}` });
-  errors.push(...policyViolations(config, policy));
+  errors.push(...instanceConfigProblems(config, repo.repo, policy));
   if (errors.length) throw new ConfigInvalid(errors);
   if (!inst.run_as && !policy.allow_same_user) {
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as', message: `agents must run as their own OS user: set run_as (agent_user, agent_home), or allow_same_user: true in policy.yaml to accept agents reading the coordinator's credentials` }]);

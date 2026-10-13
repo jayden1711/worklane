@@ -252,7 +252,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
       '',
       `Question: ${o.question}`,
     ].join('\n'),
-    appendSystemPrompt: rolePrompt(o.cfg.dir, 'chief_of_staff'),
+    appendSystemPrompt: rolePrompt(o.cfg, 'chief_of_staff'),
     cwd: o.repo,
     model,
     allowedTools: CHAT_TOOLS,

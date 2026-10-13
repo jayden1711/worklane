@@ -98,6 +98,19 @@ All config sits in `<project>/.worklane/` and is validated by zod schemas at sta
   checks/             # project-specific lints (e.g. a lint for unsafe reads of lagging external state)
 ```
 
+**The config follows the default branch** (`src/config/live.ts`). The coordinator's clone is never checked out again after it is made, so its working tree's `.worklane/` goes stale the moment a config change merges; it is never what runs. At start the coordinator fetches the default branch and loads `.worklane/` at `origin/<default_branch>` straight from git (`git show`), with the same schema and cross-checks (and, for an instance, the same "a repo may only tighten the policy" check); the checkout's copy is used only when that ref has no config or an invalid one, and the start-up says so. Then, first thing every tick, it fetches the default branch again and, when the `.worklane/` tree there changed, loads and validates it and swaps it in whole (one assignment, with the instance's settings applied over it): everything that reads the config reads the new one from then on, with no restart. That covers `required_checks` (PR readiness, the check of main after an auto-merge, the main watch's own list for anything other than judging a merge), `land_mode`, tests.yaml (runner commands, gates, `land.pr_batch` fast and full checks, worktree setup, pool size, env), review.yaml, guardrails.yaml, agents.yaml (roster, budgets, routing), owners, reports, and the role prompts in `roles/`, read at the same commit. A config that fails validation is never applied: the last good one keeps running, `config.invalid` records the commit and every error (once per bad tree), and the watchdog's incident (`config_invalid`) is raised when there is one; a valid config on the branch again records `config.recovered` (or `config.applied`) and resolves it. A config change is `config.applied`, with the sections that changed. Merges are still judged by the config at their own first parent (the main watch's `requiredAt`), not by the live one.
+
+Settings read once at start to build something that lives as long as the process need a restart: a change to one is applied for everything else, but that setting keeps its running value, and `config.applied` lists it under `restart_needed` (running and wanted values; the log says "restart needed" too). Never half-applied.
+
+| Live (next tick) | Restart only |
+|---|---|
+| `required_checks`, `owners`, `reports`, `hotspots`, `combined_check`, `conflicts`, `corrections`, `gardener`, `research`, `agent_runtime.run_windows` | `project.name` (service label, slots, state), `project.repo` (the token's scope), `project.default_branch` (the push guard and hooks) |
+| `land_mode: direct` to `pr` (a tightening) | `land_mode: pr` to `direct` (the start-up protection gate and the hooks that allow the land) |
+| agents.yaml, guardrails.yaml, review.yaml, deploy.yaml, app.yaml, `roles/*.md` | `backlog` (the backlog client), `agent_runtime.kind` (the agent runner) |
+| tests.yaml except the two on the right | `tests.worktree.root` (where worktrees and the pool live), `tests.test_run` (the sandbox set up and checked at start) |
+
+Instance-level files (`instance.yaml`, `credentials.yaml`, `intake.yaml`, ports and OS users) are not in the repo and are unaffected; `policy.yaml` is read on its own as before. Still read from the checkout: a review.yaml `money_path_source` file (a project file, not `.worklane/`), and the dashboard process's own copy of the config, loaded at its start.
+
 Precedence: engine defaults < project `.worklane/` < machine-local `~/.config/worklane/<repo>.yaml`. The local file holds things that differ per human: their GitHub token reference, their machine's slot cap, and their dashboard port. Secrets are never in YAML; config holds only env var names or keychain references.
 
 ### agents.yaml (example)
