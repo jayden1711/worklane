@@ -353,7 +353,7 @@ function coordinator(ops: string | undefined, now: () => Date) {
   mkdirSync(slotsDir);
   const posts: { where: string; text: string }[] = [];
   const src: IntakeSource = { name: 'discord', take: async () => [], reply: async (t, text) => (posts.push({ where: t.id, text }), true), openThread: async () => '1', watch: () => {} };
-  const config = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], ...(ops ? { ops_channel: ops } : {}) } });
+  const config = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], ...(ops ? { ops_channel: ops, dashboard_url: 'https://dash.example.test/' } : {}) } });
   const c = new Coordinator({
     cfg: loadConfig(repo),
     log,

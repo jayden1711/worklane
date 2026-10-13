@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { mayAnswer } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
+import { loadMoneyPaths } from '../review.js';
 import { intakeCaps, researchRepoAccess } from '../settings.js';
 import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
 import { redactPii } from '../intake/redact.js';
@@ -137,7 +138,8 @@ export abstract class Intake extends QuickReplies {
       // Only a message in an ideas channel (or a source with no threads) is ever a report: never a chat-channel one.
       const batch = inbound.filter((r) => !r.thread || r.thread.kind === 'channel');
       for (const r of batch) {
-        if (this.halt.signal.aborted || this.stopped) break;
+        // Paused on the usage limit: the report isn't taken (so not acknowledged); it comes again after the reset.
+        if (this.halt.signal.aborted || this.stopped || this.usagePause()) break;
         try {
           await this.intakeReport(cfg, r);
         } catch (e) {
@@ -194,14 +196,23 @@ export abstract class Intake extends QuickReplies {
     const got = acceptTriage(run.structured);
     if (!got.ok) return drop(`triage not accepted: ${got.why}`);
     const trusted = isTrusted(r.sender, cfg);
-    const action = intakeDecide({ report: r, redacted, triage: got.triage, trusted, shown });
+    const action = intakeDecide({ report: r, redacted, triage: got.triage, trusted, shown, moneyPaths: this.intakeMoneyPaths() });
     // A refused draft makes it needs_info, whatever kind the agent chose (decide.ts).
     const refused = action.action === 'reply' ? action.refused : undefined;
     this.emit('intake.triaged', { id, kind: refused ? 'needs_info' : got.triage.kind, reproduction: got.triage.reproduction?.result ?? null, ignored: got.dropped, ...(refused ? { draft_refused: refused.slice(0, 500) } : {}) });
-    await this.intakeAct(r, id, trusted, action, INTAKE_KIND_LABEL[got.triage.kind]);
+    await this.intakeAct(r, id, trusted, action);
   }
 
-  private async intakeAct(r: IncomingReport, id: string, trusted: boolean, a: IntakeAction, kindLabel: string | undefined): Promise<void> {
+  /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */
+  private intakeMoneyPaths(): RegExp[] {
+    try {
+      return loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source);
+    } catch {
+      return [];
+    }
+  }
+
+  private async intakeAct(r: IncomingReport, id: string, trusted: boolean, a: IntakeAction): Promise<void> {
     const owner = this.d.cfg.project.owners.default;
     switch (a.action) {
       case 'file': {
@@ -213,7 +224,7 @@ export abstract class Intake extends QuickReplies {
         // The draft waits in the coordinator's private state; the decision names only its report.
         ownerOnlyDir(join(this.d.stateDir, 'intake'));
         ownerOnlyDir(join(this.d.stateDir, 'intake', 'drafts'));
-        writeOwnerOnly(join(this.d.stateDir, 'intake', 'drafts', `${id}.json`), JSON.stringify({ title: a.title, body: a.body, labels: kindLabel ? [kindLabel] : [] }));
+        writeOwnerOnly(join(this.d.stateDir, 'intake', 'drafts', `${id}.json`), JSON.stringify({ title: a.title, body: a.body, labels: a.labels }));
         const decision = await this.ask('intake', null, owner, `File this report (via ${r.source}) as an issue: "${a.title.slice(0, 150)}"?`, a.options, 'approve', [`intake:${id}`, 'sender not trusted: approve files it ready, edit files it without ready, reject drops it']);
         this.emit('intake.awaiting', { id, decision });
         return;

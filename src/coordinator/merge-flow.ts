@@ -366,7 +366,7 @@ export abstract class MergeFlow extends FixRuns {
         }
       }
     }
-    if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
+    if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons, ...(d.auto ? {} : { why: d.why }) });
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
@@ -631,6 +631,7 @@ export abstract class MergeFlow extends FixRuns {
       ...(w.now ? { now: w.now } : {}),
       mode: (mode, detail) => this.emit('main_watch.mode', { mode, detail }),
       checked: (sha, how, number) => this.emit('main_watch.checked', { sha, how, number }),
+      accepted: (sha, number, a) => this.emit('main_watch.accepted', { sha, how: 'accepted', number, id: a.id, by: a.by, reason: a.reason.slice(0, 500) }),
       unaccounted: (o) => this.mainUnaccounted(o),
     });
     if (this.d.cfg.project.land_mode !== 'pr') return this.mainWatcher.off(`land_mode direct: the harness lands by pushing ${this.branch} itself`);

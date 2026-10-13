@@ -50,7 +50,8 @@ import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { Gardener } from './coordinator/gardener.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
-import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { resetWords } from './usage-limit.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
@@ -83,6 +84,8 @@ export class Coordinator extends Gardener {
     this.checkConsole();
     void this.checkChat();
     await step('settings', () => this.refreshSettings(), undefined);
+    // A usage-limit pause whose reset has passed ends here, before anything below would start a run.
+    await step('usage', () => this.resumeIfDue(), false);
     // Machine changes the dashboard recorded (it can't sudo; this unit can): src/coordinator/machine-requests.ts.
     await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
@@ -150,6 +153,8 @@ export class Coordinator extends Gardener {
     let used = 0;
     for (const e of this.events(n)) {
       if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
+      // A worker run the usage limit cut off (or a provider's limit sent to its fallback) wasn't an attempt at the task.
+      else if (e.type === 'usage.limit_hit' && (e.payload as { role: string }).role === 'worker') used = Math.max(0, used - 1);
       // A run resumed after research it asked for continues its attempt; it isn't another one.
       else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker' && !(e.payload as { resumed?: string }).resumed) used++;
     }
@@ -243,6 +248,8 @@ export class Coordinator extends Gardener {
       const role = this.d.cfg.agents.roles.chief_of_staff;
       if (role && !role.enabled) return refuse('the chat is off (agents.yaml roles.chief_of_staff)');
       if (this.halt.signal.aborted || this.stopped) return refuse('agents are stopped');
+      const paused = this.usagePause();
+      if (paused) return refuse(`paused on the Claude usage limit until ${resetWords(paused.resetAt, this.nowMs())}; it resumes on its own then`);
       const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
       if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
       const events = this.d.log.read();
@@ -337,6 +344,12 @@ export class Coordinator extends Gardener {
     if (this.stopped || this.halt.signal.aborted) return 0;
     const workers = this.d.cfg.agents.roles.workers;
     if (!workers?.enabled) return 0;
+    // Paused on the Claude usage limit: nothing starts until its reset (the tick's usage step ends the pause).
+    const paused = this.usagePause();
+    if (paused) {
+      this.noteHold({ reason: `paused on the Claude usage limit until ${paused.resetAt}`, load: null, freeDiskPct: null });
+      return 0;
+    }
     if (!inRunWindow(this.d.cfg.project.agent_runtime.run_windows, this.d.now?.() ?? new Date())) {
       this.noteHold({ reason: `outside the run windows (${this.d.cfg.project.agent_runtime.run_windows.map((w) => `${w.from}-${w.to}`).join(', ')})`, load: null, freeDiskPct: null });
       return 0;
@@ -626,6 +639,14 @@ export class Coordinator extends Gardener {
     } catch (e) {
       // Stopped from the console: the task waits for the owner, saying who stopped it.
       if (e instanceof StoppedByOwner) return await this.block(n, owner, e.message);
+      // The usage limit: requeued, not failed or blocked, with no attempt counted; dispatch holds until the reset.
+      if (e instanceof UsagePaused) {
+        this.releaseClaim(n, 'paused on the Claude usage limit; requeued');
+        await this.d.backlog.removeLabel(n, 'agent:working');
+        await this.d.backlog.addLabels(n, ['ready']);
+        await this.d.backlog.comment(n, `[${BRAND.cli}] Paused on the Claude usage limit until ${resetWords(e.resetAt, this.nowMs())}: requeued, and it starts again on its own after the reset. Nothing to do.`);
+        return;
+      }
       if (!(e instanceof Halted)) throw e;
       // Requeued: the task starts over once the stop is lifted.
       this.releaseClaim(n, 'emergency stop');

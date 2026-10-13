@@ -4,10 +4,10 @@
 // repo, so no agent can read who is trusted or change it. See docs/intake.md.
 import { z } from 'zod';
 
-export const SOURCES = ['discord', 'bug-store'] as const;
+export const SOURCES = ['discord', 'bug-store', 'alerts'] as const;
 export type Source = (typeof SOURCES)[number];
 
-/** Who sent it, as the source identifies them: a Discord user id, or a store row's reporter id. */
+/** Who sent it, as the source identifies them: a Discord user id, a store row's reporter id, or an alert's kind. */
 export interface Sender {
   source: Source;
   id: string;
@@ -93,6 +93,8 @@ export const IntakeConfig = z.strictObject({
     .strictObject({
       discord: z.array(snowflake('user')).default([]),
       'bug-store': z.array(z.string().min(1)).default([]),
+      /** Production alert kinds whose reports are filed `ready`; every other kind's draft is an Inbox decision. */
+      alerts: z.array(z.string().min(1)).default([]),
     })
     .prefault({}),
   /** One server only: messages from any other server, and every direct message, are dropped unstored. */
@@ -122,8 +124,12 @@ export const IntakeConfig = z.strictObject({
        */
       asks_channel: snowflake('channel').optional(),
       /**
-       * The ops channel: where the weekly trust digest (src/trust.ts) is posted, once a week, as a plain message. The
-       * bot only posts there, never reads it, so several instances may share it. Absent: no digest is posted.
+       * The ops channel, posted to only (the bot never reads it, so several instances may share it):
+       * - the machine's watchdog posts each incident here (a service down, an update rolled back, a login failing, a
+       *   full disk...), once when it opens and once when it is resolved, each linking to its place on the
+       *   dashboard's Health page (src/watchdog/); only one coordinator on the machine posts;
+       * - the weekly trust digest (src/trust.ts), once a week, as a plain message.
+       * It needs `dashboard_url` (the incident posts link to the Health page). Absent: neither is posted from here.
        */
       ops_channel: snowflake('channel').optional(),
       /**
@@ -157,12 +163,43 @@ export const IntakeConfig = z.strictObject({
     .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
     .refine((d) => !d.chat_channels.some((c) => d.channels.includes(c) || c === d.asks_channel), { message: 'a chat channel must not also be an ideas channel (discord.channels) or the asks channel', path: ['chat_channels'] })
     .refine((d) => !d.asks_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.asks_channel (posts link to it)', path: ['dashboard_url'] })
+    .refine((d) => !d.ops_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.ops_channel (incident posts link to the Health page)', path: ['dashboard_url'] })
     .prefault({}),
   'bug-store': z
     .strictObject({
       enabled: z.boolean().default(false),
       /** A fixed read-only SELECT returning id, reporter, text, created_at, newer than :after. */
       query: z.string().min(1).optional(),
+    })
+    .prefault({}),
+  /**
+   * Production alerts (src/intake/alerts.ts): a second fixed read-only query on the production read path, through the
+   * same read-only role and the owner's credential as the bug store. A kind never seen before, or more than
+   * `spike.threshold` rows of one kind within `spike.window_minutes`, becomes a report. Off by default; it also needs
+   * deploy.yaml prod_read, and the read-only role granted SELECT on the table.
+   */
+  alerts: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      /** The table (or view), `name` or `schema.name`: plain identifiers only. */
+      table: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}(?:\.[A-Za-z_][A-Za-z0-9_]{0,62})?$/, 'a table name (plain identifiers, optionally schema.table)').default('alerts'),
+      /** Its columns: an increasing integer id, the alert's kind, its message and when it was raised. */
+      columns: z
+        .strictObject({
+          id: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default('id'),
+          kind: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default('kind'),
+          message: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default('message'),
+          created_at: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default('created_at'),
+        })
+        .prefault({}),
+      /** Rows per pull. */
+      batch: z.number().int().min(1).max(10_000).default(500),
+      spike: z
+        .strictObject({
+          threshold: z.number().int().min(1).max(100_000).default(20),
+          window_minutes: z.number().int().min(1).max(10_080).default(60),
+        })
+        .prefault({}),
     })
     .prefault({}),
   /**
