@@ -135,6 +135,107 @@ jobs:
           worklane --version
           worklane demo "$RUNNER_TEMP/demo"
 
+  bootstrap-windows:
+    # Windows' documented route, local mode inside WSL2 (Ubuntu 24.04, systemd on), end to end as the bootstrap job
+    # runs it: this commit's engine packed on the Windows side, then in a fresh distro, as a plain user, the bootstrap
+    # (which fetches its own Node; nothing of ours is preinstalled), init's checklist, doctor green and naming the OS as
+    # WSL, `worklane up` / `down` as a systemd --user unit, and the demo. No GitHub: the same stand-ins. Not a
+    # required check, and not one of the updater's checks (the owner decides). WSL setup: Vampire/setup-wsl
+    # (Apache-2.0), used as an action, nothing copied. #214 (closed) explored the Windows side.
+    name: bootstrap (windows-wsl)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: pack this commit's engine (on the Windows side; WSL gets only the tarball)
+        shell: bash
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build && npm run build:web
+          npm pack --pack-destination "$RUNNER_TEMP" > /dev/null
+          ls "$RUNNER_TEMP"/*.tgz
+      - name: WSL2, Ubuntu 24.04, systemd on
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: xz-utils
+          wsl-conf: |
+            [boot]
+            systemd=true
+      - name: a plain user to install as (local mode runs as you), with a systemd --user manager
+        run: |
+          [ "$(ps -p 1 -o comm=)" = systemd ] || { echo "PID 1 is $(ps -p 1 -o comm=), not systemd" >&2; exit 1; }
+          uname -r; grep -i microsoft /proc/version
+          useradd -m -s /bin/bash wl
+          loginctl enable-linger wl
+          for _ in $(seq 30); do systemctl is-active --quiet user@"$(id -u wl)".service && break; sleep 1; done
+          systemctl is-active user@"$(id -u wl)".service
+      - name: run the next steps as that user
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-shell-user: wl
+      - name: no GitHub from here on (a stand-in gh, signed in, that reaches nothing; a stand-in claude, signed in)
+        run: |
+          ws="$(wslpath -u '${{ github.workspace }}')"
+          mkdir -p "$HOME/stand-ins" && cp "$ws"/scripts/ci/stand-ins/* "$HOME/stand-ins/" && chmod 0755 "$HOME"/stand-ins/*
+          cp "$(wslpath -u '${{ runner.temp }}')"/*.tgz "$HOME/"
+          {
+            echo "export PATH=\"\$HOME/stand-ins:\$HOME/.local/bin:\$PATH\""
+            echo "export XDG_RUNTIME_DIR=/run/user/$(id -u)"
+            echo "export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus"
+            echo "export WS=$ws"
+          } > "$HOME/ci.env"
+          . "$HOME/ci.env"
+          if command -v node; then echo "node is already here; the bootstrap must fetch its own" >&2; exit 1; fi
+      - name: bootstrap in local mode, twice
+        run: |
+          . "$HOME/ci.env"
+          ex="$HOME/example"
+          cp -r "$WS/examples/basic" "$ex" && git -C "$ex" init -q
+          git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
+          tgz="$(ls "$HOME"/*.tgz)"
+          bash "$WS/scripts/bootstrap.sh" --dry-run --mode local --engine "$tgz" "$ex"
+          bash "$WS/scripts/bootstrap.sh" --mode local --yes --engine "$tgz" "$ex" | tee "$HOME/first.log"
+          [ "$(grep -cE '^   done: ' "$HOME/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
+          grep -q 'all 6 steps done or skipped' "$HOME/first.log"
+          bash "$WS/scripts/bootstrap.sh" --engine "$tgz" "$ex" < /dev/null | tee "$HOME/second.log"
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$HOME/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          grep -q 'no --mode, and no terminal to ask on: local mode' "$HOME/second.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$HOME/second.log"
+      - name: doctor shows the checklist, the OS as WSL, and what local mode can't do
+        run: |
+          . "$HOME/ci.env"
+          worklane doctor --root "$HOME/example" | tee "$HOME/doctor.log"
+          for id in tools claude github repo-config protection discord; do grep -Eq "^ok +setup $id: " "$HOME/doctor.log"; done
+          grep -Eq '^ok +os: windows-wsl$' "$HOME/doctor.log"
+          grep -Eq '^off +not in local mode: separate OS users: ' "$HOME/doctor.log"
+          grep -Eq '^off +not in local mode: root-run add-project: ' "$HOME/doctor.log"
+      - name: the coordinator as a systemd --user service (worklane up, then down)
+        run: |
+          . "$HOME/ci.env"
+          label=dev.worklane.example-shop
+          unit="$HOME/.config/systemd/user/$label.service"
+          worklane up --root "$HOME/example"
+          test -f "$unit"
+          systemctl --user is-enabled "$label.service"
+          systemctl --user status "$label.service" --no-pager | head -n 20 || true
+          worklane down --root "$HOME/example"
+          if [ -e "$unit" ]; then echo "down left $unit" >&2; exit 1; fi
+          if systemctl --user is-enabled "$label.service" > /dev/null 2>&1; then echo "down left $label enabled" >&2; exit 1; fi
+      - name: the demo, from the installed package
+        run: |
+          . "$HOME/ci.env"
+          worklane --version
+          worklane demo "$HOME/demo"
+
   testrun-real-systemd:
     # The test-run sandbox on a real host, no mocks: test-user.sh install (rootless Docker, the helper, its check),
     # then the coordinator's own sandbox host, as the coordinator user through its real sudoers rule, against real
