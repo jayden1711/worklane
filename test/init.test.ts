@@ -16,7 +16,7 @@ import { doctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
-import { toolPlatform, which } from '../src/os/index.js';
+import { launchdUnload, toolPlatform, which } from '../src/os/index.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX tools (tar, sh)';
@@ -346,4 +346,25 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   const out = spawnSync(process.execPath, [engineCli, 'doctor', '--root', root], { encoding: 'utf8', env: { ...env, STANDIN_SIGNED_OUT: '1' } });
   assert.equal(out.status, 1);
   assert.match(out.stdout, /^FAIL {2}setup claude: Claude login \(local mode\): not signed in/m);
+});
+
+test("down on a Mac: launchd still listing the agent after bootout (as on the macOS runner) is waited out, booted out again by its plist, and never reported gone while it isn't", () => {
+  const calls: string[] = [];
+  // Listed for the first 6 looks after the first bootout, then gone.
+  let looks = 0;
+  const lingering = (args: string[]) => {
+    calls.push(args.join(' '));
+    if (args[0] === 'print') return looks++ < 7;
+    return true;
+  };
+  assert.equal(launchdUnload('dev.x.shop', '/p/dev.x.shop.plist', { uid: 501, run: lingering, sleep: () => {} }), true);
+  assert.equal(calls[1], 'bootout gui/501/dev.x.shop');
+  assert.ok(calls.includes('bootout gui/501 /p/dev.x.shop.plist'), 'booted out again by its plist');
+  assert.equal(calls.filter((c) => c.startsWith('bootout')).length, 2);
+  // Never unloads: false (down then says so), after the wait.
+  assert.equal(launchdUnload('dev.x.shop', '/p', { uid: 501, run: (a) => a[0] === 'print' || true, sleep: () => {}, waitMs: 2000 }), false);
+  // Not loaded at all: nothing to do.
+  const none: string[] = [];
+  assert.equal(launchdUnload('dev.x.shop', '/p', { uid: 501, run: (a) => (none.push(a[0]!), a[0] !== 'print'), sleep: () => {} }), true);
+  assert.deepEqual(none, ['print']);
 });
