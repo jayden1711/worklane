@@ -272,6 +272,9 @@ jobs:
           sudo install -m 0755 "$(command -v node)" /usr/local/bin/node
           sudo bash scripts/setup/machine.sh
           sha="$(git rev-parse HEAD)"
+          # The runner's /opt is open to all (0777); on a server it is root's 0755, and the machine helper refuses to run
+          # add-project.sh from under a directory anyone may write.
+          sudo chmod 0755 /opt
           sudo install -d -m 0755 /opt/worklane
           sudo cp -a "$GITHUB_WORKSPACE" "/opt/worklane/$sha"
           sudo chown -R root:root "/opt/worklane/$sha" && sudo chmod -R a+rX,go-w "/opt/worklane/$sha"
