@@ -549,3 +549,13 @@ test('regression: an instance\'s state dir and its runs are root:<its test user>
   assert.match(helper, /install -d -o root -g "\$user" -m 0710 "\$root\/runs"/);
   assert.doesNotMatch(sh + helper, /-m 0711 "\$root/, 'no state dir is 0711 any more');
 });
+
+test('regression: install restarts the test Docker unit when its unit changed or it runs in the old cgroup layout, never under a run', { skip: !posix && 'bash' }, () => {
+  // enable --now left an already-running dockerd in the old layout after #247, and check failed until a manual restart.
+  const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
+  const install = sh.slice(sh.indexOf('install_cmd() {'), sh.indexOf('\n}\n', sh.indexOf('install_cmd() {')));
+  assert.match(sh, /if cmp -s "\$tmp" "\/etc\/systemd\/system\/\$file"; then put_changed=0; else put_changed=1; fi/, 'put knows whether a unit changed');
+  assert.match(install, /docker_changed="\$put_changed"/);
+  assert.match(install, /\[ "\$docker_changed" = 1 \] \|\| ! docker_layout_ok/, 'a changed unit, or a daemon outside <unit>\/daemon, means a restart');
+  assert.match(install, /busy="\$\(active_runs\)"[\s\S]*?test runs of \$name are in progress[\s\S]*?exit 1[\s\S]*?systemctl restart "\$docker_unit_name"/, 'it refuses while runs are in progress, and restarts otherwise');
+});
