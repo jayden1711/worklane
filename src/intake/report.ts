@@ -124,8 +124,12 @@ export const IntakeConfig = z.strictObject({
        */
       asks_channel: snowflake('channel').optional(),
       /**
-       * The ops channel: where the weekly trust digest (src/trust.ts) is posted, once a week, as a plain message. The
-       * bot only posts there, never reads it, so several instances may share it. Absent: no digest is posted.
+       * The ops channel, posted to only (the bot never reads it, so several instances may share it):
+       * - the machine's watchdog posts each incident here (a service down, an update rolled back, a login failing, a
+       *   full disk...), once when it opens and once when it is resolved, each linking to its place on the
+       *   dashboard's Health page (src/watchdog/); only one coordinator on the machine posts;
+       * - the weekly trust digest (src/trust.ts), once a week, as a plain message.
+       * It needs `dashboard_url` (the incident posts link to the Health page). Absent: neither is posted from here.
        */
       ops_channel: snowflake('channel').optional(),
       /**
@@ -159,6 +163,7 @@ export const IntakeConfig = z.strictObject({
     .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
     .refine((d) => !d.chat_channels.some((c) => d.channels.includes(c) || c === d.asks_channel), { message: 'a chat channel must not also be an ideas channel (discord.channels) or the asks channel', path: ['chat_channels'] })
     .refine((d) => !d.asks_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.asks_channel (posts link to it)', path: ['dashboard_url'] })
+    .refine((d) => !d.ops_channel || d.dashboard_url, { message: 'discord.dashboard_url is required with discord.ops_channel (incident posts link to the Health page)', path: ['dashboard_url'] })
     .prefault({}),
   'bug-store': z
     .strictObject({

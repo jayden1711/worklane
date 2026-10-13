@@ -20,6 +20,7 @@ import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFi
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
+import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { trustForViewer, trustView } from '../src/trust.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
 
@@ -69,7 +70,9 @@ interface Render {
   renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], now?: number): string;
   renderBoardTestRuns(boards: { name: string | null; data: unknown; error: string | null }[]): string;
   renderTestRuns(data: unknown, compact?: boolean): string;
-  renderInstances(hub: unknown, current: string, all?: boolean): string;
+  renderInstances(hub: unknown, current: string, all?: boolean, status?: Record<string, string>): string;
+  renderHealthPage(all: unknown[], target?: string): string;
+  loadIncidents(hub: unknown, get: (name: string | null, path: string) => Promise<unknown>): Promise<unknown[]>;
   scopeOf(hub: unknown, saved: string | null, all: boolean): { current: string | null; all: boolean; instances: (string | null)[] };
   loadBoards(scope: unknown, get: (instance: string | null, path: string) => Promise<unknown>): Promise<{ name: string | null; data: unknown; error: string | null }[]>;
   onInstance(instance: string | null, path: string, init: unknown, scope: Promise<unknown>): Promise<unknown>;
@@ -1300,6 +1303,56 @@ test("two instances on one machine: with one selected, no page shows any of the 
   } finally {
     for (const d of Object.values(servers)) await d.close();
   }
+});
+
+test('Health: open incidents with what broke, since when, what was tried and the fix; resolved ones folded into a history; a viewer sees no detail; each instance has its dot', async () => {
+  const slots = mkdtempSync(join(tmpdir(), 'web-render-incidents-'));
+  const now = new Date();
+  const hour = (h: number) => new Date(now.getTime() - h * 3600_000);
+  const down = raiseIncident('unit_down', 'svc-demo.service', 'instance demo\'s coordinator is failed', 'start it: sudo systemctl start svc-demo.service', { dir: slots, instance: 'demo', tried: ['systemd restarted it 5 times before giving up'], now: hour(2) }).incident;
+  const disk = raiseIncident('disk_full', '/srv', 'the volume holding /srv is 91% full', 'free space on that volume', { dir: slots, now: hour(1) }).incident;
+  const old = raiseIncident('github_auth', 'demo', 'GitHub refused the token', 'check the App', { dir: slots, instance: 'demo', now: hour(30) }).incident;
+  resolveIncident('github_auth', 'demo', { dir: slots, now: hour(29) });
+  const { dir: root } = exampleProject();
+  const stateDir = mkdtempSync(join(tmpdir(), 'web-render-incidents-state-'));
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: slots, instance: 'demo' });
+  try {
+    const as = (login: string) => async (_name: string | null, path: string) => (await fetch(`${d.url.split('/?')[0]}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(login) } })).json();
+    const hub = { instances: [{ name: 'demo', up: true, error: null }, { name: 'gone', up: false, error: 'down' }] };
+    const owner = r.renderHealthPage(await r.loadIncidents(hub, as('example-owner')), disk.id);
+    // Open, oldest first, each anchored for the ops channel's link; the linked one marked.
+    assert.ok(owner.indexOf(`id="incident-${down.id}"`) >= 0 && owner.indexOf(`id="incident-${down.id}"`) < owner.indexOf(`id="incident-${disk.id}"`), 'open incidents, oldest first, each anchored');
+    assert.match(owner, new RegExp(`id="incident-${disk.id}"[^>]*data-targeted="true"`), 'the linked incident is marked');
+    assert.match(owner, /data-testid="incident-detail"[^>]*>instance demo&#x27;s coordinator is failed/);
+    assert.match(owner, /data-testid="incident-tried"[^>]*>systemd restarted it 5 times before giving up/);
+    assert.match(owner, /data-testid="incident-fix"[^>]*>start it: sudo systemctl start svc-demo.service/);
+    assert.match(owner, /data-testid="incident-since"[^>]*>since 2h ago/);
+    assert.match(owner, /machine/, 'a machine-wide incident says so');
+    // Resolved: folded (a closed <details>), unless the link points into it.
+    assert.match(owner, /<details[^>]*data-testid="incident-history"(?![^>]*open)/, 'the history is folded');
+    assert.match(owner, new RegExp(`id="incident-${old.id}"[^>]*data-testid="incident-resolved"`));
+    assert.match(r.renderHealthPage(await r.loadIncidents(hub, as('example-owner')), old.id), /<details[^>]*open=""[^>]*data-testid="incident-history"|<details[^>]*data-testid="incident-history"[^>]*open=""/, 'a link to a resolved incident opens the history');
+    // Each instance's dot: red here (an open red incident), red for one not answering.
+    assert.match(owner, /data-status="red"[^>]*data-testid="health-instance-dot"[\s\S]*demo/);
+    assert.match(owner, /gone<span[^>]*>not readable/);
+    // A viewer: that it broke, where and since when; never the detail, what was tried or the fix.
+    const viewer = r.renderHealthPage(await r.loadIncidents(hub, as('someone-else')));
+    assert.match(viewer, /A service is down/);
+    assert.match(viewer, /data-testid="incident-detail-hidden"/);
+    for (const secretish of ['coordinator is failed', 'systemctl start', '91% full', 'restarted it']) assert.ok(!viewer.includes(secretish), `a viewer doesn't see "${secretish}"`);
+    // Nothing open: says so.
+    resolveIncident('unit_down', 'svc-demo.service', { dir: slots });
+    resolveIncident('disk_full', '/srv', { dir: slots });
+    const clear = r.renderHealthPage(await r.loadIncidents({ instances: [{ name: 'demo', up: true, error: null }] }, as('example-owner')));
+    assert.match(clear, /data-testid="health-all-clear"/);
+    assert.match(clear, /data-status="green"/);
+  } finally {
+    await d.close();
+  }
+  // The sidebar: each instance's row has its status dot; one that isn't answering is red.
+  const nav = r.renderInstances({ instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: true, error: null }, { name: 'c', up: true, error: null }, { name: 'd', up: false, error: 'down' }] }, 'a', false, { a: 'green', b: 'amber', c: 'red', d: 'green' });
+  const dots = [...nav.matchAll(/data-status="(\w+)"[^>]*data-testid="instance-dot"/g)].map((m) => m[1]);
+  assert.deepEqual(dots, ['green', 'amber', 'red', 'red']);
 });
 
 test('the trust panel: the recommendation and its rules, each figure over 7 and 30 days, each area with its advice and verification time; a viewer gets the allowlisted figures only, never cost', () => {
