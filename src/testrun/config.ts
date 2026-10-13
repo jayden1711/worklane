@@ -74,11 +74,20 @@ export const TestRunShared = z.strictObject({
 });
 export type TestRunShared = z.infer<typeof TestRunShared>;
 
+/** test_run.database.max_connections: its bounds (the sandbox helper checks the same) and default. */
+export const MAX_CONNECTIONS = { min: 20, max: 2000, default: 200 } as const;
+
 export const TestRunDatabase = z.strictObject({
   image: z.string().regex(PINNED_IMAGE, 'an image pinned to its digest: <name>[:<tag>]@sha256:<64 hex>'),
   /** The database the run's DATABASE_URL names. */
   name: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/, 'a lowercase database name').default('test'),
   ready_timeout_s: z.number().int().min(5).max(600).default(60),
+  /**
+   * Postgres's max_connections. Size it as the run's parallel lanes x (each lane's pool + its ORM's own
+   * connections) + headroom (psql, migrations, superuser slots): 22 lanes x (8 + 2) + 20 = 240. The image's 100
+   * runs out ("sorry, too many clients already") well before that.
+   */
+  max_connections: z.number().int().min(MAX_CONNECTIONS.min).max(MAX_CONNECTIONS.max).default(MAX_CONNECTIONS.default),
 });
 
 export const TestRunConfig = z

@@ -81,6 +81,11 @@ export interface CoordinatorDeps {
    * doesn't protect the default branch; off). Absent: no watch (no GitHub, e.g. a file backlog).
    */
   mainWatch?: { api: MainWatchApi; setting?: () => 'auto' | 'off'; now?: () => number };
+  /**
+   * The default branch's protection, as the main watch asks it (src/direct-land.ts): land_mode direct pushes nothing
+   * unless GitHub enforces it, asked again before every direct land. Absent: only a remote that is a local path lands.
+   */
+  protection?: Pick<MainWatchApi, 'protection'>;
   /** A person's role on the repo, from their permission (dashboard-auth.ts): whose PRs get the full run. Absent: nobody's. */
   roleOf?: RoleOf;
 }

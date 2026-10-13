@@ -214,7 +214,7 @@ export interface State {
   /** Absent for a viewer (the budget, spend and agent runs are the owners' and writers'). */
   budget?: number;
   /** A viewer gets the counts only (cap, running), not which agents hold the slots. */
-  slots: { cap: number; running: number; agents?: { slot: string; owner: string; pid: number; acquiredAt: string }[]; fullRun?: { owner: string; acquiredAt: string } | null };
+  slots: { cap: number; running: number; agents?: SlotHolder[]; fullRun?: { owner: string; acquiredAt: string; elsewhere?: true } | null };
   lastId: number;
   tasks: Task[];
   decisions: Decision[];
@@ -383,6 +383,7 @@ export async function signOut(): Promise<void> {
   await fetch('/auth/logout', { method: 'POST', headers: await authHeaders(), body: '{}' }).catch(() => undefined);
   try {
     sessionStorage.removeItem('dash-instance');
+    sessionStorage.removeItem('dash-all-instances');
   } catch {
     // nothing kept
   }
@@ -405,22 +406,48 @@ export function probeHub(servedByHub: boolean, get: typeof fetch = fetch, auth =
 }
 export const hub: Promise<HubInfo | null> = inBrowser ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null);
 
-/** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
-export const hubInstance: Promise<string | null> = hub.then((h) => {
-  if (!h?.instances.length) return null;
-  let saved: string | null = null;
+/**
+ * Which instances a hub page reads: the selected one, or every instance this person has a role on when they
+ * chose "All instances" in the switcher (off unless chosen). `instances` is what pages that can show several
+ * instances read, labelled; every other page reads `current` only. Off a hub: this page's own server (null).
+ */
+export interface InstanceScope {
+  current: string | null;
+  all: boolean;
+  instances: (string | null)[];
+}
+/** The scope from the hub's list (only instances with a role on them), the instance picked last and the All choice. */
+export function scopeOf(h: HubInfo | null, saved: string | null, all: boolean): InstanceScope {
+  if (!h?.instances.length) return { current: null, all: false, instances: [null] };
+  const current = h.instances.find((i) => i.name === saved)?.name ?? h.instances.find((i) => i.up)?.name ?? h.instances[0]!.name;
+  const every = all && h.instances.length > 1;
+  return { current, all: every, instances: every ? h.instances.map((i) => i.name) : [current] };
+}
+const saved = (key: string): string | null => {
   try {
-    saved = sessionStorage.getItem('dash-instance');
+    return sessionStorage.getItem(key);
   } catch {
-    // no storage: the default
+    return null; // no storage: the default
   }
-  return h.instances.find((i) => i.name === saved)?.name ?? h.instances.find((i) => i.up)?.name ?? h.instances[0]!.name;
-});
+};
+export const instanceScope: Promise<InstanceScope> = hub.then((h) => scopeOf(h, saved('dash-instance'), saved('dash-all-instances') === '1'));
+/** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
+export const hubInstance: Promise<string | null> = instanceScope.then((s) => s.current);
 
-/** Show another instance (hub only): everything reloads from that instance's own server. */
+/** Show another instance (hub only), and only it: everything reloads from that instance's own server. */
 export function selectInstance(name: string) {
   try {
     sessionStorage.setItem('dash-instance', name);
+    sessionStorage.removeItem('dash-all-instances');
+  } catch {
+    // no storage: this tab can't switch
+  }
+  window.location.reload();
+}
+/** "All instances" (hub only): the Board and its test runs show every instance this person has a role on, labelled. */
+export function selectAllInstances() {
+  try {
+    sessionStorage.setItem('dash-all-instances', '1');
   } catch {
     // no storage: this tab can't switch
   }
@@ -639,6 +666,15 @@ export interface BoardBatch {
   detail?: string;
 }
 
+/** An agent slot's holder; another instance's (or a job's) is `elsewhere`, with no owner or pid (src/dashboard.ts ownHolders). */
+export interface SlotHolder {
+  slot: string;
+  owner: string;
+  pid?: number;
+  acquiredAt: string;
+  elsewhere?: true;
+}
+
 /** The Board (GET /api/board, src/board.ts): one instance's tasks in flight by stage, with what this person may do on each. */
 export type BoardColumn = 'planning' | 'building' | 'verifying' | 'waiting' | 'landing';
 export interface BoardCard {
@@ -675,7 +711,18 @@ export interface BoardData {
   batches?: BoardBatch[];
 }
 
-/** A call to one instance: through the hub to the named one (`/api/i/<name>/...`), or this page's own server (null). */
-export const onInstance = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
-/** A stream's URL on one instance: through the hub to the named one, or this page's own server (null). */
-export const instanceStream = async (instance: string | null, path: string) => streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));
+/**
+ * A call to one instance in this page's scope: through the hub to the named one (`/api/i/<name>/...`), or the
+ * instance this page shows (null: the selected one on a hub, else this page's own server). An instance outside the scope (not the selected one, unless "All instances" is on) is
+ * refused before anything is asked, so no page can show another instance's data by mistake.
+ */
+export async function onInstance<T>(instance: string | null, path: string, init: RequestInit = {}, scope: Promise<InstanceScope> = instanceScope): Promise<T> {
+  const s = await scope;
+  if (instance !== null && !s.instances.includes(instance)) throw new Error(`instance ${instance} isn't selected: choose it, or All instances, in the switcher`);
+  return instance ? instanceApi<T>(instance, path, init) : api<T>(path, init);
+}
+/** A stream's URL on one instance in this page's scope (as onInstance): through the hub to the named one, or this page's own server (null). */
+export async function instanceStream(instance: string | null, path: string, scope: Promise<InstanceScope> = instanceScope): Promise<string> {
+  if (instance !== null && !(await scope).instances.includes(instance)) throw new Error(`instance ${instance} isn't selected`);
+  return streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));
+}

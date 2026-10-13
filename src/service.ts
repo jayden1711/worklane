@@ -35,6 +35,7 @@ import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
 import { GitHubMainWatchApi } from './github/main-watch-api.js';
+import { directLandStartGate, localRemote, type Protection } from './direct-land.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
 export const INSTANCE_UMASK = 0o007;
@@ -178,8 +179,10 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const intake = () => intakeForInstance({ home: i.home, repo: i.repo.repo, tokenFile: i.credentials.intake?.discord_token, githubToken: tokens, githubApi: githubApi() });
   // The main watch (GitHub only), and whose PRs get the full run: both from repo permissions, read with the instance's own token.
   const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
-  const mainWatch = i.config.project.backlog === 'github' ? { api: new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi()), setting: () => loadInstance(name).policy.main_watch } : undefined;
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  const watchApi = new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi());
+  const mainWatch = i.config.project.backlog === 'github' ? { api: watchApi, setting: () => loadInstance(name).policy.main_watch } : undefined;
+  // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
+  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
@@ -194,10 +197,13 @@ export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?
     console.error(`coordinator not started: ${gate}`);
     return Promise.resolve(1);
   }
-  return runSite(siteForRoot(root), opts);
+  const site = siteForRoot(root);
+  // A remote on GitHub: its protection, asked with the gh login (direct-land.ts); a local path has none to ask.
+  const protection = localRemote(root, 'origin') ? undefined : new GitHubMainWatchApi(site.cfg.project.project.repo, async () => execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15_000 }).trim(), fetch, githubApi());
+  return runSite(site, { ...opts, label: 'coordinator', ...(protection ? { protection } : {}) });
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch'] }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; protection?: Protection; label?: string }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -210,13 +216,21 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   // Before anything reads or writes it: state/ as this engine keeps it, whatever an older engine left.
   const tidied = tidyState(state, agentTasks ? { agentTasksDir: agentTasks.dir } : {});
   const log = new EventLog(site.logPath);
+  // land_mode direct pushes the default branch itself: never on a branch GitHub doesn't protect (direct-land.ts).
+  const refused = await directLandStartGate({ landMode: cfg.project.land_mode, api: opts.protection, local: localRemote(root, 'origin'), repo: cfg.project.project.repo, branch: cfg.project.project.default_branch, label: opts.label ?? 'coordinator', log, actor: instanceId() });
+  if (refused) {
+    console.error(refused);
+    log.close();
+    lock.lock.release();
+    return 1;
+  }
   // Intake connects only once this process holds the instance's lock: never a second bot for one instance.
   const intake = opts.intake?.() ?? null;
   // The same instance root keeps its dependency cache, in the group its agents share.
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
   // The coordinator's own test runs of every PR (tests.yaml test_run), once the sandbox's check passed.
   const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.protection ? { protection: opts.protection } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());

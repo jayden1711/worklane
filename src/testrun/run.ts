@@ -126,7 +126,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     const caches = await cacheDirs(d.config.caches, d.repo, req.sha, (n, k) => d.host.cache(n, k));
     for (const s of d.config.shared) caches[s.env] = await d.host.shared(s.name);
     let db: RunDatabase | null = null;
-    if (d.config.database && tiers.some((t) => t.database)) db = await d.host.startDb(id, { image: d.config.database.image, name: d.config.database.name, readyS: d.config.database.ready_timeout_s });
+    if (d.config.database && tiers.some((t) => t.database)) db = await d.host.startDb(id, { image: d.config.database.image, name: d.config.database.name, readyS: d.config.database.ready_timeout_s, maxConnections: d.config.database.max_connections });
     const baseEnv = runEnv(d.config.env, caches, null);
     const dbEnv = runEnv(d.config.env, caches, db);
     mkdirSync(join(d.logDir, id), { recursive: true, mode: 0o700 });

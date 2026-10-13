@@ -15,6 +15,7 @@ import { defaultAgentPath, homeOf, homesRoot, stateDir, userExists } from './os/
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
+import { CHAT_KEY_GLOBS, CHAT_LANE, CHAT_ROOT_ENV } from './intake/chat.js';
 import { fileURLToPath } from 'node:url';
 
 /** The engine's CLI, for hooks a lane adds itself (dist/src/cli.js beside this file). */
@@ -375,6 +376,8 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
 export interface ResearchLaneSettings {
   permissions: { deny: string[] };
   hooks?: object;
+  /** Pinned for the run's hooks (the chat lane's root). */
+  env?: Record<string, string>;
   sandbox?: ReturnType<typeof sandboxSettings>['sandbox'];
 }
 
@@ -399,10 +402,16 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
     const hooks = hook ? { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `${RESEARCH_ROOT_ENV}=${JSON.stringify(researchRoot)} node ${JSON.stringify(ENGINE_CLI)} hook pre-tool-use || exit 2`, timeout: 30 }] }] } } : {};
     return { ...(i.policy.sandbox ? { sandbox: s.sandbox } : {}), permissions: { deny }, ...hooks };
   };
+  // The chat channels' lane: the checkout read-only, like research-repo, under the instance's own guardrail hooks,
+  // whose chat mode (CHAT_ROOT_ENV, pinned here) refuses anything outside the checkout and every credential, key and
+  // .env file; the instance's other directories and key-like files are denied to Read, Glob and Grep here too.
+  const chat = settingsFor([...always, join(root, 'tasks'), join(root, 'chat'), researchRoot], false);
+  const keyRules = CHAT_KEY_GLOBS.map((g) => `Read(${g})`);
   return {
     // Its own hook, in research mode: the instance's guardrail hooks would refuse a directory with no project config.
     [RESEARCH_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(noRepo, true), ownHooks: true },
     [RESEARCH_REPO_LANE]: { ...(runAs ? { runAs } : {}), settings: settingsFor(always, false) },
+    [CHAT_LANE]: { ...(runAs ? { runAs } : {}), settings: { ...chat, permissions: { deny: [...chat.permissions.deny, ...keyRules] }, env: { [CHAT_ROOT_ENV]: i.repo.path } } },
   };
 }
 

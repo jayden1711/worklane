@@ -52,3 +52,38 @@ export const exampleRoles = async (login: string) => exampleRole(login);
 export const asPerson = (login: string): Record<string, string> => ({ 'x-dashboard-login': login });
 
 export const STDIN_LINE = `(() => { const fs = require('node:fs'); const b = Buffer.alloc(1); const out = []; for (;;) { let n = 0; try { n = fs.readSync(0, b, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; throw e; } if (!n || b[0] === 10) break; out.push(b[0]); } return Buffer.from(out).toString('utf8'); })()`;
+
+/** What one instance's items are marked with, so a test can tell whose items a response or a page carries. */
+export interface InstanceMarks {
+  /** Its project name: its agent slots and land gate are held as `<cli> <project> ...`. */
+  project: string;
+  /** Its coordinator's user@host: its test slots are held as `<actor> test run <id>`. */
+  actor: string;
+  /** The first of its three issues (in flight, waiting on a decision, blocked); its PR; its test run's id. */
+  issue: number;
+  pr: number;
+  run: string;
+  title: string;
+}
+
+/**
+ * Seed an instance's log with an item on every page: a task in flight with an agent running and a PR (Board,
+ * Issues, PRs, Agents, Activity), a decision waiting (Board's Waiting on you, Decisions, Inbox, Waiting), a blocked
+ * task (Waiting, Overview), and a queued test run (the test-runs strip).
+ */
+export function seedInstanceItems(log: { append(type: string, data: unknown, actor: string): unknown }, m: InstanceMarks): void {
+  const sha = (c: string) => c.repeat(40);
+  const seen = (issue: number, title: string) => log.append('issue.seen', { issue, title, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, m.actor);
+  seen(m.issue, `${m.title} in flight`);
+  log.append('issue.claimed', { issue: m.issue, instance: m.actor, lease: sha('a'), base: sha('b'), owner: 'example-owner' }, m.actor);
+  log.append('run.started', { issue: m.issue, role: 'worker', model: 'sonnet', worktree: `/w/${m.project}`, pid: process.pid, pgid: null, attempt: 1 }, m.actor);
+  log.append('pr.opened', { issue: m.issue, number: m.pr, url: `https://example.test/${m.project}/pull/${m.pr}`, head: sha('c'), draft: true }, m.actor);
+  seen(m.issue + 1, `${m.title} waiting`);
+  log.append('decision.asked', { id: `${m.run}-ask`, kind: 'question', issue: m.issue + 1, owner: 'example-owner', question: `${m.title}: which way?`, options: ['this', 'that'], recommendation: 'this', receipts: [] }, m.actor);
+  seen(m.issue + 2, `${m.title} blocked`);
+  log.append('issue.blocked', { issue: m.issue + 2, owner: 'example-owner', why: `${m.title} needs a key` }, m.actor);
+  log.append('testrun.queued', { id: m.run, sha: sha('d'), kind: 'fast', prs: [m.pr], shard: null }, m.actor);
+}
+
+/** Every trace of one instance's items a response or page could carry: its issue numbers, PR, run, project, actor and titles. */
+export const marksOf = (m: InstanceMarks): RegExp => new RegExp([m.issue, m.issue + 1, m.issue + 2, m.pr, m.run, m.project, m.actor, m.title].map((x) => String(x).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));

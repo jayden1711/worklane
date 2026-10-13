@@ -97,6 +97,9 @@ interface Counters {
   dropped: Record<string, number>;
   /** Recent report fingerprints with their times, for flood detection. */
   recent: { fp: string; at: number }[];
+  /** The chat channels' spend today (its own cap, discord.chat_max_usd_per_day), and whether it said it is over. */
+  chatUsd?: number;
+  chatCapSaid?: boolean;
 }
 
 export type Admit = { ok: true } | { ok: false; reason: 'sender_cap' | 'flood' };
@@ -179,6 +182,32 @@ export class IntakeMeter {
     const c = this.load();
     c.usd += usd;
     this.save(c);
+  }
+
+  /** May the chat channels run another turn today, within their own cap? */
+  canChat(capUsd: number): boolean {
+    return (this.load().chatUsd ?? 0) < capUsd;
+  }
+
+  /** The chat channels' spend today. */
+  chatSpent(): number {
+    return this.load().chatUsd ?? 0;
+  }
+
+  /** A chat turn's spend: its own counter only (it has its own cap; the instance's daily budget counts it too). */
+  recordChat(usd: number) {
+    const c = this.load();
+    c.chatUsd = (c.chatUsd ?? 0) + usd;
+    this.save(c);
+  }
+
+  /** Over the chat cap: true the first time today (the bot says so once), false after. */
+  chatCapNotice(): boolean {
+    const c = this.load();
+    if (c.chatCapSaid) return false;
+    c.chatCapSaid = true;
+    this.save(c);
+    return true;
   }
 
   /** What was dropped today, by reason (for the health panel). */

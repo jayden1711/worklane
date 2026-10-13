@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TestsConfig } from '../src/config/schema.js';
-import { checkName, TestRunConfig } from '../src/testrun/config.js';
+import { checkName, MAX_CONNECTIONS, TestRunConfig } from '../src/testrun/config.js';
 import { localHost, newRunId, RUN_ID, sandboxHost } from '../src/testrun/host.js';
 import { cloneScript, createWorkspace, runEnv, wipeWorkspace } from '../src/testrun/workspace.js';
 import { exampleProject, repoRoot } from './helpers.js';
@@ -284,7 +285,7 @@ switch (a[0]) {
     const used = new Set(Object.values(s.containers).map((c) => c.port));
     let port = m[1] ? Number(m[1]) : s.next++;
     if (used.has(port)) { console.error('Bind for 127.0.0.1:' + port + ' failed: port is already allocated'); process.exit(125); }
-    s.containers[name] = { label: flag('--label'), port };
+    s.containers[name] = { label: flag('--label'), port, args: a };
     save(); console.log(name); break;
   }
   case 'port': { const c = s.containers[a[1]]; if (!c) process.exit(1); console.log('127.0.0.1:' + c.port); break; }
@@ -317,7 +318,9 @@ test('isolation: a wipe leaves nothing behind (workspace, temp files, home, cont
   const ws = await createWorkspace(host, p.dir, p.sha, id);
   assert.ok(existsSync(join(ws.workdir, '.worklane', 'config.yaml')), 'the commit\'s tree');
   assert.ok(!existsSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates')), 'its own objects, never the coordinator\'s');
-  const db = await host.startDb(id, { image: pin, name: 'test', readyS: 5 });
+  const db = await host.startDb(id, { image: pin, name: 'test', readyS: 5, maxConnections: 300 });
+  const started = Object.values(JSON.parse(readFileSync(join(base, 'docker-home', 'state.json'), 'utf8')).containers as Record<string, { args: string[] }>)[0]!.args;
+  assert.deepEqual(started.slice(started.indexOf(pin)), [pin, '-c', 'max_connections=300'], 'Postgres starts with the run\'s max_connections');
   const r = await host.exec(id, 'echo leftover > "$TMPDIR/t"; echo cached > "$HOME/h"; mkdir -p node_modules/x && echo 1 > node_modules/x/y; echo ok', runEnv({}, {}, db), 30_000);
   assert.equal(r.code, 0, r.out);
   const dockerHome = join(base, 'docker-home', 'state.json');
@@ -343,7 +346,7 @@ test('isolation: two runs at once get their own database, by a unique name and a
   const ids = [newRunId('fast', p.sha), newRunId('fast', p.sha)];
   assert.notEqual(ids[0], ids[1], 'two runs of one commit never share an id');
   await Promise.all(ids.map((id) => createWorkspace(host, p.dir, p.sha, id)));
-  const dbs = await Promise.all(ids.map((id) => host.startDb(id, { image: pin, name: 'test', readyS: 5 })));
+  const dbs = await Promise.all(ids.map((id) => host.startDb(id, { image: pin, name: 'test', readyS: 5, maxConnections: 200 })));
   assert.notEqual(dbs[0]!.port, dbs[1]!.port);
   assert.notEqual(dbs[0]!.container, dbs[1]!.container);
   const seen = await Promise.all(ids.map((id, i) => host.exec(id, 'printf %s "$DATABASE_URL"', runEnv({}, {}, dbs[i]!), 30_000)));
@@ -396,14 +399,14 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
   chmodSync(sudo, 0o755);
   const host = sandboxHost('shop', helper, sudo);
   assert.throws(() => sandboxHost('Shop;x'), /not an instance name/);
-  const db = await host.startDb('fast-abc-1', { image: pin, name: 'test', readyS: 5 });
+  const db = await host.startDb('fast-abc-1', { image: pin, name: 'test', readyS: 5, maxConnections: 250 });
   assert.deepEqual(db, { url: `postgres://postgres:${'b'.repeat(32)}@127.0.0.1:45678/test`, port: 45678, container: 'worklane-test-shop-fast-abc-1' });
   await host.exec('fast-abc-1', 'npm test', { DATABASE_URL: db.url }, 60_000);
   assert.deepEqual(await host.wipe('fast-abc-1'), { ok: true, left: [] });
-  await assert.rejects(host.startDb('fast-abc-1', { image: 'postgres:16', name: 'test', readyS: 5 }), /pinned to its digest/);
+  await assert.rejects(host.startDb('fast-abc-1', { image: 'postgres:16', name: 'test', readyS: 5, maxConnections: 200 }), /pinned to its digest/);
   await assert.rejects(host.exec('../x', 'id', {}, 1000), /not a run id/);
   assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [
-    `shop db-start fast-abc-1 ${pin} test 5`,
+    `shop db-start fast-abc-1 ${pin} test 5 250`,
     `shop exec fast-abc-1 60 --env DATABASE_URL=${db.url} -- npm test`,
     'shop wipe fast-abc-1',
   ]);
@@ -558,4 +561,93 @@ test('regression: install restarts the test Docker unit when its unit changed or
   assert.match(install, /docker_changed="\$put_changed"/);
   assert.match(install, /\[ "\$docker_changed" = 1 \] \|\| ! docker_layout_ok/, 'a changed unit, or a daemon outside <unit>\/daemon, means a restart');
   assert.match(install, /busy="\$\(active_runs\)"[\s\S]*?test runs of \$name are in progress[\s\S]*?exit 1[\s\S]*?systemctl restart "\$docker_unit_name"/, 'it refuses while runs are in progress, and restarts otherwise');
+});
+
+test('regression: test_run.database.max_connections is an integer of 20 to 2000, 200 by default (the image\'s 100 ran out at 22 lanes)', () => {
+  // A full run of 22 lanes, each with a pool of 8 plus its ORM's own connections, hit "sorry, too many clients already".
+  assert.equal(TestRunConfig.parse(baseTestRun).database?.max_connections, 200);
+  assert.deepEqual(MAX_CONNECTIONS, { min: 20, max: 2000, default: 200 });
+  for (const n of [20, 250, 2000]) assert.equal(TestRunConfig.parse({ ...baseTestRun, database: { image: pin, max_connections: n } }).database?.max_connections, n);
+  for (const n of [19, 2001, 0, -5, 250.5, '250', null]) {
+    assert.equal(TestRunConfig.safeParse({ ...baseTestRun, database: { image: pin, max_connections: n } }).success, false, `max_connections ${JSON.stringify(n)} is refused`);
+  }
+});
+
+/** The sandbox helper, runnable here: its tools stubbed, its paths in a temp dir, a stand-in docker that logs each call. */
+async function helperWithStubs() {
+  const dir = mkdtempSync(join(tmpdir(), 'tr-dbs-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const stub = (n: string, body: string) => {
+    writeFileSync(join(bin, n), `#!/bin/bash\n${body}\n`);
+    chmodSync(join(bin, n), 0o755);
+  };
+  for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id']) stub(t, 'exit 0');
+  stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
+  for (const t of ['od', 'tr', 'seq', 'sed', 'head', 'sleep', 'env', 'cat']) {
+    const real = ['/usr/bin', '/bin'].map((d) => join(d, t)).find((p) => existsSync(p));
+    if (real) symlinkSync(real, join(bin, t));
+  }
+  const log = join(dir, 'docker.log');
+  const docker = join(dir, 'docker');
+  writeFileSync(docker, `#!/bin/bash\nprintf '%s\\n' "$*" >> "${log}"\ncase "$1" in run) echo cid ;; port) echo 127.0.0.1:45678 ;; esac\nexit 0\n`);
+  chmodSync(docker, 0o755);
+  const base = join(dir, 'base');
+  mkdirSync(join(base, 'shop', 'runs', 'fast-abc-1'), { recursive: true });
+  const sock = join(dir, 's');
+  mkdirSync(sock);
+  const server = createServer();
+  await new Promise<void>((res) => server.listen(join(sock, 'docker.sock'), res));
+  const helper = join(dir, 'worklane-testrun');
+  let src = readFileSync(helperSrc, 'utf8');
+  for (const [re, to] of [
+    [/^export PATH=\S+$/m, `export PATH=${bin}`],
+    [/^BASE=\S+$/m, `BASE=${base}`],
+    [/^DOCKER=\S+$/m, `DOCKER=${docker}`],
+    [/^sock_dir=.*$/m, `sock_dir=${sock}`],
+  ] as const) {
+    assert.match(src, re);
+    src = src.replace(re, to);
+  }
+  writeFileSync(helper, src);
+  const dbStart = (...a: string[]) => spawnSync('/bin/bash', [helper, 'shop', 'db-start', 'fast-abc-1', pin, 'test', '5', ...a], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+  const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []);
+  const done = () => {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { dbStart, calls, done };
+}
+
+test('regression: the helper\'s db-start takes max_connections as a number of 20 to 2000 only, and refuses anything else before Docker', { skip: !posix && 'bash' }, async () => {
+  const h = await helperWithStubs();
+  try {
+    for (const bad of ['19', '2001', '0', '020', '99999', '-50', '250.5', '2e2', '250 ', ' 250', '250;id', '$(id)', 'max', '']) {
+      const r = h.dbStart(bad);
+      assert.equal(r.status, 2, `${JSON.stringify(bad)}: ${r.stderr}`);
+      assert.match(r.stderr, /max_connections: 20 to 2000, got/, JSON.stringify(bad));
+    }
+    assert.match(h.dbStart().stderr, /usage: db-start <id> <image@sha256:\.\.\.> <db> <ready_s> <max_connections>/, 'it is required');
+    assert.deepEqual(h.calls(), [], 'Docker is never called for a refused value');
+    for (const ok of [MAX_CONNECTIONS.min, MAX_CONNECTIONS.max]) {
+      const r = h.dbStart(String(ok));
+      assert.equal(r.status, 0, `${ok} is in range, as in the schema: ${r.stderr}`);
+    }
+  } finally {
+    h.done();
+  }
+});
+
+test('regression: the helper starts the run\'s Postgres with -c max_connections=<n>', { skip: !posix && 'bash' }, async () => {
+  const h = await helperWithStubs();
+  try {
+    const r = h.dbStart('250');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^45678 [0-9a-f]{32}$/m);
+    const run = h.calls().find((c) => c.startsWith('run '));
+    assert.ok(run, h.calls().join('\n'));
+    assert.ok(run.endsWith(` ${pin} -c max_connections=250`), run);
+  } finally {
+    h.done();
+  }
 });

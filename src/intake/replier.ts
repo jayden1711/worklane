@@ -72,8 +72,10 @@ export function echoed(reply: string, message: string): number {
 /** A short quote is fine; this many words of the message in a row is an echo. */
 export const ECHO_WORDS = 8;
 
-const URL = /\bhttps?:\/\/\S+|\bwww\.\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|app|co|gg|ly|me|xyz|info|biz|link|site|online|ru|cn|tk|to)\b(?:\/\S*)?/gi;
-const MENTION = /<@[!&]?\d+>|<#\d+>|@everyone|@here|(?:^|\s)@[A-Za-z0-9_.]{2,}/;
+/** A link, as the reply checks find one. */
+export const URL = /\bhttps?:\/\/\S+|\bwww\.\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|app|co|gg|ly|me|xyz|info|biz|link|site|online|ru|cn|tk|to)\b(?:\/\S*)?/gi;
+/** A mention: a user, role or channel ping, @everyone or @here, or an @handle. */
+export const MENTION = /<@[!&]?\d+>|<#\d+>|@everyone|@here|(?:^|\s)@[A-Za-z0-9_.]{2,}/;
 const PROMISE = [
   /\b(?:by|before|until|on) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|today|the weekend|end of (?:the )?(?:day|week|month))\b/i,
   /\b(?:tomorrow|tonight|next (?:week|month|release|update)|this (?:week|weekend|month)|in (?:a|one|two|three|\d+) (?:minutes?|hours?|days?|weeks?)|within (?:a|one|two|three|\d+) (?:minutes?|hours?|days?|weeks?))\b/i,

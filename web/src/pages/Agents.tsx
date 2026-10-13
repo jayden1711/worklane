@@ -40,9 +40,10 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
               {!state.slots.agents && <li className="text-ink-3">{state.slots.running} of {state.slots.cap} in use. Which agents hold them is for the owners and writers.</li>}
               {(state.slots.agents ?? []).map((a) => (
                 <li key={a.slot} className="flex justify-between gap-2">
-                  <span className="truncate">{a.owner}</span>
+                  <span className={a.elsewhere ? 'truncate text-ink-3' : 'truncate'}>{a.owner}</span>
                   <span className="text-ink-3">
-                    pid {a.pid} · {ago(a.acquiredAt)}
+                    {a.pid !== undefined ? `pid ${a.pid} · ` : ''}
+                    {ago(a.acquiredAt)}
                   </span>
                 </li>
               ))}

@@ -11,7 +11,14 @@
 import type { EventPayload } from '../events/types.js';
 import { ASK_EVENTS, asksFrom, asks as askApi, AskError } from '../console/asks.js';
 import { answerDecision, auditWrite, firstAnswer } from '../decide.js';
-import { alreadyText, askBack, askPost, commentText, decidedText, decisionPost, mainWatchPost, parseChoice, type ChannelPost } from '../intake/channel.js';
+import { createHash } from 'node:crypto';
+import { statSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { alreadyText, askBack, askPost, commentText, decidedText, decisionPost, mainWatchPost, parseChoice, readConfirm, type ChannelPost } from '../intake/channel.js';
+import { REPLY_CHARS } from '../intake/discord.js';
+import { acceptThread, checkSummary, confirmText, fallbackSummary, noAnswerText, notYourConfirmText, summaryRun, threadRun, threadRunDir, type ThreadRecord } from '../intake/explain.js';
+import { redactString } from '../events/redact.js';
+import { runRoute } from './model-routing.js';
 import { NEVER_FROM_CHAT, mayAnswerAskFromChat, mayAnswerFromChat, personOf, type ChatPerson } from '../intake/people.js';
 import { redactPii } from '../intake/redact.js';
 import { IntakeMeter, reportId, storeRaw } from '../intake/store.js';
@@ -27,6 +34,46 @@ const intakeMarker = (id: string) => `<!-- intake:${id} -->`;
 
 /** What a thread is for: `decision:<id>`, `ask:<id>` or `idea:<id>` (the key of the post that opened it). */
 type Target = string;
+
+/** A decision's or ask's thread, as a reply in it is handled (Channel.threadTarget). */
+interface ThreadTarget {
+  what: 'decision' | 'ask';
+  kind: string;
+  id: string;
+  issue: number | null;
+  options: string[];
+  /** Never answered from chat (a high-risk merge; a secret or root-step ask). */
+  never: boolean;
+  /** Answered (by whom, with what), or withdrawn (by ''). */
+  closed: { answer: string; by: string } | null;
+  mayAnswer: (role: ChatPerson['role']) => boolean;
+  /** Who may answer it, in words. */
+  who: string;
+  /** Its fixed post (src/intake/channel.ts). */
+  template: (o: { dashboardUrl: string; repo: string }) => string;
+  record: () => Promise<ThreadRecord>;
+  /** Record `option` as `who`'s answer, through the dashboard's own path. */
+  answer: (option: string, who: ChatPerson) => { ok: true } | { ok: false; already?: { answer: string; by: string }; error?: string };
+}
+
+const base = (url: string) => url.replace(/\/+$/, '');
+
+/** What makes an issue risky, in words: its high-risk labels, and a money path among its review level's reasons. */
+export function riskNotes(labels: string[], reasons: string[]): string[] {
+  const words: Record<string, string> = { 'money-path': 'money path', 'high-risk': 'high risk', 'size:L': 'large change' };
+  const out = labels.map((l) => words[l]).filter((x): x is string => !!x);
+  if (!out.includes('money path') && reasons.some((r) => /money/i.test(r))) out.push('money path');
+  return out;
+}
+
+/** A plan's fields as plain lines (approach, steps, files, risks), for the record. */
+export function planText(plan: Record<string, unknown>): string {
+  return Object.entries(plan)
+    .filter(([k]) => k !== 'design_change' && k !== 'questions')
+    .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('; ') : typeof v === 'string' ? v : JSON.stringify(v)}`)
+    .join('\n')
+    .slice(0, 3000);
+}
 
 export abstract class Channel extends ResearchOnDemand {
   /** The chat source, when it can open threads. */
@@ -120,7 +167,7 @@ export abstract class Channel extends ResearchOnDemand {
    */
   protected async channelInbound(cfg: IntakeConfig, reports: IncomingReport[]): Promise<{ rest: IncomingReport[]; ignored: IncomingReport[] }> {
     // Off (no mapping, or Discord off for this instance): nothing is read as a thread reply.
-    if (!this.channelOn(cfg)) return { rest: reports.filter((r) => r.thread?.kind !== 'thread'), ignored: reports.filter((r) => r.thread?.kind === 'thread') };
+    if (!this.channelOn(cfg)) return { rest: reports.filter((r) => r.thread?.kind === 'channel' || !r.thread), ignored: reports.filter((r) => r.thread && r.thread.kind !== 'channel') };
     const src = this.chatSource()!;
     const threads = this.channelThreads();
     const rest: IncomingReport[] = [];
@@ -137,7 +184,8 @@ export abstract class Channel extends ResearchOnDemand {
       const target = r.thread?.kind === 'thread' ? threads.get(r.thread.id) : undefined;
       if (!target) {
         // A reply in a thread that isn't one of this instance's: never an answer here, and never a report.
-        if (r.thread?.kind === 'thread') ignored.push(r);
+        // A chat-channel message is never a report either (src/coordinator/channel-chat.ts takes those first).
+        if (r.thread?.kind === 'thread' || r.thread?.kind === 'chat') ignored.push(r);
         else rest.push(r);
         continue;
       }
@@ -148,83 +196,229 @@ export abstract class Channel extends ResearchOnDemand {
     return { rest, ignored };
   }
 
-  /** A mapped person's reply in a decision's or ask's thread. */
-  private async threadReply(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: ChatPerson, thread: string, target: Target) {
-    const id = reportId(r);
-    const redacted = excerpt(redactPii(r.text, { names: [...(r.sender.name ? [r.sender.name] : []), ...cfg.redact.names], patterns: cfg.redact.patterns }));
-    const record = (outcome: EventPayload<'discord.reply'>['outcome'], answer: string | null = null, kept: string | null = null) =>
-      this.emit('discord.reply', { id, thread, target, by: who.login, outcome, answer, excerpt: kept });
-    const reply = (text: string) => this.say(src, thread, `reply:${id}`, text);
+  /**
+   * What a thread is for, read from the log: its record (for the summary and questions), its options, whether it
+   * is closed (answered, or withdrawn), who may answer it, and how an answer is recorded (the dashboard's own path).
+   */
+  private threadTarget(target: Target): ThreadTarget | null {
     const [what, key] = [target.slice(0, target.indexOf(':')), target.slice(target.indexOf(':') + 1)];
     if (what === 'decision') {
       const q = this.d.log.read(0, ['decision.asked']).map((e) => e.payload as EventPayload<'decision.asked'>).find((x) => x.id === key);
-      if (!q) return;
-      // Never from chat, whoever replies and whatever they say (a thread for one is never opened; this is the floor).
-      if (NEVER_FROM_CHAT.has(q.kind)) {
-        record('refused');
-        return reply('This is approved only on GitHub or the dashboard; a reply here changes nothing.');
-      }
+      if (!q) return null;
       const first = firstAnswer(this.d.log, q.id);
-      if (first) {
-        record('already');
-        return reply(alreadyText(first.answer, first.by));
-      }
-      if (!mayAnswerFromChat(q.kind, who.role)) {
-        record('comment', null, redacted);
-        if (q.issue !== null) await this.d.backlog.comment(q.issue, `[${BRAND.cli}] @${who.login} commented in chat on decision ${q.id} (a comment, not an answer):\n\n> ${redacted}`);
-        return reply(commentText(who.login, OWNER_DECISIONS.has(q.kind) ? 'an admin' : 'an admin or a writer'));
-      }
-      const choice = parseChoice(r.text, q.options);
-      if (!('answer' in choice)) {
-        record('ambiguous');
-        return reply(askBack(q.options));
-      }
-      // The dashboard's own decide path: the same checks, record and audit, with via "discord".
-      const got = answerDecision(this.d.log, { id: q.id, answer: choice.answer, who: { login: who.login, role: who.role!, via: 'discord' }, instance: this.d.instance, repo: this.d.cfg.project.project.repo });
-      if (!got.ok && got.status === 409) {
-        record('already');
-        return reply(alreadyText(got.answer!, got.by!));
-      }
-      if (!got.ok) {
-        record('refused');
-        return reply(got.error.slice(0, 400));
-      }
-      record('answered', choice.answer);
-      return this.say(src, thread, `decided:${target}`, decidedText(choice.answer, who.login));
+      return {
+        what,
+        kind: q.kind,
+        id: q.id,
+        issue: q.issue,
+        options: q.options,
+        never: NEVER_FROM_CHAT.has(q.kind),
+        closed: first ? { answer: first.answer, by: first.by } : null,
+        mayAnswer: (role) => mayAnswerFromChat(q.kind, role),
+        who: OWNER_DECISIONS.has(q.kind) ? 'an admin' : 'an admin or a writer',
+        template: (o) => decisionPost(q, o).text,
+        record: () => this.decisionRecord(q),
+        answer: (option, who) => {
+          // The dashboard's own decide path: the same checks, record and audit, with via "discord".
+          const got = answerDecision(this.d.log, { id: q.id, answer: option, who: { login: who.login, role: who.role!, via: 'discord' }, instance: this.d.instance, repo: this.d.cfg.project.project.repo });
+          return got.ok ? { ok: true } : got.status === 409 ? { ok: false, already: { answer: got.answer!, by: got.by! } } : { ok: false, error: got.error };
+        },
+      };
     }
     if (what === 'ask') {
       const a = asksFrom(this.d.log.read(0, [...ASK_EVENTS])).find((x) => x.id === key);
-      if (!a) return;
-      if (a.status !== 'open') {
-        record('already');
-        return reply(a.answer ? alreadyText(a.answer.answer, a.answer.by) : 'This was withdrawn; your reply changes nothing.');
-      }
-      if (!mayAnswerAskFromChat(a, who.role)) {
-        record(a.kind === 'question' || a.kind === 'approve_link' ? 'comment' : 'refused', null, redacted);
-        return reply(commentText(who.login, a.kind === 'question' && a.writersMayAnswer ? 'an admin or a writer' : 'an admin'));
-      }
+      if (!a) return null;
       const options = a.kind === 'question' ? a.options : ['approved', 'declined'];
-      const choice = parseChoice(r.text, options);
-      if (!('answer' in choice)) {
-        record('ambiguous');
-        return reply(askBack(options));
-      }
+      return {
+        what,
+        kind: a.kind,
+        id: a.id,
+        issue: null,
+        options,
+        never: a.kind !== 'question' && a.kind !== 'approve_link',
+        closed: a.status !== 'open' ? (a.answer ? { answer: a.answer.answer, by: a.answer.by } : { answer: '', by: '' }) : null,
+        mayAnswer: (role) => mayAnswerAskFromChat(a, role),
+        who: a.kind === 'question' && a.writersMayAnswer ? 'an admin or a writer' : 'an admin',
+        template: (o) => askPost(a, o).text,
+        record: async () => ({ kind: 'setup', issue: null, question: redactString(a.title), options, recommendation: '', ...(a.detail ? { plan: redactString(a.detail) } : {}), risk: { level: null, notes: [] } }),
+        answer: (option, who) => {
+          try {
+            askApi(this.d.log).answer(a.id, { by: who.login, role: who.role, answer: option });
+          } catch (e) {
+            if (e instanceof AskError && e.status === 409) return { ok: false, already: { answer: '', by: '' } };
+            if (e instanceof AskError) return { ok: false, error: e.message };
+            throw e;
+          }
+          auditWrite(this.d.log, { login: who.login, role: who.role!, via: 'discord' }, this.d.instance, 'ask.answered', { id: a.id, kind: a.kind, answer: option });
+          return { ok: true };
+        },
+      };
+    }
+    return null;
+  }
+
+  /**
+   * A decision's record, from what the coordinator holds: the decision, its issue (title and text), the latest plan
+   * posted on it, and the risk (the issue's review level, from review.level_set or its review:L label, and what
+   * makes it risky: a money path, a high-risk label, a large change). Redacted.
+   */
+  protected async decisionRecord(q: EventPayload<'decision.asked'>): Promise<ThreadRecord> {
+    let issue: { title: string; body: string; labels: string[] } | null = null;
+    if (q.issue !== null) {
       try {
-        askApi(this.d.log).answer(a.id, { by: who.login, role: who.role, answer: choice.answer });
-      } catch (e) {
-        if (e instanceof AskError && e.status === 409) {
-          record('already');
-          return reply('This was answered already; your reply changes nothing.');
-        }
-        if (e instanceof AskError) {
-          record('refused');
-          return reply(e.message.slice(0, 400));
-        }
-        throw e;
+        const i = await this.d.backlog.get(q.issue);
+        issue = { title: i.title, body: i.body, labels: i.labels };
+      } catch {
+        // a tracker hiccup: the record without the issue's text
       }
-      auditWrite(this.d.log, { login: who.login, role: who.role!, via: 'discord' }, this.d.instance, 'ask.answered', { id: a.id, kind: a.kind, answer: choice.answer });
-      record('answered', choice.answer);
-      return this.say(src, thread, `decided:${target}`, decidedText(choice.answer, who.login));
+    }
+    const mine = q.issue === null ? [] : this.d.log.read(0, ['plan.posted', 'review.level_set']).filter((e) => (e.payload as { issue?: number }).issue === q.issue);
+    const plan = mine.filter((e) => e.type === 'plan.posted').at(-1)?.payload as EventPayload<'plan.posted'> | undefined;
+    const set = mine.filter((e) => e.type === 'review.level_set').at(-1)?.payload as EventPayload<'review.level_set'> | undefined;
+    const labels = issue?.labels ?? [];
+    const level = set?.level ?? labels.map((l) => l.match(/^review:(L[0-3])$/)?.[1]).find((x): x is string => !!x) ?? null;
+    return {
+      kind: q.kind,
+      issue: q.issue,
+      ...(issue ? { title: redactString(issue.title), issueText: redactString(issue.body.replace(/<!--[\s\S]*?-->/g, '')) } : {}),
+      question: redactString(q.question),
+      options: q.options,
+      recommendation: q.recommendation,
+      ...(plan ? { plan: redactString(planText(plan.plan)) } : {}),
+      risk: { level, notes: riskNotes(labels, set?.reasons ?? []) },
+    };
+  }
+
+  /** The pick waiting for its confirmation in a thread, if any: the latest one asked and not since confirmed or dropped. */
+  private pendingConfirm(thread: string): EventPayload<'discord.confirm'> | null {
+    const last = this.d.log.read(0, ['discord.confirm']).map((e) => e.payload as EventPayload<'discord.confirm'>).filter((p) => p.thread === thread).at(-1);
+    return last?.stage === 'asked' ? last : null;
+  }
+
+  /** What is left today for an intake run: 0 over intake's spend cap (intake.max_usd_per_day), else the daily budget's rest. */
+  protected intakeSpendLeft(cfg: IntakeConfig): number {
+    const can = new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime()).canDraft();
+    if (!can.ok && can.reason === 'spend_cap') return 0;
+    return Math.max(0, this.d.cfg.agents.daily_budget_usd - this.spentToday());
+  }
+
+  /** A short no-tools run for a thread (its summary, or reading a message), counted against intake's spend cap. */
+  private async threadModelRun(cfg: IntakeConfig, spec: ReturnType<typeof summaryRun>, kind: 'intake_summary' | 'intake_thread'): Promise<unknown> {
+    const left = this.intakeSpendLeft(cfg);
+    if (left <= 0) return undefined;
+    const run = await this.d.runner.run({ ...spec, stateDir: this.d.stateDir, ...runRoute(this.d.cfg, kind), maxBudgetUsd: Math.max(0.05, Math.min(0.25, left)), stallMs: 2 * 60_000, timeoutMs: 5 * 60_000 });
+    this.cost(null, spec.role, run);
+    new IntakeMeter(this.d.stateDir, intakeCaps(this.d.settings?.().settings ?? {}, cfg.caps), () => (this.d.now?.() ?? new Date()).getTime()).recordSpend(run.costUsd);
+    return run.reason === 'succeeded' ? (run.structured ?? null) : undefined;
+  }
+
+  /**
+   * A mapped person's reply in a decision's or ask's thread. Exact option words answer it (as on the dashboard); a
+   * plain-language pick is asked back ("Confirm: approve?") and recorded only on the same person's following yes; a
+   * question is answered from the record and never answers anything.
+   */
+  private async threadReply(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: ChatPerson, thread: string, target: Target) {
+    const id = reportId(r);
+    const full = redactPii(r.text, { names: [...(r.sender.name ? [r.sender.name] : []), ...cfg.redact.names], patterns: cfg.redact.patterns });
+    const redacted = excerpt(full);
+    const record = (outcome: EventPayload<'discord.reply'>['outcome'], answer: string | null = null, kept: string | null = null) =>
+      this.emit('discord.reply', { id, thread, target, by: who.login, outcome, answer, excerpt: kept });
+    const reply = (text: string) => this.say(src, thread, `reply:${id}`, text);
+    const t = this.threadTarget(target);
+    if (!t) return;
+    // Never from chat, whoever replies and whatever they say (a thread for one is never opened; this is the floor).
+    if (t.never) {
+      record('refused');
+      return reply(t.what === 'decision' ? 'This is approved only on GitHub or the dashboard; a reply here changes nothing.' : 'This is answered only on the dashboard; a reply here changes nothing.');
+    }
+    if (t.closed) {
+      record('already');
+      return reply(t.closed.by ? alreadyText(t.closed.answer, t.closed.by) : t.what === 'ask' ? 'This was withdrawn; your reply changes nothing.' : 'This was answered already; your reply changes nothing.');
+    }
+    const comment = async () => {
+      record('comment', null, redacted);
+      if (t.what === 'decision' && t.issue !== null) await this.d.backlog.comment(t.issue, `[${BRAND.cli}] @${who.login} commented in chat on decision ${t.id} (a comment, not an answer):\n\n> ${redacted}`);
+      return reply(commentText(who.login, t.who));
+    };
+    const answer = async (option: string) => {
+      const got = t.answer(option, who);
+      if (!got.ok && got.already) {
+        record('already');
+        return reply(got.already.by ? alreadyText(got.already.answer, got.already.by) : 'This was answered already; your reply changes nothing.');
+      }
+      if (!got.ok) {
+        record('refused');
+        return reply((got.error ?? 'refused').slice(0, 400));
+      }
+      record('answered', option);
+      return this.say(src, thread, `decided:${target}`, decidedText(option, who.login));
+    };
+    const c = readConfirm(r.text);
+    // A plain-language pick waits for its confirmation: only the same person's explicit yes records it.
+    const pending = this.pendingConfirm(thread);
+    if (pending) {
+      if (pending.by.toLowerCase() === who.login.toLowerCase()) {
+        this.emit('discord.confirm', { ...pending, stage: c === 'yes' ? 'confirmed' : 'dropped', msg: id });
+        if (c === 'yes') return t.mayAnswer(who.role) ? answer(pending.option) : comment();
+      } else if (c === 'yes' || c === 'vague') {
+        record('ambiguous');
+        return reply(notYourConfirmText(pending.by, pending.option));
+      }
+    }
+    // Who may talk in a thread at all: an admin or a writer (a question, a pick); anyone else's reply is a comment.
+    if (who.role !== 'owner' && who.role !== 'writer') return comment();
+    // Exact option words answer directly, as before.
+    const choice = parseChoice(r.text, t.options);
+    if ('answer' in choice) return t.mayAnswer(who.role) ? answer(choice.answer) : comment();
+    // A bare yes or ok with nothing to confirm names no option: asked back, with no run.
+    if (c !== 'change') {
+      record('ambiguous');
+      return reply(askBack(t.options));
+    }
+    // A question or a plain-language pick: the thread run reads it from the record. Nothing it returns answers.
+    const dash = base(cfg.discord.dashboard_url ?? '');
+    const rec = await t.record();
+    const links = [dash, ...(t.issue !== null ? [`https://github.com/${this.d.cfg.project.project.repo}/issues/${t.issue}`] : [])].filter(Boolean);
+    const cwd = threadRunDir(dirname(this.d.repo), this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, `thread-${id}`);
+    const raw = await this.threadModelRun(cfg, threadRun({ cwd, record: rec, message: full }), 'intake_thread');
+    const got = acceptThread(raw, rec, links);
+    if (got.intent === 'question') {
+      record('question', null, redacted);
+      for (const [i, text] of got.answer.entries()) await this.say(src, thread, `reply:${id}:${i}`, text);
+      return;
+    }
+    if (got.intent === 'choice') {
+      if (!t.mayAnswer(who.role)) return comment();
+      this.emit('discord.confirm', { thread, target, by: who.login, option: got.option, stage: 'asked', msg: id });
+      record('confirm', got.option);
+      return reply(confirmText(got.option));
+    }
+    record('ambiguous');
+    return reply(raw === undefined && dash ? `${noAnswerText(`${dash}/${t.what === 'ask' ? 'setup' : 'inbox'}`)} ${askBack(t.options)}`.slice(0, REPLY_CHARS) : askBack(t.options));
+  }
+
+  /**
+   * Each open decision's or ask's thread, once: a plain-language summary from the intake-summary role, posted only
+   * when it passes the facts check (checkSummary); else the fixed template and the dashboard link. Within intake's
+   * spend cap; over it, the template.
+   */
+  private async explainThreads(cfg: IntakeConfig, src: IntakeSource): Promise<void> {
+    const done = new Set(this.d.log.read(0, ['discord.explained']).map((e) => (e.payload as { target: string }).target));
+    const dash = base(cfg.discord.dashboard_url ?? '');
+    const repo = this.d.cfg.project.project.repo;
+    for (const [thread, target] of this.channelThreads()) {
+      if (done.has(target) || !(target.startsWith('decision:') || target.startsWith('ask:'))) continue;
+      const t = this.threadTarget(target);
+      if (!t || t.never || t.closed) continue;
+      const rec = await t.record();
+      const page = `${dash}/${t.what === 'ask' ? 'setup' : 'inbox'}`;
+      const issueUrl = t.issue !== null ? `https://github.com/${repo}/issues/${t.issue}` : undefined;
+      const cwd = threadRunDir(dirname(this.d.repo), this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, `summary-${createHash('sha256').update(target).digest('hex').slice(0, 16)}`);
+      const raw = await this.threadModelRun(cfg, summaryRun({ cwd, record: rec }), 'intake_summary');
+      const checked = raw === undefined ? { ok: false as const, why: 'no summary (the spend cap, or the run ended)' } : checkSummary(raw, rec, { ...(issueUrl ? { issueUrl } : {}), dashboardUrl: page });
+      this.emit('discord.explained', { target, thread, used: checked.ok ? 'summary' : 'template', why: checked.ok ? null : checked.why.slice(0, 300) });
+      const posts = checked.ok ? checked.posts : [fallbackSummary(t.template({ dashboardUrl: dash, repo }), page)];
+      for (const [i, text] of posts.entries()) await this.say(src, thread, `explain:${target}:${i}`, text);
     }
   }
 
@@ -254,6 +448,8 @@ export abstract class Channel extends ResearchOnDemand {
       const u = e.payload as EventPayload<'main_watch.unaccounted'>;
       if (!posted.has(`main-watch:${u.sha}`)) await this.channelSend(src, `main-watch:${u.sha}`, { channel }, mainWatchPost(u, o));
     }
+    // Each new thread explained in plain language, once.
+    await this.explainThreads(cfg, src);
     // Decided elsewhere (the dashboard, GitHub, the CLI): the thread says so, once.
     for (const [thread, target] of this.channelThreads()) {
       if (posted.has(`decided:${target}`)) continue;
