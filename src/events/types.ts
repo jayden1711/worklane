@@ -41,6 +41,15 @@ export const EventSchemas = {
   /** `resumed`: the run continues the same attempt after research it asked for (it doesn't count as an attempt). */
   'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int(), resumed: z.literal('research').optional() }),
   'run.heartbeat': z.strictObject({ issue, role: z.string(), note: z.string() }),
+  // loop control (src/coordinator/loop-control.ts)
+  /** A worker attempt failed: how (`kind`), and its failure reduced to a fingerprint (failure-modes normalizeCause) that reads the same each time it recurs. */
+  'attempt.failed': z.strictObject({ issue, attempt: z.number().int().positive(), kind: z.enum(['stuck', 'rejected', 'checks', 'evaluator']), fingerprint: z.string().max(200) }),
+  /** The read-only reflection run before attempt `attempt`: `ok` when its what-failed / what-to-change reached that attempt's brief; else `why` not. */
+  'attempt.reflected': z.strictObject({ issue, attempt: z.number().int().positive(), model: z.string(), ok: z.boolean(), why: z.string().max(500).optional() }),
+  /** The same failure `repeats` times in a row: the attempts start again in a fresh worktree, on the escalated model. */
+  'task.reassigned': z.strictObject({ issue, attempt: z.number().int().positive(), fingerprint: z.string().max(200), repeats: z.number().int().positive(), model: z.string() }),
+  /** The issue's runs reached `share` of its agents.yaml budget: `warn` at 85% (an incident), `over` at 100% (the task is stopped). */
+  'task.budget': z.strictObject({ issue, level: z.enum(['warn', 'over']), share: z.number().nonnegative(), tokens: z.number().int().nonnegative(), minutes: z.number().nonnegative(), detail: z.string().max(500) }),
   'run.finished': z.strictObject({
     issue,
     role: z.string(),

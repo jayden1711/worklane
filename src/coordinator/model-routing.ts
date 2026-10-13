@@ -39,5 +39,6 @@ export function buildRoute(cfg: Config, labels: string[], attempt = 1, noOpenMod
 
 /** A routed kind's model and its route, with the Anthropic model it falls back to. */
 export function runRoute(cfg: Config, kind: RoutedRun): { model: string; route: NonNullable<RunRequest['route']> } {
-  return { model: routeRun(cfg, kind), route: { kind, fallback: routedModel(anthropicRouting(cfg), kind) } };
+  // The runner knows the reflection as an 'other' run: no open-model provider takes it (src/providers.ts).
+  return { model: routeRun(cfg, kind), route: { kind: kind === 'reflection' ? 'other' : kind, fallback: routedModel(anthropicRouting(cfg), kind) } };
 }

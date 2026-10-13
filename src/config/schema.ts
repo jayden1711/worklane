@@ -255,6 +255,18 @@ export const AgentsConfig = z
     /** No longer used (trust stages were removed); accepted so existing configs still load. */
     stage: z.number().int().min(1).max(3).optional(),
     daily_budget_usd: z.number().positive(),
+    /** Worker attempts at one issue before it is blocked (counted across restarts and requeues; reset by a block or an answer). */
+    max_attempts: z.number().int().min(1).max(20).default(8),
+    /**
+     * One issue's budget, all its runs together (src/coordinator/loop-control.ts): agent run time in minutes and
+     * tokens in and out. An incident at 85% of either; the task is stopped at 100%. Unset: no such cap.
+     */
+    budget: z
+      .strictObject({
+        task_minutes: z.number().positive().optional(),
+        task_tokens: z.number().int().positive().optional(),
+      })
+      .optional(),
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
     /**
@@ -281,6 +293,8 @@ export const AgentsConfig = z
         intake_thread: model.optional(),
         stage_judge: model.optional(),
         eval_answer: model.optional(),
+        /** The read-only reflection run before a worker's retry (src/coordinator/loop-control.ts). */
+        reflection: model.optional(),
       })
       .optional(),
     /**
