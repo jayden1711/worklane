@@ -248,6 +248,16 @@ export interface State {
   reports: { day: string; slot: string; issue: number | null; at: string }[];
   /** How the default branch is guarded; a viewer gets `mode` only. Absent from an older server. */
   protection?: Protection;
+  /** The pre-deploy gate, when tests.yaml has one (owners and writers only). */
+  deployGate?: DeployGate;
+}
+
+/** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
+export interface DeployGate {
+  branch: string;
+  deployed: { sha: string; url: string; at: string | null; by: string | null; override: boolean } | null;
+  held: { sha: string; url: string; at: string; reason: string } | null;
+  refused: { at: string; reason: string } | null;
 }
 
 /** The default branch's protection: GitHub's, the main watch's (with the last commit it checked and an alert), or off. */

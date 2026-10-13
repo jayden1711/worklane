@@ -18,6 +18,7 @@ import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
 import { USAGE_INCIDENT } from '../usage-limit.js';
 import { CONFIG_INCIDENT } from '../config/live.js';
+import { DEPLOY_GATE_INCIDENT } from '../deploy-gate/config.js';
 
 export const INCIDENTS_FILE = 'incidents.json';
 const LOCK_FILE = 'incidents.lock';
@@ -46,6 +47,8 @@ export const KINDS = {
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.
   [CONFIG_INCIDENT]: { title: 'The config on the default branch is invalid', severity: 'amber' },
+  // Raised by the coordinator (src/deploy-gate/gate.ts): someone moved the deploy branch; the gate refuses to move it.
+  [DEPLOY_GATE_INCIDENT]: { title: 'The deploy branch moved outside the gate', severity: 'red' },
 } as const satisfies Record<string, { title: string; severity: Severity }>;
 export type WatchdogKind = keyof typeof KINDS;
 
