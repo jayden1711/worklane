@@ -42,8 +42,11 @@ export interface Backlog {
   checks(sha: string): Promise<CommitCheck[]>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
-  /** Merge a PR with a merge commit (never squash), only if its head is still `sha`. Returns the merge commit. */
-  mergePr(n: number, sha: string, title: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }>;
+  /**
+   * Merge a PR with a merge commit (never squash), only if its head is still `sha` (GitHub's `sha`, like `gh pr merge
+   * --match-head-commit`). `title` and `body` are the merge commit's subject and message. Returns the merge commit.
+   */
+  mergePr(n: number, sha: string, title: string, body?: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }>;
   /** Ask these people to review a PR (GitHub notifies them). */
   requestReview(n: number, logins: string[]): Promise<void>;
   /**

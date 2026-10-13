@@ -407,6 +407,12 @@ export const EventSchemas = {
   'merge.approved': z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string(), via: z.enum(['discord']) }),
   'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
+  /**
+   * The merge train (src/merge-policy-train.ts) put off merging PR `number` at `head` until `retry_at`: GitHub requires
+   * it up to date with its base (strict protection), or its base moved under the merge. Not a failure and not the
+   * owner's call; tried again then, with a growing backoff.
+   */
+  'merge.deferred': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string(), retry_at: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
   /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
   'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()) }),
@@ -550,6 +556,40 @@ export const EventSchemas = {
   'testrun.checks_permission': z.strictObject({ level: z.enum(['write', 'read', 'none', 'unknown']), detail: z.string().max(500) }),
   /** The sandbox's own check (the helper's `check`): no run starts until it passed. */
   'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000) }),
+  // the pre-deploy gate (src/deploy-gate/): a branch fast-forwarded only to default-branch commits green on every gate tier
+  /** The gate's tiers ran on a default-branch commit: ok only when every one passed; `failed` names the rest. */
+  'deploy_gate.verdict': z.strictObject({ sha, ok: z.boolean(), failed: z.array(z.string()), reason: z.string().max(2000), run: z.string().nullable() }),
+  /** The deploy branch was fast-forwarded (never forced): by the gate, or by an owner's override (`gate`: its state then). */
+  'deploy_gate.moved': z.strictObject({ branch: z.string(), from: sha.nullable(), to: sha, by: z.string(), override: z.boolean(), gate: z.string().max(200) }),
+  /** A default-branch commit the gate didn't pass: the deploy branch stays at `deployed`. */
+  'deploy_gate.held': z.strictObject({ branch: z.string(), sha, deployed: sha.nullable(), reason: z.string().max(2000) }),
+  /** The deploy branch isn't where the gate put it, or not on the default branch's line: nothing moved; an incident is raised. */
+  'deploy_gate.refused': z.strictObject({ branch: z.string(), deploy: sha.nullable(), main: sha, target: sha.nullable(), reason: z.string().max(2000) }),
+  /** An owner's `deploy <sha>` from Discord: asked (waiting on their confirm), confirmed, cancelled or refused. */
+  'deploy_gate.override': z.strictObject({ id: z.string(), thread: z.string().nullable(), sha: z.string().max(64), by: z.string(), stage: z.enum(['asked', 'confirmed', 'cancelled', 'refused']), detail: z.string().max(1000) }),
+  /**
+   * The post-deploy check of a commit the deploy branch moved to: passed; failed (a smoke check failed: `rollback` says
+   * what was rolled back); timed_out (the host didn't deploy it in time); deploy_failed (the host's deploy of it failed).
+   * `snippet` is a redacted piece of a failing response's body; no header or cookie is ever kept. `token`: whether the
+   * host's token was stored.
+   */
+  'deploy_gate.post_deploy': z.strictObject({
+    sha,
+    prev: sha.nullable(),
+    outcome: z.enum(['passed', 'failed', 'timed_out', 'deploy_failed']),
+    detail: z.string().max(2000),
+    checks: z.array(z.strictObject({ name: z.string().max(40), ok: z.boolean(), status: z.number().int().nullable(), ms: z.number().int().nonnegative(), error: z.string().max(300).nullable(), snippet: z.string().max(300) })).max(20),
+    rollback: z
+      .strictObject({
+        attempted: z.boolean(),
+        ok: z.boolean(),
+        detail: z.string().max(2000),
+        services: z.array(z.strictObject({ service: z.string().max(40), to: z.string().max(100).nullable(), via: z.enum(['rollback', 'redeploy']).nullable(), ok: z.boolean(), detail: z.string().max(500) })).max(20),
+      })
+      .nullable(),
+    github: z.strictObject({ total: z.number().int().nonnegative(), success: z.number().int().nonnegative() }).nullable(),
+    token: z.boolean(),
+  }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
