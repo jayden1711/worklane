@@ -274,6 +274,20 @@ export interface Protection {
   accepted?: AcceptedMerge[];
   /** Whether this person may accept one (an admin, while the main watch guards the branch). */
   canAccept?: boolean;
+  /** The last commit that landed without a PR, and its ops-channel alert (owners and writers). */
+  directPush?: DirectPush | null;
+}
+
+export interface DirectPush {
+  at: string;
+  sha: string;
+  url: string;
+  kind: 'direct' | 'rewrite';
+  pusher: string | null;
+  /** posted; pending (the ops posts' limit); not_posted (with `note` saying why); off (turned off). */
+  status: 'posted' | 'pending' | 'not_posted' | 'off';
+  mentioned: number;
+  note: string | null;
 }
 
 export interface AcceptedMerge {
