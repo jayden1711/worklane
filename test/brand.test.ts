@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../src/brand.js';
 
+// The engine's root, from dist/test/brand.test.js.
 const root = fileURLToPath(new URL('../../', import.meta.url));
 
 test('package.json name and bin follow BRAND', () => {
