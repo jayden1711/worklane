@@ -178,8 +178,12 @@ export interface SetupStep {
   modes: readonly Mode[];
   /** Recommended, not required: shown, never blocks. */
   optional: boolean;
-  /** Nothing runs without it (init stops at it): doctor fails until it's done. Any other step not done is a warning there. */
-  blocks?: boolean;
+  /**
+   * The modes in which init's walk needs this step for its group to be done (init stops there until it is). Doctor's
+   * line for the group (`setup <group>`) fails until every such step is done; any step not done is a warning on its
+   * own line (`setup step <id>`).
+   */
+  walk?: readonly Mode[];
   reach: Reach;
   /** What a person does about it today, without a screen. */
   today: string;
@@ -354,7 +358,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   // Tools
   {
     id: 'tools',
-    blocks: true,
+    walk: MODES,
     group: 'tools',
     rows: [4],
     title: 'Tools: git, gitleaks, claude (and gh, locally)',
@@ -383,7 +387,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   // Claude
   {
     id: 'claude-login',
-    blocks: true,
+    walk: ['local'],
     group: 'claude',
     rows: [6],
     title: 'Signed in to Claude',
@@ -396,7 +400,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   },
   {
     id: 'claude-token',
-    blocks: true,
+    walk: ['server'],
     group: 'claude',
     rows: [7],
     title: "The agents' Claude login",
@@ -416,7 +420,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   // GitHub
   {
     id: 'gh-login',
-    blocks: true,
+    walk: ['local'],
     group: 'github',
     rows: [8],
     title: 'Signed in to GitHub (gh), able to push',
@@ -462,7 +466,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   },
   {
     id: 'agent-app',
-    blocks: true,
+    walk: ['server'],
     group: 'github',
     rows: [25],
     title: "The agents' GitHub App",
@@ -513,6 +517,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   },
   {
     id: 'config-on-main',
+    walk: ['server'],
     group: 'repo-config',
     rows: [12, 26],
     title: `${BRAND.configDir}/ valid and on the default branch`,
@@ -528,12 +533,15 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       if (isErr(cfg)) return no(`${cfg.error}${k.c.setupPr ? `; proposed in ${k.c.setupPr}` : ''}`);
       const b = cfg.project.project.default_branch;
       const onMain = k.p.run('git', ['cat-file', '-e', `refs/remotes/origin/${b}:${BRAND.configDir}/config.yaml`], { cwd: k.c.root });
-      return onMain.status === 0 ? ok(`${BRAND.configDir}/ valid here and on origin/${b}`) : no(`${BRAND.configDir}/ is valid here but not on origin/${b} yet${k.c.setupPr ? `: merge ${k.c.setupPr}` : ''}`);
+      if (onMain.status === 0) return ok(`${BRAND.configDir}/ valid here and on origin/${b}`);
+      // Server mode: add-project's service step starts only from a config on the default branch; done, it was there.
+      if (k.c.handoff?.service === 'done') return ok(`${BRAND.configDir}/ valid here; on ${b} as add-project's service step found it (init's record)`);
+      return no(`${BRAND.configDir}/ is valid here but not on origin/${b} yet${k.c.setupPr ? `: merge ${k.c.setupPr}` : ''}`);
     },
   },
   {
     id: 'hooks',
-    blocks: true,
+    walk: ['local'],
     group: 'repo-config',
     rows: [12],
     title: 'Hooks for local runs installed',
@@ -588,6 +596,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   },
   {
     id: 'agents-config',
+    walk: ['local'],
     group: 'repo-config',
     rows: [15],
     title: 'Budget, models, guardrails, review levels',
@@ -821,7 +830,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
   // Coordinator running (server): add-project's last steps, the service among them
   {
     id: 'coordinator',
-    blocks: true,
+    walk: ['server'],
     group: 'coordinator',
     rows: [20, 26],
     title: "The instance's coordinator running",
@@ -884,7 +893,8 @@ export interface StepView {
   rows: number[];
   title: string;
   optional: boolean;
-  blocks: boolean;
+  /** init's walk needs it for its group, in this mode. */
+  walk: boolean;
   reach: Reach;
   done: boolean;
   detail: string;
@@ -900,6 +910,8 @@ export interface GroupView {
   optional: boolean;
   /** Every required step in it done (an optional group: every step). */
   done: boolean;
+  /** Every step init's walk needs here done: what doctor's line for the group says (ok, or not). */
+  ready: boolean;
   steps: StepView[];
 }
 
@@ -973,25 +985,23 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       o.cache?.set(s.id, { at: t, key, r });
     }
     if (!r) continue;
-    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, blocks: !!s.blocks, reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, network: !!s.network, checkedAt: new Date(at).toISOString() });
+    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, network: !!s.network, checkedAt: new Date(at).toISOString() });
   }
   const groups: GroupView[] = GROUPS.filter((g) => g.modes.includes(c.mode))
     .map((g) => {
       const mine = steps.filter((s) => s.group === g.id);
       const required = mine.filter((s) => !s.optional);
-      return { id: g.id, title: g.title, optional: g.optional || !required.length, done: (required.length ? required : mine).every((s) => s.done), steps: mine };
+      return { id: g.id, title: g.title, optional: g.optional || !required.length, done: (required.length ? required : mine).every((s) => s.done), ready: mine.filter((s) => s.walk).every((s) => s.done), steps: mine };
     })
     .filter((g) => g.steps.length);
   return { mode: c.mode, groups, done: steps.filter((s) => s.done).length, total: steps.length, requiredLeft: steps.filter((s) => !s.optional && !s.done).length };
 }
 
-/**
- * The level doctor shows a step at: ok when done, as the first-run page shows it done; not done, a failure only for a
- * step nothing runs without (doctor's exit status), a warning otherwise.
- */
-export function stepLevel(s: Pick<StepView, 'done' | 'blocks'>): 'ok' | 'warn' | 'fail' {
-  return s.done ? 'ok' : s.blocks ? 'fail' : 'warn';
-}
+/** The level doctor shows a step's own line at: ok when done, as the page shows it; a warning when not. */
+export const stepLevel = (s: Pick<StepView, 'done'>): 'ok' | 'warn' => (s.done ? 'ok' : 'warn');
+
+/** The level of doctor's line for one of init's walked groups: ok when ready, as the page's group says; else fail (an optional group: warn). */
+export const groupLevel = (g: Pick<GroupView, 'ready' | 'optional'>): 'ok' | 'warn' | 'fail' => (g.ready ? 'ok' : g.optional ? 'warn' : 'fail');
 
 /**
  * checkSetup in a worker thread (src/setup-worker.ts), with the real probe: the dashboard's way, so its server keeps

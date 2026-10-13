@@ -743,8 +743,8 @@ export interface SetupStepView {
   rows: number[];
   title: string;
   optional: boolean;
-  /** Nothing runs without it: doctor fails until it's done. */
-  blocks: boolean;
+  /** init's walk needs it for its group, in this mode. */
+  walk: boolean;
   reach: 'all' | 'most' | 'some' | 'few';
   done: boolean;
   detail: string;
@@ -758,6 +758,8 @@ export interface SetupGroupView {
   title: string;
   optional: boolean;
   done: boolean;
+  /** Every step init's walk needs here done: what doctor's line for the group says. */
+  ready: boolean;
   steps: SetupStepView[];
 }
 export interface SetupView {

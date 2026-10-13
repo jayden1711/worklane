@@ -264,7 +264,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
         </section>
       )}
       {setup?.groups.map((g) => (
-        <section key={g.id} aria-label={g.title} className="space-y-1.5" data-testid="first-run-group" data-group={g.id} data-done={g.done}>
+        <section key={g.id} aria-label={g.title} className="space-y-1.5" data-testid="first-run-group" data-group={g.id} data-done={g.done} data-ready={g.ready}>
           <div className="flex items-center gap-2">
             <h2 className="text-[13px] font-medium text-ink">{g.title}</h2>
             {g.optional && <span className="text-[11.5px] text-ink-3">optional</span>}

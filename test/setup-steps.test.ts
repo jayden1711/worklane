@@ -275,14 +275,23 @@ test('doctor and the first-run page show the same steps with the same states', a
   try {
     const page = (await s.get()).body.setup;
     const doc = setupChecks(f.dir, { probe: probeFor(w), context: { machine: f.machine, instanceFacts: () => f.facts } });
-    const fromPage = page.groups.flatMap((g) => g.steps).map((x) => [`setup ${x.id}`, x.done]);
-    const fromDoctor = doc.filter((c) => c.name.startsWith('setup ')).map((c) => [c.name, c.level === 'ok']);
+    // Every step: done on the page is ok in doctor. Every one of init's groups: ready on the page is ok in doctor.
+    const fromPage = page.groups.flatMap((g) => g.steps).map((x) => [`setup step ${x.id}`, x.done]);
+    const fromDoctor = doc.filter((c) => c.name.startsWith('setup step ')).map((c) => [c.name, c.level === 'ok']);
     assert.deepEqual(fromDoctor, fromPage);
-    assert.deepEqual(fromPage.filter(([, done]) => !done).map(([n]) => n), ['setup engine', 'setup path', 'setup docker', 'setup claude-login', 'setup required-checks', 'setup pre-commit', 'setup fingerprints', 'setup protection', 'setup deploy-gate', 'setup service']);
+    const walked = new Set(GROUPS.filter((g) => g.walked).map((g) => g.id as string));
+    const groupsPage = page.groups.filter((g) => walked.has(g.id)).map((g) => [`setup ${g.id}`, g.ready]);
+    // (Doctor also has a line for a walked group with no step in this mode, Discord locally: always ok.)
+    const groupsDoctor = doc.filter((c) => /^setup [a-z-]+$/.test(c.name) && page.groups.some((g) => `setup ${g.id}` === c.name)).map((c) => [c.name, c.level === 'ok']);
+    assert.deepEqual(groupsDoctor, groupsPage);
+    assert.deepEqual(groupsPage.filter(([, ready]) => !ready).map(([n]) => n), ['setup claude']);
+    assert.deepEqual(fromPage.filter(([, done]) => !done).map(([n]) => n), ['engine', 'path', 'docker', 'claude-login', 'required-checks', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service'].map((id) => `setup step ${id}`));
     // Live: signed in since, both see it at once (Re-check), not when init next runs.
     w.claudeIn = true;
     assert.equal(stepIn((await s.get('example-owner', true)).body.setup, 'claude-login')!.done, true);
-    assert.equal(setupChecks(f.dir, { probe: probeFor(w), context: { machine: f.machine } }).find((c) => c.name === 'setup claude-login')!.level, 'ok');
+    const again = setupChecks(f.dir, { probe: probeFor(w), context: { machine: f.machine } });
+    assert.equal(again.find((c) => c.name === 'setup step claude-login')!.level, 'ok');
+    assert.equal(again.find((c) => c.name === 'setup claude')!.level, 'ok');
   } finally {
     await s.d.close();
   }

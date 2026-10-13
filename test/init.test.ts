@@ -305,9 +305,11 @@ test('init, server mode: the record is the machine\'s, outside root\'s home, so 
   const level = Object.fromEntries(checks.map((c) => [c.name, c.level]));
   // The registry's server steps (src/setup-steps.ts): what this user can't see for itself is read from init's record;
   // the setup PR's wait is the config step's, and the coordinator (which nothing runs without) fails doctor until then.
-  assert.deepEqual([level['setup tools'], level['setup claude-token'], level['setup agent-app'], level['setup config-on-main'], level['setup coordinator']], ['ok', 'ok', 'ok', 'warn', 'fail'], JSON.stringify(checks));
-  assert.match(checks.find((c) => c.name === 'setup config-on-main')!.detail, /waiting for the setup PR https:\/\/github\.com\/example-org\/shop\/pull\/2/);
-  assert.match(checks.find((c) => c.name === 'setup claude-token')!.detail, /as init recorded it \(add-project: claude-token\)/);
+  // init's groups (src/setup-steps.ts walked groups), as before: Claude and GitHub from init's record, the repo config
+  // waiting on its setup PR; and each step's own line.
+  assert.deepEqual([level['setup tools'], level['setup claude'], level['setup github'], level['setup repo-config'], level['setup coordinator']], ['ok', 'ok', 'ok', 'fail', 'fail'], JSON.stringify(checks));
+  assert.match(checks.find((c) => c.name === 'setup repo-config')!.detail, /^Repo config \(server mode\): waiting for the setup PR https:\/\/github\.com\/example-org\/shop\/pull\/2/);
+  assert.match(checks.find((c) => c.name === 'setup step claude-token')!.detail, /as init recorded it \(add-project: claude-token\)/);
   assert.ok(!checks.some((c) => c.level === 'ok' && /not reached yet/.test(c.detail)));
   // Opened to one group, read only, owner kept (Linux): what writeServerInitState does with the coordinator's group.
   const f = join(mkdtempSync(join(tmpdir(), 'init-share-')), 'x.json');
@@ -339,10 +341,13 @@ test('doctor: every setup step of the registry checked live, and what the mode c
   const names = (cs: { name: string }[]) => cs.map((c) => c.name);
   const local = doctor(root, { initIo: t.io });
   const setup = local.filter((c) => c.name.startsWith('setup '));
-  // The registry's local steps (src/setup-steps.ts), in its order (linger only where loginctl answers: Linux); what init's walk needs is done.
-  assert.deepEqual(names(setup).filter((n) => n !== 'setup linger'), ['setup engine', 'setup path', 'setup tools', 'setup docker', 'setup claude-login', 'setup gh-login', 'setup origin', 'setup default-branch', 'setup questions', 'setup config-on-main', 'setup hooks', 'setup owners', 'setup required-checks', 'setup agents-config', 'setup pre-commit', 'setup fingerprints', 'setup protection', 'setup deploy-gate', 'setup service']);
+  // init's walked groups, one line each and all ok; then every registry step (src/setup-steps.ts) on its own line, in
+  // its order (linger only where loginctl answers: Linux), a step not done a warning, never a failure.
+  assert.deepEqual(names(setup).filter((n) => !n.startsWith('setup step ')), ['setup tools', 'setup claude', 'setup github', 'setup repo-config', 'setup protection', 'setup discord']);
+  assert.ok(setup.filter((c) => !c.name.startsWith('setup step ')).every((c) => c.level === 'ok'), JSON.stringify(setup));
+  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service'].map((id) => `setup step ${id}`));
   assert.ok(setup.every((c) => c.level !== 'fail'), JSON.stringify(setup));
-  for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.equal(setup.find((c) => c.name === `setup ${id}`)!.level, 'ok', id);
+  for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.equal(setup.find((c) => c.name === `setup step ${id}`)!.level, 'ok', id);
   const off = local.filter((c) => c.level === 'off');
   assert.deepEqual(names(off), ['not in local mode: separate OS users', 'not in local mode: root-run add-project', 'not in local mode: test sandbox']);
   assert.match(off[1]!.detail, /Add project runs scripts\/setup\/add-project\.sh as root through the machine helper, and local mode has neither root nor the helper/);
@@ -355,9 +360,13 @@ test('doctor: every setup step of the registry checked live, and what the mode c
   assert.deepEqual(unavailableIn('server'), []);
   // Live: signed out of Claude since, doctor says so and where init picks up.
   t.w.claudeIn = false;
-  const c = doctor(root, { initIo: t.io }).find((x) => x.name === 'setup claude-login')!;
+  const signedOut = doctor(root, { initIo: t.io });
+  const c = signedOut.find((x) => x.name === 'setup claude')!;
   assert.equal(c.level, 'fail');
-  assert.match(c.detail, /Signed in to Claude \(local mode\): not signed in, per `claude auth status`; today: Run `claude auth login` in a terminal, then `worklane init` again/);
+  assert.match(c.detail, /Claude login \(local mode\): not signed in, per `claude auth status`; `worklane init` picks up here/);
+  const step = signedOut.find((x) => x.name === 'setup step claude-login')!;
+  assert.equal(step.level, 'warn');
+  assert.match(step.detail, /Signed in to Claude \(local mode\): not signed in, per `claude auth status`; today: Run `claude auth login` in a terminal, then `worklane init` again/);
   // Never run: one line saying how, nothing else.
   const fresh = exampleProject().dir;
   const none = doctor(fresh, { initIo: t.io }).filter((x) => x.name.startsWith('setup') || x.level === 'off');
@@ -416,12 +425,13 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   assert.doesNotMatch(second.stdout, /kept \.worklane|installed /, 'nothing done twice');
   const doc = cli('doctor', '--root', root);
   assert.equal(doc.status, 0, doc.stdout + doc.stderr);
-  for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.match(doc.stdout, new RegExp(`^ok {4}setup ${id}: `, 'm'));
+  for (const id of ['tools', 'claude', 'github', 'repo-config', 'protection', 'discord']) assert.match(doc.stdout, new RegExp(`^ok {4}setup ${id}: `, 'm'));
+  for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.match(doc.stdout, new RegExp(`^ok {4}setup step ${id}: `, 'm'));
   assert.match(doc.stdout, /^off {3}not in local mode: separate OS users: /m);
   // Signed out since: doctor fails, naming the step.
   const out = spawnSync(process.execPath, [engineCli, 'doctor', '--root', root], { encoding: 'utf8', env: { ...env, STANDIN_SIGNED_OUT: '1' } });
   assert.equal(out.status, 1);
-  assert.match(out.stdout, /^FAIL {2}setup claude-login: Signed in to Claude \(local mode\): not signed in/m);
+  assert.match(out.stdout, /^FAIL {2}setup claude: Claude login \(local mode\): not signed in/m);
 });
 
 test("down on a Mac: launchd still listing the agent after bootout (as on the macOS runner) is waited out, booted out again by its plist, and never reported gone while it isn't", () => {

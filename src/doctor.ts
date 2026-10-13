@@ -18,7 +18,7 @@ import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, wslAvailab
 import { findTool, toolBin } from './tool-path.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
-import { checkSetup, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -230,13 +230,17 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
     }
   }
   const view = checkSetup({ ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context }, probe);
-  const out: DoctorCheck[] = view.groups.flatMap((g) =>
-    g.steps.map((i) => ({
-      name: `setup ${i.id}`,
-      level: stepLevel(i),
-      detail: `${i.title} (${mode} mode): ${i.detail}${i.done ? '' : `; today: ${i.today}`}`,
-    })),
-  );
+  // init's walked groups first, one line each (what init stops at, with what it found), then every step's own line.
+  // A walked group with no step in this mode (Discord in local mode) still has its line, as init walks it.
+  const out: DoctorCheck[] = GROUPS.filter((d) => d.walked && d.modes.includes(mode)).map((d) => {
+    const g = view.groups.find((x) => x.id === d.id) ?? { id: d.id, title: d.title, optional: d.optional, done: true, ready: true, steps: [] };
+    const need = g.steps.filter((x) => x.walk);
+    const missing = need.find((x) => !x.done);
+    const said = missing ? missing.detail : need.length ? need.map((x) => x.detail).join('; ') : g.steps.length ? `${g.steps.filter((x) => x.done).length} of ${g.steps.length} steps done, none needed to run` : `nothing to set up in ${mode} mode`;
+    return { name: `setup ${g.id}`, level: groupLevel(g), detail: `${g.title} (${mode} mode): ${said}${missing && !g.optional ? `; \`${BRAND.cli} init\` picks up here` : ''}` };
+  });
+  for (const g of view.groups)
+    for (const i of g.steps) out.push({ name: `setup step ${i.id}`, level: stepLevel(i), detail: `${i.title} (${mode} mode): ${i.detail}${i.done ? '' : `; today: ${i.today}`}` });
   for (const u of unavailableIn(mode, (c) => probe.which(c) !== null)) out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
   return out;
 }
