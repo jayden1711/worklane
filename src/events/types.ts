@@ -602,6 +602,16 @@ export const EventSchemas = {
   'hotspot.held': z.strictObject({ issue, by: issue, files: z.array(z.string()), reason: z.string() }),
   /** A held task started (or stopped being ready): how long it waited, on which files. */
   'hotspot.released': z.strictObject({ issue, waited_ms: z.number().int().nonnegative(), files: z.array(z.string()), started: z.boolean() }),
+  /** WHY: a ready task whose "Depends on" issues are open (`on`) must not start; recorded once per change of `on` (src/task-graph.ts). */
+  'dependency.held': z.strictObject({ issue, on: z.array(issue), reason: z.string() }),
+  /** INVARIANT: ends every dependency.held: its dependencies closed (`closed`), or it stopped being ready (`not_ready`). */
+  'dependency.unblocked': z.strictObject({ issue, on: z.array(issue), waited_ms: z.number().int().nonnegative(), why: z.enum(['closed', 'not_ready']) }),
+  /** WHY: a cycle never unblocks; reported once per cycle so the owner removes an edge. */
+  'dependency.cycle': z.strictObject({ issue, cycle: z.array(issue) }),
+  /** WHY: running tasks waiting on each other's files; `proceeds` goes ahead so neither waits forever (src/ownership.ts). */
+  'ownership.deadlock': z.strictObject({ issue, cycle: z.array(issue), files: z.array(z.string()), proceeds: issue }),
+  /** WHY: a file claim outlived its task; dropped so no task waits on it forever. */
+  'ownership.stale': z.strictObject({ issue, files: z.array(z.string()) }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
   // test runs (src/testrun/): a project's CI run by the coordinator, as the sandboxed test user
   'testrun.queued': z.strictObject({ id: z.string(), sha, kind: z.enum(['fast', 'full']), prs: z.array(z.number().int().positive()), shard: z.strictObject({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable() }),

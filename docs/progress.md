@@ -117,6 +117,8 @@ Each item merged as its own reviewed PR, with tests that fail without it, on CI 
 - **Conflicts:**
   - A conflicting harness PR gets its base merged in and the hunks resolved, or goes to the owner.
   - Two tasks that would change the same shared file never run at once (hotspot holds).
+  - A running task owns its plan's files too: a task that would change one waits, before it starts or, if its own plan names it, before it builds. A wait cycle between running tasks lets the lower issue go ahead (`ownership.deadlock`); a claim left with no task is dropped (`ownership.stale`).
+  - An issue that says `Depends on #n` or `Blocked by #n` waits until those issues close, then starts on its own. A dependency cycle is reported on each issue in it, never waited on silently.
   - A combined-state check runs the fast tier on PR plus main before an auto-merge, but only when main touched what the PR touches.
   - Merge metrics show what each of these costs per merged PR.
 - **Frozen-test guard:** task files the agent can read, and a hook that fails closed when it can't check.
