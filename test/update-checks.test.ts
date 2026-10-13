@@ -128,7 +128,7 @@ test('a batch runs every slow job: scope lists every slow job\'s key for a dispa
   assert.deepEqual(keys, Object.keys(batch.SLOW_JOBS).sort(), 'batch.mjs knows every slow job, by the key a dispatch names');
   for (const k of keys) assert.deepEqual(checks().filter((c) => c.key === k).map((c) => c.name).sort(), [...batch.SLOW_JOBS[k]!].sort(), `${k}: the check runs batch.mjs bisects`);
   const scope = (env: Record<string, string>) => {
-    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', GITHUB_OUTPUT: '/dev/stdout', ...env } });
+    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } });
     const line = r.stdout.split('\n').find((l) => l.startsWith('run='));
     return { status: r.status, keys: line ? line.slice(4).trim().split(/\s+/).filter(Boolean).sort() : null, err: r.stderr };
   };

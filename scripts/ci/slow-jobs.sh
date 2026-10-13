@@ -49,4 +49,5 @@ esac
 # shellcheck disable=SC2086
 run=" $(echo $run) "
 echo "event: $EVENT; full-ci label: ${FULL:-n/a}; slow jobs this run:${run% }"
-echo "run=$run" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+# Outside Actions (the tests), to stdout: /dev/stdout can't be opened for append when stdout is a socket.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "run=$run" >> "$GITHUB_OUTPUT"; else echo "run=$run"; fi

@@ -323,7 +323,7 @@ test('slow-jobs.sh on a PR: the jobs whose paths it touches, all of them for a w
     writeFileSync(p, 'y\n');
     git('add', file);
     git('commit', '-q', '-m', 'change');
-    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', GITHUB_OUTPUT: '/dev/stdout', EVENT: 'pull_request', FULL: full, PR_BASE: base, PR_HEAD: git('rev-parse', 'HEAD') } });
+    const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', EVENT: 'pull_request', FULL: full, PR_BASE: base, PR_HEAD: git('rev-parse', 'HEAD') } });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.split('\n').find((l) => l.startsWith('run='))!.slice(4).trim().split(/\s+/).filter(Boolean);
   };
