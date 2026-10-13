@@ -30,7 +30,7 @@ interface FilePr {
 
 interface FileState {
   // As on GitHub, a pull request is an issue too (same numbering, labels and comments), with `pr` set.
-  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string }[]; pr?: FilePr })[];
+  issues: (Issue & { labelEvents: { label: string; actor: string }[]; comments: { author: string; body: string; at?: string }[]; pr?: FilePr })[];
   labels: string[];
   /** Checks per commit sha (tests set them). */
   checks?: Record<string, CommitCheck[]>;
@@ -84,9 +84,9 @@ export class FileBacklog implements Backlog {
     });
   }
 
-  /** Test helper: a human comments on an issue. */
-  humanComment(n: number, author: string, body: string) {
-    this.edit(n, (i) => i.comments.push({ author, body }));
+  /** Test helper: a human comments on an issue (now, or at `at`). */
+  humanComment(n: number, author: string, body: string, at = new Date().toISOString()) {
+    this.edit(n, (i) => i.comments.push({ author, body, at }));
   }
 
   async list(label: string) {
@@ -120,7 +120,7 @@ export class FileBacklog implements Backlog {
   }
   // What the harness writes is redacted first (events/redact.ts), as the GitHub backlog does for everything it sends.
   async comment(n: number, body: string) {
-    this.edit(n, (i) => i.comments.push({ author: this.actor, body: redactString(body) }));
+    this.edit(n, (i) => i.comments.push({ author: this.actor, body: redactString(body), at: new Date().toISOString() }));
   }
   async comments(n: number) {
     return this.load().issues.find((x) => x.number === n)?.comments ?? [];

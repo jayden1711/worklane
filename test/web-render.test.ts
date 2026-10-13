@@ -614,6 +614,14 @@ test('the machine settings: the owner gets the slot cap and engine updates with 
   assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
 });
 
+test('the PR page shows the latest stale-PR pass and its counts', () => {
+  const base = { prs: [], refused: [], stops: [], holds: [], autoMerge: { on: true, policy: true, repo: true, stopped: null, why: 'on' } };
+  const at = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  const html = r.renderPrs({ ...base, hygiene: { at, merged_in: 2, conflicting: 1, closed: 0, held: 1, skipped: 3, line: '2 merged in, 1 conflicting, 0 closed, 1 held for an owner, 3 skipped' } });
+  assert.match(html, /data-testid="prs-hygiene"[^>]*>stale PR pass [^<]*ago: <span[^>]*>2 merged in, 1 conflicting, 0 closed, 1 held for an owner, 3 skipped</);
+  assert.doesNotMatch(r.renderPrs({ ...base, hygiene: null }), /prs-hygiene/, 'nothing before the first pass');
+});
+
 test('merge flow on the PR page and in the health panel: conflict fixes, light checks and hotspot holds, with how long', () => {
   const mins = (n: number) => new Date(Date.now() - n * 60_000).toISOString();
   const pr = (number: number, phase: string, extra: Record<string, unknown> = {}) => ({ number, issue: number - 100, title: `Change ${number}`, url: `https://example.test/pr/${number}`, openedAt: mins(60), head: 'a'.repeat(40), state: 'open', draft: false, status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, conflict: null, lightCheck: null, phase, ...extra });

@@ -164,6 +164,8 @@ export interface PrsView {
   holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
+  /** The latest stale-PR pass: its counts and their line; null before the first (absent from an older server). */
+  hygiene?: { at: string; merged_in: number; conflicting: number; closed: number; held: number; skipped: number; line: string } | null;
 }
 
 export interface ServiceLog {

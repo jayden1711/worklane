@@ -28,7 +28,8 @@ export interface Backlog {
   removeLabel(n: number, label: string): Promise<void>;
   setAssignees(n: number, logins: string[]): Promise<void>;
   comment(n: number, body: string): Promise<void>;
-  comments(n: number): Promise<{ author: string; body: string }[]>;
+  /** An issue's or PR's comments, oldest first; `at`: when it was made (ISO), when the tracker says. */
+  comments(n: number): Promise<{ author: string; body: string; at?: string }[]>;
   close(n: number): Promise<void>;
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
   /**
