@@ -69,7 +69,7 @@ test('bootstrap: parses with bash -n; --help, unknown options and a missing repo
   const m = machine();
   const help = m.run('--help');
   assert.equal(help.code, 0);
-  assert.match(help.out, /bootstrap\.sh <repo-dir>/);
+  assert.match(help.out, /bootstrap\.sh \[--mode local\] <repo-dir>/);
   assert.equal(m.run('--bogus').code, 2);
   assert.match(m.run().out, /give the repo to set up, or --no-repo/);
   assert.equal(m.run().code, 2);
@@ -87,7 +87,7 @@ test('bootstrap: a dry run on a bare Linux machine plans every step, pinned and 
   assert.match(r.out, /would run: npm install -g --prefix \S+ --no-audit --no-fund @anthropic-ai\/claude-code@2\.1\.296/);
   assert.match(r.out, new RegExp(`would fetch https://github\\.com/${esc(ENGINE_REPO)}\\.git at 9c24a10eb91ffac894e24f0b0a54d8407f23d423 \\(v0\\.4\\.1\\), check the commit, and pack it`), 'the engine at its release commit, not main');
   assert.match(r.out, /would run: npm install -g --prefix \S+ --ignore-scripts --no-audit --no-fund \S+engine\.tgz/);
-  assert.match(r.out, new RegExp(`would run: worklane install --root ${m.repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(r.out, new RegExp(`would run: worklane init --mode local ${m.repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the guided checklist, in local mode');
   assert.match(r.out, /would run: worklane doctor --root/);
   assert.ok(!existsSync(m.prefix), 'nothing was created');
   assert.deepEqual(m.calls(), [], 'no tool was run');
@@ -131,7 +131,7 @@ test('bootstrap: idempotent: with everything in place it installs nothing, sets 
     for (const what of ['node v24.21.0', 'gitleaks 8.30.1', 'claude 2.1.296', 'worklane 0.4.1']) assert.match(r.out, new RegExp(`ok: ${what}`));
   }
   const calls = m.calls().filter((c) => !/--version|^node |^gitleaks |^claude /.test(c));
-  assert.deepEqual(calls, [`worklane install --root ${m.repo}`, `worklane doctor --root ${m.repo}`, `worklane install --root ${m.repo}`, `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
+  assert.deepEqual(calls, [`worklane init --mode local ${m.repo}`, `worklane doctor --root ${m.repo}`, `worklane init --mode local ${m.repo}`, `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
 });
 
 test('bootstrap: the engine is installed once per source (recorded), and again only when the source changes', { skip }, () => {
@@ -160,7 +160,29 @@ test("bootstrap: doctor's result is the script's; on success it ends with the ne
   assert.equal(r.code, 0);
   assert.match(r.out, /next: worklane up --root/);
   assert.match(r.out, /Setting up a project by\s+hand/);
-  assert.deepEqual(passing.calls().filter((c) => c.startsWith('worklane ') && !c.includes('--version')).map((c) => c.split(' ')[1]), ['install', 'doctor'], 'nothing past install and doctor');
+  assert.deepEqual(passing.calls().filter((c) => c.startsWith('worklane ') && !c.includes('--version')).map((c) => c.split(' ')[1]), ['init', 'doctor'], 'nothing past init and doctor');
+  // init stopping (a login missing, say) is the script's result, and doctor doesn't run after it.
+  const stopped = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.4.1 ;; init) exit 1 ;; *) exit 0 ;; esac' }) }));
+  const s = stopped.run(stopped.repo);
+  assert.equal(s.code, 1);
+  assert.match(s.out, /init stopped \(exit 1\): fix what it says, then run this again; it picks up where it stopped/);
+  assert.ok(!stopped.calls().some((c) => c.startsWith('worklane doctor')), 'no doctor after init stopped');
+});
+
+test('bootstrap --mode: local is this path; server is the hardened one; with no terminal to ask on, local, said so', { skip }, () => {
+  const m = released(machine({ have: installed() }));
+  const quiet = m.run(m.repo);
+  assert.equal(quiet.code, 0, quiet.out);
+  assert.match(quiet.out, /no --mode, and no terminal to ask on: local mode/);
+  assert.doesNotMatch(m.run('--mode', 'local', m.repo).out, /no terminal to ask on/, 'given: not asked, not defaulted');
+  const yes = m.run('--mode', 'local', '--yes', m.repo);
+  assert.ok(m.calls().includes(`worklane init --mode local --yes ${m.repo}`), `--yes reaches init: ${yes.out}`);
+  const server = m.run('--mode', 'server', m.repo);
+  assert.equal(server.code, 1);
+  assert.match(server.out, /server mode is the hardened multi-user Linux setup: sudo bash scripts\/bootstrap\.sh --hardened <instance-name> <owner\/repo>/);
+  assert.match(m.run('--hardened', '--mode', 'local', 'shop', 'acme/shop').out, /--hardened is server mode, not local/);
+  assert.match(m.run('--mode', 'cloud', m.repo).out, /--mode is local or server, not cloud/);
+  assert.match(m.run('--mode').out, /--mode needs local or server/);
 });
 
 test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts in order, then the credentials by hand', { skip }, () => {
@@ -243,9 +265,12 @@ test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; 
   assert.doesNotMatch(d, /curl[^\n]*\|\s*(ba)?sh/, 'nothing piped into a shell');
   const ci = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, { strategy?: { matrix?: { os?: string[] } }; steps: { run?: string }[] }> };
   const job = ci.jobs.bootstrap!;
-  assert.deepEqual(job.strategy?.matrix?.os, ['ubuntu-latest']);
+  assert.deepEqual(job.strategy?.matrix?.os, ['ubuntu-latest', 'macos-latest'], 'local mode end to end on Linux and on a Mac');
   const runs = job.steps.map((s) => s.run ?? '').join('\n');
-  assert.match(runs, /scripts\/bootstrap\.sh/);
+  assert.match(runs, /scripts\/bootstrap\.sh --mode local --yes/);
+  assert.match(runs, /scripts\/ci\/stand-ins/, 'no GitHub: a stand-in gh and claude');
+  assert.match(runs, /worklane doctor --root/);
+  assert.match(runs, /worklane up --root[\s\S]*launchctl print[\s\S]*worklane down --root/, 'the coordinator as a launchd service, up and down');
   assert.match(runs, /worklane demo/);
   assert.doesNotMatch(readFileSync(script, 'utf8'), /curl[^\n]*\|\s*(ba)?sh/, 'the bootstrap pipes nothing into a shell');
 });

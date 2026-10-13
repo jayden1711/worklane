@@ -14,6 +14,7 @@ import { MachinePage } from './pages/Machine';
 import { InboxPage } from './pages/Inbox';
 import { SetupPage } from './pages/Setup';
 import { WaitingPage } from './pages/Waiting';
+import { FirstRunPage } from './pages/FirstRun';
 import { Decisions } from './pages/Decisions';
 import { Issues } from './pages/Issues';
 import { IssueDetail } from './pages/IssueDetail';
@@ -293,6 +294,7 @@ function Dashboard() {
   else if (path === '/waiting') page = <WaitingPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
   else if (path === '/setup') page = <SetupPage />;
+  else if (path === '/first-run') page = <FirstRunPage state={state} />;
   else if (runMatch) page = <RunDetail id={runMatch[1]!} refused={runsRefusal(state)} />;
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
   else if (path.startsWith('/issues')) page = <Issues state={state} />;

@@ -1,0 +1,12 @@
+#!/bin/sh
+# CI and tests only: a stand-in Claude Code for a fresh-machine run of `init` in local mode (no real login, no
+# network). It answers what init and doctor ask: --version, and `auth status`, signed in unless STANDIN_SIGNED_OUT is
+# set. `auth login` says what it would do. Anything else (an agent run) is refused, loudly.
+case "$1 ${2:-}" in
+  "--version "*) echo "2.1.296 (Claude Code)" ;;
+  "auth status")
+    if [ -n "${STANDIN_SIGNED_OUT:-}" ]; then echo '{"loggedIn": false}'; exit 1; fi
+    echo '{"loggedIn": true, "authMethod": "stand-in"}' ;;
+  "auth login") echo "claude stand-in: would open the Claude login" ;;
+  *) echo "claude stand-in: $* is not something this stand-in does" >&2; exit 1 ;;
+esac

@@ -24,6 +24,7 @@ import { claudeAccountView } from '../src/claude-account.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { trustForViewer, trustView } from '../src/trust.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
+import { firstRunView } from '../src/init.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -40,6 +41,8 @@ interface Render {
   renderTrust(t: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderFirstRun(f: unknown): string;
+  renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
@@ -1042,6 +1045,40 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   assert.equal((asOther as unknown as { canReadDigest: boolean }).canReadDigest, false);
   assert.match(r.renderWaitingPage(asOther), /data-testid="waiting-refused"[^>]*>What waits on the owner is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
   assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
+});
+
+test("the first-run page: init's checklist in order with each status, where it stopped and how to pick up, what local mode lacks; viewers refused", () => {
+  // The view as the server makes it (src/init.ts firstRunView) from a state file init wrote.
+  const file = join(mkdtempSync(join(tmpdir(), 'web-render-init-')), 'init.json');
+  const at = '2026-10-13T10:00:00.000Z';
+  writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: { tools: { status: 'done', detail: 'node 24.21.0, git, gitleaks, claude, gh', at }, claude: { status: 'failed', detail: 'not signed in, per `claude auth status`', at } }, handoff: {}, updatedAt: at, finishedAt: null }));
+  const f = firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null, has: () => false });
+  const html = r.renderFirstRun(f);
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-step" data-step="([a-z-]+)" data-status="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['tools:done', 'claude:failed', 'github:pending', 'repo-config:pending', 'protection:pending', 'discord:pending']);
+  assert.match(html, /data-testid="first-run-mode" data-mode="local">Local mode: on this machine, as you\. No server, no ssh, no root\./);
+  assert.match(html, /1 of 6 steps done/);
+  assert.match(html, /role="progressbar" aria-valuemin="0" aria-valuemax="6" aria-valuenow="1"/);
+  assert.match(html, /Tools present[\s\S]*?done[\s\S]*?node 24\.21\.0, git, gitleaks, claude, gh/);
+  assert.match(html, /Claude login[\s\S]*?stopped here[\s\S]*?not signed in/);
+  assert.doesNotMatch(html, /not reached yet/, 'a step not reached shows no detail');
+  assert.match(html, /data-testid="first-run-resume"[\s\S]*?Stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
+  assert.match(html, /data-testid="first-run-unavailable"[\s\S]*?Not available in local mode[\s\S]*?separate OS users[\s\S]*?root-run add-project[\s\S]*?test sandbox[\s\S]*?needs Docker/);
+  assert.doesNotMatch(html, /first-run-none|first-run-finished/);
+  // Never run here: the command to start, nothing done.
+  const none = r.renderFirstRun(firstRunView(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: null }));
+  assert.match(none, /data-testid="first-run-none"[\s\S]*?<code[^>]*>worklane init --mode local \/r<\/code>/);
+  assert.doesNotMatch(none, /first-run-unavailable/, 'no mode yet: nothing claimed missing');
+  // Finished: said, no resume card.
+  const done = r.renderFirstRun({ ...f, steps: f.steps.map((x) => ({ ...x, status: x.optional ? 'skipped' : 'done' })), done: 6, finishedAt: at });
+  assert.match(done, /data-testid="first-run-finished"/);
+  assert.doesNotMatch(done, /first-run-resume/);
+  // Server mode: the per-project steps live on the Setup console; nothing listed as missing.
+  const server = r.renderFirstRun(firstRunView(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop' }));
+  assert.match(server, /Server mode[\s\S]*?Setup console/);
+  assert.doesNotMatch(server, /first-run-unavailable/);
+  // Anyone but the owner and the writers: told, not asked.
+  assert.match(r.renderFirstRunPage(asOther), /data-testid="first-run-refused"[^>]*>The first-run checklist is for the instance(&#x27;|')s owners and writers/);
+  assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
 });
 
 test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {

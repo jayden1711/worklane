@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
+import { initCommand, MODES, type Mode } from './init.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
@@ -52,12 +53,20 @@ const USAGE = `${BRAND.name} ${pkg.version}: ${BRAND.tagline}
 
 usage: ${BRAND.cli} <command> [options]
 
+  init [<repo>] [--mode local|server] [--yes] [--reset] [--instance name]
+                                   the guided first setup, one checklist in order: tools, Claude login,
+                                   GitHub, repo config, protection, then Discord (and Tailscale on a
+                                   server), optional. Each step is checked before the next; rerun it to
+                                   pick up where it stopped. Asks for the mode when not given. local: this
+                                   checkout (default: here), as you; server: <owner/repo>, as root, through
+                                   scripts/setup/add-project.sh. --yes installs missing tools as shown
   install [--instance name] [--git-hooks] [--engine path] | install --git-hooks-only
                                    scaffold ${BRAND.configDir}/; with --instance, write the hooks and rules
                                    for that instance's agent runs only (in its home); without, merge them
                                    into .claude/settings.json for local runs
-  doctor [--agentshield] [--json] [--policy file] [--instance name]
-                                   verify the install, and the config against any local instance's policy
+  doctor [--agentshield] [--json] [--policy file] [--instance name] [--mode local|server]
+                                   verify the install, and the config against any local instance's policy;
+                                   init's checklist, and what the mode can't do
   guardrails check                 run rules against their must-block/ask/allow examples
   guardrails refresh               fetch production fingerprints (stores hashes only)
   guardrails eval '<command>'      show what the rules decide for a shell command
@@ -243,6 +252,23 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'init': {
+      const modeOpt = option(args, '--mode');
+      if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
+        console.error('init: --mode is local or server');
+        return 2;
+      }
+      const yes = flag(args, '--yes');
+      const reset = flag(args, '--reset');
+      const target = args[1]?.startsWith('-') ? undefined : args[1];
+      const unknown = args.slice(target ? 2 : 1);
+      if (unknown.length) {
+        console.error(`init: unexpected ${unknown.join(' ')}`);
+        return 2;
+      }
+      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: process.env[`${BRAND.envPrefix}_PREFIX`] ?? join(homeDir(), '.local'), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+    }
+
     case 'canary': {
       // Only the canary instance's own repo, named again by the machine config, and never a repo another instance runs on.
       const repo = option(args, '--repo') ?? '';
@@ -273,10 +299,15 @@ async function main(argv: string[]): Promise<number> {
     case 'doctor': {
       const json = flag(args, '--json');
       const policy = option(args, '--policy');
+      const modeOpt = option(args, '--mode');
+      if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
+        console.error('doctor: --mode is local or server');
+        return 2;
+      }
       const instance = instanceOpt;
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}) });
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}), ...(modeOpt ? { mode: modeOpt as Mode } : {}) });
       if (json) console.log(JSON.stringify(checks, null, 2));
-      else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
+      else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : c.level === 'off' ? 'off ' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;
     }
 

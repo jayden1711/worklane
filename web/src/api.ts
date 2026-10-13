@@ -666,6 +666,29 @@ export interface AddProjectData {
   runs: AddProjectRun[];
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
+
+/** The first-run checklist (GET /api/first-run, src/init.ts firstRunView): init's steps as it recorded them. */
+export type FirstRunStatus = 'pending' | 'done' | 'skipped' | 'failed';
+export interface FirstRunStep {
+  id: string;
+  title: string;
+  optional: boolean;
+  status: FirstRunStatus;
+  detail: string;
+  at: string | null;
+}
+export interface FirstRun {
+  recorded: boolean;
+  mode: 'local' | 'server' | null;
+  steps: FirstRunStep[];
+  done: number;
+  total: number;
+  unavailable: { feature: string; why: string }[];
+  updatedAt: string | null;
+  finishedAt: string | null;
+  command: string;
+}
+export const getFirstRun = () => api<FirstRun>('/api/first-run');
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
  * The name and repo add-project takes: the same rules as the server's and the machine helper's (addProjectNameOk and

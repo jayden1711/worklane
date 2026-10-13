@@ -84,7 +84,7 @@ function readJson(path: string): Settings {
   return JSON.parse(readFileSync(path, 'utf8')) as Settings;
 }
 
-function gitRemoteRepo(root: string): string | null {
+export function gitRemoteRepo(root: string): string | null {
   try {
     const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim();
     return url.match(/github\.com[:/]([^/]+\/[^/.]+?)(?:\.git)?$/)?.[1] ?? null;

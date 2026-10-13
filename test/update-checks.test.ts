@@ -41,8 +41,17 @@ function pushChecks(): string[] {
   return out.sort();
 }
 
-test('the updater\'s default required checks are exactly the checks a push to main runs (no PR-only ones)', () => {
-  assert.deepEqual([...defaults()].sort(), pushChecks());
+/**
+ * Push-to-main checks the updater deliberately does not wait for. Only these may differ; any other drift fails.
+ * - bootstrap (macos-latest): the owner's decision. It is required to merge (.worklane/config.yaml), but engine
+ *   updates on servers must not wait on the macOS run.
+ */
+const UPDATER_EXCLUDED = ['bootstrap (macos-latest)'];
+
+test('the updater\'s default required checks are exactly the checks a push to main runs (no PR-only ones), minus the named exclusions', () => {
+  const push = pushChecks();
+  for (const x of UPDATER_EXCLUDED) assert.ok(push.includes(x), `exclusion "${x}" still names a check a push to main runs`);
+  assert.deepEqual([...defaults()].sort(), push.filter((c) => !UPDATER_EXCLUDED.includes(c)));
   assert.ok(!defaults().includes('dco'), 'dco runs on pull requests only, so on main it is always skipped');
 });
 

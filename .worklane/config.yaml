@@ -13,7 +13,8 @@ agent_runtime:
   run_windows: []
 land_mode: pr
 # The jobs that gate a merge, as GitHub names them (ci.yml and gitleaks.yml).
-# dco runs on pull requests only; scan is gitleaks.yml's job.
+# dco runs on pull requests only; scan is gitleaks.yml's job. bootstrap (macos-latest) gates a merge here
+# but is not one of the engine updater's checks (servers don't wait on the macOS run).
 required_checks:
   - test (ubuntu-latest, 22)
   - test (ubuntu-latest, 24)
@@ -23,6 +24,7 @@ required_checks:
   - denylist
   - dco
   - scan
+  - bootstrap (macos-latest)
 os: auto
 owners:
   default: jayden1711

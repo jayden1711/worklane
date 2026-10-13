@@ -1,6 +1,7 @@
 // `doctor`: verify an install. Each check is ok, warn or fail; any fail
 // makes the command exit non-zero. Nothing here is skipped silently: a check
-// that can't run reports why.
+// that can't run reports why, and a feature the setup's mode can't have is
+// listed as off, with why.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -15,8 +16,10 @@ import { instanceTargets, planMigrations, projectConfigFiles, type Targets } fro
 import { projectStateDir } from './guardrails/context.js';
 import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
+import { liveChecklist, localInitFile, localRepo, newState, readInitState, serverInitFile, systemIo, unavailableIn, type InitIo, type Mode } from './init.js';
 
-export type Level = 'ok' | 'warn' | 'fail';
+/** off: not available in this setup's mode (said why; never a failure). */
+export type Level = 'ok' | 'warn' | 'fail' | 'off';
 export interface DoctorCheck {
   name: string;
   level: Level;
@@ -43,7 +46,7 @@ export function apiKeyCheck(file: string, agentUser: string | null, access = fil
   return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -193,7 +196,29 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     // not a git repository: reported under pre-commit
   }
 
+  out.push(...setupChecks(root, opts));
   if (opts.agentshield) out.push(agentShield(root));
+  return out;
+}
+
+/**
+ * init's checklist (src/init.ts), as doctor shows it: local mode's checkable steps checked now, the others as init
+ * recorded them; then what the mode can't do, each with why. Nothing when init was never run and no mode is given,
+ * except a line saying how to get the checklist.
+ */
+export function setupChecks(root: string, opts: { instance?: string; mode?: Mode; initIo?: InitIo }): DoctorCheck[] {
+  const state = opts.instance && opts.mode === 'server' ? readInitState(serverInitFile(opts.instance)) : readInitState(localInitFile(root));
+  const mode = opts.mode ?? state?.mode;
+  if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
+  const io = opts.initIo ?? systemIo({ interactive: false });
+  const s = state?.mode === mode ? state : newState(mode, root, null, opts.instance ?? null);
+  const items = liveChecklist({ mode, root: mode === 'local' ? root : null, repo: s.repo ?? (mode === 'local' ? localRepo(root) : null), instance: s.instance, prefix: '', io, state: s });
+  const out: DoctorCheck[] = items.map((i) => ({
+    name: `setup ${i.id}`,
+    level: i.status === 'done' || i.status === 'skipped' ? 'ok' : i.optional ? 'warn' : 'fail',
+    detail: `${i.title} (${mode} mode)${i.status === 'skipped' ? ', skipped' : i.status === 'pending' ? ', not done yet' : ''}: ${i.detail}${i.status === 'done' || i.status === 'skipped' || i.optional ? '' : `; \`${BRAND.cli} init\` picks up here`}`,
+  }));
+  for (const u of unavailableIn(mode, (c) => io.which(c) !== null)) out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
   return out;
 }
 

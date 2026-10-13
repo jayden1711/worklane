@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
+import type { AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -21,6 +21,7 @@ import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
+import { FirstRunPage, FirstRunView } from './pages/FirstRun';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
@@ -98,6 +99,8 @@ export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
 export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(<WaitingView w={w} {...(now !== undefined ? { now } : {})} />);
 export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);
+export const renderFirstRun = (f: FirstRun) => renderToStaticMarkup(<FirstRunView f={f} />);
+export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
 export const renderSignIn = () => renderToStaticMarkup(<SignInPage />);
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
