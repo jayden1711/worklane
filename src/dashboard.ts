@@ -32,6 +32,7 @@ import { testRunsView } from './testrun/status.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
+import { usageView } from './usage-limit.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount, flockHolders } from './os/index.js';
@@ -49,7 +50,8 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
-import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
+import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
+import { trustForViewer, trustView } from './trust.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
@@ -403,6 +405,17 @@ export function settingSource(key: SettingKey, instance: unknown, repo: (file: s
   if (defines(instance, key.split('.'))) return 'instance';
   const place = REPO_PLACE[key];
   return place && defines(repo(place.file), place.path) ? 'repo' : 'engine';
+}
+
+/** The instance's agents (workers) in effect: its policy's setting, else the repo's; read only, for the Trust panel. */
+export function instanceAgents(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>): number {
+  let settings = {};
+  try {
+    if (o.policyFile) settings = PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings;
+  } catch {
+    // an unreadable policy: the repo's value
+  }
+  return Number(currentValue(o.cfg, settings, 'workers'));
 }
 
 /**
@@ -1040,12 +1053,25 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
         }
+        // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
+        // A viewer gets only the figures the viewer-events allowlist permits, and never cost.
+        if (url.pathname === '/api/trust') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'the trust numbers are read-only' });
+          const view = trustView(readEvents(opts.eventsDb), { agents: instanceAgents(opts) });
+          return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
+        }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
           if (!mayReadDigest(who.role)) return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
           const digest = waitingOnYou(readEvents(opts.eventsDb));
           return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
+        }
+        // Usage: the Claude usage-limit pause in force (its reset time, for the banner's countdown) and today's runs and
+        // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
+        if (url.pathname === '/api/usage' && req.method === 'GET') {
+          const v = usageView(readEvents(opts.eventsDb));
+          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null });
         }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;

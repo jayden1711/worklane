@@ -4,6 +4,8 @@ Status: **accepted at step 0 (2026-10-07)**, with the answers in §19. Name: Wor
 
 > **Changed since (stage 3, 2026-10-09).** Worklane keeps only what has shown it catches real problems, plus the controls that limit damage whatever the evidence: separate OS users and credential checks, the sandbox, protected categories that need a human, checks the harness runs itself rather than agents' claims, and no push to main. Removed for lack of evidence: the adaptive agent cap (a fixed, configurable cap remains, default 2), the optional roles of step 7, trust stages, the scorecard, the lessons loop and the Stop gate hook (the coordinator re-runs every `done_when` check itself before anything lands). A removed feature comes back only if the same failure happens twice. Sections below that describe these are kept as history.
 
+> **Waiver (2026-10-13), trust metrics: read-only measurement only.** The owner waived the stage-3 rule above for one thing: measuring trust. `trustMetrics` (src/merge-metrics.ts) and src/trust.ts compute, per instance, the change failure rate, escaped bugs, time to restore, the review revise/reject rate, the flaky-check rate, cost per merged PR (tokens and estimated dollars) and verification time per tier, by risk area (money path, auth, other) over 7 and 30 days; the dashboard's Trust panel and a weekly digest in the Discord ops channel (`discord.ops_channel`) show them, with a recommendation in words ("keep 2 agents", "ready to raise to 3"; heavier or lighter verification per area). That is all it covers: no adaptive cap, no trust stages, and no automatic change to slots, caps or merges. Changing the agent count stays a machine owner's action. The code has no write path (test/trust.test.ts holds the module to imports that cannot write, and `/api/trust` to GET only).
+
 This document describes the architecture. Each section notes the precedent it follows (details and licenses in [prior-art.md](prior-art.md)); the order it was built in is in §18. Examples describe a hypothetical project. Everything specific to a real project lives in that project's `.worklane/` folder (config plus a `NOTES.md`), never in this repo; a CI denylist check enforces this.
 
 ---
@@ -198,6 +200,7 @@ roles:
   - Reaping is by process group; processes are never matched by name.
   - On startup, the coordinator reaps orphans from its own recorded pgids and cleans the worktrees of terminal tasks.
   - A rate-limit or usage pause is classified first and is not treated as a stall.
+  - A run that hits the Claude usage limit ends at once (never retried) and pauses the instance until the reset time claude names (else a 5-hour default): no run starts, the task is requeued rather than failed, one notice goes to the asks channel and the dashboard, and the pause ends on its own at the reset. An open-model provider's limit only skips that provider until its reset; the run is redone on its fallback (src/usage-limit.ts).
   - The done_when contract and base SHA are stored on the **task**, not the attempt, so a retry can't lose them.
   - The coordinator enforces **evaluator ≠ author**, including in any recovery path.
   - Wakeups from bulk issue edits are debounced and coalesced.

@@ -457,6 +457,14 @@ export async function signOut(): Promise<void> {
   window.location.assign('/');
 }
 
+/** An instance's Claude usage (/api/usage): the usage-limit pause in force, and today's runs and limit hits (UTC day). */
+export interface UsageInfo {
+  instance: string;
+  paused: { since: string; resetAt: string; source: 'claude' | 'default'; kind: string | null } | null;
+  today: { runs: number; limitHits: number };
+  lastHit: string | null;
+}
+
 /** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */
 export interface HubInfo {
   instances: { name: string; up: boolean; error: string | null }[];
@@ -739,6 +747,45 @@ export interface Throughput {
   cost: { totalUsd: number; perMergedPrUsd: number | null; byStage: { stage: ThroughputStage; usd: number; perMergedPrUsd: number | null; share: number }[]; byModel?: { model: string; usd: number; perMergedPrUsd: number | null; share: number; tokensIn?: number; tokensOut?: number; secs?: number; perMergedPrTokens?: number | null }[]; evaluatorOnL0Usd: number };
   waits: { kind: string; label: string; owner: boolean; count: number; open: number; medianHours: number | null; totalHours: number; reasons: { reason: string; count: number }[] }[];
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
+}
+
+/**
+ * Trust (GET /api/trust, src/trust.ts): read-only measurement per instance, over 7 and 30 days, by risk area, with the
+ * agent-count and verification recommendations. A figure a viewer may not see is null (cost always is, for them).
+ */
+export type RiskArea = 'money' | 'auth' | 'other';
+export interface TrustArea {
+  merges: number | null;
+  failures: number | null;
+  changeFailureRate: number | null;
+  escapedBugs: number | null;
+  restoreHours: number[] | null;
+  medianRestoreHours: number | null;
+  reviewed: number | null;
+  revisedOrRejected: number | null;
+  reviseRejectRate: number | null;
+  checks: number | null;
+  flakyChecks: number | null;
+  flakyRate: number | null;
+  cost: { usd: number; tokens: number; perMergedPrUsd: number | null; perMergedPrTokens: number | null } | null;
+  verification: { tier: string; runs: number; medianMinutes: number; totalMinutes: number }[] | null;
+}
+export interface TrustWindow {
+  days: number;
+  since: string;
+  total: TrustArea;
+  byArea: Record<RiskArea, TrustArea> | null;
+  failures: { issue: number; number: number | null; area: RiskArea; kind: 'reverted' | 'main_red' | 'fix_followed' | 'escaped'; by: number | null }[] | null;
+  escapedMoney: number | null;
+}
+export interface Trust {
+  until: string;
+  windows: TrustWindow[];
+  agents: { action: 'keep' | 'raise'; now: number; to: number; text: string; why: { rule: string; met: boolean }[] } | null;
+  verification: { area: RiskArea; advice: 'heavier' | 'lighter' | 'keep' | 'too_few'; text: string }[] | null;
+  definitions: string[];
+  note: string;
+  hidden: string[];
 }
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */

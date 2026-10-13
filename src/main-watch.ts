@@ -15,10 +15,17 @@
 // branch and not judged yet, or in advance by PR number, pinned to the PR's head as it is then. The watch then judges
 // it accounted (how 'accepted'): no stop, no alert, no revert PR. A rewrite, a commit not on the branch and one
 // already judged can't be accepted, and accepting never clears a stop.
+//
+// The required_checks a commit is judged by are the ones in force when it landed: config.yaml as committed at its
+// first parent, read with git. Not the config loaded at startup: the clone's working tree isn't updated as the default
+// branch moves, so a check dropped since would still be required of every later merge, and never report.
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { parseDocument } from 'yaml';
+import { BRAND } from './brand.js';
+import { ProjectConfig } from './config/schema.js';
 import { writeGroupOnly } from './os/index.js';
 import type { Role } from './dashboard-auth.js';
 
@@ -236,6 +243,27 @@ export interface WatchGit {
   isAncestor(a: string, b: string): boolean;
   /** The first-parent commits after `from` up to `to`, oldest first. */
   firstParents(from: string, to: string): string[];
+  /** The content of `path` (from the repo root) as committed at `rev`, or null when git can't read it. */
+  show(rev: string, path: string): string | null;
+}
+
+/** The config file whose required_checks judge a commit, from the repo root. */
+export const CONFIG_PATH = `${BRAND.configDir}/config.yaml`;
+
+/**
+ * The required_checks in force when commit `sha` landed: config.yaml as committed at its first parent (the default
+ * branch just before it). An error when that can't be read or isn't valid; the caller falls back, and says so.
+ */
+export function requiredAt(git: WatchGit, sha: string): { required: string[] } | { error: string } {
+  const at = `${sha.slice(0, 8)}^1`;
+  const text = git.show(`${sha}^1`, CONFIG_PATH);
+  if (text === null) return { error: `${CONFIG_PATH} could not be read at ${at}` };
+  const doc = parseDocument(text, { uniqueKeys: true });
+  if (doc.errors.length) return { error: `${CONFIG_PATH} at ${at} is not valid YAML` };
+  const raw: unknown = doc.toJS();
+  const r = ProjectConfig.shape.required_checks.safeParse(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).required_checks : undefined);
+  if (!r.success) return { error: `${CONFIG_PATH} at ${at} has an invalid required_checks` };
+  return { required: r.data };
 }
 
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
@@ -249,12 +277,17 @@ export function repoGit(repo: string, remote: string, branch: string): WatchGit 
     },
     isAncestor: (a, b) => git('merge-base', '--is-ancestor', a, b).status === 0,
     firstParents: (from, to) => git('rev-list', '--first-parent', '--reverse', `${from}..${to}`).stdout.split('\n').filter(Boolean),
+    show: (rev, path) => {
+      const r = git('show', `${rev}:${path}`);
+      return r.status === 0 ? r.stdout : null;
+    },
   };
 }
 
 export interface MainWatchDeps {
   stateFile: string;
   branch: string;
+  /** The loaded config's required_checks: whether to watch at all, and the fallback when a commit's own can't be read. */
   required: () => string[];
   api: MainWatchApi;
   git: WatchGit;
@@ -272,6 +305,8 @@ export interface MainWatchDeps {
 
 export class MainWatch {
   private listedAt = -Infinity;
+  /** The required_checks the pending commit is judged by: read with git once per commit. */
+  private judgedBy: { sha: string; required: string[]; note: string } | null = null;
   constructor(private readonly d: MainWatchDeps) {}
 
   private get now() {
@@ -351,9 +386,14 @@ export class MainWatch {
       writeWatchState(this.d.stateFile, s);
     }
     const p = s.pending;
+    if (this.judgedBy?.sha !== p.sha) {
+      const at = requiredAt(this.d.git, p.sha);
+      this.judgedBy = 'required' in at ? { sha: p.sha, required: at.required, note: '' } : { sha: p.sha, required, note: ` (judged by the required_checks loaded at startup: ${at.error})` };
+    }
+    const { required: judgedBy, note } = this.judgedBy;
     // What admins accepted, as long as it descends from the commit checked when they did (a rewrite voids it).
     const accepted = readAccepted(acceptedFileFor(this.d.stateFile)).filter((a) => a.base !== p.sha && this.d.git.isAncestor(a.base, p.sha));
-    const ctx = { branch: this.d.branch, required, accepted, inMerge: (m: string) => m !== p.sha && this.d.git.isAncestor(p.sha, m) };
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted, inMerge: (m: string) => m !== p.sha && this.d.git.isAncestor(p.sha, m) };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
       if (!this.take(s)) return;
@@ -369,7 +409,8 @@ export class MainWatch {
     }
     if (v.accounted && v.how === 'accepted') this.d.accepted(p.sha, v.number, v.acceptance);
     else if (v.accounted) this.d.checked(p.sha, v.how, v.number);
-    else await this.d.unaccounted({ sha: p.sha, reason: v.reason, number: v.number, revert: true });
+    else await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true });
+    this.judgedBy = null;
     s.last = p.sha;
     s.lastAt = new Date(this.now).toISOString();
     s.pending = null;

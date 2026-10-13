@@ -3,17 +3,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Role } from '../src/dashboard-auth.js';
-import { acceptGit, acceptMerge, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
 
 /** A remote, a clone people push from, and the coordinator's clone the watch reads. */
-function world() {
+function world(o: { config?: string } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'main-watch-'));
   const remote = join(base, 'remote.git');
   const person = join(base, 'person');
@@ -21,6 +21,11 @@ function world() {
   git(base, 'init', '-q', '-b', 'main', person);
   writeFileSync(join(person, 'a.txt'), 'a\n');
   git(person, 'add', 'a.txt');
+  if (o.config !== undefined) {
+    mkdirSync(dirname(join(person, CONFIG_PATH)), { recursive: true });
+    writeFileSync(join(person, CONFIG_PATH), o.config);
+    git(person, 'add', CONFIG_PATH);
+  }
   git(person, ...ident, 'commit', '-q', '-m', 'init');
   git(person, 'remote', 'add', 'origin', remote);
   git(person, 'push', '-q', 'origin', 'main');
@@ -109,8 +114,8 @@ async function run(gh: ReturnType<typeof fakeGitHub>, watch: MainWatch, minutes:
 }
 
 /** A watch that has asked about protection and taken main's tip as its baseline. */
-async function started(o: { harness?: Map<string, { number: number; head: string; at: string }> } = {}) {
-  const w = world();
+async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string } = {}) {
+  const w = world(o.config === undefined ? {} : { config: o.config });
   const gh = fakeGitHub();
   gh.g.now = T + 60 * 60_000;
   const s = watcher(w, gh, o);
@@ -130,6 +135,48 @@ test('main watch: a green PR merged by a writer is accounted for; nothing stops'
   assert.deepEqual(s.unaccounted, [], 'nothing unaccounted');
   assert.deepEqual(s.checked, [{ sha: m.merge, how: 'person', number: 7 }]);
   assert.equal(readWatchState(s.w.stateFile).last, m.merge);
+});
+
+test("main watch: a merge is judged by the required_checks committed at its first parent, not the startup config's", async () => {
+  // The startup config still lists a check the default branch has since dropped (a clone whose working tree was
+  // never updated): the merge is judged by the config as committed just before it, so it's accounted for.
+  const s = await started({ required: ['ci', 'test (macos-latest)'], config: 'required_checks:\n  - ci\n' });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(m.head, [ci()]);
+  await run(s.gh, s.watch, 7);
+  assert.deepEqual(s.unaccounted, [], 'the dropped check is not required of it');
+  assert.deepEqual(s.checked, [{ sha: m.merge, how: 'person', number: 7 }]);
+
+  // And the other way: a check added on the branch since startup is required.
+  const a = await started({ required: ['ci'], config: 'required_checks: [ci, lint]\n' });
+  const n = a.w.mergedPr();
+  a.gh.pr(8, n.merge, n.head, iso(T), 'example-collaborator');
+  a.gh.roles.set('example-collaborator', 'writer');
+  a.gh.runs.set(n.head, [ci()]);
+  await run(a.gh, a.watch, 7);
+  assert.equal(a.unaccounted.length, 1);
+  assert.match(a.unaccounted[0]!.reason, /lint missing/);
+  assert.doesNotMatch(a.unaccounted[0]!.reason, /loaded at startup/);
+});
+
+test('main watch: with no config.yaml readable at the first parent, the startup config judges, and the reason says so', async () => {
+  for (const [label, config] of [
+    ['absent', undefined],
+    ['not YAML', 'required_checks: [ci\n'],
+    ['invalid required_checks', 'required_checks: 3\n'],
+  ] as const) {
+    const s = await started({ required: ['ci', 'test (macos-latest)'], ...(config === undefined ? {} : { config }) });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, [ci()]);
+    await run(s.gh, s.watch, 7);
+    assert.equal(s.unaccounted.length, 1, label);
+    assert.match(s.unaccounted[0]!.reason, /test \(macos-latest\) missing/, label);
+    assert.match(s.unaccounted[0]!.reason, /judged by the required_checks loaded at startup: .*config\.yaml/, label);
+  }
 });
 
 test('main watch: a direct push is unaccounted (with a revert), found with one call', async () => {

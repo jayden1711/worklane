@@ -11,6 +11,7 @@ import type { EventPayload } from '../events/types.js';
 import { redactString } from '../events/redact.js';
 import { REPLY_CHARS } from './discord.js';
 import { NEVER_FROM_CHAT } from './people.js';
+import { DEFAULT_PAUSE_MS, resetWords, type UsagePause } from '../usage-limit.js';
 
 /** A post: a thread of its own (answered in it), or a notice in the channel that nothing answers. */
 export type ChannelPost = { kind: 'thread'; name: string; text: string } | { kind: 'notice'; text: string; mentions?: string[] };
@@ -23,6 +24,17 @@ const base = (url: string) => url.replace(/\/+$/, '');
 function fit(head: string, free: string, tail: string): string {
   const room = REPLY_CHARS - head.length - tail.length;
   return `${head}${clip(free, Math.max(0, room))}${tail}`.slice(0, REPLY_CHARS);
+}
+
+/**
+ * The usage-limit pause's notice, once per pause: when it resets (and whether claude said so or it's the default
+ * wait), that the task was requeued, and the dashboard's Overview, where the pause counts down. No thread: nothing
+ * in chat ends it; it ends on its own.
+ */
+export function usagePausePost(p: Pick<UsagePause, 'resetAt' | 'source' | 'issue'>, o: { dashboardUrl: string; instance: string; now: number }): ChannelPost {
+  const why = p.source === 'default' ? ` claude's message named no reset time, so this is the default wait (${DEFAULT_PAUSE_MS / 3600_000} h).` : '';
+  const task = p.issue !== null ? ` #${p.issue} was requeued, not failed.` : '';
+  return { kind: 'notice', text: `${o.instance} is paused on the Claude usage limit: no new runs until ${resetWords(p.resetAt, o.now)}.${why}${task} It resumes on its own then; nothing to do. ${base(o.dashboardUrl)}/overview`.slice(0, REPLY_CHARS) };
 }
 
 /**
