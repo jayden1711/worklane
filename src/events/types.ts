@@ -294,6 +294,10 @@ export const EventSchemas = {
   'delegation.suggested': z.strictObject({ category: z.string(), direction: z.enum(['loosen', 'tighten']), decision: z.string(), receipts: z.array(z.string()) }),
   /** The owner's answer; loosen or tighten files the review.yaml change as an issue (built into a PR they review). */
   'delegation.decided': z.strictObject({ category: z.string(), decision: z.string(), answer: z.string(), by: z.string(), issue: issue.nullable() }),
+  /** A constraint seen min_sightings+ times got its proposal: a draft PR (a check), or an issue (a protected area). `keys`: its sightings then. */
+  'feedback_check.proposed': z.strictObject({ constraint: z.string(), keys: z.array(z.string()), kind: z.enum(['pr', 'issue']), number: z.number().int().positive(), url: z.string(), mode: z.enum(['ast-grep', 'test', 'issue']), why: z.string() }),
+  /** No proposal for it: no check fits (failed: false), or the drafting run or its draft failed (failed: true). Tried again only on a new sighting. */
+  'feedback_check.dropped': z.strictObject({ constraint: z.string(), keys: z.array(z.string()), why: z.string(), failed: z.boolean() }),
   /** A gardener finding: a pattern and the places it was seen (from the run or the event log's signals). */
   'gardener.finding': z.strictObject({ pattern: z.string(), kind: z.enum(['dead_code', 'duplication', 'rule_violation', 'hotspot', 'slow_check', 'flaky_check']), where: z.array(z.string()), detail: z.string() }),
   /** A gardener fix filed (an issue the pipeline builds into a reviewed PR): once per pattern. */

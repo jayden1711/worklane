@@ -892,6 +892,26 @@ export interface Throughput {
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
 }
 
+/** Repeated feedback (GET /api/constraints, src/checks-from-feedback.ts): constraints people's "no"s cluster into. */
+export interface ConstraintItem {
+  id: string;
+  label: string;
+  terms: string[];
+  count: number;
+  sightings: { key: string; source: string; by: string; at: string; ref: string; url: string | null; words: string }[];
+  reverts: { url: string | null; at: string; words: string }[];
+  status: 'proposed_pr' | 'proposed_issue' | 'dropped' | 'due' | 'held' | 'watching';
+  proposal: { kind: 'pr' | 'issue'; number: number | null; url: string | null } | null;
+  detail: string;
+}
+export interface Constraints {
+  enabled: boolean;
+  minSightings: number;
+  maxPerWeek: number;
+  usedThisWeek: number;
+  constraints: ConstraintItem[];
+}
+
 /**
  * Trust (GET /api/trust, src/trust.ts): read-only measurement per instance, over 7 and 30 days, by risk area, with the
  * agent-count and verification recommendations. A figure a viewer may not see is null (cost always is, for them).

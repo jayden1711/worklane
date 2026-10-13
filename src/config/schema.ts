@@ -133,6 +133,20 @@ export const ProjectConfig = z.strictObject({
       max_prs: z.number().int().min(0).max(10).default(1),
     })
     .prefault({}),
+  /**
+   * Repeated "no"s become checks (src/checks-from-feedback.ts): people's words when they turn the harness's work
+   * down (reviews requesting changes, closed PRs, revised or rejected plans, objections, chat corrections), with
+   * the reverts as evidence, are grouped into constraints. At `min_sightings` one proposal per constraint: a draft
+   * ast-grep rule with its test cases (the repo has sgconfig.yml) or a test, as a draft PR quoting the evidence; an
+   * issue instead for a protected area. Never auto-merged; at most `max_proposals_per_week`. Off by default.
+   */
+  checks_from_feedback: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      min_sightings: z.number().int().min(2).max(20).default(2),
+      max_proposals_per_week: z.number().int().min(0).max(20).default(3),
+    })
+    .prefault({}),
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),

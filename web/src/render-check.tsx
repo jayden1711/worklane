@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
+import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -14,6 +14,7 @@ import { UpdatesPanelView, type UpdatesPanelData } from './components/UpdatesPan
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
 import { TrustView } from './components/TrustPanel';
+import { ConstraintsPanel, ConstraintsView } from './components/ConstraintsPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -96,6 +97,8 @@ export { intakeRefusal } from './pages/Intake';
 export const renderThroughput = (t: Throughput) => renderToStaticMarkup(<ThroughputView t={t} />);
 export const renderThroughputPanel = (state: State) => renderToStaticMarkup(<ThroughputPanel state={state} />);
 export const renderTrust = (t: Trust) => renderToStaticMarkup(<TrustView t={t} />);
+export const renderConstraints = (c: Constraints) => renderToStaticMarkup(<ConstraintsView c={c} />);
+export const renderConstraintsPanel = (state: State) => renderToStaticMarkup(<ConstraintsPanel state={state} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);

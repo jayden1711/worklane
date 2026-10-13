@@ -49,7 +49,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { Gardener } from './coordinator/gardener.js';
+import { ChecksFromFeedback } from './coordinator/checks-from-feedback.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
@@ -71,7 +71,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends Gardener {
+export class Coordinator extends ChecksFromFeedback {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -118,6 +118,7 @@ export class Coordinator extends Gardener {
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);
     await step('gardener', () => this.checkGardener(), undefined);
+    await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -135,6 +136,7 @@ export class Coordinator extends Gardener {
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;
+    await this.feedbackChecksRun;
     await this.prBatchIdle();
   }
 
