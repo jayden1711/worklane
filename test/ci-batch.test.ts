@@ -129,7 +129,7 @@ type World = {
   comments: { pr: number; body: string }[];
   writes: Req[];
   /** What the failing job gives on a commit, when a bisect step runs it there. */
-  result: (sha: string) => 'success' | 'failure';
+  result: (sha: string) => 'success' | 'failure' | 'none';
   failing: string;
 };
 
@@ -174,8 +174,10 @@ function fakeGitHub(w: World) {
           const s = w.refs.get(ref)!;
           assert.equal(inputs.sha, s, 'the step names the commit its branch points at');
           assert.equal(ref, `ci-bisect/${s}`);
-          w.runs.push({ id: id++, event: 'workflow_dispatch', head_branch: ref, head_sha: s, status: 'completed', conclusion: w.result(s), created_at: at });
-          w.checks.set(s, [...(w.checks.get(s) ?? []), { name: w.failing, status: 'completed', conclusion: w.result(s), started_at: at, id: id++ }]);
+          // 'none': the run ended without the job (its workflow refused the dispatch's inputs, say).
+          const r = w.result(s);
+          w.runs.push({ id: id++, event: 'workflow_dispatch', head_branch: ref, head_sha: s, status: 'completed', conclusion: r === 'none' ? 'failure' : r, created_at: at });
+          if (r !== 'none') w.checks.set(s, [...(w.checks.get(s) ?? []), { name: w.failing, status: 'completed', conclusion: r, started_at: at, id: id++ }]);
         }
         return json(res, 204, null);
       }
@@ -259,6 +261,24 @@ test('a red batch over 7 commits: 3 bisect steps, each on its own ci-bisect/ bra
     await tick(port);
     assert.deepEqual(w.writes.slice(writes).filter((x) => x.method !== 'DELETE'), []);
     assert.deepEqual([...w.refs.keys()], []);
+  });
+});
+
+test('a step that ends without running the job is passed over, never asked again; with only it left, the issue names the range', async () => {
+  const w = world(4, 3);
+  const result = w.result;
+  w.result = (s) => (s === w.line[2] ? 'none' : result(s));
+  await withFake(w, async (port) => {
+    const steps: number[] = [];
+    for (let i = 0; i < 6 && !w.issues.length; i++) {
+      const before = w.writes.length;
+      await tick(port);
+      for (const x of w.writes.slice(before)) if (x.path === '/actions/workflows/ci-slow.yml/dispatches' && x.body!.ref !== 'main') steps.push(w.line.indexOf(String((x.body!.inputs as { sha: string }).sha)));
+    }
+    assert.deepEqual(steps, [2, 1, 3]);
+    assert.equal(w.issues[0]?.title, `CI batch red: "add-project (real systemd)" broke between ${w.line[2]!.slice(0, 7)} and ${w.line[3]!.slice(0, 7)}`);
+    assert.match(w.issues[0]!.body, new RegExp(`${w.line[2]!.slice(0, 7)}\\]\\([^)]*\\) skip`));
+    assert.deepEqual(w.comments, [], 'no culprit, no PR comment');
   });
 });
 

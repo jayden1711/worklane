@@ -224,8 +224,10 @@ async function bisect({ gh, R, repoUrl, runs, refs, branch }) {
   for (const c of line.slice(0, -1)) {
     const cr = (await gh.get(`${R}/commits/${c.sha}/check-runs?check_name=${encodeURIComponent(job)}&filter=all&per_page=100`)).check_runs ?? [];
     const name = `${BISECT_PREFIX}${c.sha}`;
-    const dispatched = refs.some((r) => r.name === name) && !runs.some((r) => r.head_branch === name && r.status === 'completed');
-    verdicts.set(c.sha, verdictOf(cr, dispatched));
+    const tried = runs.some((r) => r.head_branch === name && r.status === 'completed');
+    const v = verdictOf(cr, refs.some((r) => r.name === name) && !tried);
+    // A step that ended without running the job (its workflow refused, say): untestable, never asked again.
+    verdicts.set(c.sha, v === 'untested' && tried ? 'skip' : v);
   }
   verdicts.set(last.head_sha, 'bad');
   let step = nextStep(line.map((c) => ({ sha: c.sha, verdict: verdicts.get(c.sha) })));
