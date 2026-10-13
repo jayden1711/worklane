@@ -20,6 +20,8 @@ import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFi
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
+import { trustForViewer, trustView } from '../src/trust.js';
+import { VIEWER_EVENTS } from '../src/viewer-events.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -33,6 +35,7 @@ interface Render {
   intakeRefusal(state: unknown): string | null;
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
+  renderTrust(t: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderSetup(data: unknown): string;
@@ -1283,4 +1286,40 @@ test("two instances on one machine: with one selected, no page shows any of the 
   } finally {
     for (const d of Object.values(servers)) await d.close();
   }
+});
+
+test('the trust panel: the recommendation and its rules, each figure over 7 and 30 days, each area with its advice and verification time; a viewer gets the allowlisted figures only, never cost', () => {
+  const now = new Date('2026-10-13T12:00:00.000Z');
+  const ts = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+  const events = [
+    { ts: ts(9), type: 'review.level_set', payload: { issue: 1, reasons: ['money-path: src/pay.ts'] } },
+    { ts: ts(9), type: 'change.proposed', payload: { issue: 1, files: ['src/pay.ts'] } },
+    { ts: ts(8), type: 'merge.done', payload: { issue: 1, number: 11, sha: 'a'.repeat(40), title: 'Pay out' } },
+    { ts: ts(8), type: 'merge.main_result', payload: { issue: 1, number: 11, outcome: 'red' } },
+    { ts: ts(7.9), type: 'merge.main_result', payload: { issue: 9, number: 19, outcome: 'green' } },
+    { ts: ts(2), type: 'merge.done', payload: { issue: 2, number: 12, sha: 'b'.repeat(40), title: 'Copy' } },
+    { ts: ts(2), type: 'run.cost', payload: { issue: 2, role: 'worker', usd: 1.2, tokens_in: 30_000, tokens_out: 2_000 } },
+    { ts: ts(2), type: 'run.cost', payload: { issue: 2, role: 'evaluator-verdict', usd: 0.3, secs: 240 } },
+  ];
+  const full = trustView(events, { agents: 2, now });
+  const html = r.renderTrust(full);
+  assert.match(html, /data-testid="trust-panel"/);
+  assert.match(html, /data-testid="trust-recommendation" data-action="keep"[\s\S]*?Keep 2 agents/);
+  assert.equal((html.match(/data-testid="trust-rule"/g) ?? []).length, 3);
+  assert.match(html, /data-testid="trust-rule" data-met="true"[\s\S]*?no escaped money-path bug/);
+  assert.match(html, /data-testid="trust-note"[^>]*>A recommendation only: nothing here changes/);
+  assert.deepEqual([...html.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges', 'cfr', 'escaped', 'restore', 'review', 'flaky', 'cost']);
+  assert.match(html, /data-figure="cfr"[\s\S]*?data-testid="trust-figure-7"[^>]*>0%[\s\S]*?30 days: <span[^>]*>50%/);
+  assert.match(html, /data-figure="cost"[\s\S]*?~\$1\.50/);
+  assert.deepEqual([...html.matchAll(/data-testid="trust-area" data-area="([a-z]+)"/g)].map((m) => m[1]), ['money', 'auth', 'other']);
+  assert.match(html, /data-area="money"[\s\S]*?data-advice="too_few"/);
+  assert.match(html, /data-area="other"[\s\S]*?data-testid="trust-tier"[\s\S]*?evaluator[\s\S]*?4 min median/);
+  assert.match(html, /data-testid="trust-failure" data-kind="main_red"[^>]*>#1 \(PR #11\) broke the default branch/);
+  assert.match(html, /data-testid="trust-definitions"/);
+  assert.doesNotMatch(html, /data-testid="trust-hidden"/);
+  // A viewer: the merges only, no cost, no areas or recommendation, and why.
+  const viewer = r.renderTrust(trustForViewer(full, VIEWER_EVENTS));
+  assert.deepEqual([...viewer.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges']);
+  assert.doesNotMatch(viewer, /trust-recommendation|trust-area|~\$/);
+  assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
 });
