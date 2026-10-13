@@ -150,7 +150,7 @@ jobs:
           echo "T=$t" >> "$GITHUB_ENV"
           sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$t/ids"
           sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
-            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" "$DB_IMAGE"
+            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1/dist" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" "$DB_IMAGE"
       - name: nothing left of the run, seen as root
         run: |
           while IFS= read -r id; do
