@@ -48,6 +48,8 @@ sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
 sudo bash scripts/bootstrap.sh --hardened --after-credentials <name> <owner/repo>
 ```
 
+The first run makes you the machine's first owner. It asks for your GitHub login, or reads it from `gh` if gh is signed in and asks you to confirm (`--machine-owner <login>` skips the question). At the end it prints the dashboard's URL and how to make the dashboard's sign-in App. From then on, you add projects in the dashboard: **Setup console → Add project** ([dashboard.md](dashboard.md#add-project)).
+
 ## Docker
 
 A minimal image for a cloud VM or a quick trial. It runs the same bootstrap for a non-root user, with your repo mounted at `/repo`:
