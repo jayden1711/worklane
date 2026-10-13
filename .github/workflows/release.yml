@@ -132,7 +132,11 @@ jobs:
           test -f "$pkg/dist/src/cli.js" && test -f "$pkg/dist/web/index.html"
           grep -q "$pkg/dist/src/cli.js" "$t/example/.claude/settings.json"
           if grep -q _npx "$t/example/.claude/settings.json"; then echo "the hooks call npx's cache" >&2; exit 1; fi
-          "$t/prefix/bin/worklane" doctor --root "$t/example" | tee "$t/doctor.log"
+          # What init said to do: the prefix's bin on PATH (worklane, and gitleaks, which init installed there).
+          grep -q "$t/prefix/bin isn't on your PATH" "$t/first.log"
+          export PATH="$t/prefix/bin:$PATH"
+          [ "$(command -v worklane)" = "$t/prefix/bin/worklane" ] && [ "$(command -v gitleaks)" = "$t/prefix/bin/gitleaks" ]
+          worklane doctor --root "$t/example" | tee "$t/doctor.log"
           for id in tools claude github repo-config protection discord; do grep -Eq "^ok +setup $id: " "$t/doctor.log"; done
           # Again, with no --mode and no terminal: nothing reinstalled, every step done earlier.
           npx --yes --package "$tgz" -- worklane init "$t/example" < /dev/null | tee "$t/second.log"
