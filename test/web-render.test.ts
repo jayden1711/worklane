@@ -20,6 +20,8 @@ import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFi
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
+import { trustForViewer, trustView } from '../src/trust.js';
+import { VIEWER_EVENTS } from '../src/viewer-events.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -33,6 +35,7 @@ interface Render {
   intakeRefusal(state: unknown): string | null;
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
+  renderTrust(t: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderSetup(data: unknown): string;
@@ -44,6 +47,10 @@ interface Render {
   runsRefusal(state: unknown): string | null;
   renderRunResearch(data: unknown): string;
   renderStopBanner(state: State): string;
+  renderUsageBanner(usage: unknown[], now: number): string;
+  renderUsageLines(usage: unknown[], now: number): string;
+  renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
+  countdown(resetAt: string, now: number): string;
   renderProtection(protection: unknown, brand: string): string;
   renderMainWatchAlert(protection: unknown): string;
   renderPrs(view: unknown): string;
@@ -666,6 +673,36 @@ test('checks render as a table with failures tinted and their output; instances 
   assert.match(r.renderStopBanner({ ...asOwner, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: null, lastStop: null, lastResume: null } }), /Emergency stop in force/);
 });
 
+test('the usage-limit pause: a banner per paused instance counting down to its reset, and a usage line per instance on the Overview', () => {
+  const now = Date.parse('2026-10-13T10:00:00Z');
+  const running = { instance: 'site', paused: null, today: { runs: 12, limitHits: 0 }, lastHit: null };
+  const paused = { instance: 'code', paused: { since: '2026-10-13T09:00:00Z', resetAt: '2026-10-13T12:05:09Z', source: 'claude', kind: 'five_hour' }, today: { runs: 4, limitHits: 1 }, lastHit: '2026-10-13T09:00:00Z' };
+  // The countdown, to the second, and "now" once the reset has passed.
+  assert.equal(r.countdown(paused.paused.resetAt, now), '2 h 05 min 09 s');
+  assert.equal(r.countdown(paused.paused.resetAt, now + 2 * 3600_000 + 5 * 60_000), '0 min 09 s');
+  assert.equal(r.countdown(paused.paused.resetAt, now + 3 * 3600_000), 'now');
+  // No banner while nothing is paused; one per paused instance, with its countdown.
+  assert.equal(r.renderUsageBanner([running], now), '');
+  const banner = r.renderUsageBanner([running, paused], now);
+  assert.equal((banner.match(/data-testid="usage-banner"/g) ?? []).length, 1);
+  assert.match(banner, /data-instance="code"/);
+  assert.match(banner, /Paused on the Claude usage limit/);
+  assert.match(banner, /data-testid="usage-countdown"[^>]*>resumes in 2 h 05 min 09 s</);
+  assert.match(banner, /requeued, not failed/);
+  assert.doesNotMatch(banner, /default wait/, 'claude named the reset');
+  assert.match(r.renderUsageBanner([{ ...paused, paused: { ...paused.paused, source: 'default' } }], now), /default wait/);
+  assert.match(r.renderUsageBanner([paused], now + 3 * 3600_000), />resuming now</);
+  // The Overview: a line per instance, running or paused, with today's runs and limit hits.
+  const lines = r.renderUsageLines([running, paused], now);
+  assert.equal((lines.match(/data-testid="usage-line"/g) ?? []).length, 2);
+  assert.match(lines, /12 runs today/);
+  assert.match(lines, /1 usage-limit hit today/);
+  assert.match(lines, /data-instance="code"[\s\S]*paused until [^<]*\(2 h 05 min 09 s\)/);
+  assert.match(lines, /data-instance="site"[\s\S]*>running</);
+  assert.match(r.renderOverviewWithUsage(asOwner, [running, paused], now), /data-testid="overview-usage"/);
+  assert.doesNotMatch(r.renderPage('overview', asOwner), /overview-usage/, 'no usage read yet: no line');
+});
+
 test('the protection mode on the Machine page, the last commit checked for writers, and the alert with its clear for an admin', () => {
   const sha = 'c'.repeat(40);
   const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: { sha, url: `https://github.com/o/r/commit/${sha}`, at: new Date().toISOString() }, alert: null, stopped: null, canClear: false };
@@ -680,6 +717,20 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+});
+
+test('bootstrap merges on the Machine page: an admin gets the accept field, a writer the list read-only, a viewer neither', () => {
+  const sha = 'c'.repeat(40);
+  const accepted = [{ id: 'a1', sha: null, pr: 22, head: 'd'.repeat(40), by: 'example-owner', reason: "suite can't run yet", at: new Date().toISOString(), appliedTo: sha }];
+  const watch = { mode: 'main_watch' as const, detail: '', lastChecked: null, alert: null, stopped: null, canClear: false, accepted };
+  const admin = r.renderProtection({ ...watch, canAccept: true }, BRAND.name);
+  assert.match(admin, /data-testid="main-watch-accept-target"/);
+  assert.match(admin, /data-testid="main-watch-accept-submit"[^>]*>Accept as bootstrap merge/);
+  assert.match(admin, /#22 at dddddddd[\s\S]*suite can&#x27;t run yet[\s\S]*accounted: cccccccc/);
+  const writer = r.renderProtection({ ...watch, canAccept: false }, BRAND.name);
+  assert.match(writer, /data-testid="main-watch-accepted-row"/, 'the list');
+  assert.doesNotMatch(writer, /main-watch-accept-target|Accept as bootstrap merge/, 'read-only');
+  assert.doesNotMatch(r.renderProtection({ mode: 'main_watch' }, BRAND.name), /main-watch-accepted/, "a viewer's: the mode only");
 });
 
 test('a chat answer: citations as links, a draft preview with a two-step file, proposals that open their confirm flows, read-only for others', () => {
@@ -1249,4 +1300,40 @@ test("two instances on one machine: with one selected, no page shows any of the 
   } finally {
     for (const d of Object.values(servers)) await d.close();
   }
+});
+
+test('the trust panel: the recommendation and its rules, each figure over 7 and 30 days, each area with its advice and verification time; a viewer gets the allowlisted figures only, never cost', () => {
+  const now = new Date('2026-10-13T12:00:00.000Z');
+  const ts = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+  const events = [
+    { ts: ts(9), type: 'review.level_set', payload: { issue: 1, reasons: ['money-path: src/pay.ts'] } },
+    { ts: ts(9), type: 'change.proposed', payload: { issue: 1, files: ['src/pay.ts'] } },
+    { ts: ts(8), type: 'merge.done', payload: { issue: 1, number: 11, sha: 'a'.repeat(40), title: 'Pay out' } },
+    { ts: ts(8), type: 'merge.main_result', payload: { issue: 1, number: 11, outcome: 'red' } },
+    { ts: ts(7.9), type: 'merge.main_result', payload: { issue: 9, number: 19, outcome: 'green' } },
+    { ts: ts(2), type: 'merge.done', payload: { issue: 2, number: 12, sha: 'b'.repeat(40), title: 'Copy' } },
+    { ts: ts(2), type: 'run.cost', payload: { issue: 2, role: 'worker', usd: 1.2, tokens_in: 30_000, tokens_out: 2_000 } },
+    { ts: ts(2), type: 'run.cost', payload: { issue: 2, role: 'evaluator-verdict', usd: 0.3, secs: 240 } },
+  ];
+  const full = trustView(events, { agents: 2, now });
+  const html = r.renderTrust(full);
+  assert.match(html, /data-testid="trust-panel"/);
+  assert.match(html, /data-testid="trust-recommendation" data-action="keep"[\s\S]*?Keep 2 agents/);
+  assert.equal((html.match(/data-testid="trust-rule"/g) ?? []).length, 3);
+  assert.match(html, /data-testid="trust-rule" data-met="true"[\s\S]*?no escaped money-path bug/);
+  assert.match(html, /data-testid="trust-note"[^>]*>A recommendation only: nothing here changes/);
+  assert.deepEqual([...html.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges', 'cfr', 'escaped', 'restore', 'review', 'flaky', 'cost']);
+  assert.match(html, /data-figure="cfr"[\s\S]*?data-testid="trust-figure-7"[^>]*>0%[\s\S]*?30 days: <span[^>]*>50%/);
+  assert.match(html, /data-figure="cost"[\s\S]*?~\$1\.50/);
+  assert.deepEqual([...html.matchAll(/data-testid="trust-area" data-area="([a-z]+)"/g)].map((m) => m[1]), ['money', 'auth', 'other']);
+  assert.match(html, /data-area="money"[\s\S]*?data-advice="too_few"/);
+  assert.match(html, /data-area="other"[\s\S]*?data-testid="trust-tier"[\s\S]*?evaluator[\s\S]*?4 min median/);
+  assert.match(html, /data-testid="trust-failure" data-kind="main_red"[^>]*>#1 \(PR #11\) broke the default branch/);
+  assert.match(html, /data-testid="trust-definitions"/);
+  assert.doesNotMatch(html, /data-testid="trust-hidden"/);
+  // A viewer: the merges only, no cost, no areas or recommendation, and why.
+  const viewer = r.renderTrust(trustForViewer(full, VIEWER_EVENTS));
+  assert.deepEqual([...viewer.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges']);
+  assert.doesNotMatch(viewer, /trust-recommendation|trust-area|~\$/);
+  assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
 });

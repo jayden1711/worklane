@@ -631,6 +631,7 @@ export abstract class MergeFlow extends FixRuns {
       ...(w.now ? { now: w.now } : {}),
       mode: (mode, detail) => this.emit('main_watch.mode', { mode, detail }),
       checked: (sha, how, number) => this.emit('main_watch.checked', { sha, how, number }),
+      accepted: (sha, number, a) => this.emit('main_watch.accepted', { sha, how: 'accepted', number, id: a.id, by: a.by, reason: a.reason.slice(0, 500) }),
       unaccounted: (o) => this.mainUnaccounted(o),
     });
     if (this.d.cfg.project.land_mode !== 'pr') return this.mainWatcher.off(`land_mode direct: the harness lands by pushing ${this.branch} itself`);

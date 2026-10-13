@@ -19,7 +19,7 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../wo
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
 import { buildRoute } from './model-routing.js';
-import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, UsagePaused, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -67,7 +67,7 @@ export abstract class FixRuns extends Landing {
    */
   protected async maybeFix(w: EventPayload<'pr.opened'>, pr: PullRequest, r: Readiness) {
     const { issue: n, number } = w;
-    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.fixGaveUp(number)) return;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.fixGaveUp(number)) return;
     const failed = r.failed.map((c) => c.name);
     const give = (reason: string) => this.giveUpFix(w, pr.headSha, reason, failed);
     const ours = this.ourHead(number);
@@ -244,7 +244,7 @@ export abstract class FixRuns extends Landing {
    */
   protected async maybeFixConflict(w: EventPayload<'pr.opened'>, pr: PullRequest) {
     const { issue: n, number } = w;
-    if (this.active.has(n) || this.stopped || this.halt.signal.aborted) return;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause()) return;
     const baseRef = pr.base || this.branch;
     this.git(this.d.repo, 'fetch', '-q', this.remote, baseRef);
     const baseSha = this.git(this.d.repo, 'rev-parse', `${this.remote}/${baseRef}`);
@@ -425,7 +425,7 @@ export abstract class FixRuns extends Landing {
       await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
     } catch (e) {
       if (!(e instanceof Halted) && !(e instanceof StoppedByOwner)) throw e;
-      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner ? e.message : 'stopped by an emergency stop' };
+      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner || e instanceof UsagePaused ? e.message : 'stopped by an emergency stop' };
     } finally {
       clearInterval(heartbeat);
       release(n, leaseSha, { repo: this.d.repo, remote: this.remote });

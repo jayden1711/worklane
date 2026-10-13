@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AddProjectData, AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Waiting } from './api';
+import type { AddProjectData, AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -11,6 +11,7 @@ import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveL
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
+import { TrustView } from './components/TrustPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -32,6 +33,8 @@ import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages
 import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
+import { UsageBanner, UsageLines } from './components/Usage';
+import type { UsageInfo } from './api';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -81,6 +84,7 @@ export const renderIntakePage = (state: State) => renderToStaticMarkup(<IntakePa
 export { intakeRefusal } from './pages/Intake';
 export const renderThroughput = (t: Throughput) => renderToStaticMarkup(<ThroughputView t={t} />);
 export const renderThroughputPanel = (state: State) => renderToStaticMarkup(<ThroughputPanel state={state} />);
+export const renderTrust = (t: Trust) => renderToStaticMarkup(<TrustView t={t} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
@@ -101,3 +105,7 @@ export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsol
 export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<AddProjectView data={data} />);
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
+export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
+export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
+export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
+export { countdown } from './components/Usage';
