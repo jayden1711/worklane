@@ -94,6 +94,25 @@ test('a fast run: its tiers in a fresh workspace with its own database, every st
   assert.equal(r.events('testrun.wipe_failed').length, 0);
 });
 
+test('each tier records its per-test durations from its output (names and times only), and 0 when its runner prints none', { skip: !hasPerl && 'perl' }, async () => {
+  const tap = ['# Subtest: db', '    # Subtest: migrates', '    ok 1 - migrates', '      ---', '      duration_ms: 4500.25', '      ...', 'ok 1 - db', '  ---', '  duration_ms: 4600', '  ...'].join('\n');
+  const r = rig({
+    tiers: [
+      { name: 'node', command: `cat <<'EOF'\n${tap}\nEOF`, kind: 'fast' },
+      { name: 'plain', command: 'echo all good', kind: 'fast' },
+    ],
+  });
+  const res = await runTestRun(r.deps, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, true, JSON.stringify(res.tiers));
+  assert.deepEqual(
+    r.events('testrun.durations').map((e) => e.payload),
+    [
+      { id: res.id, tier: 'node', tests: [{ name: 'db > migrates', ms: 4500.3 }], parsed: 1 },
+      { id: res.id, tier: 'plain', tests: [], parsed: 0 },
+    ],
+  );
+});
+
 test('a failing setup fails every tier, and a tier that needs the change\'s files fails when given none', { skip: !hasPerl && 'perl' }, async () => {
   const r = rig({ setup: ['exit 3'], tiers: [{ name: 'a', command: 'true', kind: 'fast' }, { name: 'b', command: 'true', kind: 'fast' }] });
   const res = await runTestRun(r.deps, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });

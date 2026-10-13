@@ -22,7 +22,8 @@ import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
-import { trustForViewer, trustView } from '../src/trust.js';
+import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
+import { deliveryMetrics } from '../src/merge-metrics.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
 
@@ -39,6 +40,8 @@ interface Render {
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
   renderTrust(t: unknown): string;
+  renderMetrics(m: unknown): string;
+  renderMetricsPanel(state: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderFirstRun(f: unknown): string;
@@ -1558,4 +1561,46 @@ test('the trust panel: the recommendation and its rules, each figure over 7 and 
   assert.deepEqual([...viewer.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges']);
   assert.doesNotMatch(viewer, /trust-recommendation|trust-area|~\$/);
   assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
+});
+
+test('the metrics panel: each figure over 7 and 30 days, merges per day, the slowest tests and those over budget; a missing source says "not measured yet", never 0; a viewer is told it is the writers\'', () => {
+  const now = new Date('2026-10-13T12:00:00.000Z');
+  const ts = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
+  const events = [
+    { ts: ts(2), type: 'pr.closed', payload: { issue: 1, number: 11, merged: true } },
+    { ts: ts(1), type: 'pr.closed', payload: { issue: 2, number: 12, merged: true } },
+    { ts: ts(2), type: 'merge.main_result', payload: { issue: 1, number: 11, outcome: 'red' } },
+    { ts: ts(1.9), type: 'merge.main_result', payload: { issue: 2, number: 12, outcome: 'green' } },
+    { ts: ts(1), type: 'ci.pr_timing', payload: { number: 12, wall_ms: 18 * 60_000 } },
+    { ts: ts(1), type: 'testrun.durations', payload: { id: 'r', tier: 'full', tests: [{ name: 'db > migrates', ms: 45_000 }, { name: 'ui > renders', ms: 1200 }], parsed: 2 } },
+  ];
+  const m = { ...deliveryMetrics(events, { now, budgetS: 30 }), definitions: METRICS_DEFINITIONS };
+  const html = r.renderMetrics(m);
+  assert.match(html, /data-testid="metrics-panel"/);
+  assert.deepEqual([...html.matchAll(/data-testid="metrics-figure" data-figure="([a-zA-Z]+)" data-measured="(true|false)"/g)].map((x) => `${x[1]}:${x[2]}`), [
+    'merges:true',
+    'mainRed:true',
+    'timeToGreen:true',
+    'reverts:true',
+    'fixForward:false',
+    'prCi:true',
+    'startup:false',
+    'flake:false',
+  ]);
+  assert.match(html, /data-figure="timeToGreen"[\s\S]*?data-testid="metrics-figure-7"[^>]*>144 min/);
+  assert.match(html, /data-figure="prCi"[\s\S]*?data-testid="metrics-figure-7"[^>]*>18 min/);
+  assert.match(html, /data-figure="fixForward"[\s\S]*?data-testid="metrics-not-measured"[^>]*>not measured yet<\/div><div[^>]*>fix-forward isn(&#x27;|')t built yet/);
+  assert.match(html, /data-figure="flake"[\s\S]*?not measured yet/);
+  assert.doesNotMatch(html.slice(html.indexOf('data-figure="flake"')).split('data-testid="metrics-per-day"')[0]!, />0%?</, 'no 0 for an unmeasured figure');
+  assert.equal((html.match(/data-testid="throughput-day"/g) ?? []).length, 14, 'merges per day as bars');
+  assert.deepEqual([...html.matchAll(/data-testid="metrics-slow-test"[\s\S]*?font-mono[^>]*>([^<]+)</g)].map((x) => x[1]), ['db &gt; migrates', 'ui &gt; renders']);
+  assert.match(html, /data-testid="metrics-over-budget-count"[^>]*>1</);
+  assert.equal((html.match(/data-testid="metrics-over-budget"/g) ?? []).length, 1);
+  assert.match(html, /data-testid="metrics-definitions"/);
+  // Nothing recorded at all: every figure and the slow tests say not measured yet.
+  const empty = r.renderMetrics({ ...deliveryMetrics([], { now, budgetS: 30 }), definitions: METRICS_DEFINITIONS });
+  assert.equal((empty.match(/data-testid="metrics-not-measured"/g) ?? []).length, 9);
+  assert.doesNotMatch(empty, /metrics-figure-7|metrics-per-day|metrics-slow-test"/);
+  assert.match(r.renderMetricsPanel(asOther), /data-testid="metrics-refused"[^>]*>The metrics are for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
+  assert.doesNotMatch(r.renderMetricsPanel(asOwner), /metrics-refused/);
 });

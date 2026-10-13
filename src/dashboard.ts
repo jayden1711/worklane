@@ -52,7 +52,8 @@ import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
-import { trustForViewer, trustView } from './trust.js';
+import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
+import { deliveryMetrics } from './merge-metrics.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
@@ -1068,6 +1069,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (req.method !== 'GET') return json(res, 405, { error: 'the trust numbers are read-only' });
           const view = trustView(readEvents(opts.eventsDb), { agents: instanceAgents(opts) });
           return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
+        }
+        // Metrics (src/merge-metrics.ts deliveryMetrics): merges, main red, time to green, reverts and fix-forward, PR CI
+        // wall-clock, agent startup, flake rate and the slow tests. Read-only, the owner's and the writers' (test names
+        // and CI timings, like throughput).
+        if (url.pathname === '/api/metrics') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'the metrics are read-only' });
+          if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('the metrics are', who) });
+          return json(res, 200, { ...deliveryMetrics(readEvents(opts.eventsDb), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.

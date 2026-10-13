@@ -12,7 +12,7 @@ import { RECOMMENDATION_PREFIX } from './decision-ask.js';
 import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
 import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
-import type { EventPayload } from './events/types.js';
+import type { EventPayload, EventType } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
@@ -59,6 +59,7 @@ import { doneWhenCommands } from './stage-label.js';
 import { localDoneWhen } from './testrun/local.js';
 import { repoGit } from './main-watch.js';
 import { MergePosts, takeOpsSlot } from './merge-posts.js';
+import { CiMetrics } from './ci-metrics.js';
 import { redactPii } from './intake/redact.js';
 import { scrub } from './watchdog/post.js';
 
@@ -113,6 +114,7 @@ export class Coordinator extends Gardener {
     await step('merged', () => this.watchMerges(), undefined);
     await step('main watch', () => this.watchMain(), undefined);
     await step('merge posts', () => this.postMerges(), undefined);
+    await step('ci metrics', () => this.measureCi(), undefined);
     await step('deploy gate', () => this.d.deployGate?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
@@ -136,6 +138,22 @@ export class Coordinator extends Gardener {
     await this.correctionsRun;
     await this.gardenerRun;
     await this.prBatchIdle();
+  }
+
+  private ciMeter: CiMetrics | null = null;
+
+  /** CI timings for the metrics (src/ci-metrics.ts): with GitHub, at most one read-only call per CI_METRICS_CALL_MS. */
+  protected async measureCi(): Promise<void> {
+    const m = this.d.ciMetrics;
+    if (!m) return;
+    this.ciMeter ??= new CiMetrics({
+      api: m.api,
+      events: (types) => this.d.log.read(0, types as EventType[]),
+      emit: (type, payload) => this.emit(type, payload),
+      required: () => this.d.cfg.project.required_checks,
+      ...(m.now ? { now: m.now } : {}),
+    });
+    await this.ciMeter.step();
   }
 
   private mergePoster: MergePosts | null = null;

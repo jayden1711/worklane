@@ -548,6 +548,11 @@ export const EventSchemas = {
     results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
     detail: z.string().max(2000),
   }),
+  /**
+   * One tier's per-test durations, read from its output (src/test-durations.ts): its slowest tests (at most 100) and
+   * how many it printed durations for in all (0: its runner prints none this reads). For the metrics' slow tests.
+   */
+  'testrun.durations': z.strictObject({ id: z.string(), tier: z.string(), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative() }),
   'testrun.wipe_failed': z.strictObject({ id: z.string(), left: z.array(z.string()) }),
   'testrun.checks_posted': z.strictObject({ id: z.string(), sha, checks: z.array(z.strictObject({ name: z.string(), conclusion: z.enum(['success', 'failure', 'cancelled']) })) }),
   /** no_permission: the App lacks Checks: write (the owner adds it); the checks were not posted. */
@@ -592,6 +597,14 @@ export const EventSchemas = {
   }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
+  // CI timings read from GitHub for the metrics (src/ci-metrics.ts): each recorded once, so each is asked once.
+  /**
+   * A merged PR's CI wall-clock on its head: from the first check run starting to the last required check
+   * (config.yaml required_checks; every check when none) completing. `wall_ms` null: not measurable (`why`).
+   */
+  'ci.pr_timing': z.strictObject({ number: z.number().int().positive(), head: sha, wall_ms: z.number().int().nonnegative().nullable(), first_started: z.string().nullable(), last_completed: z.string().nullable(), why: z.string().max(500).nullable() }),
+  /** One GitHub Actions job's per-test durations on a default-branch commit, from its log (src/test-durations.ts). */
+  'ci.test_durations': z.strictObject({ sha, job: z.string().max(200), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative(), error: z.string().max(500).nullable() }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;

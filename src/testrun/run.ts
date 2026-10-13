@@ -8,6 +8,7 @@ import { redact } from '../events/redact.js';
 import { holdFlock, type HeldFlock } from '../os/index.js';
 import { BRAND } from '../brand.js';
 import type { Lock } from '../locks.js';
+import { recordable } from '../test-durations.js';
 import { cacheDirs } from './cache.js';
 import type { TestRunConfig, TestRunTier } from './config.js';
 import type { HelperState } from './helper.js';
@@ -195,6 +196,9 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       const tr = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: r.code === null ? `timed out or cancelled\n${tail(r.out)}` : tail(r.out), logRef };
       results.push(tr);
       emit('testrun.tier', { id, tier: t.name, ok: tr.ok, duration_ms: tr.durationMs, summary: tr.summary.slice(0, 2000), log_ref: logRef, cpu_s: r.stats?.cpuS ?? null, mem_peak_mb: r.stats?.memPeakMb ?? null });
+      // Its per-test durations, for the metrics' slow tests (src/test-durations.ts): names and times only, never output.
+      const durations = recordable(r.out);
+      emit('testrun.durations', { id, tier: t.name, tests: durations.tests, parsed: durations.parsed });
     }
     if (o.signal?.aborted) {
       outcome = 'cancelled';

@@ -917,6 +917,37 @@ export interface Trust {
   hidden: string[];
 }
 
+/**
+ * Metrics (GET /api/metrics, src/merge-metrics.ts deliveryMetrics): over 7 and 30 days, the owner's and writers'. A
+ * figure whose source has recorded nothing yet is `{ measured: false, why }`: "not measured yet", never a 0.
+ */
+export type Measure<T> = ({ measured: true } & T) | { measured: false; why: string };
+export interface MetricsWindow {
+  days: number;
+  since: string;
+  merges: Measure<{ total: number; perDay: number }>;
+  mainRed: Measure<{ count: number; stillRed: boolean }>;
+  timeToGreen: Measure<{ minutes: number[]; medianMinutes: number | null }>;
+  reverts: Measure<{ opened: number; onRed: number; merged: number; redTimes: number; rate: number | null }>;
+  fixForward: Measure<{ attempts: number; fixed: number; reverted: number; successRate: number | null }>;
+  prCi: Measure<{ prs: number; medianMinutes: number | null; p90Minutes: number | null; slowest: { number: number; minutes: number }[] }>;
+  startup: Measure<{ runs: number; medianSeconds: number | null; p90Seconds: number | null }>;
+  flake: Measure<{ reruns: number; flaky: number; rate: number | null; quarantined: number }>;
+}
+export interface SlowTest {
+  name: string;
+  medianMs: number;
+  maxMs: number;
+  runs: number;
+}
+export interface Metrics {
+  until: string;
+  windows: MetricsWindow[];
+  perDay: { day: string; merged: number }[] | null;
+  slowTests: Measure<{ days: number; budgetS: number; runs: number; slowest: SlowTest[]; overBudget: SlowTest[]; overBudgetTotal: number }>;
+  definitions: string[];
+}
+
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {

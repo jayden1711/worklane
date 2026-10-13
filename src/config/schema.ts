@@ -143,6 +143,11 @@ export const ProjectConfig = z.strictObject({
       min_free_disk_pct: z.number().min(1).max(90).default(15),
     })
     .prefault({}),
+  /**
+   * The Metrics panel and the weekly digest (src/merge-metrics.ts deliveryMetrics): a test whose duration (the median
+   * of its runs over the week) is over `slow_test_budget_s` seconds is listed as over budget, beside the 20 slowest.
+   */
+  metrics: z.strictObject({ slow_test_budget_s: z.number().positive().max(86_400).default(30) }).prefault({}),
   os: z.enum(['auto', 'macos', 'linux', 'windows-wsl']).default('auto'),
   owners: z.strictObject({
     default: handle,
