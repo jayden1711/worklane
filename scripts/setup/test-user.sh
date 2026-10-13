@@ -123,9 +123,14 @@ Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
 RuntimeDirectory=worklane-test-$name-docker
 RuntimeDirectoryMode=0700
 UMask=0077
+# Containers' cgroups: Docker's default systemd driver needs a systemd user session (it reads
+# /sys/fs/cgroup/user.slice/user-<uid>.slice), which the test user doesn't have. With cgroupfs, rootless Docker
+# leaves each container's cgroup to runc, which makes it beside its own: the daemon runs in <this unit>/daemon, so
+# each container gets <this unit>/<id>, in this unit's delegated subtree, under worklane-test.slice's caps.
+Delegate=cpu io memory pids
+DelegateSubgroup=daemon
 # Published ports bind 127.0.0.1.
-ExecStart=$docker_dir/dockerd-rootless.sh --data-root $root/docker --ip 127.0.0.1
-Delegate=yes
+ExecStart=$docker_dir/dockerd-rootless.sh --data-root $root/docker --ip 127.0.0.1 --exec-opt native.cgroupdriver=cgroupfs
 KillMode=mixed
 Restart=on-failure
 RestartSec=10
@@ -205,6 +210,22 @@ access_checks() {
   return "$fail"
 }
 
+# Docker's daemon runs in its unit's subgroup "daemon", and the unit's cgroup has the controllers delegated, so each
+# container gets a cgroup of its own beside it, inside worklane-test.slice.
+docker_cgroup_check() {
+  local cg pid own ctl c missing=""
+  cg="$(systemctl show "$docker_unit_name" -p ControlGroup --value 2>/dev/null || true)"
+  pid="$(systemctl show "$docker_unit_name" -p MainPID --value 2>/dev/null || true)"
+  own="$(sed -n 's/^0:://p' "/proc/${pid:-0}/cgroup" 2>/dev/null || true)"
+  ctl="$(cat "/sys/fs/cgroup$cg/cgroup.controllers" 2>/dev/null || true)"
+  for c in cpu io memory pids; do [[ " $ctl " == *" $c "* ]] || missing="$missing $c"; done
+  if [[ "$cg" == /worklane.slice/worklane-test.slice/* && "$own" == "$cg/daemon" && -z "$missing" ]]; then
+    echo "PASS Docker runs in $cg/daemon, with cpu io memory pids delegated: each container gets a cgroup of its own in $cg"
+  else
+    echo "FAIL Docker's cgroups: unit ${cg:-none}, daemon in ${own:-unknown}, delegated: ${ctl:-none}${missing:+ (missing:$missing)}"; return 1
+  fi
+}
+
 service_checks() {
   local fail=0 t_mem t_w wl_w u m
   t_mem="$(systemctl show worklane-test.slice -p MemoryMax --value)"
@@ -221,6 +242,7 @@ service_checks() {
     if [[ "$t_w" =~ ^[0-9]+$ ]] && [ "$t_w" -lt "$wl_w" ]; then echo "PASS test runs' CPU weight ($t_w) is below worklane.slice's ($wl_w)"; else echo "FAIL test runs' CPU weight ($t_w) is not below worklane.slice's ($wl_w)"; fail=1; fi
   fi
   if systemctl is-active -q "$docker_unit_name"; then echo "PASS $docker_unit_name is active"; else echo "FAIL $docker_unit_name is not active (journalctl -u $docker_unit_name)"; fail=1; fi
+  docker_cgroup_check || fail=1
   if [ -x "$helper" ] && cmp -s "$helper" "$machine_dir/worklane-testrun.sh"; then echo "PASS $helper matches this checkout's"; else echo "FAIL $helper is missing or differs from scripts/machine/worklane-testrun.sh (run install)"; fail=1; fi
   return "$fail"
 }

@@ -4,25 +4,56 @@
 // the instance's coordinator user. No mocks: what this checks is exactly what the coordinator sees on a server.
 //
 //   node testrun-real-systemd.mjs <dir with dist/src> <instance> <db image@sha256:...|-> <fixture dir> <ids file>
+//   node testrun-real-systemd.mjs --wipe <dir with dist/src> <instance> <ids file>
 //
 // Prints systemd-run's raw stderr for one plain exec (the text test/fixtures/systemd-run-255/ holds), and fails
-// if its summary isn't the shape the fixture has.
+// if its summary isn't the shape the fixture has. With a database image it starts the run's database, checks
+// Postgres answers on its port, writes the container's name to "<ids file>.db" and leaves the run in place, so the
+// job can look at the container's cgroup as root; --wipe then wipes every run in the ids file.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+const step = (s) => console.log(`\n== ${s}`);
+const load = (dist, m) => import(pathToFileURL(join(dist, 'src', m)).href);
+
+if (process.argv[2] === '--wipe') {
+  const [dist, instance, idsFile] = process.argv.slice(3);
+  if (!dist || !instance || !idsFile) {
+    console.error('usage: testrun-real-systemd.mjs --wipe <dist dir> <instance> <ids file>');
+    process.exit(2);
+  }
+  const { sandboxHost } = await load(dist, 'testrun/host.js');
+  const { wipeWorkspace } = await load(dist, 'testrun/workspace.js');
+  const host = sandboxHost(instance);
+  for (const id of readFileSync(idsFile, 'utf8').split('\n').filter(Boolean)) {
+    step(`wipe ${id}`);
+    await wipeWorkspace(host, id);
+    assert.deepEqual(await host.wipe(id), { ok: true, left: [] }, 'a second wipe finds nothing');
+  }
+  console.log('\nOK: wiped');
+  process.exit(0);
+}
 
 const [dist, instance, dbImage, fixtures, idsFile] = process.argv.slice(2);
 if (!dist || !instance || !dbImage || !fixtures || !idsFile) {
   console.error('usage: testrun-real-systemd.mjs <dist dir> <instance> <db image|-> <fixture dir> <ids file>');
   process.exit(2);
 }
-const load = (m) => import(pathToFileURL(join(dist, 'src', m)).href);
-const { sandboxHost, newRunId, systemdRunStats, SANDBOX_HELPER } = await load('testrun/host.js');
-const { createWorkspace, wipeWorkspace } = await load('testrun/workspace.js');
-const step = (s) => console.log(`\n== ${s}`);
+const { sandboxHost, newRunId, systemdRunStats, SANDBOX_HELPER } = await load(dist, 'testrun/host.js');
+const { createWorkspace, wipeWorkspace } = await load(dist, 'testrun/workspace.js');
+
+// Postgres itself answers on the port: an SSLRequest gets its one-byte reply, 'S' or 'N'.
+const postgresAnswers = (port) => new Promise((resolve, reject) => {
+  const sock = connect({ host: '127.0.0.1', port }, () => sock.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f])));
+  sock.setTimeout(10_000, () => sock.destroy(new Error('no reply in 10 s')));
+  sock.once('data', (b) => { sock.destroy(); resolve(String.fromCharCode(b[0])); });
+  sock.once('error', reject);
+});
 
 // A repo of this user's own: main, and a head commit on top of it.
 const repo = mkdtempSync(join(homedir(), 'repo-'));
@@ -88,9 +119,14 @@ if (dbImage !== '-') {
   console.log(db.url.replace(/:[0-9a-f]{32}@/, ':***@'), db.container);
   assert.ok(db.port > 0 && db.port < 65536);
   assert.match(db.url, new RegExp(`^postgres://postgres:[0-9a-f]{32}@127\\.0\\.0\\.1:${db.port}/test$`));
+  const reply = await postgresAnswers(db.port);
+  console.log(`Postgres on 127.0.0.1:${db.port} answers an SSLRequest with '${reply}'`);
+  assert.ok(reply === 'S' || reply === 'N', `Postgres's reply: ${JSON.stringify(reply)}`);
+  writeFileSync(`${idsFile}.db`, `${db.container}\n`);
+  console.log(`\nOK: the sandbox host works against real systemd-run; run ${id} and its database are left for the cgroup check`);
+} else {
+  step(`wipe ${id}`);
+  await wipeWorkspace(host, id);
+  assert.deepEqual(await host.wipe(id), { ok: true, left: [] }, 'a second wipe finds nothing');
+  console.log('\nOK: the sandbox host works against real systemd-run');
 }
-
-step(`wipe ${id}`);
-await wipeWorkspace(host, id);
-assert.deepEqual(await host.wipe(id), { ok: true, left: [] }, 'a second wipe finds nothing');
-console.log('\nOK: the sandbox host works against real systemd-run');
