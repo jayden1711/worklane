@@ -3,13 +3,18 @@
 // questions). The plan is posted on the issue and recorded, and the build
 // proceeds with it in the worker's brief. The owner can object by comment:
 // an objection stops the task before its next attempt and before anything is
-// proposed. By default the build does not wait for an approval of the plan,
-// except when the plan touches what the merge policy would never merge on its
-// own (high-risk categories, design-level changes): then it is held as a
-// decision for the owner (approve / revise with a note / reject), judged with
-// the merge policy's own checks. Every plan has a Decisions section (src/plan-decisions.ts): refused without it
+// proposed. The plan gate (config.yaml plan_gate) decides whether the build
+// waits for the owner's approval of the plan: `always` (the default) holds
+// every size:M/L plan; `risky` holds only a plan that touches what the merge
+// policy would never merge on its own (high-risk categories, design-level
+// changes), judged with the merge policy's own checks; `off` holds none. A held
+// plan is a decision for the owner (approve / revise with a note / reject),
+// posted on the issue and in the Discord decision thread ("approve plan <n>").
+// Every plan carries acceptance criteria, the issue's done_when when the
+// planner gives none. Every plan has a Decisions section (src/plan-decisions.ts): refused without it
 // or with a citation that isn't recorded, and reviewed against what it cites before it is posted.
 import { BRAND } from './brand.js';
+import type { DoneWhenList } from './backlog/types.js';
 import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
 import { computeLevel } from './review.js';
@@ -32,6 +37,11 @@ export const PLAN_SCHEMA = {
   properties: {
     approach: { type: 'string', description: 'The approach in 2-4 sentences: what you will change and why that meets the issue and its done_when.' },
     steps: { type: 'array', items: { type: 'string' }, description: 'The steps, in order, each small enough to check.' },
+    acceptance: {
+      type: 'array',
+      items: { type: 'string' },
+      description: "The acceptance criteria: each a check the owner can tell is met or not once it is built. Start from the issue's done_when (every item of it is one) and add only what the issue itself asks for.",
+    },
     files: { type: 'array', items: { type: 'string' }, description: 'Repo-relative files you expect to change or add.' },
     risks: { type: 'array', items: { type: 'string' }, description: 'What could go wrong or break, and how the steps guard against it.' },
     questions: { type: 'array', items: { type: 'string' }, description: 'Open questions for the owner, only if a real decision is needed; the build proceeds with your best answer.' },
@@ -47,6 +57,8 @@ export const PLAN_SCHEMA = {
 export interface Plan {
   approach: string;
   steps: string[];
+  /** The acceptance criteria the owner approves the plan against: the planner's, or the issue's done_when. */
+  acceptance?: string[];
   files: string[];
   risks: string[];
   questions?: string[];
@@ -62,16 +74,19 @@ export interface Plan {
  * must be there and cite only what the decisions index holds (`index`: the decisions made and the checkout's
  * records), or be exactly "nothing recorded on this".
  */
-export function readPlan(s: unknown, index: readonly DecisionEntry[]): Plan | { invalid: string } {
+export function readPlan(s: unknown, index: readonly DecisionEntry[], doneWhen: DoneWhenList = []): Plan | { invalid: string } {
   const p = s as (Partial<Omit<Plan, 'decisions'>> & { decisions?: unknown }) | undefined;
   if (!p || typeof p.approach !== 'string' || !p.approach.trim()) return { invalid: 'the plan run gave no approach' };
   const list = (x: unknown) => (Array.isArray(x) ? x.filter((v): v is string => typeof v === 'string' && v.trim() !== '') : []);
   if (!list(p.steps).length) return { invalid: 'the plan run gave no steps' };
   const decisions = checkDecisions(p.decisions, index);
   if ('invalid' in decisions) return decisions;
+  // No acceptance criteria from the planner: the issue's done_when is what the plan is approved against.
+  const acceptance = list(p.acceptance).length ? list(p.acceptance).map((a) => a.trim()) : acceptanceOf(doneWhen);
   return {
     approach: p.approach.trim(),
     steps: list(p.steps),
+    ...(acceptance.length ? { acceptance } : {}),
     files: list(p.files),
     risks: list(p.risks),
     ...(list(p.questions).length ? { questions: list(p.questions) } : {}),
@@ -79,6 +94,29 @@ export function readPlan(s: unknown, index: readonly DecisionEntry[]): Plan | { 
     ...(typeof p.design_reason === 'string' && p.design_reason.trim() ? { design_reason: p.design_reason.trim() } : {}),
     decisions,
   };
+}
+
+/** The issue's done_when as acceptance criteria, one line each. */
+export function acceptanceOf(doneWhen: DoneWhenList): string[] {
+  return doneWhen.map((d) => {
+    if ('test' in d) return `the test ${d.test} passes`;
+    if ('command' in d) return `\`${d.command}\` exits 0`;
+    if ('suite' in d) return `the ${d.suite} suite has no new failures against the default branch`;
+    if ('manual' in d) return d.manual;
+    if ('repro' in d) return d.repro ? 'a reproduction test fails before the change and passes after it' : 'no reproduction test is needed';
+    return `the browser flow ${d.browser} passes`;
+  });
+}
+
+/**
+ * The plan gate (config.yaml plan_gate): `always` holds every size:M/L plan for the owner's approval; `risky` only one
+ * the merge policy's checks hold (`reasons`); `off` none, whatever they say.
+ */
+export type PlanGate = 'always' | 'risky' | 'off';
+export const PLAN_GATE_REASON = "plan_gate is always: a size:M/L plan waits for the owner's approval";
+export function gateReasons(gate: PlanGate, reasons: string[]): string[] {
+  if (gate === 'off') return [];
+  return gate === 'always' ? [...reasons, PLAN_GATE_REASON] : reasons;
 }
 
 /** The plan run's brief, after the issue: plan, don't build. */
@@ -118,6 +156,7 @@ export function planComment(plan: Plan, owner: string, held: string[] = []): str
     '',
     '**Steps**',
     plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n'),
+    ...(plan.acceptance?.length ? ['', '**Acceptance criteria**', bullets(plan.acceptance)] : []),
     ...(plan.files.length ? ['', '**Files it expects to change**', bullets(plan.files.map((f) => `\`${f}\``))] : []),
     ...(plan.risks.length ? ['', '**Risks**', bullets(plan.risks)] : []),
     ...(plan.questions?.length ? ['', '**Open questions** (the build goes ahead with the approach above; answer to change it)', bullets(plan.questions)] : []),
@@ -134,6 +173,7 @@ export function planBrief(plan: Plan): string[] {
     `Approach: ${plan.approach}`,
     'Steps:',
     ...plan.steps.map((s, i) => `${i + 1}. ${s}`),
+    ...(plan.acceptance?.length ? ['Acceptance criteria (the owner judges the change by these):', ...plan.acceptance.map((a) => `- ${a}`)] : []),
     ...(plan.files.length ? [`Files expected to change: ${plan.files.join(', ')}`] : []),
     ...(plan.risks.length ? ['Risks to guard against:', ...plan.risks.map((r) => `- ${r}`)] : []),
     'Decisions it rests on (build within them; going against a recorded decision the plan does not name is not yours to choose):',
@@ -176,14 +216,18 @@ export function planHoldReasons(plan: Plan, o: { review: ReviewConfig; moneyPath
 export const PLAN_OPTIONS = ['approve', 'revise', 'reject'] as const;
 export type PlanAnswer = (typeof PLAN_OPTIONS)[number];
 
+/** A held plan's receipt line for each acceptance criterion (the chat post shows these). */
+export const ACCEPTANCE_RECEIPT = 'acceptance: ';
+
 /** The owner's decision on a held plan. */
-export function planDecision(reasons: string[]) {
+export function planDecision(reasons: string[], acceptance: string[] = []) {
   return {
     question: 'Approve this plan before it is built?',
     options: [...PLAN_OPTIONS],
     recommendation: 'approve' as PlanAnswer,
     receipts: [
       ...reasons.map((r) => `holds because ${r}`),
+      ...acceptance.map((a) => `${ACCEPTANCE_RECEIPT}${a}`),
       'approve: the build starts with this plan',
       `revise: the plan is written again with your note (reply \`/${BRAND.cli} revise <note>\`)`,
       'reject: the task stops; nothing is built',

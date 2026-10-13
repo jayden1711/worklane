@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
-import { needsPlan, objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planHoldReasons, readPlan } from '../src/plan-mode.js';
+import { gateReasons, needsPlan, objection, PLAN_DISALLOWED, PLAN_GATE_REASON, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planBrief, planComment, planDecision, planHoldReasons, readPlan } from '../src/plan-mode.js';
+import { ProjectConfig } from '../src/config/schema.js';
 import { exampleProject } from './helpers.js';
 
 const plan = { approach: 'Add an orders table and route totals through it.', steps: ['Add the migration', 'Use it in totals'], files: ['migrations/002_orders.sql', 'src/price.js'], risks: ['Old rows without an order id'], questions: ['Keep the old totals path for a release?'], decisions: { nothing: true as const } };
@@ -93,4 +94,38 @@ test('the planner is a role like the others: its brief comes from src/roles.ts, 
   assert.match(defaultRolePrompt('planner'), /^Own: /m);
   const cases = parseCases(engineRoleCases('planner') ?? '');
   assert.ok(cases.length >= 5 && cases.every((c) => c.correct.length && c.wrong.length), `${cases.length} cases`);
+});
+
+test("a plan's acceptance criteria default to the issue's done_when; the planner's own replace them", () => {
+  const doneWhen = [{ test: 'test/price.test.js' }, { command: 'npm run lint' }, { suite: 'changed' as const }, { manual: 'the totals page shows 0 for an empty cart' }, { repro: true }, { browser: 'checkout' }];
+  const read = readPlan(raw, [], doneWhen);
+  assert.ok(!('invalid' in read));
+  assert.deepEqual(read.acceptance, [
+    'the test test/price.test.js passes',
+    '`npm run lint` exits 0',
+    'the changed suite has no new failures against the default branch',
+    'the totals page shows 0 for an empty cart',
+    'a reproduction test fails before the change and passes after it',
+    'the browser flow checkout passes',
+  ]);
+  const own = readPlan({ ...raw, acceptance: [' totals ignore qty <= 0 ', ''] }, [], doneWhen);
+  assert.deepEqual(!('invalid' in own) && own.acceptance, ['totals ignore qty <= 0']);
+  assert.ok('acceptance' in PLAN_SCHEMA.properties, 'the planner is asked for them');
+  // They are posted, briefed, and carried into the held plan's decision for the chat post.
+  const p = { ...plan, acceptance: ['totals ignore qty <= 0'] };
+  assert.match(planComment(p, 'example-owner'), /\*\*Acceptance criteria\*\*\n- totals ignore qty <= 0/);
+  assert.match(planBrief(p).join('\n'), /Acceptance criteria[^\n]*\n- totals ignore qty <= 0/);
+  assert.ok(planDecision(['x'], p.acceptance).receipts.includes('acceptance: totals ignore qty <= 0'));
+});
+
+test('the plan gate: always holds every plan, risky only a risky one, off none; always is the default, and a bad value is refused', () => {
+  assert.deepEqual(gateReasons('always', []), [PLAN_GATE_REASON]);
+  assert.deepEqual(gateReasons('always', ['high-risk: migration']), ['high-risk: migration', PLAN_GATE_REASON]);
+  assert.deepEqual(gateReasons('risky', []), []);
+  assert.deepEqual(gateReasons('risky', ['high-risk: migration']), ['high-risk: migration']);
+  assert.deepEqual(gateReasons('off', ['high-risk: migration']), []);
+  const base = { version: 1, project: { name: 'x', repo: 'example/x' }, owners: { default: 'example-owner', writers: ['example-owner'] } };
+  assert.equal(ProjectConfig.parse(base).plan_gate, 'always');
+  assert.equal(ProjectConfig.parse({ ...base, plan_gate: 'off' }).plan_gate, 'off');
+  assert.equal(ProjectConfig.safeParse({ ...base, plan_gate: 'sometimes' }).success, false);
 });

@@ -26,6 +26,8 @@ import { repoRoot, STDIN_LINE } from './helpers.js';
 import { SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { isProtectedPath } from '../src/guardrails/engine.js';
+import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
+import { PLAN_GATE_REASON, type PlanGate } from '../src/plan-mode.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -423,12 +425,48 @@ test('with separate users, task files go to the agents\' read-only task director
 
 const PLAN = { approach: 'Guard totals against non-positive quantities.', steps: ['Change the totals reducer', 'Run the price tests'], files: ['src/price.js'], risks: ['Callers relying on negative totals'], design_change: false, decisions: 'nothing recorded on this' };
 
-/** A size:M issue with a scripted planner; `worker` decides each build attempt; `reviewer` the plan review. */
-function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequest) => object, o: { files?: Record<string, string>; reviewer?: (req: RunRequest) => object } = {}) {
+// Placeholder Discord ids, for the plan gate's decision thread.
+const CHAT_OWNER = '100000000001';
+const CHAT_WRITER = '100000000003';
+const CHAT_CONFIG = IntakeConfig.parse({
+  version: 1,
+  discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: [CHAT_OWNER, CHAT_WRITER], people: { [CHAT_OWNER]: 'example-owner', [CHAT_WRITER]: 'example-collaborator' }, asks_channel: '200000000001', dashboard_url: 'https://dashboard.example.test' },
+});
+
+/** A chat source that records its threads and posts, and hands out the replies queued for its next pull. */
+function fakeChat() {
+  const threads: { text: string; name: string; id: string }[] = [];
+  const posts: { where: string; text: string }[] = [];
+  const queued: IncomingReport[] = [];
+  let seq = 0;
+  const src: IntakeSource = {
+    name: 'discord',
+    take: async () => queued.splice(0),
+    reply: async (t, text) => (posts.push({ where: t.id, text }), true),
+    openThread: async (_channel, text, name) => {
+      const id = String(900000 + threads.length);
+      threads.push({ text, name, id });
+      return id;
+    },
+    watch: () => {},
+  };
+  const say = (from: string, thread: string, text: string) => queued.push({ source: 'discord', sourceId: `3000000000${++seq}`, sender: { source: 'discord', id: from }, text, receivedAt: '2026-10-01T10:00:00.000Z', thread: { kind: 'thread', id: thread } });
+  return { src, threads, posts, say };
+}
+
+/**
+ * A size:M issue with a scripted planner; `worker` decides each build attempt; `reviewer` the plan review. `gate`:
+ * config.yaml plan_gate (the tests of the merge policy's holds run under `risky`; 'default': as loaded). `size`:
+ * the issue's size label.
+ */
+function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequest) => object, o: { files?: Record<string, string>; reviewer?: (req: RunRequest) => object; gate?: PlanGate | 'default'; size?: string[] } = {}) {
   const f = fixture({ files: o.files ?? {} });
-  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready', 'size:M'] });
+  if (o.gate !== 'default') f.cfg.project.plan_gate = o.gate ?? 'risky';
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready', ...(o.size ?? ['size:M'])] });
   const runner = agents({ planner: planOf, ...(worker ? { worker } : {}), ...(o.reviewer ? { 'plan-reviewer': o.reviewer } : {}) });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const chat = fakeChat();
+  const roleOf = async (login: string) => (({ 'example-owner': 'owner', 'example-collaborator': 'writer' }) as Record<string, 'owner' | 'writer'>)[login] ?? 'viewer';
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, settings: () => ({ settings: {}, error: null }), intake: { config: () => CHAT_CONFIG, sources: [chat.src], pullMs: 0, roleOf } });
   const run = async () => {
     await c.tick();
     await c.idle();
@@ -439,10 +477,72 @@ function plannedTask(planOf: (req: RunRequest) => object, worker?: (req: RunRequ
     await run(); // the task again, if it was put back to ready
   };
   const roles = () => runner.calls.map((r) => r.role);
-  return { f, n, c, runner, run, answer, roles };
+  return { f, n, c, runner, run, answer, roles, chat };
 }
 
-test('plan mode: a size:M issue is planned read-only first, the plan posted, and the build proceeds at once with the plan in its brief', { skip }, async () => {
+test('plan gate: by default a size:M plan, risky or not, is held with its acceptance criteria until approved; no worker runs before', { skip }, async () => {
+  const t = plannedTask(() => PLAN, undefined, { gate: 'default' });
+  assert.equal(t.f.cfg.project.plan_gate, 'always', 'always is the default');
+  await t.run();
+  const posted = lastOf(t.f.log, 'plan.posted') as { held: boolean; reasons: string[]; decision: string; plan: { acceptance: string[] } };
+  assert.deepEqual([posted.held, posted.reasons], [true, [PLAN_GATE_REASON]]);
+  assert.deepEqual(posted.plan.acceptance, ['the test test/price.test.js passes', 'a reproduction test fails before the change and passes after it'], "the issue's done_when, as the planner gave none");
+  assert.ok((await t.f.backlog.comments(t.n)).some((x) => /waits for your approval before anything is built[\s\S]*\*\*Acceptance criteria\*\*\n- the test test\/price\.test\.js passes/.test(x.body)));
+  assert.deepEqual(t.roles(), ['planner'], 'no worker, no repro run: nothing is written before approval');
+  await t.run();
+  assert.deepEqual(t.roles(), ['planner'], 'still nothing while it waits');
+});
+
+test('plan gate: "approve plan <n>" in the Discord thread releases a held plan only from an owner; a writer\'s is a comment, another number answers nothing', { skip }, async () => {
+  const t = plannedTask(() => PLAN, undefined, { gate: 'default' });
+  await t.run();
+  await t.c.checkIntake();
+  const thread = t.chat.threads.find((x) => x.name.startsWith(`plan on #${t.n}:`));
+  assert.ok(thread, `the held plan is posted as a decision thread (${t.chat.threads.map((x) => x.name).join(', ')})`);
+  assert.match(thread.text, /Acceptance criteria:\n- the test test\/price\.test\.js passes/);
+  assert.ok(thread.text.includes(`"approve plan ${t.n}" approves it too`));
+  const after = async () => {
+    await t.c.checkIntake();
+    await t.c.tick(); // the decision
+    await t.run(); // the task again, if it was put back to ready
+  };
+  t.chat.say(CHAT_WRITER, thread.id, `approve plan ${t.n}`);
+  await after();
+  assert.equal(t.f.log.read(0, ['decision.answered']).length, 0, "a writer can't approve a plan");
+  assert.match(t.chat.posts.at(-1)!.text, /Noted as a comment from @example-collaborator\. Only an admin can answer/);
+  t.chat.say(CHAT_OWNER, thread.id, `approve plan ${t.n + 1}`);
+  await after();
+  assert.equal(t.f.log.read(0, ['decision.answered']).length, 0, "another plan's number approves nothing");
+  assert.match(t.chat.posts.at(-1)!.text, new RegExp(`about #${t.n}, not #${t.n + 1}; nothing is approved`));
+  assert.ok(!t.roles().includes('worker'), 'still nothing built');
+  t.chat.say(CHAT_OWNER, thread.id, `approve plan #${t.n}`);
+  await after();
+  assert.deepEqual(lastOf(t.f.log, 'plan.decided') as object, { issue: t.n, decision: (lastOf(t.f.log, 'plan.posted') as { decision: string }).decision, answer: 'approve', by: 'example-owner', note: '' });
+  assert.equal(t.roles().filter((r) => r === 'planner').length, 1, 'the approved plan is built, not planned again');
+  assert.ok(t.roles().includes('worker'), 'approved: the build runs');
+  assert.match(t.runner.calls.find((r) => r.role === 'worker')!.prompt, /Acceptance criteria[^\n]*\n- the test test\/price\.test\.js passes/);
+});
+
+test('plan gate: size:S and unsized tasks skip it (no plan, built at once) while a size:M one under the same config is held', { skip }, async () => {
+  for (const size of [['size:S'], []]) {
+    const t = plannedTask(() => PLAN, undefined, { gate: 'default', size });
+    await t.run();
+    assert.ok(!t.roles().includes('planner') && t.roles().includes('worker'), `${size.join() || 'unsized'}: built at once`);
+    assert.equal(t.f.log.read(0, ['decision.asked']).length, 0);
+  }
+  const m = plannedTask(() => PLAN, undefined, { gate: 'default' });
+  await m.run();
+  assert.ok(!m.roles().includes('worker'), 'size:M: held');
+});
+
+test('plan gate: off builds at once, even a plan the merge policy would hold', { skip }, async () => {
+  const t = plannedTask(() => ({ ...PLAN, files: ['migrations/002_orders.sql', 'src/price.js'] }), undefined, { gate: 'off' });
+  await t.run();
+  assert.deepEqual([(lastOf(t.f.log, 'plan.posted') as { held: boolean }).held, t.f.log.read(0, ['decision.asked']).length], [false, 0]);
+  assert.ok(t.roles().indexOf('planner') < t.roles().indexOf('worker'), 'planned, then built at once');
+});
+
+test('plan mode: under plan_gate risky, a size:M issue is planned read-only first, the plan posted, and an ordinary plan builds at once with the plan in its brief', { skip }, async () => {
   const t = plannedTask(() => PLAN);
   await t.run();
   const planner = t.runner.calls.find((r) => r.role === 'planner')!;

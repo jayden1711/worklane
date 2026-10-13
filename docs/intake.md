@@ -140,6 +140,9 @@ the same audit entry with `via: discord`. Who may answer from a thread is one fu
 
 - A reply chooses an option only when its first word is that option and it names no other ("approve",
   "Reject."). That answers at once, as before.
+- **Held plans** (the plan gate, `plan_gate` in config.yaml): the thread shows the plan's acceptance criteria and
+  links the issue with the full plan. "approve plan <n>" (n: the issue's number) is the same as "approve"; one
+  naming another number answers nothing. Only an admin's reply answers it; a writer's is a comment.
 - **Plain-language picks.** A reply from an admin or writer that clearly means one option ("yeah approve it",
   "go with a") is read by the `intake-thread` role, and the bot asks back "Confirm: approve?". Only that same
   person's following "yes" records it (through the same decide path, role check and audit); another person's yes
