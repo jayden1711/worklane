@@ -34,7 +34,8 @@ import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials } from './instance.js';
+import { credentialProblems, initInstance, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, policiesForRepo } from './instance.js';
+import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
@@ -120,6 +121,9 @@ usage: ${BRAND.cli} <command> [options]
   tune <instance> [--full] [--dry-run]
                                    profile the test suite at 1/2/4/all cores' workers and open a PR
                                    with the recommended worker settings (run as the coordinator user)
+  canary file|check --instance name --repo owner/repo [--reason update|daily] [--issue n] --json
+                                   (the engine updater runs these as the canary instance's user) file the
+                                   canary issue on the scratch repo, or say how far it got (docs/canary.md)
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
                                    (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
@@ -316,6 +320,33 @@ async function main(argv: string[]): Promise<number> {
       if (r.configDiffers.length) console.log(`the checkout's config differs from the bundle's in: ${r.configDiffers.join(', ')}; the config is the repo's: commit what you want of it in a PR`);
       console.log(`next: ${BRAND.cli} doctor${instanceOpt ? ` --instance ${instanceOpt}` : ''} (pending migrations of an older history show there)`);
       return 0;
+    }
+
+    case 'canary': {
+      // Only the canary instance's own repo, named again by the machine config, and never a repo another instance runs on.
+      const repo = option(args, '--repo') ?? '';
+      const reason = option(args, '--reason') === 'update' ? 'update' : 'daily';
+      const issue = Number(option(args, '--issue'));
+      const out = (j: unknown) => (console.log(JSON.stringify(j)), 0);
+      if (!instanceOpt || (sub !== 'file' && sub !== 'check') || (sub === 'check' && !(Number.isInteger(issue) && issue > 0))) {
+        console.error(`usage: ${BRAND.cli} canary file|check --instance <name> --repo <owner/repo> [--reason update|daily] [--issue <n>] --json`);
+        return 2;
+      }
+      try {
+        const i = loadInstance(instanceOpt);
+        const refusal = canaryRefusal({ instance: i.name, instanceRepo: i.repo.repo, canaryRepo: repo, others: policiesForRepo(repo).map((p) => ({ name: p.name, repo })) });
+        if (refusal) return (out({ ok: false, error: refusal }), 1);
+        const backlog = backlogFor(i.config, i.repo.path, i.stateDir, instanceTokens(i, instanceEnv(i)));
+        if (sub === 'file') return out({ ok: true, ...(await fileCanary(backlog, repo, reason, new Date())) });
+        const log = new EventLog(join(i.stateDir, 'events.db'));
+        try {
+          return out({ ok: true, ...(await checkCanary(backlog, repo, issue, log.read(0, ['issue.seen', 'issue.claimed', 'plan.posted', 'pr.opened', 'pr.closed']))) });
+        } finally {
+          log.close();
+        }
+      } catch (e) {
+        return (out({ ok: false, error: String((e as Error).message ?? e).split('\n')[0]!.slice(0, 500) }), 1);
+      }
     }
 
     case 'doctor': {

@@ -4,7 +4,7 @@
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
 import { BRAND } from './brand.js';
-import { AGENT_INSTRUCTIONS, type LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, LOCKED_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -111,7 +111,30 @@ export interface MergeDecision {
   auto: boolean;
   /** Why it waits for a human, grouped by kind (empty when it merges). */
   reasons: string[];
+  /** Each high-risk category it touches, said plainly with the first file in it (whyHighRisk); "Waiting on you" shows these. */
+  why: WaitWhy[];
 }
+
+/** One high-risk category a change touches, in plain words: e.g. "changes the merge policy: src/merge-policy.ts". */
+export interface WaitWhy {
+  category: string;
+  text: string;
+}
+
+/** What touching each built-in high-risk category means, in plain words; the repo's own categories are named as they are. */
+const CATEGORY_WORDS: Record<string, string> = {
+  [AGENT_INSTRUCTIONS]: "changes the agents' instructions",
+  'harness-config': "changes the harness's config",
+  'guardrail-config': 'changes the guardrails',
+  'ci-config': 'changes the CI config',
+  'deploy-config': 'changes the deploy config',
+  'release-config': 'changes the release config',
+  auth: 'changes sign-in or auth',
+  secrets: 'touches secrets',
+  migration: 'changes a database migration',
+  'money-path': 'touches the money path',
+  'deletes-data': 'deletes data',
+};
 
 const paths = (p: string[]) => `${p.slice(0, 3).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
 
@@ -120,7 +143,27 @@ const paths = (p: string[]) => `${p.slice(0, 3).join(', ')}${p.length > 3 ? ` an
  * no review.yaml removes it), and the repo's merge.wait_categories.
  */
 export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] } }; merge: { wait_categories: string[] } }): string[] {
-  return [...new Set([...review.levels.L3_human.when, 'ci-config', AGENT_INSTRUCTIONS, ...review.merge.wait_categories])];
+  return [...new Set([...review.levels.L3_human.when, 'ci-config', ...Object.keys(LOCKED_CATEGORIES), ...review.merge.wait_categories])];
+}
+
+/** The categories a change waits on: the caller's list plus the locked ones (the floor, whatever list a caller passes). */
+const waitingOn = (waitCategories: string[]) => new Set([...waitCategories, ...Object.keys(LOCKED_CATEGORIES)]);
+
+/**
+ * Why a change is high-risk, plainly, one line per category it touches, naming the first file in it: "changes the
+ * merge policy: src/merge-policy.ts" (self-modification says which part of the harness), "changes a database
+ * migration: db/001.sql", or for the repo's own category "touches pricing: src/price.js".
+ */
+export function whyHighRisk(o: { level: LevelResult; waitCategories: string[] }): WaitWhy[] {
+  const out: WaitWhy[] = [];
+  for (const c of waitingOn(o.waitCategories)) {
+    const hit = o.level.categories[c];
+    if (!hit?.length) continue;
+    const first = hit[0]!;
+    const words = c === SELF_MODIFICATION ? `changes ${selfModificationPart(first) ?? 'the harness itself'}` : (CATEGORY_WORDS[c] ?? `touches ${c}`);
+    out.push({ category: c, text: `${words}: ${first}${hit.length > 1 ? ` and ${hit.length - 1} more` : ''}` });
+  }
+  return out;
 }
 
 /**
@@ -130,8 +173,8 @@ export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] 
  */
 export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: string[]; design?: { flag: boolean | undefined; reason?: string | undefined; by: string }; newTopLevel: string[] }): string[] {
   const reasons: string[] = [];
-  // The agents' own instructions always count, whatever list a caller passes (the floor).
-  for (const c of new Set([...o.waitCategories, AGENT_INSTRUCTIONS])) {
+  // The locked categories (the agents' own instructions, the harness's own controls) always count, whatever list a caller passes (the floor).
+  for (const c of waitingOn(o.waitCategories)) {
     const hit = o.level.categories[c];
     if (hit?.length) reasons.push(`high-risk: ${c} (${paths(hit)})`);
   }
@@ -182,5 +225,5 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   if (i.pushLimitHit) reasons.push('doubt: the change hit a push limit');
   reasons.push(...(i.instructionEvals ?? []));
   reasons.push(...(i.outsidePlan ?? []));
-  return { auto: reasons.length === 0, reasons };
+  return { auto: reasons.length === 0, reasons, why: whyHighRisk({ level: i.level, waitCategories: i.waitCategories }) };
 }

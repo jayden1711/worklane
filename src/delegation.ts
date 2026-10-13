@@ -6,11 +6,13 @@
 // an answer files a review.yaml change as an issue, built into a PR the owner reviews. High-risk and safety-floor
 // categories can never be loosened, and review.yaml rejects listing them as loosened. Pure.
 
-/** Never loosened: the default L3 categories, CI config and dependencies (design-level). The repo's own L3 too. */
+import { LOCKED_CATEGORIES } from './review.js';
+
+/** Never loosened: the default L3 categories, CI config and dependencies (design-level), the locked ones (review.ts). The repo's own L3 too. */
 export const NEVER_LOOSEN = ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data', 'ci-config', 'dependency'] as const;
 
 export function protectedCategories(review: { levels: { L3_human: { when: string[] } } }): Set<string> {
-  return new Set<string>([...NEVER_LOOSEN, ...review.levels.L3_human.when]);
+  return new Set<string>([...NEVER_LOOSEN, ...Object.keys(LOCKED_CATEGORIES), ...review.levels.L3_human.when]);
 }
 
 /** Why a review.yaml's `merge.loosened` is refused: every protected category listed in it. */

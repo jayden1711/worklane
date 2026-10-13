@@ -16,6 +16,7 @@ import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
 import { allowedDomainsOf, withAllowedDomains } from './sandbox.js';
+import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'stopped' | 'stuck';
 
@@ -103,6 +104,8 @@ export interface RunResult {
   refusedHosts?: RefusedRequest[];
   /** Why the stuck-run guard stopped it (reason 'stuck'). */
   stuck?: StuckVerdict;
+  /** Reason rate_limited: when the limit resets, as claude said (or the default when it didn't). */
+  limit?: LimitHit;
 }
 
 /**
@@ -218,6 +221,21 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
     return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '' };
   } catch {
     return { method: 'unknown', text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim().slice(-500) };
+  }
+}
+
+/**
+ * claude auth status --json as the agent user, read for the watchdog: whether it is signed in, and the login's expiry
+ * when the CLI reports one. Never the token (the command doesn't print it). Null when it couldn't be read.
+ */
+export function claudeAuthStatusJson(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { loggedIn: boolean; expiresAt?: unknown } | null {
+  const [file, args] = runAs ? asUser(runAs.user, bin, ['auth', 'status', '--json'], env) : [bin, ['auth', 'status', '--json']];
+  const r = spawnSync(file, args, { encoding: 'utf8', env: runAs ? { PATH: env.PATH ?? '' } : env, timeout: 30_000 });
+  try {
+    const j = JSON.parse(r.stdout) as { loggedIn?: unknown; expiresAt?: unknown };
+    return typeof j.loggedIn === 'boolean' ? { loggedIn: j.loggedIn, ...(j.expiresAt !== undefined ? { expiresAt: j.expiresAt } : {}) } : null;
+  } catch {
+    return null;
   }
 }
 
@@ -409,8 +427,11 @@ export class CliRunner implements AgentRunner {
         }
       };
       const r = req.interactive ? await once() : await withLoginLock(key, once);
+      // A usage or rate limit claude itself gave up on resets in hours, not minutes: never retried here (the
+      // coordinator pauses until its reset instead), so one run that hits it is one try.
+      if (r.reason === 'rate_limited') return r;
       const atStartup = now() - started < STARTUP_WINDOW_MS || r.turns <= 1;
-      const transient = atStartup && (r.reason === 'rate_limited' || ((r.reason === 'failed' || r.reason === 'auth_mismatch') && TRANSIENT_ERROR.test(r.detail)));
+      const transient = atStartup && (r.reason === 'failed' || r.reason === 'auth_mismatch') && TRANSIENT_ERROR.test(r.detail);
       if (!transient) return r;
       const wait = TRANSIENT_BACKOFF_MS[Math.min(tries - 1, TRANSIENT_BACKOFF_MS.length - 1)]!;
       if (now() + wait - first > budget) {
@@ -511,7 +532,7 @@ export class CliRunner implements AgentRunner {
       child.stdin.write(userMessage(req.prompt));
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
-      let rateLimited = false;
+      let rateLimited: RateLimitInfo | null = null;
       let ended: TerminalReason | null = null;
       let buf = '';
       let stderr = '';
@@ -561,7 +582,7 @@ export class CliRunner implements AgentRunner {
         while ((nl = buf.indexOf('\n')) >= 0) {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
-          let j: { type?: string; subtype?: string; rate_limit_info?: { status?: string } };
+          let j: { type?: string; subtype?: string; rate_limit_info?: RateLimitInfo };
           try {
             j = JSON.parse(line);
           } catch {
@@ -591,7 +612,7 @@ export class CliRunner implements AgentRunner {
             result = j as ResultLine;
             turnEnded();
           }
-          else if (j.type === 'rate_limit_event' && j.rate_limit_info?.status === 'rejected') rateLimited = true;
+          else if (j.type === 'rate_limit_event' && j.rate_limit_info?.status === 'rejected') rateLimited = j.rate_limit_info;
           else if (j.type === 'assistant') req.onActivity?.('assistant turn');
         }
       });
@@ -626,7 +647,13 @@ export class CliRunner implements AgentRunner {
           return done({ reason: 'stuck', detail: `stopped as stuck: the same ${v.tool} call failed ${v.failures} times in a row: ${v.input.slice(0, 200)}`, ...base });
         }
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
-        if (rateLimited || r?.api_error_status === 429) return done({ reason: 'rate_limited', detail: 'usage or rate limit reached', ...base });
+        // The subscription's usage limit (or a provider's rate limit): claude's rate_limit_event, a 429 it gave up on,
+        // or its own words for the limit in an error result. Its text is kept: it may name the reset time.
+        const said = `${r?.is_error || r?.subtype !== 'success' ? (r?.result ?? '') : ''}\n${stderrTail(stderr)}`;
+        if (rateLimited || r?.api_error_status === 429 || ((!r || r.is_error || r.subtype !== 'success') && USAGE_LIMIT_TEXT.test(said))) {
+          const text = (r?.is_error ? (r.result ?? '') : '').trim().slice(0, 300);
+          return done({ reason: 'rate_limited', detail: `usage or rate limit reached${text ? `: ${text}` : ''}`, limit: limitHit({ info: rateLimited, text: said, now: (this.retry.now ?? Date.now)() }), ...base });
+        }
         if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
         if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
         // An error result often carries no text of its own; claude's stderr then says what went wrong.
