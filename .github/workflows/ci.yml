@@ -135,6 +135,125 @@ jobs:
           worklane --version
           worklane demo "$RUNNER_TEMP/demo"
 
+  bootstrap-windows:
+    # Windows' documented route, local mode inside WSL2 (Ubuntu 24.04, systemd on), end to end as the bootstrap job
+    # runs it: this commit's engine packed inside the distro, then, as a plain user, the bootstrap
+    # (which fetches its own Node; nothing of ours is preinstalled), init's checklist, doctor green and naming the OS as
+    # WSL, `worklane up` / `down` as a systemd --user unit, and the demo. No GitHub: the same stand-ins. Not a
+    # required check, and not one of the updater's checks (the owner decides). WSL setup: Vampire/setup-wsl
+    # (Apache-2.0), used as an action, nothing copied. #214 (closed) explored the Windows side.
+    name: bootstrap (windows-wsl)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: WSL2, Ubuntu 24.04, systemd on
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: xz-utils
+          wsl-conf: |
+            [boot]
+            systemd=true
+      - name: a plain user to install as (local mode runs as you), with a systemd --user manager
+        run: |
+          [ "$(ps -p 1 -o comm=)" = systemd ] || { echo "PID 1 is $(ps -p 1 -o comm=), not systemd" >&2; exit 1; }
+          uname -r; grep -i microsoft /proc/version
+          useradd -m -s /bin/bash wl
+          loginctl enable-linger wl
+          for _ in $(seq 30); do systemctl is-active --quiet user@"$(id -u wl)".service && break; sleep 1; done
+          systemctl is-active user@"$(id -u wl)".service
+      - name: pack this commit's engine inside WSL (dist/ and the web UI built, as in a release), with a Node that's gone after
+        run: |
+          ws="$(wslpath -u '${{ github.workspace }}')" home="$(getent passwd wl | cut -d: -f6)"
+          # The bootstrap's own pinned Node, in a scratch place off every PATH, removed once the tarball is made.
+          v="$(sed -n 's/^NODE_VERSION=//p' "$ws/scripts/bootstrap.sh")"
+          sum="$(sed -n 's/^NODE_SHA256_LINUX_X64=//p' "$ws/scripts/bootstrap.sh")"
+          curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz"
+          echo "$sum  /tmp/node.tar.xz" | sha256sum -c -
+          mkdir -p /opt/pack-node && tar -xJf /tmp/node.tar.xz -C /opt/pack-node --strip-components 1
+          mkdir -p /root/src && tar -C "$ws" --exclude=./.git -cf - . | tar -C /root/src -xf -
+          (
+            export PATH="/opt/pack-node/bin:$PATH"
+            cd /root/src
+            npm ci --ignore-scripts --no-audit --no-fund
+            npm run build && npm run build:web
+            npm pack --pack-destination "$home" > /dev/null
+          )
+          rm -rf /opt/pack-node /tmp/node.tar.xz /root/src
+          chown wl: "$home"/*.tgz && ls -l "$home"/*.tgz
+      - name: no GitHub from here on (a stand-in gh, signed in, that reaches nothing; a stand-in claude, signed in)
+        run: |
+          ws="$(wslpath -u '${{ github.workspace }}')" h="$(getent passwd wl | cut -d: -f6)" uid="$(id -u wl)"
+          install -d -o wl -g wl "$h/stand-ins" && install -o wl -g wl -m 0755 "$ws"/scripts/ci/stand-ins/* "$h/stand-ins/"
+          # What every later step sources first: it stops the step unless it runs as wl.
+          {
+            echo '[ "$(id -un)" = wl ] || { echo "this step runs as $(id -un), not wl" >&2; exit 1; }'
+            echo "H=$h WS=$ws"
+            echo "export PATH=\"$h/stand-ins:$h/.local/bin:\$PATH\""
+            echo "export XDG_RUNTIME_DIR=/run/user/$uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus"
+            echo 'echo "as $(id -un), HOME=$HOME"'
+          } > /etc/wl-ci.env
+          cat /etc/wl-ci.env
+      - name: the next steps run as that user (a wsl-sudo shell)
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-shell-command: sudo -iu wl bash -euo pipefail
+      - name: as wl, no Node yet (the bootstrap fetches its own)
+        shell: wsl-sudo {0}
+        run: |
+          . /etc/wl-ci.env
+          if command -v node; then echo "node is already here; the bootstrap must fetch its own" >&2; exit 1; fi
+      - name: bootstrap in local mode, twice
+        shell: wsl-sudo {0}
+        run: |
+          . /etc/wl-ci.env
+          ex="$H/example"
+          cp -r "$WS/examples/basic" "$ex" && git -C "$ex" init -q
+          git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
+          tgz="$(ls "$H"/*.tgz)"
+          bash "$WS/scripts/bootstrap.sh" --dry-run --mode local --engine "$tgz" "$ex"
+          bash "$WS/scripts/bootstrap.sh" --mode local --yes --engine "$tgz" "$ex" | tee "$H/first.log"
+          [ "$(grep -cE '^   done: ' "$H/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
+          grep -q 'all 6 steps done or skipped' "$H/first.log"
+          bash "$WS/scripts/bootstrap.sh" --engine "$tgz" "$ex" < /dev/null | tee "$H/second.log"
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          grep -q 'no --mode, and no terminal to ask on: local mode' "$H/second.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$H/second.log"
+      - name: doctor shows the checklist, the OS as WSL, and what local mode can't do
+        shell: wsl-sudo {0}
+        run: |
+          . /etc/wl-ci.env
+          worklane doctor --root "$H/example" | tee "$H/doctor.log"
+          for id in tools claude github repo-config protection discord; do grep -Eq "^ok +setup $id: " "$H/doctor.log"; done
+          grep -Eq '^ok +os: windows-wsl$' "$H/doctor.log"
+          grep -Eq '^off +not in local mode: separate OS users: ' "$H/doctor.log"
+          grep -Eq '^off +not in local mode: root-run add-project: ' "$H/doctor.log"
+      - name: the coordinator as a systemd --user service (worklane up, then down)
+        shell: wsl-sudo {0}
+        run: |
+          . /etc/wl-ci.env
+          label=dev.worklane.example-shop
+          unit="$H/.config/systemd/user/$label.service"
+          worklane up --root "$H/example"
+          test -f "$unit"
+          systemctl --user is-enabled "$label.service"
+          systemctl --user status "$label.service" --no-pager | head -n 20 || true
+          worklane down --root "$H/example"
+          if [ -e "$unit" ]; then echo "down left $unit" >&2; exit 1; fi
+          if systemctl --user is-enabled "$label.service" > /dev/null 2>&1; then echo "down left $label enabled" >&2; exit 1; fi
+      - name: the demo, from the installed package
+        shell: wsl-sudo {0}
+        run: |
+          . /etc/wl-ci.env
+          worklane --version
+          worklane demo "$H/demo"
+
   testrun-real-systemd:
     # The test-run sandbox on a real host, no mocks: test-user.sh install (rootless Docker, the helper, its check),
     # then the coordinator's own sandbox host, as the coordinator user through its real sudoers rule, against real
