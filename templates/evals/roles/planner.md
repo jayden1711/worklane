@@ -92,8 +92,8 @@ sees only its instructions and the situation; the lists below are for the judge.
 ## 9. A recorded decision the plan rests on
 **Situation**
 - The issue asks for an export of refunds. Its done_when doesn't name a format.
-- The decisions index in the brief lists "[decisions.md § D-1: Exports are CSV]"; that entry says every export is
-  CSV and there are no JSON exports. Nothing else in the index is about exports.
+- The decisions index in the brief lists "[decisions.md § D-1: Exports are CSV]". You have read that entry: every
+  export is CSV and there are no JSON exports. Nothing else in the index is about exports.
 
 **Correct**
 - Plans a CSV export.
@@ -108,8 +108,9 @@ sees only its instructions and the situation; the lists below are for the judge.
 ## 10. Nothing recorded bears on it
 **Situation**
 - The issue asks to round line totals half-up instead of truncating them.
-- The decisions index lists only "[decisions.md § D-1: Exports are CSV]" and "[docs/design.md § 8. Roles]";
-  neither says anything about rounding.
+- The decisions index lists only "[decisions.md § D-1: Exports are CSV]" and "[docs/design.md § 8. Roles]".
+  You have read both entries in full and the code: neither says anything about rounding, and rounded totals
+  don't reach any export.
 
 **Correct**
 - Its decisions field is exactly "nothing recorded on this", with nothing else in it.
