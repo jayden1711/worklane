@@ -89,7 +89,7 @@ export abstract class Landing extends Decisions {
       const { command, exclusive } = this.tierCommand(tier);
       let lock: { release(): void } | null = null;
       if (exclusive) {
-        const got = await fullRunLock(`${BRAND.cli} land gate ${tier}`, 5_000, this.d.slotsDir);
+        const got = await fullRunLock(`${BRAND.cli} ${this.d.cfg.project.project.name} land gate ${tier}`, 5_000, this.d.slotsDir);
         if (!('lock' in got)) return { ok: false, deferred: true, note: `tier ${tier} needs the machine-wide full-run slot (held by ${got.holder?.owner ?? 'another run'}); deferred` };
         lock = got.lock;
       }
