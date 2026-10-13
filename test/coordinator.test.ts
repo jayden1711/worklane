@@ -727,11 +727,36 @@ test('an investigation posts findings with evidence, lands nothing, and asks the
   assert.match(comments, /modified files despite being read-only; those changes were discarded/);
   assert.equal(f.log.read(0, ['change.proposed', 'land.queued']).length, 0, 'nothing proposed or landed');
   assert.ok((await f.backlog.get(n)).labels.includes('needs:decision'));
+  // This output predates "recommended": its prose isn't an option, so it is the detail's last line, whole, and
+  // the decision recommends nothing.
+  const asked = f.log.read(0, ['decision.asked']).at(-1)!.payload as { options: string[]; recommendation: string; receipts: string[] };
+  assert.deepEqual(asked.options, ['approve-fix', 'investigate-more', 'close']);
+  assert.equal(asked.recommendation, '');
+  assert.equal(asked.receipts.at(-1), 'Recommendation: Fix with a qty > 0 guard and a regression test.');
   f.backlog.humanComment(n, 'example-owner', '/worklane approve-fix');
   await c.tick();
   const after = (await f.backlog.comments(n)).map((x) => x.body).join('\n');
   assert.match(after, /approved a fix\. Give the fix its own done_when contract/);
   assert.ok(!(await f.backlog.get(n)).labels.includes('ready'), 'not requeued as a code change');
+});
+
+test("a worker's ask whose recommendation is prose, not an option: the prose goes into the detail, whole, and the decision recommends nothing", { skip }, async () => {
+  const f = fixture();
+  const n = f.backlog.open({ title: 'Free shipping above a threshold', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const why = '$50, since most orders in the fixtures are between $40 and $60 and a higher bar would leave most of them out (see test/fixtures/orders.json:12 for the spread).';
+  const runner = agents({ worker: () => ({ summary: 'Need the threshold.', ask: { question: 'What order total gets free shipping?', options: ['$50', '$75', '$100'], recommendation: why, detail: 'The fixtures decide it.' } }) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  const asked = f.log.read(0, ['decision.asked']).at(-1)?.payload as { issue: number; options: string[]; recommendation: string; receipts: string[] } | undefined;
+  assert.equal(asked?.issue, n);
+  assert.deepEqual(asked.options, ['$50', '$75', '$100']);
+  assert.equal(asked.recommendation, '', 'not one of the options: left empty');
+  assert.deepEqual(asked.receipts, ['Need the threshold.', 'Recommendation: The fixtures decide it.', `Recommendation: ${why}`]);
+  // The issue's comment names no recommendation; the prose is in its detail, whole.
+  const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => b.includes('decision needed'))!;
+  assert.doesNotMatch(comment, /Recommendation: \*\*/);
+  assert.ok(comment.includes(`- Recommendation: ${why}`));
 });
 
 const easyIssue = (title: string, file: string) => ({ title, body: `Add ${file}.\n\n\`\`\`done_when\n- test: test/price.test.js\n\`\`\`\n`, author: 'example-owner', labels: ['ready'] });

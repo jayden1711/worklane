@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { Config } from '../config/load.js';
 import { claim, release } from '../claims.js';
+import { settleRecommendation } from '../decision-ask.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
@@ -367,14 +368,16 @@ export abstract class CoordinatorBase {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation', issue: number | null, owner: string, question: string, options: string[], recommendation: string, receipts: string[]): Promise<string> {
+  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[]): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
+    // The recommendation is one of the options or nothing: prose (an agent's reasoning) moves into the detail.
+    const { recommendation, receipts } = settleRecommendation(options, recommended, detail);
     this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
     await this.d.backlog.addLabels(issue, ['needs:decision']);
     await this.d.backlog.comment(
       issue,
-      `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}. Recommendation: **${recommendation}**.\n\n${receipts.map((r) => `- ${r}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
+      `[${BRAND.cli}] @${owner} decision needed: **${question}**\n\nOptions: ${options.join(' / ')}.${recommendation ? ` Recommendation: **${recommendation}**.` : ''}\n\n${receipts.map((r) => `- ${r}`).join('\n')}\n\nReply \`/${BRAND.cli} ${options.join('` or `/' + BRAND.cli + ' ')}\` (owner or a writer), or run \`${BRAND.cli} decide ${id} <option>\`.`,
     );
     return id;
   }
