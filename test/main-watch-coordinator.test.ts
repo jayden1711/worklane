@@ -74,6 +74,12 @@ function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: Tes
   // The watch judges a merge by the required_checks committed at its parent, so the default branch carries them too.
   appendFileSync(join(person, CONFIG_PATH), `\nrequired_checks: ${JSON.stringify(f.cfg.project.required_checks)}\n`);
   git(person, 'add', CONFIG_PATH);
+  // The coordinator follows the default branch's config (src/config/live.ts): batching must be committed there too.
+  if (o.batching) {
+    const tests = join(BRAND.configDir, 'tests.yaml');
+    writeFileSync(join(person, tests), readFileSync(join(person, tests), 'utf8').replace('land:\n  pre: []\n', `land:\n  pre: []\n  pr_batch: ${JSON.stringify(f.cfg.tests.land.pr_batch)}\n`));
+    git(person, 'add', tests);
+  }
   git(person, ...ident, 'commit', '-q', '-m', 'required_checks');
   git(person, 'push', '-q', 'origin', 'main');
   const commit = (file: string) => {
