@@ -258,35 +258,10 @@ export interface Protection {
   alert?: { at: string; sha: string; url: string; reason: string; number: number | null; revert: string | null } | null;
   stopped?: string | null;
   canClear?: boolean;
-  /** Commits admins accepted as bootstrap merges (owners and writers); `appliedTo`: the commit the watch accounted with it. */
-  accepted?: AcceptedMerge[];
-  /** Whether this person may accept one (an admin, while the main watch guards the branch). */
-  canAccept?: boolean;
-}
-
-export interface AcceptedMerge {
-  id: string;
-  sha: string | null;
-  pr: number | null;
-  head: string | null;
-  by: string;
-  reason: string;
-  at: string;
-  appliedTo: string | null;
 }
 
 /** An admin resumes auto-merge (the stop file goes; audited). */
 export const clearAutoMergeStop = () => api<{ ok: boolean }>('/api/auto-merge/clear', { method: 'POST', body: '{}' });
-
-/** What the accept field names: `#22` or `22` is a PR (a sha is at least 7 hex characters), anything else a sha. */
-export function acceptTarget(text: string): { pr: number } | { sha: string } {
-  const t = text.trim();
-  const pr = t.match(/^#?(\d{1,6})$/);
-  return pr ? { pr: Number(pr[1]) } : { sha: t };
-}
-
-/** An admin accepts a commit, or a PR's merge to come, as a bootstrap merge (audited; the stop, if any, stays). */
-export const acceptBootstrapMerge = (target: string, reason: string) => api<{ ok: boolean }>('/api/main-watch/accept', { method: 'POST', body: JSON.stringify({ ...acceptTarget(target), reason }) });
 
 export interface Run {
   issue: number;

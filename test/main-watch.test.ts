@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Role } from '../src/dashboard-auth.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type Acceptance, type AcceptTarget, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt } from '../src/main-watch.js';
+import { CONFIG_PATH, judge, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, readWatchState, repoGit, type CheckRunAt, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -88,7 +88,7 @@ const iso = (ms: number) => new Date(ms).toISOString();
 const ci = (o: Partial<CheckRunAt> = {}): CheckRunAt => ({ name: 'ci', status: 'completed', conclusion: 'success', startedAt: iso(T - 10 * 60_000), completedAt: iso(T - 5 * 60_000), ...o });
 
 function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] } = {}) {
-  const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean }[] };
+  const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean }[] };
   const watch = new MainWatch({
     stateFile: w.stateFile,
     branch: 'main',
@@ -99,7 +99,6 @@ function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>,
     now: () => gh.g.now,
     mode: (mode, detail) => out.modes.push({ mode, detail }),
     checked: (sha, how, number) => out.checked.push({ sha, how, number }),
-    accepted: (sha, number, a) => out.accepted.push({ sha, number, a }),
     unaccounted: async (u) => void out.unaccounted.push(u),
   });
   return { watch, ...out };
@@ -239,7 +238,7 @@ test("main watch: the harness's own merge with green checks passes, without aski
   const before = s.gh.calls.length;
   await run(s.gh, s.watch, 3);
   assert.deepEqual(s.checked, [{ sha: m.merge, how: 'harness', number: 11 }]);
-  assert.equal(s.unaccounted.length, 0);
+  assert.deepEqual(s.unaccounted, []);
   assert.deepEqual(s.gh.calls.slice(before).map((c) => c.what), [`runs ${m.head.slice(0, 7)}`]);
   // Not green on the head it merged: unaccounted, whoever merged it.
   const r = s.w.mergedPr();
@@ -318,192 +317,4 @@ test('outcomesAt and judge: checks are read as they stood at merge time; no requ
   assert.deepEqual(outcomesAt(['ci'], [], [{ context: 'ci', state: 'success', createdAt: iso(T + 1000) }], at), [{ name: 'ci', outcome: 'missing' }]);
   const v = judge('a'.repeat(40), { harness: { number: 3, head: 'b'.repeat(40), at } }, { branch: 'main', required: [] });
   assert.ok(v.done && !v.accounted);
-});
-
-// ---------------------------------------------------------------- bootstrap merges an admin accepted
-
-/** An admin's accept, as the dashboard makes it: over the coordinator's clone, with the PRs judged already. */
-const accept = (w: ReturnType<typeof world>, target: AcceptTarget, judgedPrs: number[] = [], reason = "bootstrap: the suite can't run yet") =>
-  acceptMerge({ stateFile: w.stateFile, git: acceptGit(w.coord, 'origin', 'main'), branch: 'main', target, reason, by: 'example-owner', judgedPrs });
-
-/** An open PR #n: a branch from main with one commit, its head at refs/pull/n/head as GitHub keeps it. */
-function openPr(w: ReturnType<typeof world>, n: number) {
-  const person = join(w.base, 'person');
-  let k = 0;
-  const push = () => {
-    git(person, 'checkout', '-q', '-B', `pr${n}`, ...(k ? [`pr${n}`] : []));
-    writeFileSync(join(person, `pr${n}-${++k}.txt`), `${n}.${k}\n`);
-    git(person, 'add', '-A');
-    git(person, ...ident, 'commit', '-q', '-m', `pr ${n} (${k})`);
-    const head = git(person, 'rev-parse', 'HEAD');
-    git(person, 'push', '-q', '-f', 'origin', `HEAD:refs/pull/${n}/head`);
-    git(person, 'checkout', '-q', 'main');
-    return head;
-  };
-  const p = { head: push(), push: () => (p.head = push()) };
-  /** Merged with a merge commit (GitHub's merge button), or squashed. */
-  const merge = (how: 'merge' | 'squash' = 'merge') => {
-    if (how === 'merge') git(person, ...ident, 'merge', '-q', '--no-ff', '-m', `Merge pull request #${n}`, p.head);
-    else {
-      git(person, 'merge', '-q', '--squash', p.head);
-      git(person, ...ident, 'commit', '-q', '-m', `PR ${n} (#${n})`);
-    }
-    git(person, 'push', '-q', 'origin', 'main');
-    return git(person, 'rev-parse', 'HEAD');
-  };
-  return Object.assign(p, { merge });
-}
-
-test('main watch: a hand merge an admin accepted by its sha is accounted (no stop, alert or revert); the next one, not accepted, still trips', async () => {
-  const s = await started();
-  s.gh.roles.set('example-owner', 'owner');
-  // The project's required check can't run yet: the admin's merge has it missing.
-  const m = s.w.mergedPr();
-  s.gh.pr(22, m.merge, m.head, iso(T), 'example-owner');
-  const r = accept(s.w, { sha: m.merge.slice(0, 12) });
-  assert.ok(r.ok, r.ok ? '' : r.error);
-  assert.equal(r.acceptance.sha, m.merge, 'kept as the full sha');
-  await run(s.gh, s.watch, 7);
-  assert.equal(s.unaccounted.length, 0, 'no stop, no alert, no revert PR');
-  assert.deepEqual(s.accepted.map((x) => [x.sha, x.number, x.a.by, x.a.reason]), [[m.merge, null, 'example-owner', "bootstrap: the suite can't run yet"]]);
-  assert.deepEqual(s.checked, []);
-  assert.equal(readWatchState(s.w.stateFile).last, m.merge);
-  assert.deepEqual(s.gh.calls.map((c) => c.what).filter((c) => c.includes(m.merge.slice(0, 7))), [], 'an accepted sha takes no API call');
-  // The next hand merge, just like it but not accepted, trips as before.
-  const n = s.w.mergedPr();
-  s.gh.pr(23, n.merge, n.head, iso(T), 'example-owner');
-  await run(s.gh, s.watch, 7);
-  assert.deepEqual(s.unaccounted.map((u) => [u.sha, u.revert]), [[n.merge, true]]);
-  assert.match(s.unaccounted[0]!.reason, /#23 was merged into main with required checks not green.*ci missing/);
-  // One being checked (the watch is part-way through it) can be accepted too.
-  const p = s.w.mergedPr();
-  s.gh.pr(24, p.merge, p.head, iso(T), 'example-owner');
-  await run(s.gh, s.watch, 1);
-  assert.equal(readWatchState(s.w.stateFile).pending?.sha, p.merge, 'being checked');
-  assert.ok(accept(s.w, { sha: p.merge }).ok);
-  await run(s.gh, s.watch, 7);
-  assert.deepEqual(s.accepted.map((x) => x.sha), [m.merge, p.merge]);
-  assert.equal(s.unaccounted.length, 1);
-});
-
-test('main watch: a PR accepted by number before it merges is accounted when it merges at that head (merge or squash); pushed to after, it trips', async () => {
-  const s = await started();
-  s.gh.roles.set('example-owner', 'owner');
-  // Accept, then merge: the owner's case.
-  const a = openPr(s.w, 25);
-  const r = accept(s.w, { pr: 25 });
-  assert.ok(r.ok, r.ok ? '' : r.error);
-  assert.equal(r.acceptance.head, a.head, "pinned to the PR's head now");
-  const am = a.merge();
-  s.gh.pr(25, am, a.head, iso(T), 'example-owner');
-  await run(s.gh, s.watch, 7);
-  assert.equal(s.unaccounted.length, 0, 'no stop, no alert, no revert PR');
-  assert.deepEqual(s.accepted.map((x) => [x.sha, x.number]), [[am, 25]]);
-  // Squashed: the same.
-  const b = openPr(s.w, 26);
-  assert.ok(accept(s.w, { pr: 26 }).ok);
-  const bm = b.merge('squash');
-  s.gh.pr(26, bm, b.head, iso(T), 'example-owner');
-  await run(s.gh, s.watch, 7);
-  assert.deepEqual(s.accepted.map((x) => [x.sha, x.number]), [[am, 25], [bm, 26]]);
-  assert.equal(s.unaccounted.length, 0);
-  // Accepted, then pushed to: the head merged isn't the one accepted, so it is judged as any merge.
-  const c = openPr(s.w, 27);
-  assert.ok(accept(s.w, { pr: 27 }).ok);
-  c.push();
-  const cm = c.merge();
-  s.gh.pr(27, cm, c.head, iso(T), 'example-owner');
-  await run(s.gh, s.watch, 7);
-  assert.deepEqual(s.unaccounted.map((u) => u.sha), [cm]);
-  assert.match(s.unaccounted[0]!.reason, /#27 was merged into main with required checks not green/);
-  assert.equal(s.accepted.length, 2);
-});
-
-test('main watch accept: a rewrite, a commit not on the branch, one already judged and one off the first-parent line are refused', async () => {
-  const s = await started();
-  s.gh.roles.set('example-owner', 'owner');
-  const baseline = readWatchState(s.w.stateFile).last!;
-  // Already judged: the last commit checked, and one before it.
-  assert.match((accept(s.w, { sha: baseline }) as { error: string }).error, /judged already/);
-  const g = s.w.mergedPr();
-  s.gh.pr(30, g.merge, g.head, iso(T), 'example-owner');
-  s.gh.runs.set(g.head, [ci()]);
-  await run(s.gh, s.watch, 7);
-  assert.deepEqual(s.checked.map((x) => x.sha), [g.merge]);
-  for (const sha of [g.merge, baseline]) {
-    const r = accept(s.w, { sha });
-    assert.ok(!r.ok && r.status === 409 && /judged already/.test(r.error), `${sha.slice(0, 8)}: ${JSON.stringify(r)}`);
-  }
-  // A PR judged already, by the watch's events, or whose head is on the branch at or before the last checked.
-  assert.match((accept(s.w, { pr: 30 }, [30]) as { error: string }).error, /#30's merge was judged already/);
-  const person = join(s.w.base, 'person');
-  git(person, 'push', '-q', 'origin', `${g.head}:refs/pull/30/head`);
-  assert.match((accept(s.w, { pr: 30 }) as { error: string }).error, /on main already, at or before the last commit checked/);
-  // Not on the branch: a commit on another branch, a sha nothing has, a PR the remote doesn't have.
-  git(person, 'checkout', '-q', '-b', 'elsewhere');
-  writeFileSync(join(person, 'e.txt'), 'e\n');
-  git(person, 'add', '-A');
-  git(person, ...ident, 'commit', '-q', '-m', 'elsewhere');
-  const foreign = git(person, 'rev-parse', 'HEAD');
-  git(person, 'push', '-q', 'origin', 'elsewhere');
-  git(person, 'checkout', '-q', 'main');
-  git(s.w.coord, 'fetch', '-q', 'origin');
-  for (const sha of [foreign, 'f'.repeat(40)]) {
-    const r = accept(s.w, { sha });
-    assert.ok(!r.ok && r.status === 404 && /is not a commit on main/.test(r.error), `${sha.slice(0, 8)}: ${JSON.stringify(r)}`);
-  }
-  assert.match((accept(s.w, { pr: 999 }) as { error: string }).error, /no PR #999 on the remote/);
-  // On the branch, but inside a merge: the watch judges the merge commit, so that is what is accepted.
-  const h = s.w.mergedPr();
-  const inside = accept(s.w, { sha: h.head });
-  assert.ok(!inside.ok && /not on its first-parent line/.test(inside.error), JSON.stringify(inside));
-  // No reason refused too; and the same thing twice.
-  assert.match((accept(s.w, { sha: h.merge }, [], '  ') as { error: string }).error, /a reason is required/);
-  assert.ok(accept(s.w, { sha: h.merge }).ok);
-  assert.match((accept(s.w, { sha: h.merge }) as { error: string }).error, /accepted already/);
-  s.gh.pr(32, h.merge, h.head, iso(T), 'example-owner');
-  await run(s.gh, s.watch, 7);
-  assert.deepEqual(s.accepted.map((x) => x.sha), [h.merge]);
-  // A force-push: neither the rewritten tip nor a PR can be accepted while it waits to be judged.
-  git(person, 'reset', '-q', '--hard', 'HEAD~1');
-  writeFileSync(join(person, 'x.txt'), 'x\n');
-  git(person, 'add', '-A');
-  git(person, ...ident, 'commit', '-q', '-m', 'rewritten');
-  git(person, 'push', '-q', '--force', 'origin', 'main');
-  const rewritten = git(person, 'rev-parse', 'HEAD');
-  openPr(s.w, 31);
-  for (const target of [{ sha: rewritten }, { pr: 31 }] as AcceptTarget[]) {
-    const r = accept(s.w, target);
-    assert.ok(!r.ok && r.status === 409 && /was rewritten since the last commit checked .*: a force-push can't be accepted/.test(r.error), `${JSON.stringify(target)}: ${JSON.stringify(r)}`);
-  }
-  // And the rewrite still trips, with no revert.
-  await run(s.gh, s.watch, 2);
-  assert.match(s.unaccounted.at(-1)!.reason, /main was rewritten/);
-  assert.equal(s.unaccounted.at(-1)!.revert, false);
-  assert.equal(s.accepted.length, 1);
-});
-
-test('main watch accept: nothing to accept while GitHub guards the branch, or before the watch has a starting commit', async () => {
-  const w = world();
-  const gh = fakeGitHub();
-  const s = watcher(w, gh);
-  assert.match((accept(w, { pr: 1 }) as { error: string }).error, /isn't guarding main \(not started\)/);
-  gh.g.protection = 'enforced';
-  await run(gh, s.watch, 1);
-  assert.match((accept(w, { pr: 1 }) as { error: string }).error, /isn't guarding main \(github\)/);
-});
-
-test('judge: an accepted sha is accounted at once; an accepted PR only at the head accepted', () => {
-  const at = iso(T);
-  const a: Acceptance = { id: 'x', sha: null, pr: 5, head: 'b'.repeat(40), base: 'c'.repeat(40), by: 'example-owner', reason: 'r', at };
-  const o = { branch: 'main', required: ['ci'], accepted: [a, { ...a, id: 'y', sha: 'a'.repeat(40), pr: null, head: null }] };
-  assert.deepEqual(judge('a'.repeat(40), { harness: null }, o), { done: true, accounted: true, how: 'accepted', number: null, acceptance: o.accepted[1] });
-  const pr = (head: string): MergedPull => ({ number: 5, url: '', mergedAt: at, mergeCommit: 'd'.repeat(40), mergedBy: null, mergedByBot: false, head, base: 'main' });
-  const f = (head: string) => ({ harness: null, pulls: [pr(head)], pr: pr(head) });
-  const v = judge('d'.repeat(40), f('b'.repeat(40)), o);
-  assert.ok(v.done && v.accounted && v.how === 'accepted' && v.number === 5);
-  const w = judge('d'.repeat(40), f('e'.repeat(40)), o);
-  assert.ok(w.done && !w.accounted, 'another head: judged as any merge');
-  const h = judge('d'.repeat(40), { harness: { number: 5, head: 'b'.repeat(40), at } }, o);
-  assert.ok(h.done && h.accounted && h.how === 'accepted', "the harness's own merge of it too");
 });

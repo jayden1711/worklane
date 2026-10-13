@@ -19,7 +19,7 @@ import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
-import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
+import { protectionView } from './main-watch.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, siteForInstance, siteForRoot } from './service.js';
@@ -134,8 +134,6 @@ export interface DashboardOptions {
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
   machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string };
-  /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
-  acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
   /** The machine owners file (src/machine-owners.ts); the system's when unset (tests). */
@@ -516,29 +514,7 @@ export function protectionState(o: { stateDir: string; repo: string; events: Sto
   const last = o.events.filter((e) => e.type === 'main_watch.unaccounted').at(-1);
   const p = last?.payload as EventPayload<'main_watch.unaccounted'> | undefined;
   const alert = stop && stop.by === 'main_watch' && p ? { at: last!.ts, sha: p.sha, url: p.url, reason: p.reason, number: p.number, revert: p.revert } : null;
-  // Each acceptance, and the commit the watch applied it to (main_watch.accepted), if it has yet.
-  const applied = new Map(o.events.filter((e) => e.type === 'main_watch.accepted').map((e) => [(e.payload as EventPayload<'main_watch.accepted'>).id, (e.payload as EventPayload<'main_watch.accepted'>).sha]));
-  const accepted = view.accepted.map((a) => ({ id: a.id, sha: a.sha, pr: a.pr, head: a.head, by: a.by, reason: a.reason, at: a.at, appliedTo: applied.get(a.id) ?? null }));
-  return { ...view, accepted, alert, stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop, canAccept: isOwner(o.role) && view.mode === 'main_watch' };
-}
-
-/** The PRs whose merge the main watch has judged already (accounted, accepted or not): none of them can be accepted. */
-export function judgedPrs(events: StoredEvent[]): number[] {
-  const out = new Set<number>();
-  for (const e of events) {
-    if (e.type !== 'main_watch.checked' && e.type !== 'main_watch.unaccounted' && e.type !== 'main_watch.accepted') continue;
-    const n = (e.payload as { number: number | null }).number;
-    if (n) out.add(n);
-  }
-  return [...out];
-}
-
-/** What an accept request names: `pr` (a number), or `sha`; null when neither, or both. */
-export function acceptTarget(body: { sha?: unknown; pr?: unknown }): AcceptTarget | null {
-  const hasSha = body.sha !== undefined && body.sha !== null && body.sha !== '';
-  const hasPr = body.pr !== undefined && body.pr !== null && body.pr !== '';
-  if (hasSha === hasPr) return null;
-  return hasSha ? { sha: String(body.sha) } : { pr: Number(body.pr) };
+  return { ...view, alert, stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop };
 }
 
 function readStopFile(stateDir: string): { reason: string; by: string | null } | null {
@@ -825,25 +801,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
-        // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
-        // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
-        if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
-          const body = (await readBody(req)) as { sha?: unknown; pr?: unknown; reason?: unknown };
-          const target = acceptTarget(body);
-          const reason = typeof body.reason === 'string' ? body.reason.slice(0, 600) : '';
-          const refuse = (status: number, error: string) => {
-            audit(who, 'main_watch.accept_refused', { target, reason, status, error });
-            return json(res, status, { error });
-          };
-          if (!isOwnerHere) return refuse(403, `only the instance's owners (admin on ${repo}) may accept a commit as a bootstrap merge; @${who.login} is a ${who.role}`);
-          if (!target) return refuse(400, 'name either a commit sha or a PR number');
-          const branch = opts.cfg.project.project.default_branch;
-          const r = acceptMerge({ stateFile: join(opts.stateDir, 'main-watch.json'), git: opts.acceptGit ?? acceptGit(opts.root, 'origin', branch), branch, target, reason, by: who.login, judgedPrs: judgedPrs(readEvents(opts.eventsDb)) });
-          if (!r.ok) return refuse(r.status, r.error);
-          const a = r.acceptance;
-          audit(who, 'main_watch.accept', { id: a.id, sha: a.sha, pr: a.pr, head: a.head, base: a.base, reason: a.reason });
-          return json(res, 200, { ok: true, acceptance: a });
-        }
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
