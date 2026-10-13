@@ -731,7 +731,56 @@ export interface FirstRun {
   command: string;
   /** Auto-config (src/auto-config.ts): its open questions with their choices, each command's run on the default branch, the setup PR. */
   autoConfig: FirstRunAutoConfig | null;
+  /** Every setup step that applies to the mode, checked live (src/setup-steps.ts); doctor shows the same. */
+  setup: SetupView | null;
+  /** What Start would change, shown before it does anything. */
+  start: FirstRunStart;
+  /** Whether this viewer may press Start (the instance's owners). */
+  canStart: boolean;
 }
+/** How the page fixes a step that isn't done (src/setup-steps.ts Fix). */
+export type SetupFix =
+  | { kind: 'screen'; path: string; label: string }
+  | { kind: 'coming' }
+  | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
+  | { kind: 'terminal'; command: string; why: string }
+  | { kind: 'start' };
+export interface SetupStepView {
+  id: string;
+  group: string;
+  rows: number[];
+  title: string;
+  optional: boolean;
+  /** init's walk needs it for its group, in this mode. */
+  walk: boolean;
+  reach: 'all' | 'most' | 'some' | 'few';
+  done: boolean;
+  detail: string;
+  today: string;
+  fix: SetupFix;
+  network: boolean;
+  checkedAt: string;
+}
+export interface SetupGroupView {
+  id: string;
+  title: string;
+  optional: boolean;
+  done: boolean;
+  /** Every step init's walk needs here done: what doctor's line for the group says. */
+  ready: boolean;
+  steps: SetupStepView[];
+}
+export interface SetupView {
+  mode: 'local' | 'server';
+  groups: SetupGroupView[];
+  done: number;
+  total: number;
+  requiredLeft: number;
+}
+export type FirstRunStart =
+  | { kind: 'local'; label: string; file: string; manager: string; commands: string[]; program: string[]; log: string }
+  | { kind: 'owner-command'; unit: string; command: string; why: string }
+  | { kind: 'unsupported'; why: string };
 export interface FirstRunQuestion {
   id: string;
   ask: string;
@@ -756,7 +805,9 @@ export interface FirstRunAutoConfig {
   /** The command that answers a question. */
   answer: string;
 }
-export const getFirstRun = () => api<FirstRun>('/api/first-run');
+export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fresh ? '?fresh=1' : ''}`);
+/** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
+export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
  * The name and repo add-project takes: the same rules as the server's and the machine helper's (addProjectNameOk and
@@ -957,6 +1008,37 @@ export interface Trust {
   definitions: string[];
   note: string;
   hidden: string[];
+}
+
+/**
+ * Metrics (GET /api/metrics, src/merge-metrics.ts deliveryMetrics): over 7 and 30 days, the owner's and writers'. A
+ * figure whose source has recorded nothing yet is `{ measured: false, why }`: "not measured yet", never a 0.
+ */
+export type Measure<T> = ({ measured: true } & T) | { measured: false; why: string };
+export interface MetricsWindow {
+  days: number;
+  since: string;
+  merges: Measure<{ total: number; perDay: number }>;
+  mainRed: Measure<{ count: number; stillRed: boolean }>;
+  timeToGreen: Measure<{ minutes: number[]; medianMinutes: number | null }>;
+  reverts: Measure<{ opened: number; onRed: number; merged: number; redTimes: number; rate: number | null }>;
+  fixForward: Measure<{ attempts: number; fixed: number; reverted: number; successRate: number | null }>;
+  prCi: Measure<{ prs: number; medianMinutes: number | null; p90Minutes: number | null; slowest: { number: number; minutes: number }[] }>;
+  startup: Measure<{ runs: number; medianSeconds: number | null; p90Seconds: number | null }>;
+  flake: Measure<{ reruns: number; flaky: number; rate: number | null; quarantined: number }>;
+}
+export interface SlowTest {
+  name: string;
+  medianMs: number;
+  maxMs: number;
+  runs: number;
+}
+export interface Metrics {
+  until: string;
+  windows: MetricsWindow[];
+  perDay: { day: string; merged: number }[] | null;
+  slowTests: Measure<{ days: number; budgetS: number; runs: number; slowest: SlowTest[]; overBudget: SlowTest[]; overBudgetTotal: number }>;
+  definitions: string[];
 }
 
 /**

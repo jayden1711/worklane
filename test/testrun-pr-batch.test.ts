@@ -84,7 +84,8 @@ name="$1" cmd="$2"; shift 2
 printf '%s %s\\n' "$cmd" "\${1:-}" >> "$root/calls"
 d="$root/runs/\${1:-x}"
 case "$cmd" in
-  create) mkdir -p "$d/work" "$d/tmp" "$d/home"; cat > "$d/tree.bundle"; bash "$root/clone.sh" "$d/tree.bundle" "$d/work" "$2" "$3" "$4" >&2; echo "$d/work" ;;
+  create) mkdir -p "$d/work" "$d/tmp" "$d/home" "$root/store"; cat > "$d/tree.bundle"; b="$2" h="$3" bs="$4" hs="$5" bb="$6"; shift 6; bash "$root/clone.sh" "$d/tree.bundle" "$d/work" "$b" "$h" "$bs" "$hs" "$bb" "$root/store" "$@" >&2; echo "$d/work" ;;
+  store-tips) if [ -f "$root/store/HEAD" ]; then git -C "$root/store" for-each-ref --format='%(objectname)' refs/keep/; fi ;;
   file) cat > "$d/changed-files"; echo "$d/changed-files" ;;
   cache) mkdir -p "$root/cache/$1-$2"; echo "$root/cache/$1-$2" ;;
   shared) mkdir -p "$root/shared/$1"; echo "$root/shared/$1" ;;
@@ -163,7 +164,7 @@ test('a batch runs through the real startTestRun: a clone of the batch commit wi
     assert.equal(runs[0]!.ok, true, JSON.stringify([runs[0], r.log.read(0, ['testrun.tier']).map((e) => e.payload)]));
     assert.equal(runs.length, 1, 'one full run for the batch');
     assert.deepEqual(runs[0]!.prs, [1, 2]);
-    assert.deepEqual(r.h.calls().map((c) => c.split(' ')[0]), ['create', 'exec', 'wipe'], 'through the helper: workspace, the full tier, the wipe');
+    assert.deepEqual(r.h.calls().map((c) => c.split(' ')[0]), ['store-tips', 'create', 'exec', 'wipe'], 'through the helper: the store\'s tips, workspace, the full tier, the wipe');
     assert.deepEqual(readdirSync(join(r.helperRoot, 'runs')), [], 'wiped');
     assert.deepEqual(r.posted.map((p) => [p.name, p.head_sha, p.conclusion]), [['full', r.w.prs.get(1)!.headSha, 'success'], ['full', r.w.prs.get(2)!.headSha, 'success']]);
     assert.deepEqual(r.tested, [1, 2]);

@@ -16,7 +16,9 @@ import type { TestRuns } from './pr-batch.js';
 import type { RoleOf } from '../dashboard-auth.js';
 import type { MainWatchApi } from '../main-watch.js';
 import type { MergePostsApi } from '../merge-posts.js';
+import type { CiMetricsApi } from '../ci-metrics.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
+import { DEFAULT_GENERATED } from '../config/schema.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -52,6 +54,8 @@ export interface CoordinatorDeps {
   leaseMs?: number;
   /** How often each open PR is polled for its checks (ms; default 60 s). */
   prPollMs?: number;
+  /** How often the harness's open PRs are read for new reviews that start a fix run (ms; default REVIEW_FIX_POLL_MS, 5 min). */
+  reviewPollMs?: number;
   /** The instance policy's auto-merge kill switch, read on every decision (absent or throwing: off). */
   autoMerge?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
@@ -106,6 +110,11 @@ export interface CoordinatorDeps {
    * (discord.post_merges). Its GitHub calls. Absent: none (no GitHub, e.g. a file backlog).
    */
   mergePosts?: { api: MergePostsApi; now?: () => number };
+  /**
+   * CI timings for the metrics (src/ci-metrics.ts): merged PRs' CI wall-clock and the default branch's CI jobs' slow
+   * tests, read from GitHub. Its GitHub calls. Absent: not measured (no GitHub, e.g. a file backlog).
+   */
+  ciMetrics?: { api: CiMetricsApi; now?: () => number };
   /**
    * The default branch's protection, as the main watch asks it (src/direct-land.ts): land_mode direct pushes nothing
    * unless GitHub enforces it, asked again before every direct land. Absent: only a remote that is a local path lands.
@@ -240,6 +249,9 @@ export const DEFAULT_REVIEW = {
     L3_human: { when: ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data'], over_lines: 800 },
   },
   merge: { auto: true, max_lines: 800, max_files: 20, wait_categories: [] as string[], loosened: [] as string[] },
+  max_pr_lines: 600,
+  generated: DEFAULT_GENERATED,
+  docs_only_checks: [] as string[],
   delegation: { enabled: false, min_clean: 10 },
 };
 

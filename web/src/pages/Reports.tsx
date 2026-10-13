@@ -1,5 +1,6 @@
 import { api, useFetch, type State } from '../api';
 import { ConstraintsPanel } from '../components/ConstraintsPanel';
+import { MetricsPanel } from '../components/MetricsPanel';
 import { ThroughputPanel } from '../components/ThroughputPanel';
 import { TrustPanel } from '../components/TrustPanel';
 import { FlakyPanel } from '../components/FlakyPanel';
@@ -23,6 +24,7 @@ export function Reports({ state, pulse }: { state: State; pulse: number }) {
         <TrustPanel state={state} />
       </div>
       <div className="px-6 pt-6">
+        <MetricsPanel state={state} />
         <FlakyPanel state={state} />
       </div>
       <div className="px-6 pt-6">

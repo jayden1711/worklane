@@ -20,12 +20,67 @@ import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
 import { buildRoute } from './model-routing.js';
 import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { SESSION_ID, type RunRequest, type RunResult } from '../runner.js';
+import { resumeFailed, reviewBrief, reviewFeedback, type ReviewFeedback } from '../review-feedback.js';
+
+/** What a fix run answers: failing required checks (with their logs), or writers' reviews. */
+type FixTrigger = { kind: 'ci'; failed: string[]; logs: string[] } | { kind: 'review'; reviews: ReviewFeedback[] };
+
+/** How often the harness's open PRs are read for new reviews (each PR's reviews: one GitHub call). */
+export const REVIEW_FIX_POLL_MS = 5 * 60_000;
+
+/** Runs that wrote an issue's change: their sessions are what a fix run resumes. */
+const WRITING_ROLES = new Set(['worker', 'ci-fix', 'conflict-fix', 'review-fix']);
 
 export abstract class FixRuns extends Landing {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
   protected abstract inspect(...args: Parameters<Coordinator['inspect']>): ReturnType<Coordinator['inspect']>;
   protected abstract verify(...args: Parameters<Coordinator['verify']>): ReturnType<Coordinator['verify']>;
   protected abstract evaluate(...args: Parameters<Coordinator['evaluate']>): ReturnType<Coordinator['evaluate']>;
+  abstract watchedPrs(): EventPayload<'pr.opened'>[];
+  private reviewFixesPolledAt = -Infinity;
+
+  // ---------------------------------------------------------------- the writing session
+
+  /**
+   * The claude session that wrote this issue's change: the latest worker or fix run on it that succeeded and
+   * reported a session. A fix run resumes it, so CI failures, conflicts and reviews go back to the context that made
+   * the change rather than to a fresh agent.
+   */
+  protected writerSession(n: number): string | null {
+    const e = this.events(n)
+      .filter((x) => x.type === 'run.finished')
+      .map((x) => x.payload as EventPayload<'run.finished'>)
+      .filter((p) => WRITING_ROLES.has(p.role) && p.reason === 'succeeded' && p.session)
+      .at(-1);
+    return e?.session ?? null;
+  }
+
+  /**
+   * A fix run's agent: resumes the writing session with `resumed` (the new instructions only: the session already
+   * has the issue's brief), and falls back to a fresh session with `fresh` (the whole brief) when none is stored or
+   * the resume fails to start. Same request otherwise, so the same lane and OS user: the session lives in that
+   * user's home. Records which happened on run.finished (`resume`), and each run's session (`session`).
+   */
+  protected async runFix(n: number, role: string, model: string, path: string, attempt: number, req: Omit<RunRequest, 'prompt' | 'resume' | 'onStart'>, prompts: { fresh: string; resumed: string }): Promise<RunResult> {
+    const onStart = (p: number) => this.emit('run.started', { issue: n, role, model, worktree: path, pid: p, pgid: p, attempt });
+    const session = this.writerSession(n);
+    let resume: NonNullable<EventPayload<'run.finished'>['resume']> = { outcome: 'fresh', session: null, why: 'no session stored for this issue' };
+    let r: RunResult | null = null;
+    if (session) {
+      r = await this.d.runner.run({ ...req, prompt: prompts.resumed, resume: session, onStart });
+      if (resumeFailed(r)) {
+        this.cost(n, role, r);
+        this.emit('run.finished', { issue: n, role, reason: r.reason, detail: `resuming session ${session} failed: ${r.detail}`.slice(0, 1000) });
+        resume = { outcome: 'fresh', session, why: `resuming it failed: ${r.detail}`.slice(0, 500) };
+        r = null;
+      } else resume = { outcome: 'resumed', session, why: '' };
+    }
+    r ??= await this.d.runner.run({ ...req, prompt: prompts.fresh, onStart });
+    this.cost(n, role, r);
+    this.emit('run.finished', { issue: n, role, reason: r.reason, detail: r.detail.slice(0, 1000), ...(r.sessionId && SESSION_ID.test(r.sessionId) ? { session: r.sessionId } : {}), resume });
+    return r;
+  }
 
   // ---------------------------------------------------------------- CI fix runs
 
@@ -93,7 +148,7 @@ export abstract class FixRuns extends Landing {
       this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
       return;
     }
-    const p = this.fixRun(w, pr, failed, logs, runs + 1)
+    const p = this.fixRun(w, pr, { kind: 'ci', failed, logs }, runs + 1)
       .catch((e: Error) => {
         this.emit('coordinator.error', { instance: this.d.instance, where: `CI fix #${n}`, kind: 'error', message: e.message.slice(0, 500) });
       })
@@ -117,13 +172,100 @@ export abstract class FixRuns extends Landing {
     }
   }
 
+  // ---------------------------------------------------------------- review fix runs
+
+  /** Reviews already answered on a PR: a fix run started for them, or the owner was told why none would. */
+  private handledReviews(number: number): Set<number> {
+    const ids = new Set<number>();
+    for (const e of this.d.log.read(0, ['ci_fix.started', 'review_fix.declined'])) {
+      const p = e.payload as { number: number; reviews?: number[] };
+      if (p.number === number) for (const id of p.reviews ?? []) ids.add(id);
+    }
+    return ids;
+  }
+
+  /**
+   * A writer's review on one of the harness's own open PRs (changes requested, or a comment with something to say)
+   * goes back to the session that wrote the change, as a fix run with the review's text: the same pipeline and the
+   * same per-PR cap as a CI fix (roles.ci_repair). Only PRs the harness opened are read; a person's PR never is.
+   * Polled every REVIEW_FIX_POLL_MS.
+   */
+  async watchReviewFixes(): Promise<void> {
+    const role = this.d.cfg.agents.roles.ci_repair;
+    if (!role?.enabled || this.stopped || this.halt.signal.aborted || this.usagePause()) return;
+    const now = Date.now();
+    if (now - this.reviewFixesPolledAt < (this.d.reviewPollMs ?? REVIEW_FIX_POLL_MS)) return;
+    this.reviewFixesPolledAt = now;
+    const writers = this.d.cfg.project.owners.writers;
+    const isWriter = (login: string) => writers.some((x) => x.toLowerCase() === login.toLowerCase());
+    for (const w of this.watchedPrs()) {
+      if (this.active.has(w.issue)) continue;
+      const handled = this.handledReviews(w.number);
+      const reviews = await this.d.backlog.reviews(w.number);
+      // Inline comments are read only when there is a new writer's review they could belong to.
+      if (!reviews.some((r) => !handled.has(r.id) && isWriter(r.author) && (r.state === 'CHANGES_REQUESTED' || r.state === 'COMMENTED'))) continue;
+      const comments = (await this.d.backlog.reviewComments?.(w.number)) ?? [];
+      const feedback = reviewFeedback({ reviews, comments, writers, handled });
+      if (!feedback.length) continue;
+      const pr = await this.d.backlog.pullRequest(w.number);
+      if (pr.state !== 'open') continue;
+      await this.maybeFixReview(w, pr, feedback);
+    }
+  }
+
+  /** Start a review fix run within the cap, or tell the owner (once per review) why there is none. */
+  private async maybeFixReview(w: EventPayload<'pr.opened'>, pr: PullRequest, reviews: ReviewFeedback[]) {
+    const { issue: n, number } = w;
+    const decline = async (reason: string) => {
+      this.emit('review_fix.declined', { issue: n, number, reviews: reviews.map((r) => r.id), reason: reason.slice(0, 2000) });
+      await this.giveUpReview(w, pr.headSha, reviews, reason);
+    };
+    const ours = this.ourHead(number);
+    if (pr.headSha !== ours) return decline(`someone else pushed to the branch (its head ${pr.headSha.slice(0, 8)} is not the harness's last push ${ours?.slice(0, 8) ?? 'none'}), and the harness never pushes over that`);
+    const role = this.d.cfg.agents.roles.ci_repair!;
+    const runs = this.d.log.read(0, ['ci_fix.started']).filter((e) => (e.payload as { number: number }).number === number).length;
+    const cap = role.max_fixes_per_pr ?? 2;
+    if (runs >= cap) return decline(`${runs} fix run(s) already, the limit (agents.yaml roles.ci_repair.max_fixes_per_pr: ${cap})`);
+    const hold = this.governorHold();
+    this.noteHold(hold);
+    if (hold) return;
+    const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${n} review fix`, this.d.slotsDir);
+    if (!slot) {
+      this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+      return;
+    }
+    const p = this.fixRun(w, pr, { kind: 'review', reviews }, runs + 1)
+      .catch((e: Error) => {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `review fix #${n}`, kind: 'error', message: e.message.slice(0, 500) });
+      })
+      .finally(() => {
+        slot.release();
+        this.active.delete(n);
+      });
+    this.active.set(n, p);
+  }
+
+  /** A review that gets no (more) fix: say why on the PR, label it, and ask the owner to review. */
+  private async giveUpReview(w: EventPayload<'pr.opened'>, head: string, reviews: ReviewFeedback[], reason: string) {
+    const owner = this.ownerOf(w.issue);
+    await this.d.backlog.addLabels(w.number, ['needs-owner']);
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} review(s) by ${[...new Set(reviews.map((r) => `@${r.author}`))].join(', ')} on \`${head.slice(0, 8)}\`: no fix pushed for them: ${reason}. It needs you; nothing here merges it.`);
+    try {
+      await this.d.backlog.requestReview(w.number, [owner]);
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${w.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
+    }
+  }
+
   /**
    * One fix run: reclaim the issue, a worktree at the PR's head, a worker with the failing logs, then the
    * usual inspect, verify and evaluate on the whole change, and a push to the same branch only if it is still
    * at the head the run started from. Anything short of that gives up and asks the owner.
    */
-  private async fixRun(w: EventPayload<'pr.opened'>, pr: PullRequest, failed: string[], logs: string[], attempt: number) {
+  private async fixRun(w: EventPayload<'pr.opened'>, pr: PullRequest, trigger: FixTrigger, attempt: number) {
     const { issue: n, number } = w;
+    const failed = trigger.kind === 'ci' ? trigger.failed : [...new Set(trigger.reviews.map((r) => `review by @${r.author}`))];
+    const giveUp = (reason: string) => (trigger.kind === 'ci' ? this.giveUpFix(w, pr.headSha, reason, failed) : this.giveUpReview(w, pr.headSha, trigger.reviews, reason));
     const last = <T>(type: StoredEvent['type']) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
     const claimed = last<EventPayload<'issue.claimed'>>('issue.claimed')!;
     const doneWhen = localDoneWhen((last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList, this.d.cfg.tests);
@@ -136,11 +278,11 @@ export abstract class FixRuns extends Landing {
     if (!won.won) {
       const holder = won.holder?.instance ?? 'another run';
       const record = () => this.emit('ci_fix.finished', { issue: n, number, outcome: 'claim_lost', head: pr.headSha, detail: `the issue's claim is held by ${holder}` });
-      if (this.claimHeldTooLong('ci_fix.finished', number, pr.headSha, record)) await this.giveUpFix(w, pr.headSha, `the issue's claim has been held by ${holder} for over an hour`, failed);
+      if (this.claimHeldTooLong('ci_fix.finished', number, pr.headSha, record)) await giveUp(`the issue's claim has been held by ${holder} for over an hour`);
       return;
     }
     let leaseSha = won.sha;
-    this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha });
+    this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha, ...(trigger.kind === 'review' ? { reviews: trigger.reviews.map((r) => r.id) } : {}) });
     const heartbeat = setInterval(() => {
       const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
       if (next) leaseSha = next;
@@ -150,17 +292,20 @@ export abstract class FixRuns extends Landing {
     let finished: { outcome: 'pushed' | 'no_push'; head: string | null; detail: string } = { outcome: 'no_push', head: null, detail: '' };
     const give = async (reason: string) => {
       finished = { outcome: 'no_push', head: null, detail: reason.slice(0, 1000) };
-      await this.giveUpFix(w, pr.headSha, reason, failed);
+      await giveUp(reason);
     };
     try {
       const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
       if (setupErrors.length) return await give(`the fix worktree's setup failed: ${setupErrors.join('; ')}`);
       this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, ...(repro ? { frozen: [repro.path] } : {}) });
-      const s = await this.fixAgent(issue, doneWhen, path, taskFile, repro, pr, logs, attempt);
+      const s = await this.fixAgent(issue, doneWhen, path, taskFile, repro, pr, trigger, attempt);
       if ('ended' in s) return await give(s.ended);
       removeSandboxPlaceholders(path);
       const head = this.git(path, 'rev-parse', 'HEAD');
-      if (s.no_change_needed || head === pr.headSha) return await give(`the fix run found the failure isn't caused by this change: ${s.no_change_needed ?? `it made no commit (${s.summary})`}`);
+      if (s.no_change_needed || head === pr.headSha) {
+        const why = s.no_change_needed ?? `it made no commit (${s.summary})`;
+        return await give(trigger.kind === 'ci' ? `the fix run found the failure isn't caused by this change: ${why}` : `the fix run changed nothing for the review: ${why}`);
+      }
       if (spawnSync('git', ['merge-base', '--is-ancestor', pr.headSha, head], { cwd: path }).status !== 0) return await give('the fix run rewrote the branch history instead of adding commits');
       const change = await this.inspect(n, path, claimed.base, head, repro);
       if ('rejected' in change) return await give(`the fix was rejected: ${change.rejected}`);
@@ -176,7 +321,8 @@ export abstract class FixRuns extends Landing {
       }
       if (!push.ok) return await give(`the branch moved while the fix ran (someone pushed), so the harness didn't push over it: ${push.error.split('\n').pop()}`);
       finished = { outcome: 'pushed', head, detail: s.summary.slice(0, 1000) };
-      await this.d.backlog.comment(number, `[${BRAND.cli}] ${failed.join(', ')} failed on \`${pr.headSha.slice(0, 8)}\`. CI fix run ${attempt} pushed \`${head.slice(0, 8)}\`: ${s.summary}`);
+      if (trigger.kind === 'ci') await this.d.backlog.comment(number, `[${BRAND.cli}] ${failed.join(', ')} failed on \`${pr.headSha.slice(0, 8)}\`. CI fix run ${attempt} pushed \`${head.slice(0, 8)}\`: ${s.summary}`);
+      else await this.d.backlog.comment(number, `[${BRAND.cli}] ${[...new Set(trigger.reviews.map((r) => `@${r.author}`))].join(', ')}: your review on \`${pr.headSha.slice(0, 8)}\` went back to the session that wrote this change. Review fix run ${attempt} pushed \`${head.slice(0, 8)}\`: ${s.summary}`);
     } catch (e) {
       if (e instanceof StoppedByOwner) await give(e.message);
       else if (!(e instanceof Halted)) throw e;
@@ -193,41 +339,59 @@ export abstract class FixRuns extends Landing {
     }
   }
 
-  /** The fix run's worker: the issue's brief plus the failing logs. Ends with its answer, or why it stopped. */
-  private async fixAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, logs: string[], attempt: number): Promise<{ summary: string; no_change_needed?: string } | { ended: string }> {
+  /**
+   * The fix run's worker: the session that wrote the change, resumed with the failing logs or the reviews (a fresh
+   * one gets the issue's brief too). Ends with its answer, or why it stopped.
+   */
+  private async fixAgent(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, pr: PullRequest, trigger: FixTrigger, attempt: number): Promise<{ summary: string; no_change_needed?: string } | { ended: string }> {
     const n = issue.number;
     const workers = this.d.cfg.agents.roles.workers!;
     const role = this.d.cfg.agents.roles.ci_repair!;
     const model = role.model || workers.model;
     const { runner, checks } = this.d.cfg.tests;
+    const after = 'When you finish, the coordinator re-runs the done_when checks' + (checks.length ? ` and ${checks.join('; ')}` : '') + ', the evaluator judges the whole change, and the coordinator pushes your commits to the pull request.';
     const extra = [
-      `CI fix run ${attempt}: this issue's pull request (${pr.url}, branch ${pr.head}, head ${pr.headSha}) failed a required check on GitHub. The end of each failing job's log:`,
-      ...logs.map((l) => `\`\`\`\n${l}\n\`\`\``),
-      'Fix the failure with new commits on this branch; never rewrite its history. When you finish, the coordinator re-runs the done_when checks' + (checks.length ? ` and ${checks.join('; ')}` : '') + ', the evaluator judges the whole change, and the coordinator pushes your commits to the pull request.',
-      "If the failure isn't caused by this change (for example a test that also fails on the default branch, or a flaky one), commit nothing and put your evidence in no_change_needed.",
+      ...(trigger.kind === 'ci'
+        ? [
+            `CI fix run ${attempt}: this issue's pull request (${pr.url}, branch ${pr.head}, head ${pr.headSha}) failed a required check on GitHub. The end of each failing job's log:`,
+            ...trigger.logs.map((l) => `\`\`\`\n${l}\n\`\`\``),
+            `Fix the failure with new commits on this branch; never rewrite its history. ${after}`,
+            "If the failure isn't caused by this change (for example a test that also fails on the default branch, or a flaky one), commit nothing and put your evidence in no_change_needed.",
+          ]
+        : [
+            `Review fix run ${attempt}: a maintainer reviewed this issue's pull request (${pr.url}, branch ${pr.head}, head ${pr.headSha}). Their review, with comments on lines of the diff:`,
+            ...reviewBrief(trigger.reviews).map((r) => `\`\`\`\n${r}\n\`\`\``),
+            `Address it with new commits on this branch; never rewrite its history. ${after}`,
+            'If the review asks for no change to the code (a question, or something the change already does), commit nothing and put your answer in no_change_needed.',
+          ]),
       `Fast tests to run while you work: ${runner.changed}`,
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
-    const r = await this.d.runner.run({
-      env: this.projectEnv(),
-      role: 'worker',
-      ...laneOf(issue),
-      stateDir: this.d.stateDir,
-      prompt: issueBrief(issue, doneWhen, extra),
-      appendSystemPrompt: rolePrompt(this.d.cfg, 'worker'),
-      cwd: path,
+    const runRole = trigger.kind === 'ci' ? 'ci-fix' : 'review-fix';
+    const r = await this.runFix(
+      n,
+      runRole,
       model,
-      allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
-      maxTurns: 200,
-      maxBudgetUsd: Math.min(role.budget_usd ?? workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
-      jsonSchema: WORKER_SCHEMA,
-      taskFile,
-      stallMs: 20 * 60_000,
-      timeoutMs: this.commandTimeoutMs,
-      onStart: (p) => this.emit('run.started', { issue: n, role: 'ci-fix', model, worktree: path, pid: p, pgid: p, attempt }),
-    });
-    this.cost(n, 'ci-fix', r);
-    this.emit('run.finished', { issue: n, role: 'ci-fix', reason: r.reason, detail: r.detail.slice(0, 1000) });
+      path,
+      attempt,
+      {
+        env: this.projectEnv(),
+        role: 'worker',
+        ...laneOf(issue),
+        stateDir: this.d.stateDir,
+        appendSystemPrompt: rolePrompt(this.d.cfg, 'worker'),
+        cwd: path,
+        model,
+        allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
+        maxTurns: 200,
+        maxBudgetUsd: Math.min(role.budget_usd ?? workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+        jsonSchema: WORKER_SCHEMA,
+        taskFile,
+        stallMs: 20 * 60_000,
+        timeoutMs: this.commandTimeoutMs,
+      },
+      { fresh: issueBrief(issue, doneWhen, extra), resumed: extra.join('\n\n') },
+    );
     const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string } };
     if (r.reason !== 'succeeded') return { ended: `the fix run ended: ${r.reason} (${r.detail.slice(0, 300)})` };
     if (s.blocked) return { ended: `the fix run was blocked: ${s.blocked}` };
@@ -449,26 +613,30 @@ export abstract class FixRuns extends Landing {
       'The merge is in progress in this worktree. Resolve every conflicted file, `git add` them, and finish the merge with `git commit --no-edit`. Make no other commits, never rebase or reset, and change nothing the merge did not leave conflicted. The coordinator then re-runs the done_when checks, the evaluator judges the resolution, and the coordinator pushes it.',
       ...(repro?.path ? [`Frozen reproduction test (must pass; never edit): ${repro.path}`] : []),
     ];
-    const r = await this.d.runner.run({
-      env: this.projectEnv(),
-      role: 'worker',
-      ...laneOf(issue),
-      stateDir: this.d.stateDir,
-      prompt: issueBrief(issue, doneWhen, extra),
-      appendSystemPrompt: rolePrompt(this.d.cfg, 'worker'),
-      cwd: path,
-      model: fixModel,
-      allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
-      maxTurns: 100,
-      maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
-      jsonSchema: WORKER_SCHEMA,
-      taskFile,
-      stallMs: 20 * 60_000,
-      timeoutMs: this.commandTimeoutMs,
-      onStart: (p) => this.emit('run.started', { issue: n, role: 'conflict-fix', model: fixModel, worktree: path, pid: p, pgid: p, attempt }),
-    });
-    this.cost(n, 'conflict-fix', r);
-    this.emit('run.finished', { issue: n, role: 'conflict-fix', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    const r = await this.runFix(
+      n,
+      'conflict-fix',
+      fixModel,
+      path,
+      attempt,
+      {
+        env: this.projectEnv(),
+        role: 'worker',
+        ...laneOf(issue),
+        stateDir: this.d.stateDir,
+        appendSystemPrompt: rolePrompt(this.d.cfg, 'worker'),
+        cwd: path,
+        model: fixModel,
+        allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
+        maxTurns: 100,
+        maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+        jsonSchema: WORKER_SCHEMA,
+        taskFile,
+        stallMs: 20 * 60_000,
+        timeoutMs: this.commandTimeoutMs,
+      },
+      { fresh: issueBrief(issue, doneWhen, extra), resumed: extra.join('\n\n') },
+    );
     const s = (r.structured ?? {}) as { summary?: string; blocked?: string; ask?: { question: string } };
     if (r.reason !== 'succeeded') return { ended: `the fix run ended: ${r.reason} (${r.detail.slice(0, 300)})` };
     if (s.blocked) return { ended: `the fix run was blocked: ${s.blocked}` };

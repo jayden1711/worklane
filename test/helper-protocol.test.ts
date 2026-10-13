@@ -146,7 +146,7 @@ test('a helper that takes db-start with 4 arguments only (installed before max_c
 
     const host = sandboxHost('shop', old.helper, old.sudo);
     const config = TestRunConfig.parse(testRun);
-    const cfg = { tests: { test_run: config } } as unknown as Config;
+    const cfg = { tests: { test_run: config, checkout: { sparse_exclude: [] } } } as unknown as Config;
     const runs = await setupTestRuns(cfg, { instance: 'shop', repo: 'example-org/example-shop', token: async () => 't', host }, { log, actor: 'shop', root: p.dir, stateDir: p.stateDir });
     assert.ok(runs, 'set up, so each PR still gets a check');
     const helperEv = log.read(0, ['testrun.helper']).map((e) => e.payload as EventPayload<'testrun.helper'>);

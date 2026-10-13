@@ -18,6 +18,10 @@ worktree:
   root: .claude/worktrees
   setup: []
   est_size_gb: 1
+  # pool: 2                          # worktrees kept ready on main, set up, for tasks to start in
+  # setup_key: [package-lock.json]   # what pins the install: unchanged, the pool follows main instead of reinstalling
+# checkout:
+#   sparse_exclude: [docs/design]    # directories no agent or test reads, left out of worktrees and test-run workspaces
 land:
   pre: []
 failures: { section: '^✖ failing tests:', item: '^✖ (.+?) \(\d' }   # pin --test-reporter=spec: without a TTY, Node 22 defaults to TAP

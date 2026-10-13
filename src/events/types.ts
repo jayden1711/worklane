@@ -46,6 +46,13 @@ export const EventSchemas = {
     role: z.string(),
     reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped', 'stuck']),
     detail: z.string(),
+    /** The claude session the run was: a fix run on the issue's PR resumes the latest one (src/coordinator/fix-runs.ts). */
+    session: z.string().max(200).optional(),
+    /**
+     * A fix run's session: `resumed` the session that wrote the change (`session`), or `fresh` (a new session; `why`:
+     * none was stored, or resuming `session` failed, e.g. it is gone).
+     */
+    resume: z.strictObject({ outcome: z.enum(['resumed', 'fresh']), session: z.string().max(200).nullable(), why: z.string() }).optional(),
   }),
   /** A run waited at least a second for its Claude login (one claude per login at a time). `issue` null: not an issue's run. */
   'run.lock_waited': z.strictObject({ issue: issue.nullable(), role: z.string(), model: z.string(), wait_ms: z.number().int().nonnegative() }),
@@ -242,8 +249,12 @@ export const EventSchemas = {
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
   /** The browser checks a verify ran (src/coordinator/browser.ts): the PR description's BROWSER CHECKS section. */
   'browser.evidence': z.strictObject({ issue, head: sha, lines: z.array(z.string().max(1000)).max(300) }),
-  /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
-  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
+  /**
+   * The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts; and the
+   * worker's intent paragraph and risk class for the top of the PR body (src/pr-rules.ts; the class can only raise
+   * the one computed from the paths). Both absent in older events.
+   */
+  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()), intent: z.string().max(4000).optional(), risk_class: z.enum(['docs-only', 'logic', 'protected']).optional() }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -298,6 +309,35 @@ export const EventSchemas = {
   'feedback_check.proposed': z.strictObject({ constraint: z.string(), keys: z.array(z.string()), kind: z.enum(['pr', 'issue']), number: z.number().int().positive(), url: z.string(), mode: z.enum(['ast-grep', 'test', 'issue']), why: z.string() }),
   /** No proposal for it: no check fits (failed: false), or the drafting run or its draft failed (failed: true). Tried again only on a new sighting. */
   'feedback_check.dropped': z.strictObject({ constraint: z.string(), keys: z.array(z.string()), why: z.string(), failed: z.boolean() }),
+  /**
+   * One weekly optimization pass (src/coordinator/optimize.ts; started_at by the coordinator's clock): the target it
+   * picked, main's numbers (baseline), and the task it filed; outcome: `filed`, or why it stopped.
+   */
+  'optimize.pass': z.strictObject({
+    started_at: z.string(),
+    target: z.string().max(400).nullable(),
+    unit: z.string().max(20).default(''),
+    lower_is_better: z.boolean().default(true),
+    issue: issue.nullable(),
+    baseline: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    outcome: z.string().max(1000),
+  }),
+  /**
+   * An optimization task measured on its change (head): `improved` becomes the PR (its numbers in the body);
+   * `discarded` is closed with why (no improvement, within the noise, the benchmark failed, or the week's budget).
+   */
+  'optimize.result': z.strictObject({
+    issue,
+    target: z.string().max(400),
+    head: sha.nullable(),
+    outcome: z.enum(['improved', 'discarded']),
+    why: z.string().max(1000),
+    before: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    after: z.strictObject({ sha, runs: z.array(z.number()).max(30), median: z.number(), mad: z.number() }).nullable(),
+    gain: z.number().nullable(),
+    pct: z.number().nullable(),
+    noise: z.number().nullable(),
+  }),
   /** A gardener finding: a pattern and the places it was seen (from the run or the event log's signals). */
   'gardener.finding': z.strictObject({ pattern: z.string(), kind: z.enum(['dead_code', 'duplication', 'rule_violation', 'hotspot', 'slow_check', 'flaky_check']), where: z.array(z.string()), detail: z.string() }),
   /** A gardener fix filed (an issue the pipeline builds into a reviewed PR): once per pattern. */
@@ -369,8 +409,13 @@ export const EventSchemas = {
   'pr.ready': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
   'pr.unready': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   'pr.closed': z.strictObject({ issue, number: z.number().int().positive(), merged: z.boolean() }),
-  /** A CI fix run on a PR whose required check failed at `head`; `lease` is its claim. */
-  'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha }),
+  /**
+   * A fix run on a PR at `head`: a required check failed, or (`reviews`, their ids) a writer's review asked for
+   * changes or commented. Both count toward roles.ci_repair.max_fixes_per_pr. `lease` is its claim.
+   */
+  'ci_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, checks: z.array(z.string()), attempt: z.number().int().positive(), lease: sha, reviews: z.array(z.number().int().positive()).optional() }),
+  /** Writers' reviews on a harness PR that get no fix run (the cap, runs off, someone else's push): recorded once, the owner told why. */
+  'review_fix.declined': z.strictObject({ issue, number: z.number().int().positive(), reviews: z.array(z.number().int().positive()), reason: z.string() }),
   /** pushed: a fix is on the branch at `head`; no_push: it ended without one (ci_fix.gave_up says why); interrupted: the coordinator restarted. */
   'ci_fix.finished': z.strictObject({ issue, number: z.number().int().positive(), outcome: z.enum(['pushed', 'no_push', 'interrupted', 'claim_lost']), head: sha.nullable(), detail: z.string() }),
   /** An eval of instructions the change touches, base vs head (base null: new instructions). `error`: it couldn't run. */
@@ -540,8 +585,8 @@ export const EventSchemas = {
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
   /** A task started in a worktree from the pool (worktree-pool.ts), not a fresh one: this claim's worktree is `name`. */
   'worktree.pooled': z.strictObject({ issue, name: z.string() }),
-  /** The worktree pool brought to main's tip: what was made and removed, and setups that failed. */
-  'worktree.pool_refilled': z.strictObject({ base: sha, created: z.array(z.string()), removed: z.array(z.string()), errors: z.array(z.string()) }),
+  /** The worktree pool brought to main's tip: what was made, moved to it with its install kept (setup_key), removed, and setups that failed. */
+  'worktree.pool_refilled': z.strictObject({ base: sha, created: z.array(z.string()), moved: z.array(z.string()).default([]), removed: z.array(z.string()), errors: z.array(z.string()) }),
   /** At start: state/ closed to other users (paths tightened, first 20 named) and old task files removed. */
   'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
   /** A shutdown began (SIGTERM, SIGINT): runs in flight are aborted and their tasks requeued; `pending` is what was in flight. */
@@ -579,6 +624,11 @@ export const EventSchemas = {
     results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
     detail: z.string().max(2000),
   }),
+  /**
+   * One tier's per-test durations, read from its output (src/test-durations.ts): its slowest tests (at most 100) and
+   * how many it printed durations for in all (0: its runner prints none this reads). For the metrics' slow tests.
+   */
+  'testrun.durations': z.strictObject({ id: z.string(), tier: z.string(), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative() }),
   'testrun.wipe_failed': z.strictObject({ id: z.string(), left: z.array(z.string()) }),
   'testrun.checks_posted': z.strictObject({ id: z.string(), sha, checks: z.array(z.strictObject({ name: z.string(), conclusion: z.enum(['success', 'failure', 'cancelled']) })) }),
   /** no_permission: the App lacks Checks: write (the owner adds it); the checks were not posted. */
@@ -623,6 +673,14 @@ export const EventSchemas = {
   }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
+  // CI timings read from GitHub for the metrics (src/ci-metrics.ts): each recorded once, so each is asked once.
+  /**
+   * A merged PR's CI wall-clock on its head: from the first check run starting to the last required check
+   * (config.yaml required_checks; every check when none) completing. `wall_ms` null: not measurable (`why`).
+   */
+  'ci.pr_timing': z.strictObject({ number: z.number().int().positive(), head: sha, wall_ms: z.number().int().nonnegative().nullable(), first_started: z.string().nullable(), last_completed: z.string().nullable(), why: z.string().max(500).nullable() }),
+  /** One GitHub Actions job's per-test durations on a default-branch commit, from its log (src/test-durations.ts). */
+  'ci.test_durations': z.strictObject({ sha, job: z.string().max(200), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative(), error: z.string().max(500).nullable() }),
   // flaky tests (src/flaky.ts, coordinator/flaky.ts): before the default branch counts as red, its failing checks re-run on the same commit
   /**
    * The default branch's required checks failed on `sha` (a red run): each failing check (`failed`) is re-run there.

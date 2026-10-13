@@ -27,7 +27,7 @@ test_run:
 ```
 
 - **Tiers.** `fast` tiers run on every PR, and again on each new head. `full` tiers run once per batch of approved PRs (PR mode). Each tier is one command, run under bash with pipefail in the run's workspace. It posts one check.
-- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
+- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{tests}` is the test files the change can affect, shell-quoted, with `select: imports` (see "Test selection" below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
 - **Database.** A tier with `database: true` gets the run's own Postgres in `DATABASE_URL`: a container named after the run, on a port the daemon picks, on `127.0.0.1` only, with a random password. Its data is on a tmpfs, and it is removed with the run.
 - **Database connections.** `max_connections` (20 to 2000, default 200) starts the run's Postgres with `-c max_connections=<n>`; the image's own default, 100, runs out ("sorry, too many clients already") once many lanes share the database. Size it as lanes x (each lane's pool + its ORM's own connections) + headroom for migrations, psql and Postgres's reserved superuser slots: 22 lanes with a pool of 8 and 2 ORM connections each need 22 x 10 + 20 = 240. `shared_buffers` stays at the image's 128 MB: the per-connection shared memory (lock and process slots) is small, a few tens of MB even at 2000, and each connection's working memory is its own process's, not shared buffers. The helper takes it as a number in that range only, never as text.
 - **Checks.** Several tiers of one kind may map to one check (say three full tiers to `suite`): it passes only when all of them passed. A check can't have both fast and full tiers.
@@ -44,12 +44,15 @@ test_run:
 | `/usr/local/libexec/worklane-testrun` | The helper, root-owned. sudoers lets `wl-<name>` run it for `<name>` only; it checks every other argument itself. |
 | `worklane-test.slice` | A top-level slice for all test runs: `AllowedCPUs` and a matching `CPUQuota`, `MemoryMax` with no swap, and CPU and IO weights below `worklane.slice`'s. `check` fails if its memory cap isn't below every instance's. |
 | `worklane-test-<name>-docker.service` | Rootless Docker as the test user, for the runs' databases. There is no root daemon and no `docker` group. Published ports bind `127.0.0.1`. It uses the `cgroupfs` driver (the default systemd driver needs a user session the test user doesn't have). The daemon runs in the unit's subgroup `daemon` (`DelegateSubgroup=`), with `cpu io memory pids` delegated, so each container gets a cgroup of its own in the unit's, under the slice's caps. `check` fails otherwise. |
-| `/var/lib/worklane-test/<name>` | Per instance: `runs/<id>` (one per run), `cache/`, Docker's data. |
+| `/var/lib/worklane-test/<name>` | Per instance: `runs/<id>` (one per run), `store/` (the object store), `cache/`, Docker's data. |
 
-**One run.** A run's workspace is a git clone of its own, owned by the test user, so suites that call git (`git log main`, a diff against `origin/main`, LFS paths) work as on CI.
-- The coordinator writes a `git bundle` of the commit and the default branch, under temporary refs it removes at once. The bundle is a copy of the objects, never shared alternates or the coordinator's `.git`, and it is piped to the helper.
-- As the test user, the helper clones it into `runs/<id>/work`: the commit checked out, and the default branch as `main` and `origin/main` (and `origin/HEAD`).
-- The clone has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config.
+**One run.** A run's workspace is a git repo of its own, owned by the test user, so suites that call git (`git log main`, a diff against `origin/main`, LFS paths) work as on CI.
+- Its objects come from the instance's **object store**, `/var/lib/worklane-test/<name>/store`: a bare repo of the test user's (0700), which every run's workspace reads through `objects/info/alternates`. It is never the coordinator's `.git`, which the test user can't read.
+- The coordinator asks the helper the store's tips (`store-tips`: the commits it keeps, the newest 50), and writes a `git bundle` of only what the store lacks: the commit and the default branch, minus everything those tips reach. The first run of an instance sends the history; a run of a commit the store already has sends nothing at all; a new PR head sends its own commits. The bundle is made under temporary refs the coordinator removes at once, and is piped to the helper.
+- As the test user, before anything of the run's runs, the helper fetches the bundle into the store (git checks every object it takes; objects are named by their hashes, so one run's objects never change what another reads), keeps the two commits under `refs/keep/`, and makes `runs/<id>/work`: the commit checked out, and the default branch as `main` and `origin/main` (and `origin/HEAD`).
+- A run's own commands read the store and never write it: in the sandbox (below) everything outside the run's directory, the caches and the shared directories is read-only. `check` proves it on the host: its probe run reads its commit through the store and fails to write the store's objects, refs or files.
+- `tests.yaml` `checkout.sparse_exclude` (directories no test reads, such as design files and art) is left out of the checkout (sparse; the commit still has them). A tier that needs them sets `full_checkout: true`, and then its whole run checks everything out (a run's tiers share one workspace).
+- The workspace has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config. Neither has the store.
 - The test user never reads the coordinator's checkout, and has no path back to it to write. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
 
 - a read-only system (`ProtectSystem=strict`), no `/home`, `/root` or `/run/user` (`ProtectHome=tmpfs`);
@@ -57,6 +60,7 @@ test_run:
 - no other run's workspace: `runs/` is an empty read-only tmpfs with only this run's directory bound in;
 - a private `/tmp`, `TMPDIR` and `HOME` inside the run's directory, no devices, no new privileges;
 - an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment.
+- the command exactly as written, for bash alone. Otherwise systemd-run expands `${...}` in it itself (as `ExecStart=` does), which blanks a shell-only `${x}`. On systemd 254 and later the helper passes `--expand-environment=no`. On an older one it writes each `$` as `$$`, systemd's escape for a literal `$`.
 
 **The wipe.** After every run, pass or fail: the run's units are killed and stopped, its containers and volumes removed, and its directory deleted. The wipe then looks again and fails if anything is left.
 
@@ -106,6 +110,32 @@ With `test_run` in tests.yaml and the sandbox's check passing at start (`testrun
 - **New head:** the run on the old head is cancelled, and a run starts on the new one. A closed PR's run is cancelled too. A cancelled run posts no check.
 - **Restarts:** a head already run isn't run again. A run a restart cut short is wiped at start, recorded as `interrupted`, and run again.
 - **Bots:** a bot's PR gets the fast tier. Its full tiers (a batch, in PR mode) wait until the owner approves it (`fullRunAllowed`).
+
+## Test selection
+
+A PR's fast run can run only the tests its change can affect. `test_run.select` says how:
+
+- **`repo`**: the project's own planner. A tier passes `{changed_files}` to it, and it decides. This is the default when a tier uses `{changed_files}`, so a config that already has a planner keeps it as it is.
+- **`imports`**: the engine's import graph, for a JS/TS repo (a `package.json` at its root). A fast tier passes `{tests}` to its test runner: `node --test {tests}`, `vitest run {tests}`, `jest {tests}`. `{tests}` is the selected test files (`*.test.*`, `*.spec.*`, anything under `__tests__/`), or nothing when the whole suite runs: a runner given no files runs them all. When the change can affect no test file, the tier passes without running, and its check says so. Every tier check that selected shows the selection in its first line.
+- **`off`**: no selection (the default without a `{changed_files}` tier).
+
+```yaml
+test_run:
+  select: imports
+  tiers:
+    - { name: unit, command: "npx vitest run {tests}", kind: fast }
+    - { name: suite, command: "npx vitest run", kind: full }
+```
+
+How `imports` decides (src/testrun/affected.ts; the coordinator reads the code from its clone at the PR's head):
+
+- A test file is selected when it imports a changed file, directly or through other files (static imports, and `import()` or `require()` of a path it can work out), or reads one: a path built from the file's own location (`new URL('…', import.meta.url)`, `join(__dirname, …)`, or a name bound to one), as a file or as a directory it reads.
+- The whole suite runs when a changed file is a package manifest or lockfile, a `tsconfig`/`jsconfig`, a tool config (`*.config.js` and the like: test setup files are named there), the Node version, `.github/` or the project config folder; when a file is deleted or renamed; when it is a script (`.sh`, `.py`, …) or has no extension; when some code names it in a string without an import or read reaching it; and when nothing reaches it at all (a Markdown file nothing names is documentation, and selects nothing).
+- A test that imports something the graph can't follow (a computed `import()`, a bare import that isn't a dependency in `package.json`, such as a path alias) runs on every change, and so does one that reads the whole repo.
+- A full run (a batch in PR mode, the deploy gate's run) always runs everything: `{tests}` is empty there.
+- If the plan fails (git can't read the commit), the run takes the whole suite.
+
+The engine's own CI selects the same way on a pull request (scripts/ci/affected.mjs, run in each test shard after the build; a push to main, and a PR labelled `full-ci`, run every file). It forces the whole suite for `package.json` and its lockfile, any `tsconfig`, `.nvmrc`, `test/helpers.ts`, `scripts/ci/` and `.github/`. `test/helpers.ts` is described per export rather than scanned (most tests import it for `repoRoot` alone); `test/ci-affected.test.ts` keeps the description in step with the file. A test that runs `git ls-files` in the repo depends on which files exist, and runs when a change adds one. A `src/` module that reads the directory it runs from as a whole (`npm pack` of the engine) reads the package: `package.json` and its `files`. The selected files are split into the 4 shards by `test/timings.json`, and a shard with none of them passes.
 
 ## Agents skip local full runs
 

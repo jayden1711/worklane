@@ -14,8 +14,9 @@ agent_runtime:
 land_mode: pr
 # The jobs that gate a merge, as GitHub names them (ci.yml and gitleaks.yml).
 # Exactly the checks every pull request runs (the main ruleset requires the same): dco runs on pull requests
-# only; scan is gitleaks.yml's job. The main-only jobs (bootstrap, real systemd, real users) gate the engine
-# updater on main instead; a PR runs them only when it touches what they test, or with the full-ci label.
+# only; scan is gitleaks.yml's job. The slow jobs (ci-slow.yml: bootstrap, real systemd, real users) gate the engine
+# updater on main instead, run there in batches (ci-batch.yml); a PR runs them only when it touches what they
+# test, or with the full-ci label.
 required_checks:
   - test (ubuntu-latest, 22)
   - test (ubuntu-latest, 24)

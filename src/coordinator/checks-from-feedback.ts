@@ -13,13 +13,13 @@ import { FEEDBACK_CHECK_BRANCH_PREFIX } from '../merge-policy.js';
 import { checkedPush } from '../push-check.js';
 import { rolePrompt } from '../roles.js';
 import { removeSandboxPlaceholders } from '../worktrees.js';
-import { PrHygiene } from './pr-hygiene.js';
+import { Optimizer } from './optimize.js';
 
 /** The drafting run reads the repo and writes only files (no shell beyond git's read commands and ast-grep). */
 export const FEEDBACK_CHECK_TOOLS = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git grep:*)', 'Bash(ast-grep:*)'];
 export const FEEDBACK_CHECK_DISALLOWED = ['NotebookEdit'];
 
-export abstract class ChecksFromFeedback extends PrHygiene {
+export abstract class ChecksFromFeedback extends Optimizer {
   /** The proposal in flight (one at a time). */
   protected feedbackChecksRun: Promise<void> = Promise.resolve();
   private feedbackChecksBusy = false;

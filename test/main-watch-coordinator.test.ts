@@ -38,6 +38,7 @@ function watchApi(f: Fixture) {
     checkRuns: async (sha) => (calls.push('runs'), runsOf(sha)),
     statuses: async () => (calls.push('statuses'), []),
     role: async (login) => (calls.push('role'), roles.get(login) ?? null),
+    compare: async () => (calls.push('compare'), { status: 'behind', aheadBy: 0, behindBy: 1 }),
   };
   return { api, pulls, roles, mergedAt, calls };
 }
@@ -102,7 +103,7 @@ test('main watch: a direct push stops auto-merge, alerts, and opens a revert PR 
   const main = git(w.f.remote, 'rev-parse', 'main');
   const sha = w.commit('direct.txt');
   git(w.person, 'push', '-q', 'origin', 'main');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   // Stopped, with the reason, in the existing stopped state.
   const stop = JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { reason: string; by: string; sha: string };
   assert.equal(stop.by, 'main_watch');
@@ -136,7 +137,7 @@ test('main watch: only an admin clears the stop on the dashboard; it is audited,
   await w.watch(2);
   w.commit('direct.txt');
   git(w.person, 'push', '-q', 'origin', 'main');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   const d = await startDashboard({ root: w.f.repo, cfg: w.f.cfg, eventsDb: join(w.f.base, 'events.db'), stateDir: w.f.stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: w.f.slotsDir, instance: 'alice' });
   const base = d.url.split('/?')[0]!;
   const call = (who: string, path: string, method = 'GET') => fetch(`${base}${path}`, { method, headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(who) }, ...(method === 'POST' ? { body: '{}' } : {}) });
@@ -260,7 +261,7 @@ test('main watch: an admin accepts a PR as a bootstrap merge on the dashboard (a
   // A stop in force already: an earlier direct push.
   w.commit('direct.txt');
   git(w.person, 'push', '-q', 'origin', 'main');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   assert.ok(existsSync(stopFile(w.f)));
   // The admin's PR; the project's required check can't run yet, so it has none.
   const pr = await personPr(w, 'feature/bootstrap');

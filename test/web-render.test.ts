@@ -22,9 +22,11 @@ import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
-import { trustForViewer, trustView } from '../src/trust.js';
+import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
+import { deliveryMetrics } from '../src/merge-metrics.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
+import { checkSetup } from '../src/setup-steps.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -41,10 +43,12 @@ interface Render {
   renderTrust(t: unknown): string;
   renderConstraints(c: unknown): string;
   renderConstraintsPanel(state: unknown): string;
+  renderMetrics(m: unknown): string;
+  renderMetricsPanel(state: unknown): string;
   renderFlaky(f: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1133,35 +1137,81 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   assert.doesNotMatch(r.renderWaitingPage(asOwner), /waiting-refused/);
 });
 
-test("the first-run page: init's checklist in order with each status, where it stopped and how to pick up, what local mode lacks; viewers refused", () => {
-  // The view as the server makes it (src/init.ts firstRunView) from a state file init wrote.
+/** The first-run view as the server makes it: init's record (src/init.ts firstRunView), the steps checked live with stand-ins, and Start. */
+function firstRun(file: string, o: { root: string; repo: string; instance: string | null; start?: unknown; canStart?: boolean }) {
+  const probe = {
+    which: (c: string) => (['git', 'gitleaks', 'claude', 'gh'].includes(c) ? `/stand-in/${c}` : null),
+    run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }),
+    serviceRunning: () => false,
+    systemUnitActive: () => false,
+    linger: () => null,
+  };
+  const setup = checkSetup({ mode: o.instance ? 'server' : 'local', root: o.root, repo: o.repo, instance: o.instance, stateDir: mkdtempSync(join(tmpdir(), 'web-render-fr-')), policyFile: null, openQuestions: 0, setupPr: null, instanceFacts: () => ({ error: 'no instance here' }) }, probe);
+  const view = firstRunView(file, { root: o.root, repo: o.repo, instance: o.instance, has: () => false, setup });
+  const start = o.start ?? { kind: 'local', label: 'dev.worklane.example-shop', file: '/home/example/Library/LaunchAgents/dev.worklane.example-shop.plist', manager: 'launchd (a per-user agent: KeepAlive, starts at login)', commands: ['launchctl bootstrap gui/501 /home/example/Library/LaunchAgents/dev.worklane.example-shop.plist'], program: ['/usr/bin/node', '/opt/engine/dist/src/cli.js', 'coordinator', 'run', '--root', '/r'], log: '/state/coordinator.log' };
+  return { ...view, start, canStart: o.canStart ?? true };
+}
+
+const escaped = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+
+test("the first-run page: every setup step checked live, grouped, done or not done; a Fix for each that isn't; init's record; what local mode lacks; viewers refused", () => {
   const file = join(mkdtempSync(join(tmpdir(), 'web-render-init-')), 'init.json');
   const at = '2026-10-13T10:00:00.000Z';
   writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: { tools: { status: 'done', detail: 'node 24.21.0, git, gitleaks, claude, gh', at }, claude: { status: 'failed', detail: 'not signed in, per `claude auth status`', at } }, handoff: {}, updatedAt: at, finishedAt: null }));
-  const f = firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null, has: () => false });
+  const f = firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: null });
   const html = r.renderFirstRun(f);
-  assert.deepEqual([...html.matchAll(/data-testid="first-run-step" data-step="([a-z-]+)" data-status="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['tools:done', 'claude:failed', 'github:pending', 'repo-config:pending', 'protection:pending', 'discord:pending']);
+  // Grouped as the registry groups them, local mode's only.
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-group" data-group="([a-z-]+)"/g)].map((m) => m[1]), ['install', 'tools', 'claude', 'github', 'repo-config', 'protection', 'extras', 'service']);
+  const steps = [...html.matchAll(/data-testid="first-run-step" data-step="([a-z-]+)" data-status="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`);
+  assert.ok(steps.includes('tools:done'), 'tools are all on PATH (live, not from init.json)');
+  assert.ok(steps.includes('claude-login:todo'), 'signed out, per claude auth status');
+  assert.equal(steps.length, f.setup!.total);
   assert.match(html, /data-testid="first-run-mode" data-mode="local">Local mode: on this machine, as you\. No server, no ssh, no root\./);
-  assert.match(html, /1 of 6 steps done/);
-  assert.match(html, /role="progressbar" aria-valuemin="0" aria-valuemax="6" aria-valuenow="1"/);
-  assert.match(html, /Tools present[\s\S]*?done[\s\S]*?node 24\.21\.0, git, gitleaks, claude, gh/);
-  assert.match(html, /Claude login[\s\S]*?stopped here[\s\S]*?not signed in/);
-  assert.doesNotMatch(html, /not reached yet/, 'a step not reached shows no detail');
-  assert.match(html, /data-testid="first-run-resume"[\s\S]*?Stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
+  assert.match(html, new RegExp(`${f.setup!.done} of ${f.setup!.total} steps done, ${f.setup!.requiredLeft} required left`));
+  assert.match(html, /data-testid="first-run-recheck"[^>]*>Re-check/);
+  assert.match(html, /data-testid="first-run-checked"/);
+  // Each not-done step has a Fix of its kind; a done one has none.
+  assert.match(html, /data-step="claude-login" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="outside"/);
+  assert.match(html, /data-step="service" data-status="todo"[\s\S]*?data-fix="start"[^>]*>Start</);
+  const tools = html.slice(html.indexOf('data-step="tools"'), html.indexOf('</li>', html.indexOf('data-step="tools"')));
+  assert.doesNotMatch(tools, /first-run-fix/);
+  assert.doesNotMatch(html, /first-run-fix-panel/, 'no Fix open yet');
+  // init's record: where it last stopped, and the command that picks up there.
+  assert.match(html, /data-testid="first-run-resume"[\s\S]*?init last stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
   assert.match(html, /data-testid="first-run-unavailable"[\s\S]*?Not available in local mode[\s\S]*?separate OS users[\s\S]*?root-run add-project[\s\S]*?test sandbox[\s\S]*?needs Docker/);
-  assert.doesNotMatch(html, /first-run-none|first-run-finished/);
-  // Never run here: the command to start, nothing done.
-  const none = r.renderFirstRun(firstRunView(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: null }));
-  assert.match(none, /data-testid="first-run-none"[\s\S]*?<code[^>]*>worklane init --mode local \/r<\/code>/);
-  assert.doesNotMatch(none, /first-run-unavailable/, 'no mode yet: nothing claimed missing');
-  // Finished: said, no resume card.
-  const done = r.renderFirstRun({ ...f, steps: f.steps.map((x) => ({ ...x, status: x.optional ? 'skipped' : 'done' })), done: 6, finishedAt: at });
-  assert.match(done, /data-testid="first-run-finished"/);
-  assert.doesNotMatch(done, /first-run-resume/);
-  // Server mode: the per-project steps live on the Setup console; nothing listed as missing.
-  const server = r.renderFirstRun(firstRunView(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop' }));
-  assert.match(server, /Server mode[\s\S]*?Setup console/);
-  assert.doesNotMatch(server, /first-run-unavailable/);
+  assert.doesNotMatch(html, /first-run-none/);
+  // Fix, a provider's login: the command, and that the page notices when it's done.
+  const claude = r.renderFirstRun(f, { open: 'claude-login' });
+  assert.match(claude, /data-testid="first-run-outside"[\s\S]*?Anthropic(&#x27;|')s own login and consent page[\s\S]*?checks again every 15 s and marks it done[\s\S]*?<code[^>]*>claude auth login<\/code>/);
+  // ... and with a direct link where the provider has one (GitHub's device login).
+  assert.match(r.renderFirstRun(f, { open: 'gh-login' }), /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="first-run-outside-link"[^>]*>Open GitHub(&#x27;|')s device login/);
+  // Fix with no screen yet: what a person does today, and that a screen is coming.
+  const coming = f.setup!.groups.flatMap((g) => g.steps).find((s) => !s.done && s.fix.kind === 'coming')!;
+  const comingHtml = r.renderFirstRun(f, { open: coming.id });
+  assert.match(comingHtml, /data-testid="first-run-coming"[\s\S]*?Today: <\/span>/);
+  assert.match(comingHtml, /A screen for this is coming\./);
+  assert.ok(comingHtml.includes(escaped(coming.today)), "today's way, as the audit has it");
+  // Fix only in a terminal: the command and why.
+  assert.match(r.renderFirstRun(f, { open: 'path' }), /data-testid="first-run-terminal"[\s\S]*?Only in a terminal: it goes in your shell profile/);
+  // Start: the change shown first, then a confirmation.
+  assert.match(html, /data-testid="first-run-start"[\s\S]*?data-testid="first-run-start-change"[\s\S]*?launchd[\s\S]*?dev\.worklane\.example-shop\.plist[\s\S]*?coordinator run --root \/r[\s\S]*?data-testid="first-run-start-button"/);
+  assert.doesNotMatch(html, /first-run-start-confirm"/, 'no confirmation until Start is pressed');
+  const confirming = r.renderFirstRun(f, { confirming: true });
+  assert.match(confirming, /data-testid="first-run-start-confirming"[\s\S]*?data-testid="first-run-start-confirm"[^>]*>Confirm start[\s\S]*?data-testid="first-run-start-cancel"/);
+  // A writer sees the change but no Start.
+  const writer = r.renderFirstRun({ ...f, canStart: false });
+  assert.match(writer, /data-testid="first-run-start-refused"[^>]*>Only the instance(&#x27;|')s owners can start it/);
+  assert.doesNotMatch(writer, /first-run-start-button/);
+  // Never run here: still checked live, and the command to walk it.
+  const none = r.renderFirstRun(firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: null }));
+  assert.match(none, /data-testid="first-run-none"[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
+  assert.match(none, /data-testid="first-run-group"/);
+  // Server mode: the server's steps; Start is the owner's root command, never a button here.
+  const server = r.renderFirstRun(firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop', start: { kind: 'owner-command', unit: 'worklane-shop.service', command: 'sudo bash /opt/engine/scripts/setup/service.sh shop', why: 'the dashboard never runs sudo' } }));
+  assert.match(server, /Server mode/);
+  assert.match(server, /data-group="policy"[\s\S]*?data-group="updates"/);
+  assert.match(server, /data-testid="first-run-start-owner-command"[\s\S]*?worklane-shop\.service[\s\S]*?<code[^>]*>sudo bash \/opt\/engine\/scripts\/setup\/service\.sh shop<\/code>/);
+  assert.doesNotMatch(server, /first-run-start-button|first-run-unavailable/);
   // Anyone but the owner and the writers: told, not asked.
   assert.match(r.renderFirstRunPage(asOther), /data-testid="first-run-refused"[^>]*>The first-run checklist is for the instance(&#x27;|')s owners and writers/);
   assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
@@ -1178,7 +1228,7 @@ test("the first-run page, Repo config: auto-config's open questions with every c
   const question = { id: 'full-fails', ask: 'The full test run `npm test` fails on the default branch: use it anyway, pick another, or skip?', about: 'npm test', custom: true, choices: [{ id: 'use', label: 'use it anyway', command: 'npm test' }, { id: '1', label: 'make test   (Makefile target test)', command: 'make test' }, { id: 'custom', label: 'pick another: type a command (custom:<command>)' }, { id: 'skip', label: 'skip: leave it out' }] };
   const autoConfig = { answers: {}, overrides: {}, accepted: [], questions: [question], verified, base: 'b1', pr: null };
   writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: { 'repo-config': { status: 'failed', detail: '1 question to answer', at } }, handoff: {}, autoConfig, updatedAt: at, finishedAt: null }));
-  const html = r.renderFirstRun(firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null, has: () => false }));
+  const html = r.renderFirstRun(firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: null }));
   assert.match(html, /data-testid="first-run-question" data-question="full-fails"[\s\S]*?`npm test` fails on the default branch: use it anyway, pick another, or skip\?/);
   assert.deepEqual([...html.matchAll(/data-testid="first-run-choice" data-choice="([^"]+)"/g)].map((m) => m[1]), ['use', '1', 'custom', 'skip'], 'every choice shown');
   assert.match(html, /<code[^>]*>worklane init \/r --answer &lt;id&gt;=&lt;choice&gt;<\/code>/);
@@ -1187,12 +1237,12 @@ test("the first-run page, Repo config: auto-config's open questions with every c
   assert.doesNotMatch(html, /first-run-auto-config-pr/);
   // Proposed: the PR, no questions.
   writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'example-org/example-shop', instance: null, steps: {}, handoff: {}, autoConfig: { ...autoConfig, questions: [], pr: { number: 7, url: 'https://github.com/example-org/example-shop/pull/7', branch: 'worklane/setup' } }, updatedAt: at, finishedAt: null }));
-  const proposed = r.renderFirstRun(firstRunView(file, { root: '/r', repo: 'example-org/example-shop', instance: null }));
+  const proposed = r.renderFirstRun(firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: null }));
   assert.match(proposed, /data-testid="first-run-auto-config-pr"[\s\S]*?href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"[\s\S]*?PR #7/);
   assert.doesNotMatch(proposed, /first-run-question"/);
   // No auto-config yet (a config folder already there): nothing extra.
   writeFileSync(file, JSON.stringify({ version: 1, mode: 'local', target: '/r', repo: 'o/r', instance: null, steps: {}, handoff: {}, updatedAt: at, finishedAt: null }));
-  assert.doesNotMatch(r.renderFirstRun(firstRunView(file, { root: '/r', repo: 'o/r', instance: null })), /first-run-auto-config/);
+  assert.doesNotMatch(r.renderFirstRun(firstRun(file, { root: '/r', repo: 'o/r', instance: null })), /first-run-auto-config/);
 });
 
 test('the report preview: refused to anyone but the owner and the writers without asking, shown to them', () => {
@@ -1649,6 +1699,48 @@ test('the repeated-feedback panel: each constraint with its count, a link per si
   assert.match(html, /Check proposed[\s\S]*?Seen once/);
   assert.match(r.renderConstraints({ ...c, enabled: false, constraints: [] }), /off for this instance[\s\S]*?data-testid="constraints-empty"/);
   assert.match(r.renderConstraintsPanel(asOther), /data-testid="constraints-refused"[^>]*>Repeated feedback is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
+});
+
+test('the metrics panel: each figure over 7 and 30 days, merges per day, the slowest tests and those over budget; a missing source says "not measured yet", never 0; a viewer is told it is the writers\'', () => {
+  const now = new Date('2026-10-13T12:00:00.000Z');
+  const ts = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
+  const events = [
+    { ts: ts(2), type: 'pr.closed', payload: { issue: 1, number: 11, merged: true } },
+    { ts: ts(1), type: 'pr.closed', payload: { issue: 2, number: 12, merged: true } },
+    { ts: ts(2), type: 'merge.main_result', payload: { issue: 1, number: 11, outcome: 'red' } },
+    { ts: ts(1.9), type: 'merge.main_result', payload: { issue: 2, number: 12, outcome: 'green' } },
+    { ts: ts(1), type: 'ci.pr_timing', payload: { number: 12, wall_ms: 18 * 60_000 } },
+    { ts: ts(1), type: 'testrun.durations', payload: { id: 'r', tier: 'full', tests: [{ name: 'db > migrates', ms: 45_000 }, { name: 'ui > renders', ms: 1200 }], parsed: 2 } },
+  ];
+  const m = { ...deliveryMetrics(events, { now, budgetS: 30 }), definitions: METRICS_DEFINITIONS };
+  const html = r.renderMetrics(m);
+  assert.match(html, /data-testid="metrics-panel"/);
+  assert.deepEqual([...html.matchAll(/data-testid="metrics-figure" data-figure="([a-zA-Z]+)" data-measured="(true|false)"/g)].map((x) => `${x[1]}:${x[2]}`), [
+    'merges:true',
+    'mainRed:true',
+    'timeToGreen:true',
+    'reverts:true',
+    'fixForward:false',
+    'prCi:true',
+    'startup:false',
+    'flake:false',
+  ]);
+  assert.match(html, /data-figure="timeToGreen"[\s\S]*?data-testid="metrics-figure-7"[^>]*>144 min/);
+  assert.match(html, /data-figure="prCi"[\s\S]*?data-testid="metrics-figure-7"[^>]*>18 min/);
+  assert.match(html, /data-figure="fixForward"[\s\S]*?data-testid="metrics-not-measured"[^>]*>not measured yet<\/div><div[^>]*>fix-forward isn(&#x27;|')t built yet/);
+  assert.match(html, /data-figure="flake"[\s\S]*?not measured yet/);
+  assert.doesNotMatch(html.slice(html.indexOf('data-figure="flake"')).split('data-testid="metrics-per-day"')[0]!, />0%?</, 'no 0 for an unmeasured figure');
+  assert.equal((html.match(/data-testid="throughput-day"/g) ?? []).length, 14, 'merges per day as bars');
+  assert.deepEqual([...html.matchAll(/data-testid="metrics-slow-test"[\s\S]*?font-mono[^>]*>([^<]+)</g)].map((x) => x[1]), ['db &gt; migrates', 'ui &gt; renders']);
+  assert.match(html, /data-testid="metrics-over-budget-count"[^>]*>1</);
+  assert.equal((html.match(/data-testid="metrics-over-budget"/g) ?? []).length, 1);
+  assert.match(html, /data-testid="metrics-definitions"/);
+  // Nothing recorded at all: every figure and the slow tests say not measured yet.
+  const empty = r.renderMetrics({ ...deliveryMetrics([], { now, budgetS: 30 }), definitions: METRICS_DEFINITIONS });
+  assert.equal((empty.match(/data-testid="metrics-not-measured"/g) ?? []).length, 9);
+  assert.doesNotMatch(empty, /metrics-figure-7|metrics-per-day|metrics-slow-test"/);
+  assert.match(r.renderMetricsPanel(asOther), /data-testid="metrics-refused"[^>]*>The metrics are for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
+  assert.doesNotMatch(r.renderMetricsPanel(asOwner), /metrics-refused/);
 });
 
 test('flaky tests: each quarantined check is a row with its sightings, issue and passes toward release, and the flake rate over 7 and 30 days', () => {

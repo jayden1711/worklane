@@ -121,7 +121,8 @@ discord:
   merged it (their GitHub login, never an email), the merge commit's short sha, and the first line of the PR body's
   first paragraph (redacted, at most 200 characters; the PR title when the body is empty). Nothing else from the body
   is posted. Each new first-parent commit is matched to its PR through GitHub's API
-  (`GET /repos/{o}/{r}/commits/{sha}/pulls`); a commit no merged PR has (a direct push) gets no post here, since the
+  (`GET /repos/{o}/{r}/commits/{sha}/pulls`), asked again for up to 2 minutes while it has no merged PR (GitHub links a
+  merge a few seconds after it lands); a commit no merged PR has (a direct push) gets no post here, since the
   main watch alerts on those. Within the same machine-wide limit as the incidents; where it is in the branch is kept in
   the instance's state dir, so a restart neither posts a merge twice nor skips one.
 

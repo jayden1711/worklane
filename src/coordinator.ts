@@ -12,15 +12,16 @@ import { RECOMMENDATION_PREFIX } from './decision-ask.js';
 import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
 import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
-import type { EventPayload } from './events/types.js';
+import type { EventPayload, EventType } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
-import { type RunResult } from './runner.js';
+import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
@@ -43,7 +44,7 @@ import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
-import { refillPool, takeFromPool } from './worktree-pool.js';
+import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
@@ -59,6 +60,7 @@ import { doneWhenCommands } from './stage-label.js';
 import { localDoneWhen } from './testrun/local.js';
 import { repoGit } from './main-watch.js';
 import { MergePosts, takeOpsSlot } from './merge-posts.js';
+import { CiMetrics } from './ci-metrics.js';
 import { redactPii } from './intake/redact.js';
 import { scrub } from './watchdog/post.js';
 
@@ -107,6 +109,7 @@ export class Coordinator extends ChecksFromFeedback {
     await step('decisions', () => this.handleDecisions(), undefined);
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
+    await step('review fixes', () => this.watchReviewFixes(), undefined);
     await step('pr hygiene', () => this.checkPrHygiene(), null);
     await step('test runs', () => this.d.prTestRuns?.tick(), undefined);
     await step('people-prs', () => this.batchPeoplesPrs(), undefined);
@@ -114,12 +117,14 @@ export class Coordinator extends ChecksFromFeedback {
     await step('merged', () => this.watchMerges(), undefined);
     await step('main watch', () => this.watchMain(), undefined);
     await step('merge posts', () => this.postMerges(), undefined);
+    await step('ci metrics', () => this.measureCi(), undefined);
     await step('deploy gate', () => this.d.deployGate?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);
     await step('gardener', () => this.checkGardener(), undefined);
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
+    await step('optimize', () => this.checkOptimize(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -138,7 +143,24 @@ export class Coordinator extends ChecksFromFeedback {
     await this.correctionsRun;
     await this.gardenerRun;
     await this.feedbackChecksRun;
+    await this.optimizeRun;
     await this.prBatchIdle();
+  }
+
+  private ciMeter: CiMetrics | null = null;
+
+  /** CI timings for the metrics (src/ci-metrics.ts): with GitHub, at most one read-only call per CI_METRICS_CALL_MS. */
+  protected async measureCi(): Promise<void> {
+    const m = this.d.ciMetrics;
+    if (!m) return;
+    this.ciMeter ??= new CiMetrics({
+      api: m.api,
+      events: (types) => this.d.log.read(0, types as EventType[]),
+      emit: (type, payload) => this.emit(type, payload),
+      required: () => this.d.cfg.project.required_checks,
+      ...(m.now ? { now: m.now } : {}),
+    });
+    await this.ciMeter.step();
   }
 
   private mergePoster: MergePosts | null = null;
@@ -468,7 +490,7 @@ export class Coordinator extends ChecksFromFeedback {
       if (hold) break;
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
-      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
@@ -575,8 +597,10 @@ export class Coordinator extends ChecksFromFeedback {
       try {
         spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
         const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-        const r = await refillPool(this.wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb });
-        if (r.created.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
+        const wt = this.wt;
+        const keyFiles = this.d.cfg.tests.worktree.setup_key;
+        const r = await refillPool(wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb, key: (b) => setupKey(wt, b, keyFiles) });
+        if (r.created.length || r.moved.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, moved: r.moved, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
       } catch (e) {
         this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree pool', kind: 'error', message: (e as Error).message.slice(0, 500) });
       } finally {
@@ -667,8 +691,15 @@ export class Coordinator extends ChecksFromFeedback {
       if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
       // Once a hosted model's change is refused, the task's later attempts run on Anthropic.
       let noOpenModel = false;
+      // An optimization task (src/coordinator/optimize.ts): its week's budget is a hard stop before every attempt.
+      const optimizing = this.optimizePassOf(n);
       for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
+        if (optimizing && this.optimizeLeft() <= 0) {
+          const why = `the week's optimization budget ($${this.d.cfg.project.optimize.budget_usd}) is spent ($${this.optimizeSpent().toFixed(2)})`;
+          this.emit('optimize.result', { issue: n, target: optimizing.target ?? '', head: null, outcome: 'discarded', why, before: optimizing.baseline, after: null, gain: null, pct: null, noise: null });
+          return await this.optimizeDiscard(n, why, optimizing.baseline);
+        }
         const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan, 0, noOpenModel);
         if (out.stop) return;
         // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
@@ -714,6 +745,8 @@ export class Coordinator extends ChecksFromFeedback {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
+        // An optimization becomes a PR only if its benchmark beats main's by more than the noise; else discarded.
+        if (optimizing && !(await this.optimizeGate(n, optimizing, path, base, head))) return;
         // A change to the agents' own instructions is evaluated before it can land (the merge policy reads the result).
         if (verdict.patch_correct) await this.instructionEvals(n, path, base, head, change.files.map((f) => f.path));
         const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
@@ -899,7 +932,8 @@ export class Coordinator extends ChecksFromFeedback {
       route,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 200,
-      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining),
+      // An optimization task's run is also capped at what its week's budget has left (a hard stop).
+      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining, ...(this.optimizePassOf(n) ? [Math.max(0.01, this.optimizeLeft())] : [])),
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
@@ -911,8 +945,9 @@ export class Coordinator extends ChecksFromFeedback {
     });
     void pid;
     this.cost(n, 'worker', r);
-    this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown };
+    // Its session is kept: a fix run on this issue's PR resumes it (src/coordinator/fix-runs.ts).
+    this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000), ...(r.sessionId && SESSION_ID.test(r.sessionId) ? { session: r.sessionId } : {}) });
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown; intent?: string; risk_class?: RiskClass };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
@@ -952,7 +987,10 @@ export class Coordinator extends ChecksFromFeedback {
       return { stop: true as const };
     }
     // What the worker says it verified: checked against the record at evaluation, listed in the PR's receipts.
-    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? '') });
+    // And its intent (the summary's first paragraph when it gave none) and risk class: the top of the PR body.
+    const intent = oneParagraph(s.intent || (s.summary ?? '').split(/\n\s*\n/)[0]).slice(0, 4000);
+    const riskClass = s.risk_class && RISK_CLASSES.includes(s.risk_class) ? s.risk_class : undefined;
+    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? ''), ...(intent ? { intent } : {}), ...(riskClass ? { risk_class: riskClass } : {}) });
     return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}), ...(r.provider ? { provider: r.provider } : {}) };
   }
 
@@ -1070,6 +1108,10 @@ export class Coordinator extends ChecksFromFeedback {
       this.emit('push.refused', { issue: n, head, stage: 'change', reasons: limits });
       return { rejected: `it can't be pushed: ${limits.join('; ')}`, refused: limits };
     }
+    // The size limit: over review.yaml max_pr_lines and not mechanical, sent back to be split (src/pr-rules.ts).
+    const review = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const size = sizeVerdict(sizeFiles(path, base, head), { maxLines: review.max_pr_lines, generated: review.generated });
+    if (!size.ok) return { rejected: `${size.why}. Make this change one self-contained part under ${review.max_pr_lines} lines, and say in your summary what is left for follow-up issues` };
     const files = this.changeFiles(path, base, head);
     // Tamper guard: tests deleted, skipped, focused, or with fewer assertions.
     const tampered: string[] = [];

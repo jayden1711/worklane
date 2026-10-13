@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process';
 import { redact } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
-import type { Backlog, CommitCheck, Issue, PrReview, PullRequest, RerunJobs } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
 
 export class GitHubError extends Error {
   constructor(
@@ -267,6 +267,11 @@ export class GitHubBacklog implements Backlog {
   async reviews(n: number): Promise<PrReview[]> {
     const list = await this.req<{ id: number; user: { login: string } | null; state: string; body: string | null; submitted_at?: string }[]>('GET', `/repos/${this.repo}/pulls/${n}/reviews?per_page=100`);
     return list.map((r) => ({ id: r.id, author: r.user?.login ?? '', state: r.state, body: r.body ?? '', at: r.submitted_at ?? '' }));
+  }
+
+  async reviewComments(n: number): Promise<PrReviewComment[]> {
+    const list = await this.req<{ id: number; pull_request_review_id?: number | null; user: { login: string } | null; body: string | null; path: string; line?: number | null; original_line?: number | null; created_at?: string }[]>('GET', `/repos/${this.repo}/pulls/${n}/comments?per_page=100`);
+    return list.map((c) => ({ id: c.id, review: c.pull_request_review_id ?? null, author: c.user?.login ?? '', body: c.body ?? '', path: c.path, line: c.line ?? c.original_line ?? null, at: c.created_at ?? '' }));
   }
 
   async closedBy(n: number): Promise<string | null> {

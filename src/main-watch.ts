@@ -12,6 +12,12 @@
 // Discord owners (src/direct-push-alert.ts; config.yaml main_watch.direct_push_alert, on by default). The last checked commit is kept in a state file, so a restart neither
 // checks a commit twice nor skips one; so is the time of the last call, so the limit holds across restarts too.
 //
+// Which PR a commit belongs to is GitHub's answer, never git's: the commit-to-PR link (GET /commits/{sha}/pulls),
+// asked again for up to LINK_LAG_MS while it is still empty (GitHub links a merge a few seconds after it lands); the
+// PR's merge_commit_sha; and for a commit inside a rebase merge, compare (GET /compare/{sha}...{merge commit}) against
+// the PR's commit count. Git only reads the branch itself: its tip, whether it was rewritten, its first-parent line,
+// a commit's parents and the config committed at a commit.
+//
 // A bootstrap merge: while a project's required check can't run yet, an admin's hand merge is unaccounted. An admin
 // may accept such a commit on the dashboard before the watch judges it (acceptMerge): by its sha, once it is on the
 // branch and not judged yet, or in advance by PR number, pinned to the PR's head as it is then. The watch then judges
@@ -33,6 +39,11 @@ import type { Role } from './dashboard-auth.js';
 
 /** At most one GitHub API call per this long. */
 export const MAIN_WATCH_CALL_MS = 60_000;
+/**
+ * How long an empty commit-to-PR link is asked again before it counts as "no PR": GitHub links a merge commit to its
+ * PR a few seconds after the merge (main 09f60340 was judged 6 s after #307 landed, with the link still empty).
+ */
+export const LINK_LAG_MS = 120_000;
 /** How often whether GitHub protects the branch is asked again. */
 export const PROTECTION_RECHECK_MS = 6 * 3600_000;
 
@@ -60,6 +71,15 @@ export interface MergedPull {
   mergedByBot: boolean;
   head: string;
   base: string;
+  /** How many commits the PR has (GET /pulls/{n} only; the commit-to-PR list leaves it out). */
+  commits?: number;
+}
+
+/** GitHub's compare of two commits (GET /compare/{base}...{head}): how far `head` is ahead of and behind `base`. */
+export interface Compared {
+  status: string;
+  aheadBy: number;
+  behindBy: number;
 }
 
 /** The calls the watch makes: one REST request each (github/main-watch-api.ts). */
@@ -70,6 +90,7 @@ export interface MainWatchApi {
   checkRuns(sha: string): Promise<CheckRunAt[]>;
   statuses(sha: string): Promise<StatusAt[]>;
   role(login: string): Promise<Role | null>;
+  compare(base: string, head: string): Promise<Compared>;
   /**
    * Who pushed `sha` to `branch`: the GitHub login of the push that made it the branch's tip (the repo's activity),
    * else the commit's own GitHub author (`from: 'commit'`); null when neither is known. A login only, never an email.
@@ -81,15 +102,20 @@ export interface MainWatchApi {
 export interface Facts {
   harness: { number: number; head: string; at: string } | null;
   pulls?: MergedPull[];
+  /** When the pulls call was first and last answered (ms): an empty link is asked again until an answer LINK_LAG_MS after the first. */
+  pullsAt?: number;
+  pullsLastAt?: number;
   /** A merge commit's own subject names this PR ("Merge #N: …", "Merge pull request #N …"): asked directly when the pulls link is empty. */
   subjectPr?: number | null;
   pr?: MergedPull;
+  /** compare(base, head): whether `base` (the commit) is inside the rebase merge ending at `head` (the PR's merge commit). */
+  compare?: Compared & { base: string; head: string };
   role?: Role | null;
   runs?: CheckRunAt[];
   statuses?: StatusAt[];
 }
 
-export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string };
+export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string };
 export type Verdict =
   | { done: true; accounted: true; how: 'harness' | 'person'; number: number }
   | { done: true; accounted: true; how: 'accepted'; number: number | null; acceptance: Acceptance }
@@ -144,10 +170,9 @@ export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: Sta
 
 /**
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
- * share it. `inMerge(mergeCommit)`: whether `sha` is one of the commits a rebase merge ending at `mergeCommit` put
- * on the branch (git, no API call).
+ * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; inMerge?: (mergeCommit: string) => boolean; accepted?: Acceptance[] }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[] }): Verdict {
   const short = sha.slice(0, 8);
   const bySha = o.accepted?.find((a) => a.sha === sha);
   if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
@@ -167,18 +192,36 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   } else {
     if (!f.pulls) return { done: false, need: { call: 'pulls' } };
     const merged = f.pulls.filter((p) => p.mergedAt && p.base === o.branch);
-    let cand = merged.find((p) => p.mergeCommit === sha) ?? merged.find((p) => p.mergeCommit && o.inMerge?.(p.mergeCommit));
+    let cand = merged.find((p) => p.mergeCommit === sha);
+    let notIn = '';
+    // A rebase merge puts the PR's commits on the branch one by one, and its merge_commit_sha is the last of them. This
+    // commit is one of them when that merge commit is ahead of it by fewer commits than the PR has: GitHub's compare,
+    // not git ancestry (every earlier commit on the branch, a direct push too, is an ancestor of a later merge).
+    const rebased = cand ? undefined : merged.find((p) => p.mergeCommit);
+    if (rebased) {
+      if (!f.pr || f.pr.number !== rebased.number) return { done: false, need: { call: 'pull', number: rebased.number } };
+      const m = f.pr.mergeCommit;
+      if (m && m !== sha && f.pr.mergedAt && f.pr.base === o.branch) {
+        if (!f.compare || f.compare.base !== sha || f.compare.head !== m) return { done: false, need: { call: 'compare', base: sha, head: m } };
+        const c = f.compare;
+        if (c.status === 'ahead' && c.behindBy === 0 && typeof f.pr.commits === 'number' && c.aheadBy < f.pr.commits) cand = f.pr;
+        else notIn = ` (#${f.pr.number}'s merge ${m.slice(0, 8)} doesn't include it: ${c.aheadBy} commit(s) ahead of it, and the PR has ${f.pr.commits ?? 'an unknown number of'} commit(s))`;
+      }
+    }
     // GitHub links a merge commit to its PR a few seconds after the merge, so the pulls call can be empty for a normal
     // merge (main 09f60340, judged 6 s after #307 landed). A merge commit whose subject names a PR: ask that PR, and
     // take it only when its own merge commit is this one (a made-up subject still counts as a direct push).
-    if (!cand && f.subjectPr) {
+    if (!cand && !merged.length && f.subjectPr) {
       if (!f.pr || f.pr.number !== f.subjectPr) return { done: false, need: { call: 'pull', number: f.subjectPr } };
       if (f.pr.mergedAt && f.pr.base === o.branch && f.pr.mergeCommit === sha) cand = f.pr;
     }
     if (!cand) {
+      // The link is still empty: a squash or rebase merge (no merge subject to go by), or a merge whose subject was
+      // edited, may just not be linked yet. Asked again, within the call budget, until an answer LINK_LAG_MS after the first.
+      if (!merged.length && f.pullsAt !== undefined && (f.pullsLastAt ?? f.pullsAt) - f.pullsAt < LINK_LAG_MS) return { done: false, need: { call: 'pulls' } };
       const other = f.pulls.find((p) => !p.mergedAt);
       // GitHub's own commit-to-PR link (the pulls call) says no merged PR has it: a direct push.
-      return { done: true, accounted: false, number: null, direct: true, reason: `${short} was pushed to ${o.branch} directly: no merged PR has it${other ? ` (#${other.number} has it, unmerged)` : ''}` };
+      return { done: true, accounted: false, number: null, direct: true, reason: `${short} was pushed to ${o.branch} directly: no merged PR has it${notIn}${other ? ` (#${other.number} has it, unmerged)` : ''}` };
     }
     if (!f.pr || f.pr.number !== cand.number) return { done: false, need: { call: 'pull', number: cand.number } };
     number = f.pr.number;
@@ -443,12 +486,16 @@ export class MainWatch {
     const { required: judgedBy, note } = this.judgedBy;
     // What admins accepted, as long as it descends from the commit checked when they did (a rewrite voids it).
     const accepted = readAccepted(acceptedFileFor(this.d.stateFile)).filter((a) => a.base !== p.sha && this.d.git.isAncestor(a.base, p.sha));
-    const ctx = { branch: this.d.branch, required: judgedBy, accepted, inMerge: (m: string) => m !== p.sha && this.d.git.isAncestor(p.sha, m) };
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
       if (!this.take(s)) return;
       const n = v.need;
-      if (n.call === 'pulls') p.facts.pulls = await this.d.api.commitPulls(p.sha);
+      if (n.call === 'pulls') {
+        p.facts.pulls = await this.d.api.commitPulls(p.sha);
+        p.facts.pullsAt ??= this.now;
+        p.facts.pullsLastAt = this.now;
+      } else if (n.call === 'compare') p.facts.compare = { ...(await this.d.api.compare(n.base, n.head)), base: n.base, head: n.head };
       else if (n.call === 'pull') p.facts.pr = await this.d.api.pull(n.number);
       else if (n.call === 'role') p.facts.role = await this.d.api.role(n.login);
       else if (n.call === 'runs') p.facts.runs = await this.d.api.checkRuns(n.sha);

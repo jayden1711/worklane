@@ -7,6 +7,8 @@ import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
+import { SparseExclude } from '../checkout.js';
+import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
@@ -161,6 +163,13 @@ export const ProjectConfig = z.strictObject({
       max_proposals_per_week: z.number().int().min(0).max(20).default(3),
     })
     .prefault({}),
+  /**
+   * The weekly optimization pass (src/optimize.ts): on `weekday` after `at`, the top target (a benchmarks.yaml
+   * benchmark, or the slowest test the metrics recorded) is measured on main, then built as a normal task on the
+   * strongest model; it becomes a PR only if its median beats main's by more than the noise. Off by default; a hard
+   * stop at `budget_usd` a week, at most `max_prs` PRs a week.
+   */
+  optimize: OptimizeConfig,
   conflicts: z
     .strictObject({
       fix: z.boolean().default(true),
@@ -192,6 +201,11 @@ export const ProjectConfig = z.strictObject({
       min_free_disk_pct: z.number().min(1).max(90).default(15),
     })
     .prefault({}),
+  /**
+   * The Metrics panel and the weekly digest (src/merge-metrics.ts deliveryMetrics): a test whose duration (the median
+   * of its runs over the week) is over `slow_test_budget_s` seconds is listed as over budget, beside the 20 slowest.
+   */
+  metrics: z.strictObject({ slow_test_budget_s: z.number().positive().max(86_400).default(30) }).prefault({}),
   os: z.enum(['auto', 'macos', 'linux', 'windows-wsl']).default('auto'),
   owners: z.strictObject({
     default: handle,
@@ -449,6 +463,24 @@ export const TestsConfig = z.strictObject({
       dep_cache: z.boolean().default(true),
       /** Worktrees kept ready on main, set up, for tasks to start in (0: off). Bounded by free disk. */
       pool: z.number().int().min(0).max(4).default(0),
+      /**
+       * The files whose contents decide what the setup steps produce (the lockfiles, and anything an install step
+       * generates from, such as an ORM schema). When main moves and none of them changed, a pooled worktree is
+       * moved to the new main and kept, its installed dependencies with it, instead of being set up again. Empty:
+       * every main change sets the pool up afresh.
+       */
+      setup_key: z.array(z.string().min(1).refine((p) => !p.startsWith('/') && !p.split(/[\\/]/).includes('..'), 'a path inside the repo (relative, no ..)')).default([]),
+    })
+    .prefault({}),
+  /** What the harness's own checkouts of the project hold (src/checkout.ts). */
+  checkout: z
+    .strictObject({
+      /**
+       * Directories left out of every agent worktree and test-run workspace (sparse checkout), e.g. design files and
+       * art no agent or test reads. They stay in the repo. The project's checks run in the worktree too: leave out
+       * only what they never read. A test-run tier that needs them sets `full_checkout`.
+       */
+      sparse_exclude: SparseExclude,
     })
     .prefault({}),
   land: z
@@ -557,6 +589,9 @@ export const TestsConfig = z.strictObject({
 
 // ---------- review.yaml ----------
 
+/** Generated files not counted toward review.yaml max_pr_lines, unless a repo lists its own. */
+export const DEFAULT_GENERATED = ['**/*.min.js', '**/*.min.css', '**/*.map', '**/dist/**', '**/__generated__/**', '**/*.generated.*', '**/*.snap'];
+
 export const ReviewConfig = z.strictObject({
   version: z.literal(1),
   money_path_source: z.strictObject({ file: z.string().min(1), pattern: regex.optional() }).optional(),
@@ -592,6 +627,20 @@ export const ReviewConfig = z.strictObject({
       loosened: z.array(z.string()).default([]),
     })
     .prefault({}),
+  /**
+   * The size limit for an agent's change (src/pr-rules.ts): over this many changed lines, lockfiles and `generated`
+   * files not counted, it is sent back to the worker with "split it", unless it is mechanical (only renames,
+   * moves and formatting: whitespace ignored, the added lines are exactly the removed ones).
+   */
+  max_pr_lines: z.number().int().positive().default(600),
+  /** Generated files (globs): not counted toward max_pr_lines. */
+  generated: z.array(z.string().min(1)).default(DEFAULT_GENERATED),
+  /**
+   * The light checks: for a docs-only PR (only *.md and docs/**), the harness's own merge call waits on just these
+   * of the required_checks. Empty (the default): no fast path, every required check. GitHub's ruleset still
+   * requires every required check before it lets a merge through.
+   */
+  docs_only_checks: z.array(z.string().min(1)).default([]),
   /**
    * Gradual delegation, suggest-only: a waiting category whose last `min_clean` PRs were approved unchanged, with
    * no revert, red main or later fix, is put to the owner for loosening, with the evidence. Never automatic.
@@ -701,4 +750,5 @@ export const FILES = {
   'review.yaml': ReviewConfig,
   'deploy.yaml': DeployConfig,
   'app.yaml': AppConfig,
+  'benchmarks.yaml': BenchmarksConfig,
 } as const;
