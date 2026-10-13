@@ -13,7 +13,7 @@ const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
 const NOW = Date.parse('2026-10-12T20:00:00Z');
 const ADMIN = 'adminx';
 const cfg: TerminalConfig = { consoleUser: ADMIN, hubUser: 'wl-dash' };
-const owner = (over: Partial<ConsoleSession> = {}): ConsoleSession => ({ login: 'olive', role: 'owner', authenticatedAt: NOW - 60_000, csrfOk: true, ...over });
+const owner = (over: Partial<ConsoleSession> = {}): ConsoleSession => ({ login: 'olive', role: 'owner', csrfOk: true, ...over });
 const passwordRequired = () => 'password-required\n';
 
 /** A fake PTY: echoes input (when echo is on, as a shell does), records what it was spawned with. */
@@ -62,11 +62,9 @@ function open(over: Partial<Parameters<typeof openTerminal>[0]> = {}) {
   return { t, audit, p, closed, execCalls };
 }
 
-test('the terminal refuses without a fresh GitHub sign-in (none, or older than 5 minutes), and runs nothing', () => {
+test('the terminal refuses without a session or without its CSRF token, and runs nothing', () => {
   for (const [s, re] of [
     [null, /not signed in/],
-    [owner({ authenticatedAt: null }), /fresh GitHub sign-in/],
-    [owner({ authenticatedAt: NOW - 5 * 60_000 - 1 }), /within the last 5 minutes/],
     [owner({ csrfOk: false }), /CSRF/],
   ] as const) {
     const o = open({ session: s });
@@ -75,7 +73,7 @@ test('the terminal refuses without a fresh GitHub sign-in (none, or older than 5
     assert.deepEqual(o.execCalls, [], 'not even the sudo check');
     assert.equal(o.audit.at(-1)!.kind, 'refused');
   }
-  assert.ok(!('refused' in open({ session: owner({ authenticatedAt: NOW - 5 * 60_000 + 1000 }) }).t), 'within 5 minutes it opens');
+  assert.ok(!('refused' in open({ session: owner() }).t), 'a signed-in owner with the token: it opens');
 });
 
 test("the terminal refuses non-owners: writers, viewers and people with no role", () => {

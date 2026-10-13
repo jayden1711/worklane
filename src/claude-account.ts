@@ -216,9 +216,9 @@ export function switchView(lines: readonly SwitchLine[], now = Date.now()): Swit
 export const mayViewClaudeAccount = (r: Pick<MachineRequester, 'login' | 'breakGlass'>, file = MACHINE_OWNERS_FILE) => r.breakGlass || isMachineOwner(r.login, file);
 
 /** Why this person may not refresh or switch now; null when they may (the same gate as any machine change). */
-export function claudeAccountGate(who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string; now?: number } = {}): string | null {
+export function claudeAccountGate(who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string } = {}): string | null {
   if (who.role !== 'owner') return `only an owner of this instance who is one of the machine's owners may switch the Claude account; @${who.requester.login} is ${who.role ? `a ${who.role}` : 'not on it'}`;
-  return machineChangeRefusal(who.requester, { file: o.ownersFile ?? MACHINE_OWNERS_FILE, ...(o.now !== undefined ? { now: o.now } : {}) });
+  return machineChangeRefusal(who.requester, { file: o.ownersFile ?? MACHINE_OWNERS_FILE });
 }
 
 const isAccountRequest = (r: MachineRequest) => r.args[0] === 'claude-account';
@@ -227,7 +227,7 @@ const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'runn
 /** The panel's data: each agent user's account, the last switch, this log's requests, and whether this person may act. */
 export function claudeAccountView(o: { dir?: string; events: readonly StoredEvent[]; who: { role: Role | null; requester: MachineRequester }; instance: string; ownersFile?: string; now?: number }) {
   const now = o.now ?? Date.now();
-  const why = claudeAccountGate(o.who, { ...(o.ownersFile ? { ownersFile: o.ownersFile } : {}), now });
+  const why = claudeAccountGate(o.who, o.ownersFile ? { ownersFile: o.ownersFile } : {});
   const sw = switchView(readSwitchLines(o.dir), now);
   const requests = machineRequests(o.events).filter(isAccountRequest);
   const busy = sw?.status === 'running' ? 'a switch is running' : requests.some((r) => open(r) && r.args[1] === 'switch') ? 'a switch is waiting for the coordinator' : null;
@@ -260,7 +260,7 @@ export function requestClaudeAccount(log: EventLog, r: { action: unknown; reques
   const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x) && x.args[1] === action);
   if (pending) throw new MachineRequestError(`a claude-account ${action} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);
   if (action === 'switch' && switchView(readSwitchLines(r.dir), r.now)?.status === 'running') throw new MachineRequestError('a Claude account switch is running on this machine; wait for it to end', 409);
-  return requestMachineChange(log, { args: ['claude-account', action], requester: r.requester, via: 'claude-account', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}), ...(r.now !== undefined ? { now: r.now } : {}) });
+  return requestMachineChange(log, { args: ['claude-account', action], requester: r.requester, via: 'claude-account', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}) });
 }
 
 export class ClaudeTokenError extends Error {
@@ -278,7 +278,7 @@ export class ClaudeTokenError extends Error {
  * Returns the file's path.
  */
 export function storeSwitchToken(o: { value: string; instance: string; who: { role: Role | null; requester: MachineRequester }; dir?: string; home?: string; ownersFile?: string; now?: number }): string {
-  const why = claudeAccountGate(o.who, { ...(o.ownersFile ? { ownersFile: o.ownersFile } : {}), ...(o.now !== undefined ? { now: o.now } : {}) });
+  const why = claudeAccountGate(o.who, o.ownersFile ? { ownersFile: o.ownersFile } : {});
   if (why) throw new ClaudeTokenError(why, 403);
   const sw = switchView(readSwitchLines(o.dir), o.now);
   if (!sw || !sw.waitingForToken) throw new ClaudeTokenError('no Claude account switch is waiting for a token', 409);

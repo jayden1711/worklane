@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Once per machine, as root, and only if you want the dashboard's owner terminal (review it first). The
-# terminal is a login shell as your admin user, opened from the hub after a fresh GitHub sign-in; sudo in it
+# terminal is a login shell as your admin user, opened from the hub by the signed-in owner; sudo in it
 # asks for your password every time.
 #
 #   bash scripts/setup/console-shell.sh <admin user>

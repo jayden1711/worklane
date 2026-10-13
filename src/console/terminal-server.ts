@@ -1,14 +1,16 @@
 // The owner terminal's WebSocket, on the hub: /api/terminal?instance=<name>. The page sends
 // {"type":"input","data":"..."}; the hub sends {"type":"output","data":"..."}, then {"type":"closed","why":"..."}
 // or, when it won't open, {"type":"refused","why":"..."}. The per-install token grants nothing here: only a
-// fresh GitHub sign-in as the instance's owner opens it (terminal.ts). A cross-site page can't open it: the
-// Origin must be this host's.
+// signed-in session as the instance's owner opens it (terminal.ts). A cross-site page can't open it: the Origin
+// must be this host's, and the page offers the session's CSRF token as a subprotocol (`csrf.<token>`, beside
+// TERMINAL_PROTOCOL), since a browser can't set headers on the upgrade. The answer names TERMINAL_PROTOCOL alone.
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { openTerminal, type AuditSink, type Exec, type SpawnPty, type TerminalConfig, type TerminalHandle } from './terminal.js';
 import type { SessionOf } from './session.js';
 import { deviceRefusal, type DeviceOptions } from './terminal-devices.js';
+import { TERMINAL_PROTOCOL } from '../dashboard-auth.js';
 
 export interface TerminalServerOptions {
   config: TerminalConfig;
@@ -41,7 +43,8 @@ export function sameOrigin(req: IncomingMessage): boolean {
 
 /** Serve the terminal on this server's upgrades to TERMINAL_PATH; others are refused. Returns a closer. */
 export function attachTerminal(server: Server, o: TerminalServerOptions): () => void {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_INPUT });
+  // Answer with the terminal's own subprotocol only: never the one that carries the CSRF token.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_INPUT, handleProtocols: (offered) => (offered.has(TERMINAL_PROTOCOL) ? TERMINAL_PROTOCOL : false) });
   const open = new Set<TerminalHandle>();
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');

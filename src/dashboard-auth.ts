@@ -34,8 +34,6 @@ export const SIGNIN_STATE_MS = 10 * 60_000;
 export const LOGIN_HEADER = 'x-dashboard-login';
 /** On the hub's role check (/api/role): read the permission from GitHub now, not the instance's cache. */
 export const FRESH_HEADER = 'x-dashboard-fresh-role';
-/** The header the hub passes the person's sign-in time with (ms since the epoch), alongside LOGIN_HEADER. */
-export const AUTH_AT_HEADER = 'x-dashboard-authenticated-at';
 /**
  * Set (to 1) by the hub on a forwarded write when Tailscale identified the request's device as one of the console's
  * allowed devices (src/console/terminal-devices.ts); only the hub can tell, and it builds every forwarded header
@@ -45,13 +43,12 @@ export const DEVICE_HEADER = 'x-dashboard-console-device';
 
 /**
  * Who is asking, in the shape the setup console (src/console/session.ts) reads: the login, the role on this
- * instance (read from the repo, never the client), when they last signed in with GitHub, and whether this write
+ * instance (read from the repo, never the client), and whether this write
  * carries the session's CSRF token. Structurally the same as that module's ConsoleSession and SessionOf.
  */
 export interface ConsoleSession {
   login: string;
   role: Role | null;
-  authenticatedAt: number | null;
   csrfOk: boolean;
   /** The owner's break-glass (no person named). */
   breakGlass?: boolean;
@@ -62,6 +59,27 @@ export type SessionOf = (req: IncomingMessage, instance: string) => ConsoleSessi
 
 /** The header every write carries its CSRF token in. */
 export const CSRF_HEADER = 'x-csrf-token';
+/**
+ * The owner terminal's WebSocket subprotocol. A browser can't set headers on a WebSocket upgrade, so the page offers
+ * two subprotocols: this one and `csrf.<the session's CSRF token>`. The hub reads the token from the second and
+ * answers with this one alone, never echoing the token.
+ */
+export const TERMINAL_PROTOCOL = 'terminal.v1';
+/** The prefix of the subprotocol that carries the CSRF token on the terminal's upgrade. */
+export const CSRF_PROTOCOL_PREFIX = 'csrf.';
+/** The CSRF token a WebSocket upgrade offers as a subprotocol (`csrf.<token>`); undefined when it offers none. */
+export function csrfFromProtocols(req: IncomingMessage): string | undefined {
+  const offered = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map((p) => p.trim());
+  const p = offered.find((x) => x.startsWith(CSRF_PROTOCOL_PREFIX));
+  return p ? p.slice(CSRF_PROTOCOL_PREFIX.length) : undefined;
+}
+/**
+ * The instance API paths (after /api/) whose GET says whether a machine change would pass now, the device included.
+ * The hub asks Tailscale for the device on these reads, as on every write, and the instance serves these views
+ * under exactly these paths (src/dashboard.ts), so the two can't drift apart.
+ */
+export const DEVICE_VIEWS = { addProject: 'add-project', machine: 'machine', claudeAccount: 'claude-account' } as const;
+export const isDeviceView = (path: string) => (Object.values(DEVICE_VIEWS) as string[]).includes(path);
 /** The session cookie: __Host- binds it to this origin, Path=/, Secure, with no Domain. */
 export const SESSION_COOKIE = '__Host-session';
 /** The sign-in round trip's state cookie (Lax: it must come back on GitHub's redirect). */

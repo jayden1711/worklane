@@ -25,8 +25,8 @@
 #
 #   --machine-owner: the GitHub logins that may change the machine itself from the dashboard (the slot caps, engine
 #     updates), comma-separated. Written to /etc/worklane/machine-owners.json, root:root 0644. An instance's owners
-#     who aren't machine owners see the machine settings read-only. A machine change also needs a GitHub sign-in in
-#     the last 5 minutes and one of the --console-devices, as the terminal does. Left out: the file is kept as it
+#     who aren't machine owners see the machine settings read-only. A machine change also needs a signed-in session
+#     and one of the --console-devices, as the terminal does. Left out: the file is kept as it
 #     is (none yet: only the break-glass may change the machine).
 #
 #   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh

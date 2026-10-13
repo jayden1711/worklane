@@ -87,7 +87,7 @@ export function checkRootStep(command: string, args: readonly string[]): RootSte
 
 /**
  * Ask the coordinator to run an open, allowlisted root_step ask through the helper (src/machine-requests.ts):
- * the dashboard can't sudo, and never tries. The instance's owner only, and a machine owner with a fresh sign-in on
+ * the dashboard can't sudo, and never tries. The instance's owner only, and a machine owner on
  * an allowed device (or the break-glass; src/machine-owners.ts). One off the allowlist is refused here, and again by
  * the coordinator. The coordinator answers the ask (ran or failed, with the output) once it has run.
  */

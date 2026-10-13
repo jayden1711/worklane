@@ -16,7 +16,7 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
@@ -604,7 +604,10 @@ test('the machine settings: the owner gets the slot cap and engine updates with 
   const instanceOnly = r.renderMachine({ ...data, user: 'ivy', canChange: false, machineOwner: false, machineOwners: ['ada', 'olu'], needs: 'x' });
   assert.match(instanceOnly, /data-testid="machine-read-only"[^>]*>Read-only: only the machine(&#x27;|')s owners can change these; you are @ivy\. <span data-testid="machine-owners">machine owners: @ada, @olu<\/span>/);
   assert.doesNotMatch(instanceOnly, /data-testid="machine-setting-input"|data-testid="machine-needs"/);
-  assert.match(r.renderMachine({ ...data, machineOwner: true, machineOwners: ['example-owner'], needs: 'a GitHub sign-in within the last 5 minutes' }), /data-testid="machine-needs"[^>]*>A change needs a GitHub sign-in within the last 5 minutes\./, 'a machine owner is told what a change needs');
+  const owned = { ...data, machineOwner: true, machineOwners: ['example-owner'], needs: "one of the console's allowed devices" };
+  assert.match(r.renderMachine(owned), /data-testid="machine-needs"[^>]*>A change needs one of the console(&#x27;|')s allowed devices\./, 'a machine owner is told what a change needs (an older server: no readiness)');
+  assert.match(r.renderMachine({ ...owned, deviceReady: true }), /data-testid="machine-needs" data-ready="yes"[^>]*>You may change these: this page came from one of the console(&#x27;|')s allowed devices\./, 'from an allowed device: changes may be made');
+  assert.match(r.renderMachine({ ...owned, deviceReady: false }), /data-testid="machine-needs" data-ready="no"[^>]*>A change needs one of the console(&#x27;|')s allowed devices, and this page didn(&#x27;|')t come from one\./, 'from elsewhere: says so');
   const noUpdater = r.renderMachine({ ...data, updates: { configured: false, enabled: null }, history: [] });
   assert.match(noUpdater, /data-setting="updates"[\s\S]*?not set up/);
   assert.match(noUpdater, /No updates: the updater isn(&#x27;|')t set up on this machine/);
@@ -1218,19 +1221,18 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });
 
-test("Add project: enabled for a machine owner, freshly signed in on an allowed device; otherwise disabled, saying why", () => {
+test("Add project: enabled for a machine owner on an allowed device; otherwise disabled, saying why", () => {
   const ownersFile = machineOwnersFile('ada', 'olu');
-  const view = (requester: ReturnType<typeof freshRequester>, role: 'owner' | 'writer' = 'owner') => r.renderAddProject(addProjectView([], { role, requester }, { ownersFile }));
+  const view = (requester: ReturnType<typeof ownerRequester>, role: 'owner' | 'writer' = 'owner') => r.renderAddProject(addProjectView([], { role, requester }, { ownersFile }));
   const controls = (html: string) => [...html.matchAll(/<(?:input|button)[^>]*data-testid="add-project-(?:name|repo|submit)"[^>]*>/g)].map((m) => m[0]);
-  const enabled = view(freshRequester('ada'));
+  const enabled = view(ownerRequester('ada'));
   assert.match(enabled, /data-testid="add-project" data-enabled="yes"/);
   assert.equal(controls(enabled).length, 3);
   assert.ok(controls(enabled).every((c) => !/disabled=""/.test(c)), 'the name, the repo and the button are live');
   assert.doesNotMatch(enabled, /data-testid="add-project-disabled"/);
-  const cases: [string, ReturnType<typeof freshRequester>, RegExp][] = [
-    ['an instance-only owner', freshRequester('ivy'), /machine owners: @ada, @olu\); @ivy isn(&#x27;|')t one/],
-    ['a stale sign-in', { ...freshRequester('ada'), authenticatedAt: Date.now() - 6 * 60_000 }, /a GitHub sign-in within the last 5 minutes: sign in again/],
-    ['a disallowed device', { ...freshRequester('ada'), deviceOk: false }, /one of the console(&#x27;|')s allowed devices/],
+  const cases: [string, ReturnType<typeof ownerRequester>, RegExp][] = [
+    ['an instance-only owner', ownerRequester('ivy'), /machine owners: @ada, @olu\); @ivy isn(&#x27;|')t one/],
+    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the console(&#x27;|')s allowed devices/],
   ];
   for (const [who, requester, why] of cases) {
     const html = view(requester);
@@ -1240,7 +1242,7 @@ test("Add project: enabled for a machine owner, freshly signed in on an allowed 
     const said = (html.match(/data-testid="add-project-disabled"[\s\S]*?<\/p>/)?.[0] ?? '').replace(/<[^>]+>/g, '');
     assert.equal((said.match(/[Mm]achine owners: @ada, @olu/g) ?? []).length, 1, `${who}: names the machine owners, once: ${said}`);
   }
-  assert.match(view(freshRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
+  assert.match(view(ownerRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
 });
 
 test('Add project: the steps show in the script order as they arrive, and its asks (GitHub links, the Claude token) appear in the same view', () => {
@@ -1253,7 +1255,7 @@ test('Add project: the steps show in the script order as they arrive, and its as
   log.append('machine.started', { id: 'mr-0000000000aa', instance: 'demo' }, 'demo', 'coordinator');
   const step = (s: string, state: string, detail = '') => log.append('add_project.step', { request_id: 'mr-0000000000aa', name: 'shop', repo: 'acme/shop', step: s, state, detail } as never, 'demo', 'coordinator');
   const render = () => {
-    const html = r.renderAddProject(addProjectView(log.read(0), { role: 'owner', requester: freshRequester('ada') }, { ownersFile }));
+    const html = r.renderAddProject(addProjectView(log.read(0), { role: 'owner', requester: ownerRequester('ada') }, { ownersFile }));
     const run = html.match(/data-testid="add-project-run"[\s\S]*$/)?.[0] ?? '';
     return { html, run, steps: [...run.matchAll(/data-testid="add-project-step" data-step="([^"]+)" data-state="([^"]+)"/g)].map((m) => `${m[1]}:${m[2]}`) };
   };
@@ -1405,7 +1407,7 @@ test('Claude account: a machine owner sees each agent user and the switch step b
   writeFileSync(join(dir, 'status.json'), JSON.stringify({ at, users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: new Date(Date.now() + 200 * 86_400_000).toISOString() }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: false, logged_in: false, auth_method: 'none', error: 'claude auth status says it is not logged in' }] }));
   const lines = (more: object[]) =>
     writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from the dashboard of shop' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
-  const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: freshRequester(login) }, instance, ownersFile });
+  const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester(login) }, instance, ownersFile });
   lines([]);
   const html = r.renderClaudeAccount(view('ada'));
   for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-account-switch', 'claude-switch', 'claude-switch-token']) assert.match(html, new RegExp(`data-testid="${id}"`), id);

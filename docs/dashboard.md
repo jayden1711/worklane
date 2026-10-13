@@ -135,7 +135,7 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 The Setup console page on the hub can open a terminal: a login shell as the machine's admin user. sudo in it asks for that user's password every time. It's off until the owner turns it on, and it's refused, with a plain message and an entry in the hub's audit log (`terminal-audit.jsonl` in the hub's state), unless all of these hold:
 
-- the person is the instance's owner, signed in with GitHub in the last 5 minutes;
+- the person is signed in and is the instance's owner, and the request carries the session's CSRF token (the page offers it as a WebSocket subprotocol, `csrf.<token>` beside `terminal.v1`, since a browser can't set headers on the upgrade; the hub answers with `terminal.v1` alone), from this site's origin;
 - the request comes from a Tailscale device the owner listed;
 - `sudo -n true` as the admin user fails, so sudo still needs a password.
 
@@ -178,7 +178,7 @@ sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--co
 
 The list goes to `/etc/worklane/machine-owners.json` (`{"owners": ["<login>", ...]}`, root:root 0644; `src/machine-owners.ts`). A rerun without `--machine-owner` keeps it. A machine change from the dashboard (Settings, or a root step) needs all of:
 - the instance's owner, who is also a machine owner;
-- a GitHub sign-in in the last 5 minutes;
+- a signed-in session, with its CSRF token;
 - one of the console's allowed devices (`--console-devices`), as the hub identifies it for the terminal.
 
 The instance's dashboard checks these before it records the request, and the coordinator checks the machine owner again before it runs it. The break-glass (port 4398, on the machine) is still allowed. An instance owner who isn't a machine owner sees the machine settings read-only, with the machine owners' logins. With no file (or one anyone but root may write), there are no machine owners, and only the break-glass may change the machine.
@@ -187,7 +187,7 @@ The first install sets the first machine owner: `sudo bash scripts/bootstrap.sh 
 
 ## Add project
 
-The Setup console's **Add project** sets up a new instance on this machine: a name (`^[a-z][a-z0-9-]{0,20}$`) and the GitHub repo (`owner/name`), checked in the page and again on the server. It's enabled only for an owner of the instance you're on who is a machine owner, signed in with GitHub in the last 5 minutes, on one of the console's allowed devices (the same rules as a machine change, above). Anyone else sees it disabled, with the reason and the machine owners' logins.
+The Setup console's **Add project** sets up a new instance on this machine: a name (`^[a-z][a-z0-9-]{0,20}$`) and the GitHub repo (`owner/name`), checked in the page and again on the server. It's enabled only for an owner of the instance you're on who is a machine owner, signed in, on one of the console's allowed devices (the same rules as a machine change, above). Anyone else sees it disabled, with the reason and the machine owners' logins.
 
 A submit is recorded as the machine request `add-project <name> <owner/repo>` (`POST /api/machine/add-project`; the view is `GET /api/add-project`, `src/console/add-project.ts`), with an audit entry; a refused one is audited too. The dashboard never runs it. The coordinator runs the machine helper, which runs the installed engine's `scripts/setup/add-project.sh` as root. One project at a time.
 
@@ -211,7 +211,7 @@ The switch:
 5. **Checks** each agent user with `claude auth status`, run as that user.
 6. **Resumes** each instance whose users all passed, and reports each instance's result. An instance whose check failed stays paused. The script remembers it, so once you've fixed the problem a rerun resumes it. Rerunning is always safe. A resumed instance on the new login also ends its Claude usage-limit pause, if it had one (`usage.resumed`, reason "account switched", and its watchdog incident resolved), since the old account's limit no longer applies; one resumed on its current login (no token came) stays paused until the reset.
 
-From the dashboard, the Machine page's **Claude account** card shows the same status. It's visible only to machine owners: the server refuses everyone else its data (`GET /api/claude-account`, `src/claude-account.ts`). **Refresh** and **Switch account** are the machine requests `claude-account status` and `claude-account switch`, gated like any machine change (an owner here who is a machine owner, freshly signed in, on an allowed device). The machine helper starts the switch as its own unit, `worklane-claude-account.service`, because the switch stops that coordinator too. The card follows the switch step by step from the script's progress file, `/var/lib/worklane/claude-account/switch.jsonl`. When the switch asks for the token, a password box appears in the dashboard of the instance that started it. The pasted token is stored for that instance's coordinator user only (0400). The script reads it once, as root, and deletes it. The token is never in an event, a response or the audit, which records only that a token was stored. The machine helper's sudoers rule needs rerunning once to allow `claude-account` (`machine-helper.sh` with every instance).
+From the dashboard, the Machine page's **Claude account** card shows the same status. It's visible only to machine owners: the server refuses everyone else its data (`GET /api/claude-account`, `src/claude-account.ts`). **Refresh** and **Switch account** are the machine requests `claude-account status` and `claude-account switch`, gated like any machine change (an owner here who is a machine owner, signed in, on an allowed device). The machine helper starts the switch as its own unit, `worklane-claude-account.service`, because the switch stops that coordinator too. The card follows the switch step by step from the script's progress file, `/var/lib/worklane/claude-account/switch.jsonl`. When the switch asks for the token, a password box appears in the dashboard of the instance that started it. The pasted token is stored for that instance's coordinator user only (0400). The script reads it once, as root, and deletes it. The token is never in an event, a response or the audit, which records only that a token was stored. The machine helper's sudoers rule needs rerunning once to allow `claude-account` (`machine-helper.sh` with every instance).
 
 ## The Board
 
