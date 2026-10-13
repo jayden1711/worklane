@@ -174,7 +174,9 @@ exec_run() {
   inaccessible="-$sock_dir -$root/docker -$root/docker-home"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
   # The unit's own name carries the run id, so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
-  # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier.
+  # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
+  # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
+  # the run's stdout as its own and reads systemd-run's summary only as the final block of stderr.
   exec systemd-run --wait --pipe --collect \
     --unit="worklane-test-$name-$id-$$" --slice="$SLICE" --uid="$user" --gid="$user" \
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
@@ -229,10 +231,17 @@ probe_bundle() {
   rm -rf "$t"
 }
 
+# The sandbox probe passed: it exited 0, and its own stdout has the line "probed" and no "open " line. Only its
+# stdout: systemd-run prints its unit line and its summary on stderr (not --quiet), which a run shares under --pipe.
+probe_passed() {
+  local rc="$1" out="$2"
+  [ "$rc" -eq 0 ] && grep -qx probed <<<"$out" && ! grep -q '^open ' <<<"$out"
+}
+
 # PASS when the test user can't read, write or enter each protected path, as itself and inside the sandbox. A probe
 # that can't run is a FAIL, never a pass.
 check() {
-  local fail=0 groups p out id
+  local fail=0 groups p out id err rc=0
   [ "$#" -eq 0 ] || die "usage: check"
   groups="$(id -nG "$user")"
   if [ "$groups" = "$user" ]; then echo "PASS $user is in its own group only"; else echo "FAIL $user's groups: $groups"; fail=1; fi
@@ -242,13 +251,15 @@ check() {
     out="$(cd / && runuser -u "$user" -- sh -c 'if [ -r "$1" ] || [ -w "$1" ] || { [ -d "$1" ] && [ -x "$1" ]; }; then echo open; else echo denied; fi' _ "$p" 2>/dev/null || true)"
     if [ "$out" = denied ]; then echo "PASS $user can't reach $p"; else echo "FAIL $user can reach $p (${out:-the probe did not run})"; fail=1; fi
   done < <(protected_paths)
-  # The same, inside the sandbox a run gets: a probe run, wiped after.
+  # The same, inside the sandbox a run gets: a probe run, wiped after. Its stdout and systemd-run's stderr apart.
   id="probe-$$"
+  err="$(mktemp)"
   probe_bundle "$id" | create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" >/dev/null
-  out="$( (exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; echo probed; exit $n' <<<"$(protected_paths)") 2>&1 || true)"
+  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
   wipe "$id" >/dev/null || { echo "FAIL the probe run was not wiped"; fail=1; }
-  if [ "$(tail -n1 <<<"$out")" = probed ] && ! grep -q '^open ' <<<"$out"; then echo "PASS a sandboxed run reaches none of them"
-  else echo "FAIL in the sandbox: ${out:-the probe did not run}"; fail=1; fi
+  if probe_passed "$rc" "$out"; then echo "PASS a sandboxed run reaches none of them"
+  else echo "FAIL in the sandbox (exit $rc): ${out:-the probe printed nothing}"; sed 's/^/  stderr: /' "$err"; fail=1; fi
+  rm -f "$err"
   [ "$fail" -eq 0 ] && echo "OK" || echo "FAILED"
   return "$fail"
 }

@@ -192,7 +192,8 @@ test('isolation: the test user\'s access checks fail closed; a path it can reach
   // that printed nothing (didn't run) is a FAIL too.
   const helper = readFileSync(helperSrc, 'utf8');
   assert.match(helper, /if \[ "\$out" = denied \]; then echo "PASS/);
-  assert.match(helper, /if \[ "\$\(tail -n1 <<<"\$out"\)" = probed \] && ! grep -q '\^open ' <<<"\$out"; then echo "PASS a sandboxed run reaches none of them"/);
+  assert.match(helper, /if probe_passed "\$rc" "\$out"; then echo "PASS a sandboxed run reaches none of them"/);
+  assert.match(helper, /2>"\$err"\)" \|\| rc=\$\?/, 'the probe\'s stdout apart from systemd-run\'s stderr');
 });
 
 /** The helper's argument checks, run alone (the helper itself needs root and the test user). */
