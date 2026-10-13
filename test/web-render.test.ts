@@ -719,6 +719,20 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
 });
 
+test('bootstrap merges on the Machine page: an admin gets the accept field, a writer the list read-only, a viewer neither', () => {
+  const sha = 'c'.repeat(40);
+  const accepted = [{ id: 'a1', sha: null, pr: 22, head: 'd'.repeat(40), by: 'example-owner', reason: "suite can't run yet", at: new Date().toISOString(), appliedTo: sha }];
+  const watch = { mode: 'main_watch' as const, detail: '', lastChecked: null, alert: null, stopped: null, canClear: false, accepted };
+  const admin = r.renderProtection({ ...watch, canAccept: true }, BRAND.name);
+  assert.match(admin, /data-testid="main-watch-accept-target"/);
+  assert.match(admin, /data-testid="main-watch-accept-submit"[^>]*>Accept as bootstrap merge/);
+  assert.match(admin, /#22 at dddddddd[\s\S]*suite can&#x27;t run yet[\s\S]*accounted: cccccccc/);
+  const writer = r.renderProtection({ ...watch, canAccept: false }, BRAND.name);
+  assert.match(writer, /data-testid="main-watch-accepted-row"/, 'the list');
+  assert.doesNotMatch(writer, /main-watch-accept-target|Accept as bootstrap merge/, 'read-only');
+  assert.doesNotMatch(r.renderProtection({ mode: 'main_watch' }, BRAND.name), /main-watch-accepted/, "a viewer's: the mode only");
+});
+
 test('a chat answer: citations as links, a draft preview with a two-step file, proposals that open their confirm flows, read-only for others', () => {
   const answer = {
     turn: 't1',
