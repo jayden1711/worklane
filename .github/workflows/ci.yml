@@ -425,8 +425,10 @@ jobs:
           sudo -u wl-ci sudo -n "$HELPER" claude-account switch < /dev/null | tee "$F/helper-switch.txt"
           grep -q 'started the Claude account switch as worklane-claude-account.service' "$F/helper-switch.txt"
           s=/var/lib/worklane/claude-account/switch.jsonl
-          for _ in $(seq 1 60); do grep -q '"step":"token","state":"ask"' "$s" 2>/dev/null && break; sleep 2; done
-          grep '"step":"token","state":"ask"' "$s" | grep -q "in ci's dashboard"
+          # The unit starts on its own: until it has, switch.jsonl is still the last switch's (its own token ask included).
+          asked() { grep '"step":"token","state":"ask"' "$s" 2>/dev/null | grep -q "in ci's dashboard"; }
+          for _ in $(seq 1 60); do asked && break; sleep 2; done
+          asked || { cat "$s"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; exit 1; }
           # What the dashboard does with a pasted token: the coordinator user's own file, 0400, renamed into place (src/console/secrets.ts).
           sudo -H -u wl-ci sh -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/.t.tmp"; chmod 0400 "$d/.t.tmp"; mv "$d/.t.tmp" "$d/claude-account-token"' < "$F/claude-token3"
           for _ in $(seq 1 150); do grep -q '"step":"switch","state":"\(done\|failed\)"' "$s" && break; sleep 2; done
