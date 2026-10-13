@@ -23,7 +23,7 @@ function repo() {
   git('init', '-q', '-b', 'main');
   for (const [k, v] of [['user.name', 'Ada'], ['user.email', 'ada@example.com'], ['commit.gpgsign', 'false']]) git('config', k!, v!);
   const real = JSON.parse(readFileSync(join(repoRoot, '.denylist.json'), 'utf8')) as { patterns: string[] };
-  writeFileSync(join(dir, '.denylist.json'), JSON.stringify({ hashed: [sha('secretproject')], patterns: real.patterns }));
+  writeFileSync(join(dir, '.denylist.json'), JSON.stringify({ hashed: [sha('secretproject'), sha('otherhandle')], patterns: real.patterns }));
   writeFileSync(join(dir, 'README.md'), 'hello\n');
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
@@ -95,4 +95,66 @@ test('push gate --range checks exactly the given commits (CI mode)', { skip }, (
   assert.notEqual(p.status, 0);
   assert.match(p.stderr, /denied term "secretproject"/);
   assert.equal(spawnSync('node', [gate, '--range', 'nonsense..HEAD'], { cwd: r.dir, encoding: 'utf8' }).status, 1, 'an unresolvable range refuses');
+});
+
+/** The gate over base..HEAD with GITHUB_REPOSITORY set to `ghRepo`, or unset (CI sets the real one). */
+function gateRange(dir: string, base: string, ghRepo?: string) {
+  const env = { ...process.env };
+  delete env.GITHUB_REPOSITORY;
+  if (ghRepo) env.GITHUB_REPOSITORY = ghRepo;
+  return spawnSync('node', [gate, '--range', `${base}..HEAD`], { cwd: dir, encoding: 'utf8', env });
+}
+
+/** A real merge commit on main with message `msg`, the way GitHub's merge button makes one. */
+function merged(msg: string) {
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  r.git('checkout', '-q', '-b', 'topic');
+  r.commit('ok.md', 'fine\n', 'fine');
+  r.git('checkout', '-q', 'main');
+  r.git('merge', '-q', '--no-ff', 'topic', '-m', msg);
+  return { ...r, run: (ghRepo?: string) => gateRange(r.dir, base, ghRepo) };
+}
+
+// "secretproject" (a hashed denied term) plays the repo owner's handle; "otherhandle" is another denied handle.
+const own = 'secretproject/repo';
+
+test('push gate allows the repo owner in GitHub\'s merge subject (owner from GITHUB_REPOSITORY)', { skip }, () => {
+  const p = merged('Merge pull request #12 from secretproject/feat/x\n\nApproved.').run(own);
+  assert.equal(p.status, 0, p.stderr);
+});
+
+test('push gate takes the repo owner from the origin URL when GITHUB_REPOSITORY is unset', { skip }, () => {
+  const r = merged('Merge pull request #12 from secretproject/feat/x');
+  r.git('remote', 'set-url', 'origin', 'https://github.com/secretproject/repo.git');
+  assert.equal(r.run().status, 0);
+  r.git('remote', 'set-url', 'origin', 'ssh://git@github.com/secretproject/repo.git');
+  assert.equal(r.run().status, 0);
+});
+
+test('push gate still refuses the owner\'s handle anywhere else in a merge message', { skip }, () => {
+  const p = merged('Merge pull request #12 from secretproject/feat/x\n\nThanks secretproject.').run(own);
+  assert.notEqual(p.status, 0);
+  assert.match(p.stderr, /COMMIT_MSG:3: denied term "secretproject"/);
+  assert.doesNotMatch(p.stderr, /COMMIT_MSG:1:/);
+});
+
+test('push gate refuses a different denied owner, another denied term in the subject, or no known owner', { skip }, () => {
+  const other = merged('Merge pull request #12 from otherhandle/feat/x').run(own);
+  assert.notEqual(other.status, 0);
+  assert.match(other.stderr, /COMMIT_MSG:1: denied term "otherhandle"/);
+  const branch = merged('Merge pull request #12 from secretproject/fix-otherhandle').run(own);
+  assert.notEqual(branch.status, 0);
+  assert.match(branch.stderr, /COMMIT_MSG:1: denied term "otherhandle"/);
+  const unknown = merged('Merge pull request #12 from secretproject/feat/x').run();
+  assert.notEqual(unknown.status, 0, 'a local origin names no owner, so nothing is allowed');
+  assert.match(unknown.stderr, /COMMIT_MSG:1: denied term "secretproject"/);
+});
+
+test('push gate allows the owner only in a real merge commit with the exact subject', { skip }, () => {
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  r.commit('ok.md', 'fine\n', 'Merge pull request #12 from secretproject/feat/x');
+  assert.notEqual(gateRange(r.dir, base, own).status, 0, 'a plain commit wearing the merge subject gets no allowance');
+  assert.notEqual(merged('Merge pull request #12 from secretproject/feat/x by hand').run(own).status, 0, 'only the exact GitHub subject');
 });
