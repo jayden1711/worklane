@@ -5,13 +5,14 @@
 // decision or change config. The coordinator carries out the action.
 import type { Candidate } from './dedupe.js';
 import type { IncomingReport } from './report.js';
+import { issueParts } from '../backlog/types.js';
 import { checkDraft, type Triage } from './triage.js';
 
 export type IntakeAction =
   /** Trusted sender, valid draft: file it with `ready`. */
   | { action: 'file'; title: string; body: string; labels: string[] }
   /** Untrusted sender, valid draft: an Inbox decision for the owner (approve / edit / reject). */
-  | { action: 'decision'; title: string; body: string; options: ['approve', 'edit', 'reject'] }
+  | { action: 'decision'; title: string; body: string; options: ['approve', 'edit', 'reject']; labels: string[] }
   /** Same bug as an open issue: a comment there listing this report. */
   | { action: 'comment'; issue: number; body: string }
   /** Same as a recent report with no issue yet: group them. */
@@ -43,7 +44,18 @@ function reportSection(report: IncomingReport, redacted: string, triage: Triage)
   return `**Reported via ${report.source}** at ${report.receivedAt}:\n\n> ${excerpt(redacted).replace(/\n/g, '\n> ')}${repro}`;
 }
 
-export function decide(o: { report: IncomingReport; redacted: string; triage: Triage; trusted: boolean; shown: Candidate[] }): IntakeAction {
+/** The money-path files a draft's Sources name (paths matched against the project's money paths). */
+export function moneyPathFiles(body: string, moneyPaths: RegExp[]): string[] {
+  if (!moneyPaths.length) return [];
+  const sources = issueParts(body).Sources ?? '';
+  const paths = sources
+    .split(/[\s`'"(),;<>[\]]+/)
+    .map((w) => w.replace(/^\.\//, '').replace(/[.:]+$/, ''))
+    .filter((w) => /[/.]/.test(w) && !/^https?:/.test(w));
+  return [...new Set(paths.filter((p) => moneyPaths.some((re) => re.test(p))))];
+}
+
+export function decide(o: { report: IncomingReport; redacted: string; triage: Triage; trusted: boolean; shown: Candidate[]; moneyPaths?: RegExp[] }): IntakeAction {
   const { report, redacted, triage, trusted, shown } = o;
   // A duplicate or group target counts only if it was one of the candidates the agent was shown.
   const dupOk = triage.duplicate_of !== undefined && shown.some((c) => c.issue === triage.duplicate_of);
@@ -63,10 +75,14 @@ export function decide(o: { report: IncomingReport; redacted: string; triage: Tr
   const check = checkDraft(triage.draft);
   // A draft that can't be filed as written is a report we need more about, never an issue or a silent drop.
   if (!check.ok) return { action: 'reply', text: NEEDS_INFO_REPLY, refused: check.why };
-  const body = `${triage.draft.body.trim()}\n\n---\n${reportSection(report, redacted, triage)}`;
+  // A draft whose Sources name a money-path file is high-risk: the money-path label takes its work to L3 (review.ts).
+  const money = moneyPathFiles(triage.draft.body, o.moneyPaths ?? []);
+  const risk = money.length ? `\n\n**High risk:** names money-path files (${money.slice(0, 5).map((f) => `\`${f}\``).join(', ')}), so its work waits for the owner (L3).` : '';
+  const body = `${triage.draft.body.trim()}\n\n---\n${reportSection(report, redacted, triage)}${risk}`;
   const kindLabel = KIND_LABEL[triage.kind];
-  if (trusted) return { action: 'file', title: triage.draft.title, body, labels: ['ready', ...(kindLabel ? [kindLabel] : [])] };
-  return { action: 'decision', title: triage.draft.title, body, options: ['approve', 'edit', 'reject'] };
+  const labels = [...(kindLabel ? [kindLabel] : []), ...(money.length ? ['money-path'] : [])];
+  if (trusted) return { action: 'file', title: triage.draft.title, body, labels: ['ready', ...labels] };
+  return { action: 'decision', title: triage.draft.title, body, options: ['approve', 'edit', 'reject'], labels };
 }
 
 export type Stage = 'filed' | 'merged' | 'deployed';
