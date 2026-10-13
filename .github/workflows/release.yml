@@ -1,0 +1,177 @@
+name: release
+# The npm release: a v* tag -> build -> test -> pack -> the tarball installed and run (npx, and init from it against
+# a scratch repo) -> npm publish with provenance. It publishes for real only on a v* tag whose version is
+# package.json's, with the repo variable NPM_PUBLISH set to 'true', through npm's trusted publishing (OIDC: no npm
+# token, no secret). Anything else is a dry run (npm publish --dry-run). The owner sets that up once: the npm org,
+# trusted publishing for this repo's release.yml, then NPM_PUBLISH=true.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  # A change to the release path itself proves it here first (never publishing: that needs a tag).
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - package.json
+      - package-lock.json
+      - src/npx-engine.ts
+      - src/init.ts
+      - test/package-files.test.ts
+      - test/release-workflow.test.ts
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: a tag names package.json's version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v="$(node -p "require('./package.json').version")"
+          [ "$GITHUB_REF_NAME" = "v$v" ] || { echo "tag $GITHUB_REF_NAME but package.json says $v" >&2; exit 1; }
+      - run: npm ci
+      - name: install gitleaks (the test suite runs the secret scan)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  ${f}" | sha256sum -c -
+          tar -xzf "$f" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run build:web
+      # After build:web, so the package tests see dist/web as it ships.
+      - run: npm test
+      - name: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          npm pack --pack-destination "$RUNNER_TEMP/pack" --json > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))[0];
+            const lines = [`## ${p.id}`, "", `${p.filename}: ${(p.size / 1024).toFixed(0)} KiB packed, ${(p.unpackedSize / 1024).toFixed(0)} KiB unpacked, ${p.entryCount} files`, "", "```"];
+            for (const f of p.files) lines.push(`${String(f.size).padStart(9)}  ${f.path}`);
+            lines.push("```");
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+            console.log(lines.slice(0, 3).join("\n"));
+          ' "$RUNNER_TEMP/pack.json"
+      - name: the tarball, installed into an empty folder and run (no build, no install scripts)
+        run: |
+          tgz="$(ls "$RUNNER_TEMP"/pack/*.tgz)"
+          t="$RUNNER_TEMP/try" && mkdir -p "$t" && cd "$t"
+          npm init -y > /dev/null
+          npm install --ignore-scripts --no-audit --no-fund "$tgz"
+          npx worklane --version
+          [ "$(npx worklane --version)" = "$(node -p "require('$GITHUB_WORKSPACE/package.json').version")" ]
+          npx worklane init --help
+          npx worklane init --help | grep -q '^usage: worklane init '
+          test -f node_modules/@worklane/cli/dist/web/index.html
+          test -f node_modules/@worklane/cli/scripts/setup/app-permissions.mjs
+          if [ -e node_modules/@worklane/cli/dist/test ]; then echo "the package holds the tests" >&2; exit 1; fi
+      - name: npm publish, a dry run
+        run: npm publish "$(ls "$RUNNER_TEMP"/pack/*.tgz)" --dry-run --access public
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package
+          path: ${{ runner.temp }}/pack/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  npx-init:
+    # `npx <the tarball> init` against a scratch repo, as someone with no checkout of the engine: npx runs it from its
+    # cache, init installs the engine under the prefix and goes on from there. No GitHub: the stand-in gh and claude
+    # (scripts/ci/stand-ins), as ci.yml's bootstrap job; gitleaks is missing, so init installs it (pinned, checked).
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: ${{ runner.temp }}/pack
+      - name: npx init, local mode, twice
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          tgz="$(ls "$RUNNER_TEMP"/pack/*.tgz)"
+          t="$RUNNER_TEMP/npx"
+          mkdir -p "$t" && cp -r examples/basic "$t/example" && git -C "$t/example" init -q
+          git -C "$t/example" remote add origin https://github.com/example-org/example-shop.git
+          export PATH="$GITHUB_WORKSPACE/scripts/ci/stand-ins:$PATH"
+          export npm_config_cache="$t/cache" WORKLANE_PREFIX="$t/prefix" WORKLANE_STATE_DIR="$t/state"
+          # Not from the checkout: the scratch folder, with the engine nowhere but in the tarball.
+          cd "$t"
+          npx --yes --package "$tgz" -- worklane init --mode local --yes "$t/example" | tee "$t/first.log"
+          grep -q "running from npx's cache" "$t/first.log"
+          grep -q 'all 6 steps done or skipped' "$t/first.log"
+          pkg="$t/prefix/lib/node_modules/@worklane/cli"
+          test -f "$pkg/dist/src/cli.js" && test -f "$pkg/dist/web/index.html"
+          grep -q "$pkg/dist/src/cli.js" "$t/example/.claude/settings.json"
+          if grep -q _npx "$t/example/.claude/settings.json"; then echo "the hooks call npx's cache" >&2; exit 1; fi
+          "$t/prefix/bin/worklane" doctor --root "$t/example" | tee "$t/doctor.log"
+          for id in tools claude github repo-config protection discord; do grep -Eq "^ok +setup $id: " "$t/doctor.log"; done
+          # Again, with no --mode and no terminal: nothing reinstalled, every step done earlier.
+          npx --yes --package "$tgz" -- worklane init "$t/example" < /dev/null | tee "$t/second.log"
+          grep -q 'is installed at .*: handing over to it' "$t/second.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$t/second.log"
+
+  publish:
+    needs: [build, npx-init]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm trusted publishing and provenance: the run's OIDC token, instead of an npm token.
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package
+          path: ${{ runner.temp }}/pack
+      - name: npm publish (with provenance, only on a v* tag with NPM_PUBLISH=true; otherwise a dry run)
+        env:
+          REAL: ${{ vars.NPM_PUBLISH == 'true' && startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          tgz="$(ls "$RUNNER_TEMP"/pack/*.tgz)"
+          if [ "$REAL" != true ]; then
+            echo "a dry run: publishing needs a v* tag and the repo variable NPM_PUBLISH=true (now: ${GITHUB_REF})"
+            npm publish "$tgz" --dry-run --access public
+            exit 0
+          fi
+          # Trusted publishing only: never a token from anywhere.
+          [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || { echo "no OIDC token for this run (id-token: write)" >&2; exit 1; }
+          [ -z "${NODE_AUTH_TOKEN:-}${NPM_TOKEN:-}" ] || { echo "an npm token is set: this workflow publishes through OIDC only" >&2; exit 1; }
+          # npm 11.5.1 is the first with trusted publishing.
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)' "$(npm --version)" \
+            || { echo "npm $(npm --version) predates trusted publishing (11.5.1)" >&2; exit 1; }
+          npm publish "$tgz" --provenance --access public
