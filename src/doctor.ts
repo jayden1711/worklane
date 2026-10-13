@@ -16,7 +16,8 @@ import { instanceTargets, planMigrations, projectConfigFiles, type Targets } fro
 import { projectStateDir } from './guardrails/context.js';
 import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
-import { liveChecklist, localInitFile, localRepo, newState, readInitState, serverInitFile, systemIo, unavailableIn, type InitIo, type Mode } from './init.js';
+import { localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
+import { checkSetup, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -202,23 +203,36 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
 }
 
 /**
- * init's checklist (src/init.ts), as doctor shows it: local mode's checkable steps checked now, the others as init
- * recorded them; then what the mode can't do, each with why. Nothing when init was never run and no mode is given,
- * except a line saying how to get the checklist.
+ * The setup steps (src/setup-steps.ts), as doctor shows them: every step that applies to the mode, checked live, the
+ * same checks and the same done or not done as the dashboard's first-run page. Then what the mode can't do, each
+ * with why. When init was never run and no mode is given, one line saying how to get the checklist.
  */
-export function setupChecks(root: string, opts: { instance?: string; mode?: Mode; initIo?: InitIo }): DoctorCheck[] {
+export function setupChecks(root: string, opts: { instance?: string; mode?: Mode; initIo?: InitIo; probe?: SetupProbe; context?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>> }): DoctorCheck[] {
   const state = opts.instance && opts.mode === 'server' ? readInitState(serverInitFile(opts.instance)) : readInitState(localInitFile(root));
   const mode = opts.mode ?? state?.mode;
   if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
-  const io = opts.initIo ?? systemIo({ interactive: false });
-  const s = state?.mode === mode ? state : newState(mode, root, null, opts.instance ?? null);
-  const items = liveChecklist({ mode, root: mode === 'local' ? root : null, repo: s.repo ?? (mode === 'local' ? localRepo(root) : null), instance: s.instance, prefix: '', io, state: s });
-  const out: DoctorCheck[] = items.map((i) => ({
-    name: `setup ${i.id}`,
-    level: i.status === 'done' || i.status === 'skipped' ? 'ok' : i.optional ? 'warn' : 'fail',
-    detail: `${i.title} (${mode} mode)${i.status === 'skipped' ? ', skipped' : i.status === 'pending' ? ', not done yet' : ''}: ${i.detail}${i.status === 'done' || i.status === 'skipped' || i.optional ? '' : `; \`${BRAND.cli} init\` picks up here`}`,
-  }));
-  for (const u of unavailableIn(mode, (c) => io.which(c) !== null)) out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
+  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run } : {}) };
+  const s = state?.mode === mode ? state : null;
+  // A server instance's own clone, state and policy; a checkout's own state.
+  let site = { root, stateDir: projectStateDir(root), policyFile: null as string | null };
+  const instance = opts.instance ?? s?.instance ?? null;
+  if (mode === 'server' && instance) {
+    try {
+      const i = loadInstance(instance);
+      site = { root: i.repo.path, stateDir: i.stateDir, policyFile: join(i.home, 'policy.yaml') };
+    } catch {
+      // its steps say it can't be read
+    }
+  }
+  const view = checkSetup({ ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context }, probe);
+  const out: DoctorCheck[] = view.groups.flatMap((g) =>
+    g.steps.map((i) => ({
+      name: `setup ${i.id}`,
+      level: stepLevel(i),
+      detail: `${i.title} (${mode} mode): ${i.detail}${i.done ? '' : `; today: ${i.today}`}`,
+    })),
+  );
+  for (const u of unavailableIn(mode, (c) => probe.which(c) !== null)) out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
   return out;
 }
 

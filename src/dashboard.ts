@@ -22,7 +22,7 @@ import type { EventPayload, StoredEvent } from './events/types.js';
 import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
-import { backlogFor, instanceEnv, instanceId, instanceTokens, siteForInstance, siteForRoot } from './service.js';
+import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { answerDecision, auditWrite } from './decide.js';
@@ -35,7 +35,7 @@ import { healthView } from './health.js';
 import { usageView } from './usage-limit.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { cpuCount, flockHolders } from './os/index.js';
+import { cpuCount, flockHolders, installService, serviceChange, type ServiceSpec } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
@@ -55,7 +55,9 @@ import { trustForViewer, trustView } from './trust.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
-import { firstRunView, INIT_FILE } from './init.js';
+import { engineRoot, firstRunLiveView, INIT_FILE } from './init.js';
+import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError } from './console/asks.js';
@@ -147,6 +149,39 @@ export interface DashboardOptions {
   machineOwnersFile?: string;
   /** Where claude-account.sh writes status.json and switch.jsonl (src/claude-account.ts); the system's when unset (tests). */
   claudeAccountDir?: string;
+  /** What the first-run page's live checks ask of the machine (src/setup-steps.ts); the real one when unset (tests). */
+  setupProbe?: SetupProbe;
+  /** The machine paths and instance facts those checks read (tests). */
+  setupContext?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
+  /** The first-run page's Start: installs and starts the coordinator's service; the OS adapter's installService when unset (tests). */
+  startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
+}
+
+/** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
+export type FirstRunStart =
+  /** Local mode: this user's own service, through the same spec as `up` (src/service.ts localServiceSpec). */
+  | { kind: 'local'; label: string; file: string; manager: string; commands: string[]; program: string[]; log: string }
+  /** A server instance: nothing here may start it; the command an owner runs, and why. */
+  | { kind: 'owner-command'; unit: string; command: string; why: string }
+  | { kind: 'unsupported'; why: string };
+
+export function firstRunStart(o: { root: string; cfg: Config; instance?: string | null }): FirstRunStart {
+  if (o.instance) {
+    const unit = instanceUnit(o.instance);
+    // The machine helper's commands run through the coordinator (src/machine-requests.ts), and the coordinator is the
+    // thing that isn't running: its add-project would start the unit, but nothing would pick the request up.
+    const helper = checkRootStep('add-project', [o.instance, o.cfg.project.project.repo]);
+    return {
+      kind: 'owner-command',
+      unit,
+      command: `sudo bash ${join(engineRoot(), 'scripts', 'setup', 'service.sh')} ${o.instance}`,
+      why: `the dashboard never runs sudo, and the machine helper's commands${helper.allowed ? ' (add-project would start it)' : ''} are run by the coordinator, which is what isn't running: an owner runs this at a root shell on the machine`,
+    };
+  }
+  const spec = localServiceSpec(o.root, o.cfg);
+  const change = serviceChange(spec.label);
+  if (!change) return { kind: 'unsupported', why: 'agents need macOS, Linux or WSL2; on native Windows run the coordinator on another machine' };
+  return { kind: 'local', label: spec.label, file: change.path, manager: change.manager, commands: change.commands, program: spec.program, log: spec.logFile };
 }
 
 /**
@@ -739,6 +774,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const repo = opts.cfg.project.project.repo;
   /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
+  /** The first-run page's live checks, kept between polls: local checks for 10 s, GitHub's for 2 min (its rate limit is shared). */
+  const setupCache: DetectCache = new Map();
+  let lastFresh = 0;
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -1108,10 +1146,34 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
-        // The first-run page: init's checklist as it recorded it (src/init.ts), and what this mode can't do. Read-only.
+        // The first-run page: every setup step checked live (src/setup-steps.ts, the same checks doctor runs), what init
+        // recorded, what this mode can't do, and what Start would change. Re-check (?fresh=1) checks everything again,
+        // at most every 3 s.
         if (url.pathname === '/api/first-run' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
-          return json(res, 200, firstRunView(join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null }));
+          const fresh = url.searchParams.get('fresh') === '1' && Date.now() - lastFresh > 3_000;
+          if (fresh) lastFresh = Date.now();
+          const live = { ...(opts.setupProbe ? { probe: opts.setupProbe } : {}), stateDir: opts.stateDir, policyFile: opts.policyFile ?? null, cache: setupCache, fresh, localMs: 10_000, netMs: 120_000, ...(opts.setupContext ? { context: opts.setupContext } : {}) };
+          const view = await firstRunLiveView(join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere });
+        }
+        // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
+        // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.
+        if (url.pathname === '/api/first-run/start' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { confirm?: unknown };
+          const plan = firstRunStart(opts);
+          const refused = (status: number, error: string, extra: Record<string, unknown> = {}) => {
+            audit(who, 'first_run.start_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error, ...extra });
+          };
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may start the coordinator; @${who.login} is a ${who.role}`);
+          if (plan.kind === 'owner-command') return refused(409, `not started from here: ${plan.why}`, { command: plan.command });
+          if (plan.kind === 'unsupported') return refused(409, plan.why);
+          if (body.confirm !== true) return refused(400, 'Start changes this machine: review the change it shows, then confirm it ({"confirm": true})');
+          const r = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          setupCache.delete('service');
+          audit(who, 'first_run.start', { label: plan.label, file: r.path, started: r.started, detail: r.detail.slice(0, 300) });
+          return json(res, r.started ? 200 : 500, r.started ? { ok: true, ...r } : { error: `not started: ${r.detail}`, ...r });
         }
         // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
         // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.

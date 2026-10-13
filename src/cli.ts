@@ -41,7 +41,7 @@ import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
 import { homeOf, openUrl, stateDir } from './os/index.js';
-import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
+import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, localServiceSpec, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -588,13 +588,7 @@ async function main(argv: string[]): Promise<number> {
         return r.started ? 0 : 1;
       }
       const cfg = loadConfig(root);
-      const r = installService({
-        label: serviceLabel(cfg),
-        program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--root', root],
-        workingDir: root,
-        logFile: join(projectStateDir(root), 'coordinator.log'),
-        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-      });
+      const r = installService(localServiceSpec(root, cfg));
       console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
       return r.started ? 0 : 1;
     }

@@ -258,15 +258,17 @@ test('init, server mode: as root only; tools are never installed; the Claude log
   assert.equal(await initCommand(ok.args({ target: 'not a repo', mode: 'server' }), ok.io, () => true), 2);
 });
 
-test('doctor: the same checklist (local steps checked live), and what the mode cannot do, each saying why; never a failure', async () => {
+test('doctor: every setup step of the registry checked live, and what the mode cannot do, each saying why; never a failure once init is done', async () => {
   const root = repo();
   const t = world();
   assert.equal(await initCommand(t.args({ target: root }), t.io), 0);
   const names = (cs: { name: string }[]) => cs.map((c) => c.name);
   const local = doctor(root, { initIo: t.io });
   const setup = local.filter((c) => c.name.startsWith('setup '));
-  assert.deepEqual(names(setup), ['setup tools', 'setup claude', 'setup github', 'setup repo-config', 'setup protection', 'setup discord']);
-  assert.ok(setup.every((c) => c.level === 'ok'), JSON.stringify(setup));
+  // The registry's local steps (src/setup-steps.ts), in its order (linger only where loginctl answers: Linux); what init's walk needs is done.
+  assert.deepEqual(names(setup).filter((n) => n !== 'setup linger'), ['setup engine', 'setup path', 'setup tools', 'setup docker', 'setup claude-login', 'setup gh-login', 'setup origin', 'setup default-branch', 'setup questions', 'setup config-on-main', 'setup hooks', 'setup owners', 'setup required-checks', 'setup agents-config', 'setup pre-commit', 'setup fingerprints', 'setup protection', 'setup deploy-gate', 'setup service']);
+  assert.ok(setup.every((c) => c.level !== 'fail'), JSON.stringify(setup));
+  for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.equal(setup.find((c) => c.name === `setup ${id}`)!.level, 'ok', id);
   const off = local.filter((c) => c.level === 'off');
   assert.deepEqual(names(off), ['not in local mode: separate OS users', 'not in local mode: root-run add-project', 'not in local mode: test sandbox']);
   assert.match(off[1]!.detail, /Add project runs scripts\/setup\/add-project\.sh as root through the machine helper, and local mode has neither root nor the helper/);
@@ -279,9 +281,9 @@ test('doctor: the same checklist (local steps checked live), and what the mode c
   assert.deepEqual(unavailableIn('server'), []);
   // Live: signed out of Claude since, doctor says so and where init picks up.
   t.w.claudeIn = false;
-  const c = doctor(root, { initIo: t.io }).find((x) => x.name === 'setup claude')!;
+  const c = doctor(root, { initIo: t.io }).find((x) => x.name === 'setup claude-login')!;
   assert.equal(c.level, 'fail');
-  assert.match(c.detail, /Claude login \(local mode\): not signed in, per `claude auth status`; `worklane init` picks up here/);
+  assert.match(c.detail, /Signed in to Claude \(local mode\): not signed in, per `claude auth status`; today: Run `claude auth login` in a terminal, then `worklane init` again/);
   // Never run: one line saying how, nothing else.
   const fresh = exampleProject().dir;
   const none = doctor(fresh, { initIo: t.io }).filter((x) => x.name.startsWith('setup') || x.level === 'off');
@@ -340,12 +342,12 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   assert.doesNotMatch(second.stdout, /kept \.worklane|installed /, 'nothing done twice');
   const doc = cli('doctor', '--root', root);
   assert.equal(doc.status, 0, doc.stdout + doc.stderr);
-  for (const id of ['tools', 'claude', 'github', 'repo-config', 'protection', 'discord']) assert.match(doc.stdout, new RegExp(`^ok {4}setup ${id}: `, 'm'));
+  for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.match(doc.stdout, new RegExp(`^ok {4}setup ${id}: `, 'm'));
   assert.match(doc.stdout, /^off {3}not in local mode: separate OS users: /m);
   // Signed out since: doctor fails, naming the step.
   const out = spawnSync(process.execPath, [engineCli, 'doctor', '--root', root], { encoding: 'utf8', env: { ...env, STANDIN_SIGNED_OUT: '1' } });
   assert.equal(out.status, 1);
-  assert.match(out.stdout, /^FAIL {2}setup claude: Claude login \(local mode\): not signed in/m);
+  assert.match(out.stdout, /^FAIL {2}setup claude-login: Signed in to Claude \(local mode\): not signed in/m);
 });
 
 test("down on a Mac: launchd still listing the agent after bootout (as on the macOS runner) is waited out, booted out again by its plist, and never reported gone while it isn't", () => {

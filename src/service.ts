@@ -35,6 +35,7 @@ import { batchTestRuns, setupTestRuns, type TestRunSetup } from './testrun/setup
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
+import type { ServiceSpec } from './os/index.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
 import { GitHubMainWatchApi } from './github/main-watch-api.js';
@@ -49,6 +50,23 @@ export const INSTANCE_UMASK = 0o007;
 export const instanceId = () => `${userInfo().username}@${hostname().split('.')[0]}`;
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
+
+/**
+ * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
+ * one spec, so the two can't start it differently.
+ */
+export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env): ServiceSpec {
+  return {
+    label: serviceLabel(cfg),
+    program: [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
+    workingDir: root,
+    logFile: join(projectStateDir(root), 'coordinator.log'),
+    env: { PATH: env.PATH ?? '', HOME: env.HOME ?? '' },
+  };
+}
+
+/** An instance's coordinator unit on a server (scripts/setup installs it as root). */
+export const instanceUnit = (name: string) => `${BRAND.cli}-${name}.service`;
 
 export function backlogFor(cfg: Config, root: string, state = projectStateDir(root), token?: () => Promise<string>): Backlog {
   return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo, token) : new FileBacklog(join(state, 'backlog.json'));

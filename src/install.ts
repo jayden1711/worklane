@@ -86,12 +86,14 @@ function readJson(path: string): Settings {
 
 export function gitRemoteRepo(root: string): string | null {
   try {
-    const url = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim();
-    return url.match(/github\.com[:/]([^/]+\/[^/.]+?)(?:\.git)?$/)?.[1] ?? null;
+    return githubRepoOf(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }));
   } catch {
     return null;
   }
 }
+
+/** owner/name from a GitHub remote URL (https or ssh); null for anything else. */
+export const githubRepoOf = (url: string): string | null => url.trim().match(/github\.com[:/]([^/]+\/[^/.]+?)(?:\.git)?$/)?.[1] ?? null;
 
 /**
  * The engine as installed in the project's node_modules, if present. Preferred

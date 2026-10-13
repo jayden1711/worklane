@@ -699,7 +699,54 @@ export interface FirstRun {
   command: string;
   /** Auto-config (src/auto-config.ts): its open questions with their choices, each command's run on the default branch, the setup PR. */
   autoConfig: FirstRunAutoConfig | null;
+  /** Every setup step that applies to the mode, checked live (src/setup-steps.ts); doctor shows the same. */
+  setup: SetupView | null;
+  /** What Start would change, shown before it does anything. */
+  start: FirstRunStart;
+  /** Whether this viewer may press Start (the instance's owners). */
+  canStart: boolean;
 }
+/** How the page fixes a step that isn't done (src/setup-steps.ts Fix). */
+export type SetupFix =
+  | { kind: 'screen'; path: string; label: string }
+  | { kind: 'coming' }
+  | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
+  | { kind: 'terminal'; command: string; why: string }
+  | { kind: 'start' };
+export interface SetupStepView {
+  id: string;
+  group: string;
+  rows: number[];
+  title: string;
+  optional: boolean;
+  /** Nothing runs without it: doctor fails until it's done. */
+  blocks: boolean;
+  reach: 'all' | 'most' | 'some' | 'few';
+  done: boolean;
+  detail: string;
+  today: string;
+  fix: SetupFix;
+  network: boolean;
+  checkedAt: string;
+}
+export interface SetupGroupView {
+  id: string;
+  title: string;
+  optional: boolean;
+  done: boolean;
+  steps: SetupStepView[];
+}
+export interface SetupView {
+  mode: 'local' | 'server';
+  groups: SetupGroupView[];
+  done: number;
+  total: number;
+  requiredLeft: number;
+}
+export type FirstRunStart =
+  | { kind: 'local'; label: string; file: string; manager: string; commands: string[]; program: string[]; log: string }
+  | { kind: 'owner-command'; unit: string; command: string; why: string }
+  | { kind: 'unsupported'; why: string };
 export interface FirstRunQuestion {
   id: string;
   ask: string;
@@ -724,7 +771,9 @@ export interface FirstRunAutoConfig {
   /** The command that answers a question. */
   answer: string;
 }
-export const getFirstRun = () => api<FirstRun>('/api/first-run');
+export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fresh ? '?fresh=1' : ''}`);
+/** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
+export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
  * The name and repo add-project takes: the same rules as the server's and the machine helper's (addProjectNameOk and
