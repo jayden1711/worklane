@@ -125,7 +125,7 @@ The smaller of the two is 2 (`recommendTestSlots`). Give `worklane-test.slice` t
 3. **root** `sudo bash scripts/setup/test-user.sh install <name> --cpus <list> --memory-max <size>`. It checks the boundaries as the test user before installing anything else, and everything again at the end.
 4. **root** `sudo bash scripts/setup/machine-helper.sh <every instance>` again, so the coordinators may run `set-test-slots`.
 5. **owner** In the App's settings, add **Checks: read & write**, then accept the new permission on the installation. Then restart the instance: it records the permission at start.
-6. **owner** Once the checks show on PRs, require them in the branch protection.
+6. **owner** Once the checks show on PRs, require them in the branch protection (not strict, unless `config.yaml` `protection.strict` opts the repo in).
 
 ## Check
 
