@@ -60,7 +60,7 @@ async function serve() {
   writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 2, max_test_runs: 3 }));
   writeFileSync(join(slots, 'test-0.lock'), JSON.stringify({ pid: process.pid, owner: 'wl-site test run full-r', acquiredAt: new Date().toISOString() }));
   const cfg = loadConfig(root);
-  cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+  cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
   const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: slots, actor: 'wl-site', pollMs: 50, testRunLock: join(dir, 'full-run.lock') });
   const base = d.url.split('/?')[0]!;
   const get = async <T>(path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<T>;

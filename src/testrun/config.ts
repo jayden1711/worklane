@@ -37,6 +37,11 @@ export const TestRunTier = z
     database: z.boolean().default(false),
     /** A full tier that splits across shards with {shard_index}/{shard_total}; any other tier runs in the first shard only. */
     shardable: z.boolean().default(false),
+    /**
+     * Needs the directories tests.yaml checkout.sparse_exclude leaves out: a run with this tier checks the whole tree
+     * out (every tier of that run shares its workspace).
+     */
+    full_checkout: z.boolean().default(false),
     timeout_s: z.number().int().min(30).max(6 * 3600).default(1800),
   })
   .refine((t) => !t.shardable || t.kind === 'full', { message: 'only a full tier can be sharded', path: ['shardable'] })

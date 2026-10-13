@@ -257,7 +257,7 @@ roles:
   - **The coordinator only ever touches worktrees it created**, tracked in the log. Other sessions' worktrees are never listed or removed.
   - Project setup steps come from `tests.yaml` `worktree.setup`. Typical steps: symlink `node_modules`, run code generators, install sub-package dependencies.
   - Every worktree is a `git worktree add` of the instance's one checkout, so all of an instance's agents share one object store: starting a task copies no history.
-  - `tests.yaml` `checkout.sparse_exclude` lists directories no agent or test reads (design files, art): they are left out of every agent worktree (sparse checkout), never out of the repo.
+  - `tests.yaml` `checkout.sparse_exclude` lists directories no agent or test reads (design files, art): they are left out of every agent worktree and test-run workspace (sparse checkout), never out of the repo. A test-run tier that needs them sets `full_checkout: true`. Test runs share an object store of their own per instance (docs/test-runs.md): each run is sent only the objects the store lacks.
   - With `worktree.pool`, worktrees wait on main with setup done. `worktree.setup_key` names the files that pin what setup installs (the lockfiles, an ORM schema): when main moves and none of them changed, a pooled worktree follows main by a checkout in place and keeps its install, instead of being set up again. Each is set up on main only and handed to one task, never back, so no task's change reaches another's dependencies.
   - A worktree is deleted right after landing or abandonment, and deletion is verified by `git worktree list` plus a path check.
 - **Watchdog:**

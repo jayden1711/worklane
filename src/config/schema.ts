@@ -414,8 +414,9 @@ export const TestsConfig = z.strictObject({
   checkout: z
     .strictObject({
       /**
-       * Directories left out of every agent worktree (sparse checkout), e.g. design files and art no agent or test
-       * reads. They stay in the repo. The project's checks run in the worktree too: leave out only what they never read.
+       * Directories left out of every agent worktree and test-run workspace (sparse checkout), e.g. design files and
+       * art no agent or test reads. They stay in the repo. The project's checks run in the worktree too: leave out
+       * only what they never read. A test-run tier that needs them sets `full_checkout`.
        */
       sparse_exclude: SparseExclude,
     })

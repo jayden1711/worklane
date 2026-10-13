@@ -1,7 +1,8 @@
 // tests.yaml `checkout.sparse_exclude`: directories a project keeps out of the checkouts the harness makes for its
-// work (each agent's worktree), e.g. design files, art and other binaries no agent or test reads. They stay in the
-// repo and its history; they are just never written to those working trees, so making one is faster and smaller.
-// The project's own checks run in the agent's worktree too: leave out only what they don't read.
+// work (each agent's worktree, each test run's workspace), e.g. design files, art and other binaries no agent or
+// test reads. They stay in the repo and its history; they are just never written to those working trees, so making
+// one is faster and smaller. The project's own checks run in the agent's worktree too: leave out only what they
+// don't read. A test-run tier that needs them says `full_checkout: true` (test_run.tiers).
 //
 // Non-cone sparse checkout ("/*" then "!/<dir>/" per directory): everything, minus those directories.
 import { execFileSync } from 'node:child_process';
@@ -11,12 +12,13 @@ import { z } from 'zod';
 
 /**
  * A directory left out, relative to the repo root: plain path characters only (no glob, no quote, no space), not
- * starting with "-", no "." or ".." or empty segment, so it goes into a sparse pattern (and a command's arguments)
- * as written.
+ * starting with "-", no "." or ".." or empty segment, so it goes into a sparse pattern and the test-run helper's
+ * arguments as written. The sandbox helper checks each with the same rule (scripts/machine/<cli>-testrun.sh
+ * valid_dir; a test keeps the two alike).
  */
 export const SPARSE_DIR = /^[A-Za-z0-9._@+][A-Za-z0-9._@+/-]{0,199}$/;
 
-/** The most directories a project may leave out. */
+/** The most directories a project may leave out (each is one argument to the helper, which takes at most this). */
 export const SPARSE_MAX = 32;
 
 /** `docs/design/` and `docs/design` are the same directory: no trailing slash. */

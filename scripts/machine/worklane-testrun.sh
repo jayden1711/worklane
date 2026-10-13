@@ -4,7 +4,10 @@
 # <name> only, so an instance reaches its own test user and nothing else. Every other argument is checked here,
 # before anything is read or written. docs/test-runs.md has the why of each choice.
 #
-#   worklane-testrun <name> create <id> <branch> <head> <base> a new run: its workspace, a clone from a bundle on stdin
+#   worklane-testrun <name> create <id> <branch> <head> <base> <head sha> <base sha> [<dir>]...
+#                                                             a new run: what the bundle on stdin carries goes into the
+#                                                             object store, then a workspace reading it, <dir>s left out
+#   worklane-testrun <name> store-tips                        the commits the object store keeps (one a line)
 #   worklane-testrun <name> file <id> changed-files           the change's paths (stdin) for {changed_files}
 #   worklane-testrun <name> cache <cache> <key>               a cache's directory for this key (printed)
 #   worklane-testrun <name> shared <dir>                      a directory all runs share, never wiped (printed)
@@ -14,6 +17,11 @@
 #   worklane-testrun <name> wipe <id>                         the run's units, containers, volumes and files
 #   worklane-testrun <name> check                             the boundaries, as the test user and in the sandbox
 #   worklane-testrun <name> version                           this helper's protocol version (an integer)
+#
+# The object store ($BASE/<name>/store) is a bare repo of the test user's: every run's workspace reads its objects
+# through alternates, and each run's bundle carries only what the store lacks. create fetches into it as the test
+# user, before anything of the run's runs; a run's own commands (exec) can read it and never write it (ProtectSystem=
+# strict leaves only the run's directory, the caches and the shared directories writable; check proves it).
 #
 # The protocol version is the engine's HELPER_PROTOCOL (src/testrun/helper.ts; a test checks they match). Bump both
 # whenever a command's arguments or output change: an engine refuses to start test runs with a helper whose version
@@ -28,7 +36,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=2
+PROTOCOL=3
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -39,9 +47,10 @@ PROTECTED=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /etc/sudo
 
 die() { echo "worklane-testrun: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
-[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|file|cache|db-start|exec|wipe|check|version ..."
+[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|store-tips|file|cache|shared|db-start|exec|wipe|check|version ..."
 user="wl-test-$name"
 root="$BASE/$name"
+store="$root/store"
 sock_dir="/run/worklane-test-$name-docker"
 # The coordinator of instance <name> only (sudo sets SUDO_USER; root running it by hand has none).
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "wl-$name" ]; then die "$SUDO_USER may not use $name's test runs"; fi
@@ -82,35 +91,73 @@ valid_env() {
 # The clone a run's workspace is made with, as the test user: the same commands as src/testrun/workspace.ts
 # cloneScript (a test checks they match). No remote, no credential helper, hooks off, no one's global config.
 CLONE='set -euo pipefail
-bundle="$1" work="$2" branch="$3" head="$4" base="$5"
+bundle="$1" work="$2" branch="$3" head="$4" base="$5" hsha="$6" bsha="$7" store="$8"
+shift 8
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+sg() { git --git-dir="$store" -c core.hooksPath=/dev/null -c gc.autoDetach=false "$@"; }
+for i in 1 2 3 4 5 6 7 8 9 10; do [ "$(sg config --get core.bare 2>/dev/null)" = true ] && break; git init -q --bare "$store" >/dev/null 2>&1 || sleep 1; done
+if [ -s "$bundle" ]; then
+  refs=()
+  for r in "$head" "$base"; do if sg bundle list-heads "$bundle" "$r" | grep -q .; then refs+=("$r"); fi; done
+  [ "${#refs[@]}" -eq 0 ] || sg fetch -q --no-tags --no-write-fetch-head "$bundle" "${refs[@]}"
+fi
+for c in "$hsha" "$bsha"; do
+  sg cat-file -e "$c^{commit}" || { echo "the object store has no commit $c" >&2; exit 1; }
+  sg update-ref "refs/keep/$c" "$c" 2>/dev/null || true
+done
+sg for-each-ref --sort=-committerdate --format="%(refname)" refs/keep/ | tail -n +51 | while IFS= read -r r; do sg update-ref -d "$r" 2>/dev/null || true; done
+sg gc --auto --quiet || true
 git init -q -b "$branch" "$work"
 cd "$work"
+mkdir -p .git/objects/info .git/info
+printf "%s\n" "$store/objects" > .git/objects/info/alternates
 git config core.hooksPath /dev/null
 git config credential.helper ""
 git config user.name test-run
 git config user.email test-run@example.com
-git fetch -q --no-tags --no-write-fetch-head --update-head-ok "$bundle" "+$head:refs/test-run/head" "+$base:refs/heads/$branch"
-git update-ref "refs/remotes/origin/$branch" "refs/heads/$branch"
+git update-ref "refs/heads/$branch" "$bsha"
+git update-ref "refs/remotes/origin/$branch" "$bsha"
 git symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$branch"
-git checkout -q --detach refs/test-run/head
-git update-ref -d refs/test-run/head
+if [ "$#" -gt 0 ]; then
+  git config core.sparseCheckout true
+  git config core.sparseCheckoutCone false
+  { echo "/*"; for d in "$@"; do echo "!/$d/"; done; } > .git/info/sparse-checkout
+fi
+git checkout -q --detach "$hsha"
 rm -f "$bundle"'
 
+# A directory a workspace leaves out: src/checkout.ts sparseDirProblem's rule (a test keeps them alike).
+valid_dir() {
+  local p="$1"
+  [[ "$p" =~ ^[A-Za-z0-9._@+][A-Za-z0-9._@+/-]{0,199}$ && "/$p/" != *//* && "/$p/" != */./* && "/$p/" != */../* && "$p" != .git && "$p" != .git/* ]] || die "not a directory to leave out: $p"
+}
+
 create() {
-  local id="${1:-}" branch="${2:-}" head="${3:-}" base="${4:-}" d
-  [ "$#" -eq 4 ] || die "usage: create <id> <branch> <head ref> <base ref>"
+  local id="${1:-}" branch="${2:-}" head="${3:-}" base="${4:-}" hsha="${5:-}" bsha="${6:-}" d p
+  [ "$#" -ge 6 ] || die "usage: create <id> <branch> <head ref> <base ref> <head sha> <base sha> [<dir left out>]..."
+  shift 6
   valid_id "$id"; d="$(run_dir "$id")"
   [[ "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && "$branch" != *..* ]] || die "not a branch name: $branch"
   [ "$head" = "refs/worklane/test-run/$id/head" ] && [ "$base" = "refs/worklane/test-run/$id/base" ] || die "not run $id's bundle refs"
+  for p in "$hsha" "$bsha"; do [[ "$p" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "not a full commit id: $p"; done
+  [ "$#" -le 32 ] || die "at most 32 directories left out"
+  for p in "$@"; do valid_dir "$p"; done
   [ ! -e "$d" ] || die "run $id exists; wipe it first"
   install -d -o root -g "$user" -m 0710 "$root/runs"
   install -d -o "$user" -g "$user" -m 0700 "$d" "$d/work" "$d/tmp" "$d/home"
-  # The bundle (a copy of the objects, never the coordinator's .git) arrives on stdin; the clone is made from it as
-  # the test user, so nothing in it is ever written as root and the test user owns it all.
+  [ -d "$store" ] || install -d -o "$user" -g "$user" -m 0700 "$store"
+  # The bundle (only the objects the store lacks; empty when it has both commits; never the coordinator's .git)
+  # arrives on stdin. The store takes it and the workspace is made as the test user, so nothing in either is ever
+  # written as root and the test user owns it all.
   as_user sh -c 'cat > "$1"' _ "$d/tree.bundle"
-  (cd "$d" && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/home" LANG=C.UTF-8 bash -c "$CLONE" _ "$d/tree.bundle" "$d/work" "$branch" "$head" "$base") >&2
+  (cd "$d" && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$d/home" LANG=C.UTF-8 bash -c "$CLONE" _ "$d/tree.bundle" "$d/work" "$branch" "$head" "$base" "$hsha" "$bsha" "$store" "$@") >&2
   echo "$d/work"
+}
+
+store_tips() {
+  [ "$#" -eq 0 ] || die "usage: store-tips"
+  [ -f "$store/HEAD" ] || return 0
+  (cd / && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --git-dir="$store" for-each-ref --format="%(objectname)" refs/keep/)
 }
 
 put_file() {
@@ -236,11 +283,12 @@ wipe() {
   echo "wiped $id"
 }
 
-# A bundle of one empty commit under run <id>'s refs, for the sandbox probe.
+# A bundle of one commit (one file, made at this moment, so its objects are new to the store) under run <id>'s refs,
+# for the sandbox probe: written to <file>, and the commit's id printed.
 probe_bundle() {
-  local id="$1" t
+  local id="$1" file="$2" t
   t="$(runuser -u "$user" -- mktemp -d)"
-  runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$t" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash -c 'set -e; cd "$1"; git init -q; git -c user.name=p -c user.email=p@example.com commit -q --allow-empty -m probe; git update-ref "refs/worklane/test-run/$2/head" HEAD; git update-ref "refs/worklane/test-run/$2/base" HEAD; git bundle create --quiet - "refs/worklane/test-run/$2/head" "refs/worklane/test-run/$2/base"' _ "$t" "$id"
+  runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$t" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null bash -c 'set -e; cd "$1"; git init -q; date +%s%N > probe.txt; git add probe.txt; git -c user.name=p -c user.email=p@example.com commit -q -m probe; git update-ref "refs/worklane/test-run/$2/head" HEAD; git update-ref "refs/worklane/test-run/$2/base" HEAD; git bundle create --quiet "$3" "refs/worklane/test-run/$2/head" "refs/worklane/test-run/$2/base"; git rev-parse HEAD' _ "$t" "$id" "$file"
   rm -rf "$t"
 }
 
@@ -254,7 +302,7 @@ probe_passed() {
 # PASS when the test user can't read, write or enter each protected path, as itself and inside the sandbox. A probe
 # that can't run is a FAIL, never a pass.
 check() {
-  local fail=0 groups p out id err rc=0
+  local fail=0 groups p out id err bundle sha rc=0
   [ "$#" -eq 0 ] || die "usage: check"
   groups="$(id -nG "$user")"
   if [ "$groups" = "$user" ]; then echo "PASS $user is in its own group only"; else echo "FAIL $user's groups: $groups"; fail=1; fi
@@ -267,10 +315,16 @@ check() {
   # The same, inside the sandbox a run gets: a probe run, wiped after. Its stdout and systemd-run's stderr apart.
   id="probe-$$"
   err="$(mktemp)"
-  probe_bundle "$id" | create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" >/dev/null
-  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
+  bundle="$(runuser -u "$user" -- mktemp)"
+  sha="$(probe_bundle "$id" "$bundle")"
+  create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$sha" "$sha" <"$bundle" >/dev/null
+  rm -f "$bundle"
+  # The run also reads its commit through the object store, and can't write the store (its objects or its refs).
+  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; s="$(cat .git/objects/info/alternates)"; s="${s%/objects}"; git cat-file -e HEAD:probe.txt || { echo "store unread: $s"; n=1; }; for w in "$s/objects/probe-write" "$s/refs/keep/probe-write" "$s/probe-write"; do if ( : > "$w" ) 2>/dev/null; then echo "open $w (written)"; rm -f "$w"; n=1; fi; done; echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
   wipe "$id" >/dev/null || { echo "FAIL the probe run was not wiped"; fail=1; }
-  if probe_passed "$rc" "$out"; then echo "PASS a sandboxed run reaches none of them"
+  # The probe's commit is no tip worth keeping: its ref goes (its objects go with git's gc).
+  (cd / && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --git-dir="$store" update-ref -d "refs/keep/$sha") || true
+  if probe_passed "$rc" "$out"; then echo "PASS a sandboxed run reaches none of them, and reads the object store without writing it"
   else echo "FAIL in the sandbox (exit $rc): ${out:-the probe printed nothing}"; sed 's/^/  stderr: /' "$err"; fail=1; fi
   rm -f "$err"
   [ "$fail" -eq 0 ] && echo "OK" || echo "FAILED"
@@ -279,6 +333,7 @@ check() {
 
 case "$cmd" in
   create) create "$@" ;;
+  store-tips) store_tips "$@" ;;
   file) put_file "$@" ;;
   cache) cache "$@" ;;
   shared) shared "$@" ;;

@@ -80,6 +80,13 @@ export interface TestRunDeps {
   now?: () => number;
   /** The helper's protocol, asked once at coordinator start (./helper.ts): when not ok, no run starts. */
   helper?: HelperState;
+  /** Directories left out of the workspace (tests.yaml checkout.sparse_exclude), unless a tier of the run sets full_checkout. */
+  sparseExclude?: readonly string[];
+}
+
+/** What a run's workspace leaves out: the project's sparse_exclude, or nothing when one of its tiers needs a full checkout. */
+export function workspaceExclude(tiers: readonly TestRunTier[], sparseExclude: readonly string[] = []): readonly string[] {
+  return tiers.some((t) => t.full_checkout) ? [] : sparseExclude;
 }
 
 /** The tiers a request runs: its kind's, and of a sharded run's later shards only the shardable ones. */
@@ -153,7 +160,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     emit('testrun.started', { id, slot: slot.path.split(/[\\/]/).pop()!.replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom) });
     created = true;
     stage = 'create';
-    await createWorkspace(d.host, d.repo, req.sha, id);
+    await createWorkspace(d.host, d.repo, req.sha, id, workspaceExclude(tiers, d.sparseExclude));
     stage = 'changed-files';
     const changed = req.changedFiles ? await d.host.changedFiles(id, req.changedFiles) : null;
     stage = 'caches';
