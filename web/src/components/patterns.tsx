@@ -215,7 +215,7 @@ export function SidebarRow({ icon, label, count, countTone, active, href, onSele
       {body}
     </a>
   ) : (
-    <button type="button" title={title} aria-current={active ? 'true' : undefined} disabled={disabled} onClick={onSelect} className={cx(cls, 'w-full')}>
+    <button type="button" title={title} data-testid={testId} aria-current={active ? 'true' : undefined} disabled={disabled} onClick={onSelect} className={cx(cls, 'w-full')}>
       {body}
     </button>
   );

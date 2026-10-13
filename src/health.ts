@@ -10,6 +10,7 @@ import { offsiteLine, offsiteStatus, type OffsiteStatus } from './offsite-backup
 import { mergeMetrics, type MergeMetrics } from './merge-metrics.js';
 import { heldUpdate, updateLog, type HeldUpdate, type UpdateEntry } from './updates.js';
 import { testRunStatus, type TestRunStatus } from './testrun/status.js';
+import { directLandProblem } from './direct-land.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -205,6 +206,7 @@ export function healthView(events: StoredEvent[], machine: MachineStats | null, 
   const since = new Date((o.now ?? new Date()).getTime() - MERGE_DAYS * 86_400_000);
   const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now), merge: mergeMetrics(events, { since }), updateHold: heldUpdate(o.updates ?? updateLog()) };
   const testRuns = testRunStatus(events);
-  // What stops the test runs working is said first, plainly: it is not a suggestion.
-  return { ...base, testRuns, suggestions: [...testRuns.problems, ...suggestions(base, o)] };
+  // What stops the coordinator or the test runs working is said first, plainly: it is not a suggestion.
+  const direct = directLandProblem(events);
+  return { ...base, testRuns, suggestions: [...(direct ? [direct] : []), ...testRuns.problems, ...suggestions(base, o)] };
 }

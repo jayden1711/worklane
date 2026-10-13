@@ -8,6 +8,7 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
 import { loadMoneyPaths } from '../review.js';
 import { checkedPush } from '../push-check.js';
+import { DIRECT_LAND_REFUSED, directLandRefusal, localRemote } from '../direct-land.js';
 import { receiptLines } from '../receipts.js';
 import { scanRange } from '../scan/secrets.js';
 import { fullRunLock } from '../slots.js';
@@ -52,6 +53,22 @@ export abstract class Landing extends Decisions {
     return batch;
   }
 
+  private directRefused: string | null = null;
+  private remoteIsLocal: boolean | undefined;
+
+  /**
+   * Why a direct land may not push the default branch now, or null: GitHub must enforce its protection, asked now
+   * (src/direct-land.ts). A refusal is recorded once until the answer changes (coordinator.error: health and the
+   * dashboard show it); the queue waits, and lands once protection is back.
+   */
+  private async directLandBlocked(): Promise<string | null> {
+    this.remoteIsLocal ??= localRemote(this.d.repo, this.remote);
+    const why = await directLandRefusal(this.d.protection, { repo: this.d.cfg.project.project.repo, branch: this.branch, local: this.remoteIsLocal });
+    if (why && why !== this.directRefused) this.emit('coordinator.error', { instance: this.d.instance, where: 'direct land', kind: DIRECT_LAND_REFUSED, message: `nothing pushed: ${why}`.slice(0, 1000) });
+    this.directRefused = why;
+    return why;
+  }
+
   protected async landNext() {
     // Safety floor: under an emergency stop the queue waits; it lands once the stop is lifted.
     if (this.landing || this.emergencyInForce()) return;
@@ -60,7 +77,8 @@ export abstract class Landing extends Decisions {
     this.landing = true;
     try {
       if (this.d.cfg.project.land_mode === 'pr') for (const q of queue) await this.proposePr(q);
-      else await this.landBatch(this.buildBatch(queue));
+      // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too).
+      else if (!(await this.directLandBlocked())) await this.landBatch(this.buildBatch(queue));
     } finally {
       this.landing = false;
     }
@@ -89,7 +107,7 @@ export abstract class Landing extends Decisions {
       const { command, exclusive } = this.tierCommand(tier);
       let lock: { release(): void } | null = null;
       if (exclusive) {
-        const got = await fullRunLock(`${BRAND.cli} land gate ${tier}`, 5_000, this.d.slotsDir);
+        const got = await fullRunLock(`${BRAND.cli} ${this.d.cfg.project.project.name} land gate ${tier}`, 5_000, this.d.slotsDir);
         if (!('lock' in got)) return { ok: false, deferred: true, note: `tier ${tier} needs the machine-wide full-run slot (held by ${got.holder?.owner ?? 'another run'}); deferred` };
         lock = got.lock;
       }
@@ -216,6 +234,12 @@ export abstract class Landing extends Decisions {
       // A stop that came in while the gates ran: left queued, landed once it's lifted.
       if (this.emergencyInForce()) {
         for (const q of applied) result(q.issue, 'deferred', null, 'emergency stop in force; lands once it is lifted');
+        return;
+      }
+      // The branch's protection, asked again right before the push: none (or no answer) and nothing is pushed.
+      const unprotected = await this.directLandBlocked();
+      if (unprotected) {
+        for (const q of applied) result(q.issue, 'deferred', null, `not pushed: ${unprotected}`);
         return;
       }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.

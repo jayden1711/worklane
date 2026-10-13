@@ -114,8 +114,9 @@ assert.ok(typeof cpuS === 'number' && cpuS >= 0.1 && cpuS < 60, `CPU ${cpuS}s: f
 assert.ok(typeof memPeakMb === 'number' && memPeakMb > 0 && memPeakMb < 2048, `memory ${memPeakMb} MB: from systemd, not the planted 999G`);
 
 if (dbImage !== '-') {
-  step(`db-start ${dbImage}`);
-  const db = await host.startDb(id, { image: dbImage, name: 'test', readyS: 90 });
+  step(`db-start ${dbImage}, max_connections 250`);
+  // Not the default (200) nor the image's (100): the job checks SHOW max_connections is 250 inside the database.
+  const db = await host.startDb(id, { image: dbImage, name: 'test', readyS: 90, maxConnections: 250 });
   console.log(db.url.replace(/:[0-9a-f]{32}@/, ':***@'), db.container);
   assert.ok(db.port > 0 && db.port < 65536);
   assert.match(db.url, new RegExp(`^postgres://postgres:[0-9a-f]{32}@127\\.0\\.0\\.1:${db.port}/test$`));

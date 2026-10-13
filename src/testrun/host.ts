@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
 import { killTree, shellCommand, spawnDetached } from '../os/index.js';
-import { PINNED_IMAGE } from './config.js';
+import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { cloneScript } from './workspace.js';
 
 export const SANDBOX_HELPER = `/usr/local/libexec/${BRAND.cli}-testrun`;
@@ -116,6 +116,15 @@ export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: 
   return { stats, own };
 }
 
+/** What a run's Postgres is started with (test_run.database). */
+export interface RunDbSpec {
+  image: string;
+  name: string;
+  readyS: number;
+  /** Postgres's max_connections (`-c max_connections=<n>`), within MAX_CONNECTIONS. */
+  maxConnections: number;
+}
+
 export interface RunDatabase {
   url: string;
   port: number;
@@ -147,7 +156,7 @@ export interface RunHost {
   /** A directory every run of the instance shares (e.g. a test-port registry); no wipe removes it. */
   shared(name: string): Promise<string>;
   /** The run's own Postgres: a unique container and a port the daemon picks, on loopback. */
-  startDb(id: string, db: { image: string; name: string; readyS: number }): Promise<RunDatabase>;
+  startDb(id: string, db: RunDbSpec): Promise<RunDatabase>;
   /** Run a command in the workspace with exactly `env` (and the host's fixed PATH, HOME, TMPDIR, CI). */
   exec(id: string, command: string, env: Record<string, string>, timeoutMs: number, signal?: AbortSignal): Promise<ExecResult>;
   /** The sandbox's own boundary check; a check that can't run is not ok. */
@@ -250,9 +259,11 @@ function postgresUrl(port: number, password: string, db: string): string {
   return `postgres://postgres:${password}@127.0.0.1:${port}/${db}`;
 }
 
-function checkDb(db: { image: string; name: string; readyS: number }): void {
+function checkDb(db: RunDbSpec): void {
   if (!PINNED_IMAGE.test(db.image)) throw new Error(`the database image must be pinned to its digest: ${db.image}`);
   if (!/^[a-z_][a-z0-9_]{0,62}$/.test(db.name)) throw new Error(`not a database name: ${db.name}`);
+  const n = db.maxConnections;
+  if (!Number.isInteger(n) || n < MAX_CONNECTIONS.min || n > MAX_CONNECTIONS.max) throw new Error(`max_connections: ${MAX_CONNECTIONS.min} to ${MAX_CONNECTIONS.max}, got ${n}`);
 }
 
 /** The production host: every step through the sandbox helper, for instance `instance`'s test user. */
@@ -290,7 +301,7 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
     async startDb(id, db) {
       checkId(id);
       checkDb(db);
-      const r = await call(['db-start', id, db.image, db.name, String(db.readyS)], { timeoutMs: (db.readyS + 300) * 1000 });
+      const r = await call(['db-start', id, db.image, db.name, String(db.readyS), String(db.maxConnections)], { timeoutMs: (db.readyS + 300) * 1000 });
       const m = /^(\d{1,5}) ([0-9a-f]{32})$/.exec(lastLine(r));
       if (r.code !== 0 || !m) throw fail(`starting run ${id}'s database`, r);
       return { url: postgresUrl(Number(m[1]), m[2]!, db.name), port: Number(m[1]), container: `${BRAND.cli}-test-${instance}-${id}` };
@@ -392,7 +403,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
         if (p.code !== 0) throw fail(`pulling ${db.image}`, p);
       }
       // A unique name and a port the daemon picks, on loopback only: never a fixed host port.
-      const r = await d(['run', '-d', '--name', container, '--label', `${RUN_LABEL}=${id}`, '-p', '127.0.0.1::5432', '--tmpfs', '/var/lib/postgresql/data:rw', '-e', `POSTGRES_PASSWORD=${password}`, '-e', `POSTGRES_DB=${db.name}`, db.image]);
+      const r = await d(['run', '-d', '--name', container, '--label', `${RUN_LABEL}=${id}`, '-p', '127.0.0.1::5432', '--tmpfs', '/var/lib/postgresql/data:rw', '-e', `POSTGRES_PASSWORD=${password}`, '-e', `POSTGRES_DB=${db.name}`, db.image, '-c', `max_connections=${db.maxConnections}`]);
       if (r.code !== 0) throw fail(`starting run ${id}'s database`, r);
       const p = await d(['port', container, '5432/tcp']);
       const m = /^127\.0\.0\.1:(\d{1,5})$/m.exec(p.out);
