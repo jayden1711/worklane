@@ -22,6 +22,7 @@ import { loadConfig } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
+import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { detectOs, isRoot, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 
@@ -495,8 +496,11 @@ export interface InitArgs {
   interactive: boolean;
 }
 
-/** `init`: the mode (asked when not given), the context, then the walk. */
-export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interactive: a.interactive }), root = isRoot): Promise<number> {
+/**
+ * `init`: the mode (asked when not given), the context, then the walk. Local mode run through npx hands over to an
+ * install of its own first (src/npx-engine.ts).
+ */
+export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interactive: a.interactive }), root = isRoot, handOff: HandOff = handOffFromNpx): Promise<number> {
   let mode = a.mode;
   // A directory that exists is a checkout (local mode); anything else is taken as owner/name (server mode).
   const localRoot = a.target === undefined ? resolve(a.cwd) : existsSync(a.target) ? resolve(a.target) : null;
@@ -528,6 +532,8 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
       io.say('init: on Windows, run it inside WSL2 (Ubuntu): local mode is Linux there');
       return 2;
     }
+    const handed = await handOff({ root: localRoot, prefix: a.prefix, yes: a.yes, reset: a.reset, say: (l) => io.say(l) });
+    if (handed !== null) return handed;
     const file = localInitFile(localRoot);
     let state = readInitState(file);
     if (!state || a.reset) state = newState('local', localRoot, null, null);

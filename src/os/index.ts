@@ -397,6 +397,11 @@ export function homeDir(): string {
   return homedir();
 }
 
+/** Where `npm install -g --prefix <prefix>` puts a package: lib/node_modules on macOS and Linux, node_modules on Windows. */
+export function npmGlobalPackageDir(prefix: string, pkg: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? join(prefix, 'node_modules', ...pkg.split('/')) : join(prefix, 'lib', 'node_modules', ...pkg.split('/'));
+}
+
 /** Where Chrome or Chromium is usually installed on this OS, most likely first (then the PATH is searched). */
 export function chromeCandidates(): string[] {
   if (process.platform === 'darwin') return ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'];

@@ -61,7 +61,9 @@ usage: ${BRAND.cli} <command> [options]
                                    server), optional. Each step is checked before the next; rerun it to
                                    pick up where it stopped. Asks for the mode when not given. local: this
                                    checkout (default: here), as you; server: <owner/repo>, as root, through
-                                   scripts/setup/add-project.sh. --yes installs missing tools as shown
+                                   scripts/setup/add-project.sh. --yes installs missing tools as shown.
+                                   Run through npx (npx ${BRAND.pkg} init), local mode first installs
+                                   the engine under ~/.local, then goes on from there
   export [--instance name] [--out file]
                                    one file with this checkout's (or instance's) config and history (the
                                    event log, init's checklist, findings); never secrets, locks or logs
@@ -144,6 +146,15 @@ usage: ${BRAND.cli} <command> [options]
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
 
 options: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;
+
+/** One command's lines of USAGE (its synopsis and description). */
+function commandUsage(name: string, usage = USAGE): string {
+  const lines = usage.split('\n');
+  const at = lines.findIndex((l) => l.startsWith(`  ${name} `) || l === `  ${name}`);
+  if (at < 0) return usage;
+  const end = lines.findIndex((l, i) => i > at && !/^ {4,}\S/.test(l));
+  return [`usage: ${BRAND.cli} ${lines[at]!.trim()}`, ...lines.slice(at + 1, end < 0 ? undefined : end)].join('\n');
+}
 
 function flag(args: string[], name: string): boolean {
   const i = args.indexOf(name);
@@ -261,6 +272,10 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'init': {
+      if (flag(args, '--help') || flag(args, '-h')) {
+        console.log(commandUsage('init'));
+        return 0;
+      }
       const modeOpt = option(args, '--mode');
       if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
         console.error('init: --mode is local or server');
