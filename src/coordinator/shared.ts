@@ -1,7 +1,7 @@
 // What the coordinator's parts share: its dependencies, constants and module-level helpers.
 import type { IncidentSink } from '../usage-limit.js';
 import { spawn } from 'node:child_process';
-import type { Config } from '../config/load.js';
+import type { Config, ConfigError } from '../config/load.js';
 import { type Backlog, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventLog } from '../events/log.js';
@@ -59,6 +59,11 @@ export interface CoordinatorDeps {
    * usage-limit pause raises and resolves its incident there. Absent: the pause reports only through its events.
    */
   incidents?: IncidentSink;
+  /**
+   * The config follows the default branch (src/config/live.ts): `tree`, the config tree `cfg` was loaded from
+   * (absent: the checkout's HEAD); `check`, checks beyond the schema a new config must pass (an instance's policy).
+   */
+  liveConfig?: { tree?: string | null; check?: (cfg: Config) => ConfigError[] };
   /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
   providerKeys?: Record<string, string>;
   /** The clock (tests). */

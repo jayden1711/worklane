@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -16,6 +17,8 @@ export interface Config {
   deploy?: DeployConfig;
   /** The project's app, for browser checks; absent: browser checks are off (Track B is inactive). */
   app?: AppConfig;
+  /** Role prompts (roles/<role>.md by role) as committed, for a config read from git; absent: read from `dir`. */
+  roles?: Record<string, string>;
 }
 
 export interface ConfigError {
@@ -33,8 +36,8 @@ export class ConfigInvalid extends Error {
 const REQUIRED = ['config.yaml', 'agents.yaml', 'guardrails.yaml', 'tests.yaml'] as const;
 const OPTIONAL = ['review.yaml', 'deploy.yaml', 'app.yaml'] as const;
 
-function parseFile(path: string, file: string, errors: ConfigError[]): unknown {
-  const doc = parseDocument(readFileSync(path, 'utf8'), { uniqueKeys: true });
+function parseFile(text: string, file: string, errors: ConfigError[]): unknown {
+  const doc = parseDocument(text, { uniqueKeys: true });
   for (const e of doc.errors) errors.push({ file, path: '', message: e.message.split('\n')[0]! });
   return doc.errors.length ? undefined : doc.toJS();
 }
@@ -49,16 +52,48 @@ function validate<S extends z.ZodType>(schema: S, value: unknown, file: string, 
 /** Load and validate every config file. Throws ConfigInvalid listing all errors. */
 export function loadConfig(root: string): Config {
   const dir = join(root, BRAND.configDir);
+  if (!existsSync(dir)) throw new ConfigInvalid([{ file: BRAND.configDir, path: '', message: `missing; run \`${BRAND.cli} install\`` }]);
+  return configFrom(root, (file) => {
+    const path = join(dir, file);
+    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  });
+}
+
+/**
+ * The config committed at `rev` (e.g. origin/main), read from git and never from the working tree: the same files,
+ * schema and checks as loadConfig. Throws ConfigInvalid listing all errors. `dir` stays the checkout's.
+ */
+export function loadConfigAt(root: string, rev: string): Config {
+  const git = (...args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+  if (git('rev-parse', '-q', '--verify', `${rev}:${BRAND.configDir}`).status !== 0) throw new ConfigInvalid([{ file: BRAND.configDir, path: '', message: `missing at ${rev}` }]);
+  const show = (file: string) => {
+    const r = git('show', `${rev}:${BRAND.configDir}/${file}`);
+    return r.status === 0 ? r.stdout : null;
+  };
+  const cfg = configFrom(root, show);
+  // The role prompts at the same commit, so agents get the instructions that config goes with.
+  const listed = git('ls-tree', '--name-only', `${rev}:${BRAND.configDir}/roles`);
+  const roles: Record<string, string> = {};
+  for (const name of listed.status === 0 ? listed.stdout.split('\n') : []) {
+    if (!name.endsWith('.md')) continue;
+    const text = show(`roles/${name}`);
+    if (text !== null) roles[name.slice(0, -3)] = text;
+  }
+  return { ...cfg, roles };
+}
+
+/** Parse, validate and cross-check every config file `read` returns (null: the file is absent). */
+function configFrom(root: string, read: (file: string) => string | null): Config {
+  const dir = join(root, BRAND.configDir);
   const errors: ConfigError[] = [];
   const out: Record<string, unknown> = {};
-  if (!existsSync(dir)) throw new ConfigInvalid([{ file: BRAND.configDir, path: '', message: `missing; run \`${BRAND.cli} install\`` }]);
   for (const file of [...REQUIRED, ...OPTIONAL]) {
-    const path = join(dir, file);
-    if (!existsSync(path)) {
+    const text = read(file);
+    if (text === null) {
       if ((REQUIRED as readonly string[]).includes(file)) errors.push({ file, path: '', message: 'missing' });
       continue;
     }
-    const raw = parseFile(path, file, errors);
+    const raw = parseFile(text, file, errors);
     if (raw !== undefined) out[file] = validate(FILES[file], raw, file, errors);
   }
   if (!errors.length) crossCheck(out, errors);

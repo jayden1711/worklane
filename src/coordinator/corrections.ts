@@ -115,7 +115,7 @@ export abstract class Corrections extends MergeFlow {
       stateDir: this.d.stateDir,
       ...(c.issue !== null ? { issue: c.issue } : {}),
       prompt: correctionBrief(c, earlier),
-      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'corrections'),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'corrections'),
       cwd: this.d.repo,
       model: role.model,
       allowedTools: CORRECTIONS_TOOLS,

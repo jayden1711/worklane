@@ -1,0 +1,127 @@
+// The config follows the default branch (src/config/live.ts): a config change merged to main reaches the running
+// coordinator on its next tick, read from git and never from its checkout's working tree; an invalid one is never
+// applied (the last good one stays, and why is recorded); a restart-only setting keeps its running value.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BRAND } from '../src/brand.js';
+import { loadConfig } from '../src/config/load.js';
+import { liveMerge, startConfig } from '../src/config/live.js';
+import type { EventPayload } from '../src/events/types.js';
+import { rolePrompt } from '../src/roles.js';
+import { FakeRunner } from '../src/runner.js';
+import { coordinator, fixture, git, passing, type Fixture } from './repro-state-graph/harness.js';
+
+const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
+const CONFIG = join(BRAND.configDir, 'config.yaml');
+const WORKER = join(BRAND.configDir, 'roles', 'worker.md');
+
+/** A person's clone of the remote: `push` edits config.yaml there and pushes it to main. */
+function world() {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.cfg.project.required_checks = ['ci'];
+  const raised: string[] = [];
+  const resolved: string[] = [];
+  const incidents = { raiseIncident: (kind: string, _key: string, detail: string) => raised.push(`${kind}: ${detail}`), resolveIncident: (kind: string) => resolved.push(kind) };
+  const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0, incidents });
+  const person = join(mkdtempSync(join(tmpdir(), 'person-')), 'p');
+  git(f.base, 'clone', '-q', f.remote, person);
+  const push = (edit: (text: string) => string, msg = 'config', file = CONFIG) => {
+    const p = join(person, file);
+    writeFileSync(p, edit(existsSync(p) ? readFileSync(p, 'utf8') : ''));
+    git(person, 'add', '--', file);
+    git(person, ...ident, 'commit', '-q', '-m', msg);
+    git(person, 'push', '-q', 'origin', 'main');
+    return git(person, 'rev-parse', 'HEAD');
+  };
+  const required = () => c.prReadiness(1, 'a'.repeat(40), passing).checks.map((x) => x.name);
+  return { f, c, push, required, raised, resolved };
+}
+
+const of = <T>(f: Fixture, type: Parameters<Fixture['log']['read']>[1] extends (infer U)[] | undefined ? U : never) => f.log.read(0, [type]).map((e) => e.payload as T);
+const requiredChecks = (list: string[]) => (text: string) => `${text.replace(/^required_checks:.*\n/m, '')}required_checks: [${list.join(', ')}]\n`;
+
+test('live config: a commit to main that changes required_checks reaches PR readiness without a restart', async () => {
+  const w = world();
+  await w.c.tick();
+  assert.deepEqual(w.required(), ['ci']);
+  const sha = w.push(requiredChecks(['ci', 'e2e']));
+  await w.c.tick();
+  assert.deepEqual(w.required(), ['ci', 'e2e']);
+  const applied = of<EventPayload<'config.applied'>>(w.f, 'config.applied');
+  assert.equal(applied.length, 1);
+  assert.equal(applied[0]!.sha, sha);
+  assert.ok(applied[0]!.changed.includes('project'));
+  // Nothing new on main: nothing applied again.
+  await w.c.tick();
+  assert.equal(of(w.f, 'config.applied').length, 1);
+});
+
+test('live config: an invalid config pushed to main keeps the last good one and records why', async () => {
+  const w = world();
+  w.push(requiredChecks(['ci', 'e2e']));
+  await w.c.tick();
+  assert.deepEqual(w.required(), ['ci', 'e2e']);
+  const bad = w.push((t) => `${t}not_a_setting: true\n`, 'bad config');
+  await w.c.tick();
+  await w.c.tick();
+  // The last good config runs on; the refusal is recorded once, with the file and the reason, and raised.
+  assert.deepEqual(w.required(), ['ci', 'e2e']);
+  const invalid = of<EventPayload<'config.invalid'>>(w.f, 'config.invalid');
+  assert.equal(invalid.length, 1);
+  assert.equal(invalid[0]!.sha, bad);
+  assert.match(invalid[0]!.errors.join('\n'), /config\.yaml.*not_a_setting/);
+  assert.equal(w.raised.length, 1);
+  assert.match(w.raised[0]!, /^config_invalid: .*invalid/);
+  // Fixed on main: applied, and the incident resolved.
+  w.push((t) => requiredChecks(['ci', 'lint'])(t.replace('not_a_setting: true\n', '')), 'fix config');
+  await w.c.tick();
+  assert.deepEqual(w.required(), ['ci', 'lint']);
+  assert.ok(w.resolved.includes('config_invalid'));
+});
+
+test("live config: the checkout's stale working tree is ignored once main has moved", async () => {
+  const w = world();
+  // The checkout's own copy says something else, and nothing ever updates it.
+  const local = join(w.f.repo, CONFIG);
+  writeFileSync(local, requiredChecks(['stale'])(readFileSync(local, 'utf8')));
+  assert.deepEqual(loadConfig(w.f.repo).project.required_checks, ['stale']);
+  writeFileSync(join(w.f.repo, WORKER), 'stale worker prompt\n');
+  w.push(requiredChecks(['ci', 'e2e']));
+  w.push(() => 'worker prompt from main\n', 'worker prompt', WORKER);
+  await w.c.tick();
+  assert.deepEqual(w.required(), ['ci', 'e2e']);
+  // The role prompts too: the ones committed with that config.
+  assert.equal(rolePrompt((w.c as unknown as { d: { cfg: Fixture['cfg'] } }).d.cfg, 'worker'), 'worker prompt from main\n');
+  // At start too: the default branch's config, not the checkout's.
+  const start = startConfig({ repo: w.f.repo, remote: 'origin', fallback: loadConfig(w.f.repo) });
+  assert.equal(start.note, null);
+  assert.deepEqual(start.cfg.project.required_checks, ['ci', 'e2e']);
+});
+
+test('live config: a restart-only setting keeps its running value and says a restart is needed', async () => {
+  const w = world();
+  w.push((t) => requiredChecks(['ci', 'e2e'])(t.replace('name: example-shop', 'name: renamed-shop')));
+  await w.c.tick();
+  assert.deepEqual(w.required(), ['ci', 'e2e']);
+  const applied = of<EventPayload<'config.applied'>>(w.f, 'config.applied').at(-1)!;
+  assert.deepEqual(applied.restart_needed, [{ path: 'project.project.name', running: 'example-shop', wanted: 'renamed-shop' }]);
+  assert.equal((w.c as unknown as { d: { cfg: Fixture['cfg'] } }).d.cfg.project.project.name, 'example-shop');
+});
+
+test('live config: turning direct landing on needs a restart; turning it off applies live', () => {
+  const base = fixture().cfg;
+  const pr = structuredClone(base);
+  pr.project.land_mode = 'pr';
+  const direct = structuredClone(base);
+  direct.project.land_mode = 'direct';
+  const on = liveMerge(pr, direct);
+  assert.equal(on.cfg.project.land_mode, 'pr');
+  assert.deepEqual(on.restart.map((r) => r.path), ['project.land_mode']);
+  const off = liveMerge(direct, pr);
+  assert.equal(off.cfg.project.land_mode, 'pr');
+  assert.deepEqual(off.restart, []);
+});

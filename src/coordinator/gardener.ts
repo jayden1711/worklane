@@ -57,7 +57,7 @@ export abstract class Gardener extends Delegation {
       role: 'gardener',
       stateDir: this.d.stateDir,
       prompt: gardenerBrief(signals, history),
-      appendSystemPrompt: rolePrompt(this.d.cfg.dir, 'gardener'),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'gardener'),
       cwd: this.d.repo,
       model: role.model,
       allowedTools: CORRECTIONS_TOOLS,

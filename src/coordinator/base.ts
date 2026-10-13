@@ -42,7 +42,8 @@ export abstract class CoordinatorBase {
 
   protected get wt(): WorktreeOptions {
     const cacheEnv = this.depCacheEnv();
-    return { ...this.wtBase, env: this.projectEnv(), ...(cacheEnv ? { cacheEnv } : {}) };
+    // The setup steps as the config now says (it follows the default branch); the root is fixed at start.
+    return { ...this.wtBase, setup: this.d.cfg.tests.worktree.setup, env: this.projectEnv(), ...(cacheEnv ? { cacheEnv } : {}) };
   }
 
   protected active = new Map<number, Promise<void>>();
@@ -76,8 +77,8 @@ export abstract class CoordinatorBase {
 
   protected intakePulledAt = -Infinity;
 
-  /** The repo's own config: the defaults the instance's settings apply over. */
-  protected readonly repoCfg: Config;
+  /** The repo's own config, as the default branch has it (src/config/live.ts): the defaults the instance's settings apply over. */
+  protected repoCfg: Config;
 
   protected settingsKey = '';
 
