@@ -18,6 +18,7 @@ import { allowedOnce } from '../domain-requests.js';
 import { type FileIndex } from '../hotspots.js';
 import { runIssue } from '../run-record.js';
 import { emergencyStop } from '../slots.js';
+import type { PushGuard } from '../push-guard.js';
 import { removeWorktree, type WorktreeOptions } from '../worktrees.js';
 import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
@@ -188,6 +189,11 @@ export abstract class CoordinatorBase {
 
   protected get branch() {
     return this.d.cfg.project.project.default_branch;
+  }
+
+  /** What every push checks: the default branch is never pushed (only the direct land passes `directLand`); a refusal is recorded. */
+  protected pushGuard(directLand = false): PushGuard {
+    return { defaultBranch: this.branch, directLand, blocked: (ref, head) => this.emit('push.blocked', { ref, head, via: 'coordinator' }) };
   }
 
   protected git(cwd: string, ...args: string[]) {

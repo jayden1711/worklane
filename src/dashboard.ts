@@ -18,7 +18,8 @@ import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
-import type { StoredEvent } from './events/types.js';
+import type { EventPayload, StoredEvent } from './events/types.js';
+import { protectionView } from './main-watch.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceTokens, siteForInstance, siteForRoot } from './service.js';
@@ -450,7 +451,46 @@ export function autoMergeState(o: { policyFile: string | null; repoAuto: boolean
   return { on, policy, repo: o.repoAuto, stopped, why };
 }
 
-/** Where the coordinator's service output is: its systemd unit's journal and/or the log file a launchd or user service writes. */
+/**
+ * How the default branch is guarded, for the dashboard: "GitHub enforced" or the harness's own guard, the main watch (or off,
+ * or not known yet), the last commit the watch checked, and, while an unaccounted commit's stop is in force, its alert.
+ * Read-only, from the watch's state file and the log. A viewer is sent the mode only (viewer-events.ts).
+ */
+export function protectionState(o: { stateDir: string; repo: string; events: StoredEvent[]; role: Role | null }) {
+  const view = protectionView(join(o.stateDir, 'main-watch.json'), o.repo);
+  const stop = readStopFile(o.stateDir);
+  const last = o.events.filter((e) => e.type === 'main_watch.unaccounted').at(-1);
+  const p = last?.payload as EventPayload<'main_watch.unaccounted'> | undefined;
+  const alert = stop && stop.by === 'main_watch' && p ? { at: last!.ts, sha: p.sha, url: p.url, reason: p.reason, number: p.number, revert: p.revert } : null;
+  return { ...view, alert, stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop };
+}
+
+function readStopFile(stateDir: string): { reason: string; by: string | null } | null {
+  const file = join(stateDir, 'auto-merge-stopped.json');
+  if (!existsSync(file)) return null;
+  try {
+    const j = JSON.parse(readFileSync(file, 'utf8')) as { reason?: unknown; by?: unknown };
+    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null };
+  } catch {
+    return { reason: 'the stop file is unreadable', by: null };
+  }
+}
+
+/** An admin resumes auto-merge from the dashboard: the stop file goes, and merge.resumed records who did. */
+export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: string }): { ok: true; reason: string } | { ok: false; error: string } {
+  const stop = readStopFile(o.stateDir);
+  if (!stop) return { ok: false, error: 'auto-merge is not stopped' };
+  rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+  const log = new EventLog(o.eventsDb);
+  try {
+    log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
+  } finally {
+    log.close();
+  }
+  return { ok: true, reason: stop.reason };
+}
+
+/** Where the coordinator's service output is:its systemd unit's journal and/or the log file a launchd or user service writes. */
 export interface LogSource {
   unit: string | null;
   file: string | null;
@@ -680,6 +720,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       inbox: inbox(p, who.login),
       // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
       prCounts: prCounts(prsView(events).prs),
+      // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
+      protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
     };
     // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
     return isWriter(who.role) ? full : stateForViewer(full);
@@ -981,6 +1023,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           clients.set(res, who.role);
           req.on('close', () => clients.delete(res));
           return;
+        }
+        // Clear the auto-merge stop (a red main after an auto-merge, or the main watch's unaccounted commit): an admin's
+        // only, audited, and the one way auto-merge resumes from the dashboard.
+        if (url.pathname === '/api/auto-merge/clear' && req.method === 'POST') {
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may resume auto-merge; @${who.login} is a ${who.role}` });
+          const r = clearAutoMergeStop({ stateDir: opts.stateDir, eventsDb: opts.eventsDb, by: who.login });
+          if (!r.ok) return json(res, 409, { error: r.error });
+          audit(who, 'auto_merge.cleared', { reason: r.reason });
+          return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/decide' && req.method === 'POST') {
           const body = (await readBody(req)) as { id?: string; answer?: string };

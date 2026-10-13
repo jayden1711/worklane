@@ -31,6 +31,10 @@ import { instanceTargets, migrationGate, projectConfigFiles } from './migrations
 import { settingsReader } from './settings.js';
 import { batchTestRuns, setupTestRuns, type TestRunSetup } from './testrun/setup.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
+import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
+import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
+import type { CoordinatorDeps } from './coordinator/shared.js';
+import { GitHubMainWatchApi } from './github/main-watch-api.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
 export const INSTANCE_UMASK = 0o007;
@@ -72,9 +76,11 @@ export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance
 export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
-  // The coordinator's git runs in checkouts agents can write to: no hooks, no fsmonitor command, whatever the repo's config says.
+  // The coordinator's git runs in checkouts agents can write to: none of the repo's hooks and no fsmonitor command,
+  // whatever its config says. Its hooks are its own (writeCoordinatorHooks, in its instance home, this user's only):
+  // the pre-push hook that refuses the default branch, and nothing else. Not written yet: no hooks at all.
   const git: [string, string][] = [
-    ['core.hooksPath', '/dev/null'],
+    ['core.hooksPath', coordinatorHooksDir(i.home)],
     ['core.fsmonitor', 'false'],
   ];
   if (i.credentials.github.kind === 'gh-config-dir') {
@@ -93,6 +99,12 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
   return env;
+}
+
+/** Write the instance coordinator's own git hooks dir from the config in effect (push-guard.ts). */
+export function writeInstanceHooks(i: Pick<Instance, 'home' | 'config'>): string {
+  const engine = fileURLToPath(new URL('./cli.js', import.meta.url));
+  return writeCoordinatorHooks(i.home, { defaultBranch: i.config.project.project.default_branch, directLand: i.config.project.land_mode === 'direct', node: process.execPath, engine });
 }
 
 /**
@@ -125,6 +137,8 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     console.error(`instance ${name} not started: ${(e as Error).message}`);
     return 1;
   }
+  // The coordinator's own git hooks (core.hooksPath in instanceEnv): the pre-push hook that refuses the default branch.
+  writeInstanceHooks(i);
   const env = instanceEnv(i);
   // The GitHub credential must reach this instance's repo and nothing else.
   const tokens = instanceTokens(i, env);
@@ -162,7 +176,10 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const testRun: TestRunSetup = { instance: i.name, repo: i.repo.repo, token: tokens, api: githubApi(), ...(gh.kind === 'app' ? { app: { appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path } } : {}) };
   // Intake (docs/intake.md): this instance's own intake.yaml and bot token only; none means intake off.
   const intake = () => intakeForInstance({ home: i.home, repo: i.repo.repo, tokenFile: i.credentials.intake?.discord_token, githubToken: tokens, githubApi: githubApi() });
-  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  // The main watch (GitHub only), and whose PRs get the full run: both from repo permissions, read with the instance's own token.
+  const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
+  const mainWatch = i.config.project.backlog === 'github' ? { api: new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi()), setting: () => loadInstance(name).policy.main_watch } : undefined;
+  return runSite(siteForInstance(i), { ...opts, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, ...(mainWatch ? { mainWatch } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** The policy's lanes plus the built-in research lanes (no repo access by default; see researchLanes). */
@@ -180,7 +197,7 @@ export function runCoordinator(root: string, opts: { once?: boolean; intervalMs?
   return runSite(siteForRoot(root), opts);
 }
 
-async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch'] }, runner?: CliRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -199,7 +216,7 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
   // The coordinator's own test runs of every PR (tests.yaml test_run), once the sandbox's check passed.
   const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());

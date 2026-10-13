@@ -5,6 +5,7 @@ import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hou
 import { hub, hubInstance, needsSignIn, selectInstance, signOut, useLiveState, type HubInfo, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
+import { MainWatchAlert } from './components/Protection';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
 import { BoardPage } from './pages/Board';
@@ -234,7 +235,7 @@ export function App() {
 
 function Dashboard() {
   const path = useRoute();
-  const { state, error, live, pulse } = useLiveState();
+  const { state, error, live, pulse, refresh } = useLiveState();
   const [theme, toggleTheme] = useTheme();
   const [menu, setMenu] = useState(false);
 
@@ -348,6 +349,7 @@ function Dashboard() {
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
         {state && <StopBanner state={state} />}
+        {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
         {page}
       </main>
       <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />

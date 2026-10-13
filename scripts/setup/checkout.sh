@@ -5,7 +5,8 @@
 # time, in the coordinator's own instance home. If the repo has no Worklane
 # config yet, scaffold it on a worklane/setup branch and push only that
 # branch, for a PR you review and merge. Never pushes the default branch.
-# Re-running it fast-forwards an existing checkout (e.g. after that PR merges).
+# Re-running it fast-forwards an existing checkout (e.g. after that PR merges). Its pre-push hook (install
+# --git-hooks-only) refuses any push to the default branch from the checkout, by anyone.
 #   bash scripts/setup/checkout.sh <name> <owner/repo>
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
@@ -29,7 +30,8 @@ run_as "$coord" '
   git config core.sharedRepository group
   # Re-run after a config PR merges: fast-forward to it, running no hooks (the checkout is agent-writable).
   git -c core.hooksPath=/dev/null pull -q --ff-only
-  # Every agent commit, in any worktree of this checkout, is secret-scanned first (gitleaks from tools.sh).
+  # Every agent commit, in any worktree of this checkout, is secret-scanned first (gitleaks from tools.sh), and no
+  # push from it may update the default branch (the pre-push hook; the harness merges through GitHub only).
   worklane install --root . --git-hooks-only
   git log -1 --format="checkout at %h (%s)"
 ' "$name" "$dest" "$repo"

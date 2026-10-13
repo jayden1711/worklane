@@ -1,9 +1,11 @@
-// The machine this instance runs on: its agent slots (shared by every instance and harness on it), its health
+// The machine this instance runs on: its agent slots (shared by every instance and harness on it), how its default
+// branch is guarded (GitHub, or the main watch), its health
 // (memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage, and on a hub the
 // instances side by side), the test runs (queue, slots, the full-run lock's holder, tiers), and the machine-wide
 // settings (the slot caps, engine updates) with their history.
 import type { State } from '../api';
 import { HealthPanel } from '../components/HealthPanel';
+import { ProtectionStatus } from '../components/Protection';
 import { MachineSettings } from '../components/MachineSettings';
 import { TestRunsPanel } from '../components/TestRuns';
 import { RecordsTable } from '../components/patterns';
@@ -50,6 +52,7 @@ export function MachinePage({ state }: { state: State }) {
       <Header title="Machine" sub="the always-on machine: slots, health and machine-wide settings, shared by every instance on it" />
       <div className="space-y-6 p-6">
         <MachineSlots slots={state.slots} />
+        <ProtectionStatus protection={state.protection} brand={state.brand.name} />
         <TestRunsPanel />
         <HealthPanel />
         {/* The machine settings are the owners' and writers' (a viewer's request for them is refused). */}

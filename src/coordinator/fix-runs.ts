@@ -169,7 +169,7 @@ export abstract class FixRuns extends Landing {
       if (red.length) return await give(`the fix doesn't pass the coordinator's own checks: ${red.map((c) => `${c.check} ${c.status}`).join(', ')}`);
       const verdict = await this.evaluate(issue, doneWhen, path, claimed.base, head, change.patchHash, checks, repro, change.tampered, change.files);
       if (!verdict.patch_correct) return await give(`the evaluator rejected the fix: ${verdict.advice || 'no reason given'}`);
-      const push = checkedPush({ cwd: path, remote: this.remote, base: claimed.base, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, expect: pr.headSha });
+      const push = checkedPush({ cwd: path, remote: this.remote, base: claimed.base, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), expect: pr.headSha });
       if (!push.ok && 'refused' in push) {
         this.emit('push.refused', { issue: n, head, stage: 'push', reasons: push.refused });
         return await give(pushRefusal(push.refused));
@@ -415,7 +415,7 @@ export abstract class FixRuns extends Landing {
       const touched = change.files.filter((f) => files.includes(f.path));
       const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review) : null;
       const reasons = conflictWaitReasons({ outside, riskCategories: lvl?.level === 'L3' ? lvl.reasons : [], evaluator: { approved: verdict.patch_correct, confidence: verdict.confidence, bothSidesKept: merged.clean ? true : verdict.bothSidesKept } });
-      const push = checkedPush({ cwd: path, remote: this.remote, base: baseSha, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, expect: pr.headSha });
+      const push = checkedPush({ cwd: path, remote: this.remote, base: baseSha, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), expect: pr.headSha });
       if (!push.ok && 'refused' in push) {
         this.emit('push.refused', { issue: n, head, stage: 'push', reasons: push.refused });
         return await give(pushRefusal(push.refused));
