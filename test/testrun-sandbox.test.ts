@@ -679,6 +679,32 @@ test('sparse_exclude in a run: the workspace leaves those directories out, unles
   await assert.rejects(createWorkspace(host, p.dir, sha, newRunId('fast', sha), ['../up']), /a directory inside the repo/);
 });
 
+test('regression: a run\'s ${...} is bash\'s, never systemd-run\'s (--expand-environment=no on 254+, each $ as $$ before)', { skip: !posix && 'bash' }, () => {
+  const cmd = 'x=hello; echo "got ${x} ${x%lo} $x"';
+  // What systemd does with the command line when it expands: $$ is a literal $, ${NAME} and $NAME (a word of its own)
+  // its environment's (none of these is set there).
+  const systemdExpands = (s: string) => s.replace(/\$\$|\$\{[^}]*\}/g, (m) => (m === '$$' ? '$' : ''));
+  const lines = (r: ReturnType<typeof helperFn>) => r.stdout.replace(/accepted\n$/, '').split('\n');
+  const bash = (c: string) => spawnSync('bash', ['-c', c], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(bash(systemdExpands(cmd)), 'got   hello', 'the bug: systemd blanks the shell-only ${x} forms');
+  for (const v of ['254', '255', '258']) {
+    const [flag, ...rest] = lines(helperFn('systemd_command', v, cmd));
+    assert.equal(flag, '--expand-environment=no', v);
+    assert.equal(rest.join('\n'), cmd, `${v}: the command as written`);
+  }
+  for (const v of ['253', '249', '0']) {
+    const [flag, ...rest] = lines(helperFn('systemd_command', v, cmd));
+    assert.equal(flag, '', `${v}: no flag (older systemd-run has none)`);
+    assert.equal(bash(systemdExpands(rest.join('\n'))), 'got hello hel hello', `${v}: after systemd's own expansion, bash gets the command as written`);
+  }
+  assert.equal(helperFn('systemd_command', '25x', cmd).status, 2);
+  const src = readFileSync(helperSrc, 'utf8');
+  const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
+  assert.ok(exec.includes('cmd="$(systemd_command "$(systemd_version)" "$2")"'));
+  assert.ok(exec.includes('exec systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
+  assert.ok(exec.endsWith('/bin/bash -o pipefail -c "$cmd"'), 'the command goes as systemd_command made it');
+});
+
 test('a directory left out: the helper takes exactly what the engine\'s config takes', { skip: !posix && 'bash' }, () => {
   const cases = ['docs/design', 'art', 'assets', 'a.b/c_d@e+f-g', 'x'.repeat(200), 'x'.repeat(201), '../up', '/abs', 'a/../b', 'a//b', '.', './a', 'a/.', 'docs/*', 'my dir', '-x', '.git', '.git/hooks', '.github', "it's", 'a\\b', 'a;b', '$(id)', ''];
   for (const c of cases) {
