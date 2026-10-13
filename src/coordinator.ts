@@ -91,8 +91,10 @@ export class Coordinator extends Gardener {
     await step('land', () => this.landNext(), undefined);
     await step('prs', () => this.watchPrs(), undefined);
     await step('test runs', () => this.d.prTestRuns?.tick(), undefined);
+    await step('people-prs', () => this.batchPeoplesPrs(), undefined);
     await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
+    await step('main watch', () => this.watchMain(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);

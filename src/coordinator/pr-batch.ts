@@ -69,9 +69,12 @@ export interface PrBatchConfig {
 // ---------------------------------------------------------------- state, from the log
 
 export interface BatchEntry {
+  /** The issue the harness's PR is for; for a person's PR (`by`), the PR's own number. */
   issue: number;
   number: number;
   head: string;
+  /** A person's PR: who opened it (a mapped admin or writer). The harness never merges it; they do. */
+  by?: string;
 }
 type Step = EventPayload<'pr_batch.step'>;
 type StepName = Step['step'];
@@ -120,7 +123,7 @@ export function batchState(events: StoredEvent[]): BatchState {
     if (e.type === 'pr_batch.queued') {
       const p = e.payload as EventPayload<'pr_batch.queued'>;
       const prior = latest.get(p.number);
-      if (!prior || prior.entry.head !== p.head) latest.set(p.number, { entry: { issue: p.issue, number: p.number, head: p.head }, order: e.id });
+      if (!prior || prior.entry.head !== p.head) latest.set(p.number, { entry: { issue: p.issue, number: p.number, head: p.head, ...(p.by ? { by: p.by } : {}) }, order: e.id });
     } else if (e.type === 'pr.closed') {
       latest.delete((e.payload as EventPayload<'pr.closed'>).number);
     } else if (e.type === 'pr_batch.step') {
@@ -383,7 +386,9 @@ export function mergesPending(events: StoredEvent[], now: number): boolean {
   }
   for (const [k, id] of st.posted) {
     const b = st.batches.get(id);
-    if (merged.has(k) || owner.get(k) || closed.has(Number(k.split('@')[0])) || !b || now - Date.parse(b.last) > 30 * 60_000) continue;
+    // A person's PR merges when they merge it, not the harness: nothing waits on it.
+    const person = b?.prs.some((p) => key(p.number, p.head) === k && p.by);
+    if (person || merged.has(k) || owner.get(k) || closed.has(Number(k.split('@')[0])) || !b || now - Date.parse(b.last) > 30 * 60_000) continue;
     return true;
   }
   return false;
@@ -477,7 +482,7 @@ export class PrBatcher {
     this.emit('pr_batch.step', {
       id,
       step,
-      prs: prs.map((p) => ({ issue: p.issue, number: p.number, head: p.head })),
+      prs: prs.map((p) => ({ issue: p.issue, number: p.number, head: p.head, ...(p.by ? { by: p.by } : {}) })),
       sha: o.sha ?? null,
       base: o.base ?? null,
       parent: o.parent ?? null,
@@ -503,7 +508,7 @@ export class PrBatcher {
       .at(-1);
     if (last?.type === 'pr_batch.queued' && (last.payload as EventPayload<'pr_batch.queued'>).head === e.head) return false;
     if (last?.type === 'pr_batch.step' && (last.payload as Step).prs.some((p) => p.number === e.number && p.head === e.head)) return false;
-    this.emit('pr_batch.queued', { issue: e.issue, number: e.number, head: e.head });
+    this.emit('pr_batch.queued', { issue: e.issue, number: e.number, head: e.head, ...(e.by ? { by: e.by } : {}) });
     return true;
   }
 
@@ -867,7 +872,7 @@ export class PrBatcher {
     try {
       await this.d.removeLabel(e.number, 'merge-ready');
       if (labels.length) await this.d.addLabels(e.number, labels);
-      await this.d.comment(e.number, `[${BRAND.cli}] @${this.d.ownerOf(e.issue)} ${text}`);
+      await this.d.comment(e.number, `[${BRAND.cli}] @${e.by ?? this.d.ownerOf(e.issue)} ${text}`);
     } catch (err) {
       this.emit('coordinator.error', { instance: this.d.instance, where: `pr-batch #${e.number}`, kind: 'error', message: (err as Error).message.slice(0, 500) });
     }

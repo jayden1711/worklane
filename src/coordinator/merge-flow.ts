@@ -16,7 +16,8 @@ import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
-import { instructionEvalReasons, mergeDecision, outsidePlanReasons, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
+import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
+import { MainWatch, repoGit } from '../main-watch.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
@@ -55,8 +56,10 @@ export abstract class MergeFlow extends FixRuns {
       // The merge policy decides it on the PR watch's next pass, as for any ready PR.
       tested: (e) => this.prPolled.delete(e.number),
       mergesSettled: () => !mergesPending(this.d.log.read(0, [...PR_BATCH_EVENTS, 'merge.done', 'merge.decided']), Date.now()),
-      // High-risk, money-path, or anything else the policy leaves to the owner: batched alone.
+      // High-risk, money-path, or anything else the policy leaves to the owner: batched alone. A person's PR too: it
+      // merges when they merge it, so nothing of the harness's may wait behind it in a batch.
       waitsForOwner: (e, pr) => {
+        if (e.by) return `opened by @${e.by}: a person merges it, never the harness`;
         try {
           const d = this.mergeDecisionFor(e.issue, e.number, pr);
           return d.auto ? null : d.reasons.join('; ') || 'waits for the owner';
@@ -71,6 +74,50 @@ export abstract class MergeFlow extends FixRuns {
   /** Start the next PR batch in the background (one at a time). */
   protected prBatchTick() {
     if (this.prBatching()) this.prBatch.tick();
+  }
+
+  /** When each person's PR was last looked at (its fast checks), by number. */
+  private readonly peoplePolled = new Map<number, number>();
+
+  /**
+   * People's PRs into the default branch join the batch queue: once their fast checks pass on the head, a PR opened
+   * by a mapped admin or writer (their role from their repo permission) gets the same sharded full run, and the full
+   * check posted on its head. A bot's or an unmapped author's stays fast-only until an admin approves it. The harness
+   * never merges any of them (the merge policy refuses a PR it didn't open): the person does, once it's green. From
+   * the test runs' own listing of open PRs: no listing of its own.
+   */
+  protected async batchPeoplesPrs() {
+    if (!this.prBatching() || !this.d.prTestRuns) return;
+    const fastChecks = this.d.cfg.tests.land.pr_batch.fast_checks;
+    if (!fastChecks.length) return;
+    const ours = new Set(this.d.log.read(0, ['pr.opened']).map((e) => (e.payload as EventPayload<'pr.opened'>).number));
+    const now = Date.now();
+    const interval = this.d.prPollMs ?? 60_000;
+    const st = this.prBatch.state();
+    for (const pr of this.d.prTestRuns.listing()) {
+      if (ours.has(pr.number) || pr.base !== this.branch) continue;
+      // A head that moved off the one in the running batch drops it: its run is cancelled.
+      this.prBatch.observe(pr.number, pr.headSha, 'open');
+      const k = `${pr.number}@${pr.headSha}`;
+      if (st.posted.has(k) || st.returned.has(k) || st.queue.some((q) => q.number === pr.number && q.head === pr.headSha)) continue;
+      if (now - (this.peoplePolled.get(pr.number) ?? 0) < interval) continue;
+      this.peoplePolled.set(pr.number, now);
+      const role = pr.bot ? null : ((await this.d.roleOf?.(pr.author)) ?? null);
+      const mapped = role === 'owner' || role === 'writer';
+      const fast = requiredOutcomes(fastChecks, await this.d.backlog.checks(pr.headSha));
+      if (fast.some((c) => c.outcome !== 'pass')) continue;
+      if (!mapped && !(await this.adminApproved(pr.number))) continue;
+      this.prBatch.enqueue({ issue: pr.number, number: pr.number, head: pr.headSha, by: pr.author || 'unknown' });
+    }
+  }
+
+  /** An admin's (owner's) latest review on the PR approves it. */
+  private async adminApproved(n: number): Promise<boolean> {
+    if (!this.d.roleOf) return false;
+    const latest = new Map<string, string>();
+    for (const r of [...(await this.d.backlog.reviews(n))].sort((a, b) => a.at.localeCompare(b.at))) if (r.state !== 'COMMENTED') latest.set(r.author, r.state);
+    for (const [author, state] of latest) if (state === 'APPROVED' && (await this.d.roleOf(author)) === 'owner') return true;
+    return false;
   }
 
   /** Wait for a running PR batch. */
@@ -200,6 +247,21 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
+  /** Whether this instance opened PR `number` (a pr.opened event of its own). */
+  private openedByUs(number: number): boolean {
+    return this.d.log.read(0, ['pr.opened']).some((e) => (e.payload as EventPayload<'pr.opened'>).number === number);
+  }
+
+  /**
+   * The only way the harness merges: GitHub's merge API, pinned to the head, and never for a PR it didn't open or a
+   * revert it opened (neverAutoMerge), whatever led here.
+   */
+  private async mergeOurs(pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
+    const never = neverAutoMerge({ branch: pr.head, openedByHarness: this.openedByUs(pr.number) });
+    if (never.length) return { ok: false, why: never.join('; ') };
+    return this.d.backlog.mergePr(pr.number, pr.headSha, `${pr.title} (#${pr.number})`);
+  }
+
   /** The policy's call on a ready PR at its current head. */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
@@ -218,6 +280,8 @@ export abstract class MergeFlow extends FixRuns {
       // an unreadable policy is "off"
     }
     const d = mergeDecision({
+      branch: pr.head,
+      openedByHarness: this.openedByUs(number),
       policyOn,
       repoOn: review.merge.auto,
       stopped: this.autoMergeStopped(),
@@ -302,7 +366,7 @@ export abstract class MergeFlow extends FixRuns {
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
     if (this.prBatching()) return this.mergeTested(w, pr, 'auto');
-    const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
+    const m = await this.mergeOurs(pr);
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -334,7 +398,7 @@ export abstract class MergeFlow extends FixRuns {
       if (how === 'approved') await this.d.backlog.comment(number, `[${BRAND.cli}] Approved, but not merged yet: ${turn.why}. It is tested again on the current ${this.branch} first, and merges once that passes.`);
       return;
     }
-    const m = await this.d.backlog.mergePr(number, pr.headSha, `${pr.title} (#${number})`);
+    const m = await this.mergeOurs(pr);
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -435,31 +499,105 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** A PR reverting an auto-merge (git revert -m 1 on the current tip), through the push checks. Never watched, so never merged by the harness. */
-  private async openRevert(m: EventPayload<'merge.done'>, failed: string[]): Promise<{ url: string; number: number } | null> {
+  private openRevert(m: EventPayload<'merge.done'>, failed: string[]): Promise<{ url: string; number: number } | null> {
+    const body = `Reverts #${m.number} (\`${m.sha.slice(0, 8)}\`): after it was auto-merged, ${this.branch}'s required checks failed: ${failed.join(', ')}.\n\nOpened by ${BRAND.name}. It never merges this; a human does.`;
+    return this.openRevertOf(m.sha, `pr-${m.number}`, `Revert "${m.title}" (#${m.number})`, body);
+  }
+
+  /**
+   * A revert PR of commit `sha` on the current tip (`-m 1` for a merge commit), on `<cli>/revert-<name>`, through the
+   * push checks. The merge policy never auto-merges a revert branch (neverAutoMerge), and it is never watched.
+   */
+  private async openRevertOf(sha: string, name: string, title: string, body: string): Promise<{ url: string; number: number } | null> {
     const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-    const dir = join(this.d.stateDir, 'reverts', `pr-${m.number}`);
-    const branch = `${BRAND.cli}/revert-pr-${m.number}`;
+    const dir = join(this.d.stateDir, 'reverts', name);
+    const branch = `${REVERT_BRANCH_PREFIX}${name}`;
     spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
-      const rv = spawnSync('git', ['-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'revert', '-m', '1', '--no-edit', m.sha], { cwd: dir, encoding: 'utf8' });
+      const parents = this.git(this.d.repo, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1;
+      const rv = spawnSync('git', ['-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
       if (rv.status !== 0) {
-        this.emit('coordinator.error', { instance: this.d.instance, where: `revert #${m.number}`, kind: 'error', message: (rv.stderr || rv.stdout).trim().slice(-500) });
+        this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: (rv.stderr || rv.stdout).trim().slice(-500) });
         return null;
       }
       const head = this.git(dir, 'rev-parse', 'HEAD');
-      const push = checkedPush({ cwd: dir, remote: this.remote, base: tip, head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, force: true });
+      const push = checkedPush({ cwd: dir, remote: this.remote, base: tip, head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), force: true });
       if (!push.ok) {
-        this.emit('coordinator.error', { instance: this.d.instance, where: `revert #${m.number}`, kind: 'error', message: ('refused' in push ? push.refused.join('; ') : push.error).slice(0, 500) });
+        this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: ('refused' in push ? push.refused.join('; ') : push.error).slice(0, 500) });
         return null;
       }
-      const body = `Reverts #${m.number} (\`${m.sha.slice(0, 8)}\`): after it was auto-merged, ${this.branch}'s required checks failed: ${failed.join(', ')}.\n\nOpened by ${BRAND.name}. It never merges this; a human does.`;
-      const pr = await this.d.backlog.openPr(branch, this.branch, `Revert "${m.title}" (#${m.number})`, body, { headSha: head });
+      const pr = await this.d.backlog.openPr(branch, this.branch, title, body, { headSha: head });
       return { url: pr.url, number: pr.number };
     } finally {
       spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
       spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
     }
+  }
+
+  // ---------------------------------------------------------------- main watch
+
+  private mainWatcher: MainWatch | null = null;
+
+  /** The main watch's state: its mode, the last commit it checked, the call it is waiting on (src/main-watch.ts). */
+  protected get mainWatchFile() {
+    return join(this.d.stateDir, 'main-watch.json');
+  }
+
+  /**
+   * The default branch with no protection on GitHub: check each new commit on it (at most one API call a minute).
+   * PR mode only: with land_mode direct, the harness lands by pushing the default branch itself.
+   */
+  protected async watchMain() {
+    const w = this.d.mainWatch;
+    if (!w) return;
+    this.mainWatcher ??= new MainWatch({
+      stateFile: this.mainWatchFile,
+      branch: this.branch,
+      required: () => this.d.cfg.project.required_checks,
+      api: w.api,
+      git: repoGit(this.d.repo, this.remote, this.branch),
+      harnessMerge: (sha) => {
+        const e = this.d.log.read(0, ['merge.done']).find((x) => (x.payload as EventPayload<'merge.done'>).sha === sha);
+        if (!e) return null;
+        const m = e.payload as EventPayload<'merge.done'>;
+        return { number: m.number, head: m.head, at: e.ts };
+      },
+      ...(w.now ? { now: w.now } : {}),
+      mode: (mode, detail) => this.emit('main_watch.mode', { mode, detail }),
+      checked: (sha, how, number) => this.emit('main_watch.checked', { sha, how, number }),
+      unaccounted: (o) => this.mainUnaccounted(o),
+    });
+    if (this.d.cfg.project.land_mode !== 'pr') return this.mainWatcher.off(`land_mode direct: the harness lands by pushing ${this.branch} itself`);
+    if ((w.setting?.() ?? 'auto') === 'off') return this.mainWatcher.off('turned off in the instance policy (main_watch: off)');
+    await this.mainWatcher.step();
+  }
+
+  /**
+   * A commit on the default branch nothing accounts for: stop auto-merge at once (the stop file, until an admin clears
+   * it on the dashboard), then alert (main_watch.unaccounted: the dashboard; the asks channel posts it) and open a revert
+   * PR for a human. Once per commit, even across a restart.
+   */
+  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean }) {
+    if (this.d.log.read(0, ['main_watch.unaccounted']).some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
+    const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
+    const reason = `main watch: ${o.reason}`;
+    if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
+    this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null });
+    let revert: { url: string; number: number } | null = null;
+    if (o.revert) {
+      const body = `Reverts \`${o.sha.slice(0, 8)}\` on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
+      try {
+        revert = await this.openRevertOf(o.sha, o.sha.slice(0, 12), `Revert ${o.sha.slice(0, 8)} (unaccounted on ${this.branch})`, body);
+        if (revert) {
+          await this.d.backlog.addLabels(revert.number, ['needs-owner']);
+          await this.d.backlog.requestReview(revert.number, [this.d.cfg.project.owners.default]).catch(() => undefined);
+        }
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: `main watch revert ${o.sha.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
+      }
+    }
+    this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null });
   }
 
   /** Merge the default branch into the PR head in a scratch worktree and run the fast tier there. Nothing is pushed. */

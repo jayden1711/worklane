@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
+import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -30,6 +30,7 @@ import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData 
 import { SettingsPage } from './pages/Settings';
 import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
+import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { SetupConsoleView } from './pages/Setup';
 
 export const pages = {
@@ -68,6 +69,8 @@ export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToSta
 export const renderConsole = (data: ConsoleData) => renderToStaticMarkup(<ConsolePanel data={data} run="r" />);
 export const renderAgents = (state: State, live: LiveList | null) => renderToStaticMarkup(<Agents state={state} live={live} />);
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);
+export const renderProtection = (protection: Protection, brand: string) => renderToStaticMarkup(<ProtectionStatus protection={protection} brand={brand} />);
+export const renderMainWatchAlert = (protection: Protection) => renderToStaticMarkup(<MainWatchAlert protection={protection} />);
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';

@@ -13,6 +13,7 @@ import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
 import type { PrTestRuns } from './test-runs.js';
 import type { TestRuns } from './pr-batch.js';
 import type { RoleOf } from '../dashboard-auth.js';
+import type { MainWatchApi } from '../main-watch.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -75,6 +76,13 @@ export interface CoordinatorDeps {
    * Absent with batching on: queued PRs wait, and nothing merges untested.
    */
   testRuns?: TestRuns;
+  /**
+   * The main watch (src/main-watch.ts): its GitHub calls, and the instance policy's main_watch (auto: on when GitHub
+   * doesn't protect the default branch; off). Absent: no watch (no GitHub, e.g. a file backlog).
+   */
+  mainWatch?: { api: MainWatchApi; setting?: () => 'auto' | 'off'; now?: () => number };
+  /** A person's role on the repo, from their permission (dashboard-auth.ts): whose PRs get the full run. Absent: nobody's. */
+  roleOf?: RoleOf;
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */

@@ -246,7 +246,22 @@ export interface State {
     lastResume: string | null;
   };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
+  /** How the default branch is guarded; a viewer gets `mode` only. Absent from an older server. */
+  protection?: Protection;
 }
+
+/** The default branch's protection: GitHub's, the main watch's (with the last commit it checked and an alert), or off. */
+export interface Protection {
+  mode: 'github' | 'main_watch' | 'off' | 'unknown';
+  detail?: string;
+  lastChecked?: { sha: string; url: string; at: string | null } | null;
+  alert?: { at: string; sha: string; url: string; reason: string; number: number | null; revert: string | null } | null;
+  stopped?: string | null;
+  canClear?: boolean;
+}
+
+/** An admin resumes auto-merge (the stop file goes; audited). */
+export const clearAutoMergeStop = () => api<{ ok: boolean }>('/api/auto-merge/clear', { method: 'POST', body: '{}' });
 
 export interface Run {
   issue: number;
