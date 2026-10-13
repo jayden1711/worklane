@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { toolBin } from '../src/tool-path.js';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { firstRunStart, startDashboard, type DashboardOptions, type FirstRunStart } from '../src/dashboard.js';
@@ -15,12 +16,13 @@ import { setupChecks } from '../src/doctor.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { install, GIT_HOOK_MARKER } from '../src/install.js';
-import { localInitFile, newState, STEPS, writeInitState } from '../src/init.js';
+import { localInitFile, newState, serverInitFile, STEPS, writeInitState } from '../src/init.js';
 import { checkSetup, checkSetupOffThread, GROUPS, SETUP_STEPS, type InstanceFacts, type MachinePaths, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
 import { serviceChange, type ServiceSpec } from '../src/os/index.js';
 import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-state-'));
+process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] = mkdtempSync(join(tmpdir(), 'setup-steps-machine-init-'));
 
 test('the registry covers every row of the first-run audit (1-33), each step once, and init walks its groups in order', () => {
   const rows = new Set(SETUP_STEPS.flatMap((s) => s.rows));
@@ -317,6 +319,7 @@ test('Start: shows the change first, needs a confirmation, is audited, and only 
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(s.started.length, 1);
     assert.deepEqual(s.started[0]!.program.slice(-4), ['coordinator', 'run', '--root', f.dir]);
+    assert.ok(s.started[0]!.env!.PATH!.split(delimiter).includes(toolBin()), 'PATH reaches the tool prefix, as `up` sets it');
     assert.equal(stepIn((await s.get()).body.setup, 'service')!.done, true);
     const audit = s.audit().filter((a) => a.action.startsWith('first_run.'));
     assert.deepEqual(audit.map((a) => [a.login, a.action]), [
@@ -327,6 +330,25 @@ test('Start: shows the change first, needs a confirmation, is audited, and only 
     assert.equal(audit[2]!.detail.started, true);
     // A viewer can't read the checklist either.
     assert.equal((await s.get('someone-else')).status, 403);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("a server instance's page reads init's record where init writes it (the machine's, src/init.ts serverInitFile), and its steps from it", async () => {
+  const f = fixture();
+  const s0 = newState('server', 'example-org/example-shop', 'example-org/example-shop', 'shop');
+  s0.handoff = { 'claude-token': 'done', app: 'done', service: 'waiting' };
+  s0.handoffDetail = { service: 'waiting for the setup PR https://github.com/example-org/example-shop/pull/9 to merge' };
+  s0.steps = { tools: { status: 'done', detail: 'ok', at: '2026-10-13T10:00:00.000Z' } };
+  writeInitState(serverInitFile('shop'), s0);
+  const s = await dashboard(f, world(), { instance: 'shop', policyFile: join(f.home, 'policy.yaml'), setupContext: { machine: f.machine, instanceFacts: () => ({ error: 'not visible to this user' }) } });
+  try {
+    const v = (await s.get()).body as unknown as { recorded: boolean; mode: string; setup: SetupView };
+    assert.equal(v.recorded, true, "init's record found");
+    assert.equal(v.mode, 'server');
+    assert.equal(stepIn(v.setup, 'claude-token')!.done, true, 'from the record');
+    assert.match(stepIn(v.setup, 'config-on-main')!.detail, /pull\/9 to merge/);
   } finally {
     await s.d.close();
   }
