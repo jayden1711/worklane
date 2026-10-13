@@ -79,6 +79,12 @@ export const ProjectConfig = z.strictObject({
    */
   protection: z.strictObject({ strict: z.boolean().default(false) }).prefault({}),
   /**
+   * The main watch (src/main-watch.ts), where GitHub doesn't protect the default branch. `direct_push_alert`: a
+   * commit that lands there without a PR (a direct push, a force-push) is posted to the Discord ops channel at once,
+   * mentioning the Discord owners. On by default; read as committed just before the push, so a push can't turn it off.
+   */
+  main_watch: z.strictObject({ direct_push_alert: z.boolean().default(true) }).prefault({}),
+  /**
    * Files two tasks running at once would both change and then conflict on (globs). Two tasks that would
    * touch the same one never run together; the second waits while other ready work takes the slot.
    * Absent: lockfiles, registries and changelogs, shared test helpers. An empty list turns holds off.
