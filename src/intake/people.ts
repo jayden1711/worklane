@@ -35,7 +35,10 @@ export async function personOf(cfg: IntakeConfig, discordId: string, roleOf: Rol
   return { id: discordId, login, role };
 }
 
-/** Decision kinds no chat reply ever answers, and that never post as answerable: high-risk (L3) merges. */
+/**
+ * Decision kinds no ordinary chat reply ever answers: high-risk (L3) merges. Only an owner listed in discord.owners
+ * approves one from a thread, naming its number (mayApproveHighRisk; src/coordinator/channel.ts).
+ */
 export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['land']);
 
 /**
@@ -44,6 +47,15 @@ export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['land']);
  */
 export function mayAnswerFromChat(kind: string, role: Role | null): boolean {
   return !NEVER_FROM_CHAT.has(kind) && mayAnswerKind(kind, role);
+}
+
+/**
+ * THE rule for a high-risk (L3) approval from a thread, and for a setup step's one-time link: the sender is in
+ * intake.yaml discord.owners AND their mapped login is an admin on the repo now. A mapped writer, a mapped admin
+ * who isn't listed, or anyone else: never (their reply is a comment).
+ */
+export function mayApproveHighRisk(cfg: IntakeConfig, discordId: string, role: Role | null): boolean {
+  return role === 'owner' && cfg.discord.owners.includes(discordId) && loginOf(cfg, discordId) !== null;
 }
 
 /** Setup-console asks a thread reply may answer: questions and approval links, by the console's own rule. */

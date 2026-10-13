@@ -339,6 +339,48 @@ function readToken(): string {
 
 export const token = readToken();
 
+/** Where a one-time setup link from Discord waits for the page to exchange it (src/console/links.ts). */
+const SETUP_LINK_KEY = 'dash-setup-link';
+/**
+ * A one-time setup link (`/setup/link/<instance>/<token>`, sent by DM): taken out of the address bar at once, before
+ * anything renders, and kept in this tab only until the Setup page exchanges it (after a sign-in, if one is needed).
+ * On a hub, the link's instance is the one this tab shows. Returns whether this page was opened from one.
+ */
+export function takeSetupLink(loc: Pick<Location, 'pathname'> = window.location, store: Pick<Storage, 'setItem'> = sessionStorage, replace: (path: string) => void = (p) => window.history.replaceState(null, '', p)): boolean {
+  const m = loc.pathname.match(/^\/setup\/link\/([A-Za-z0-9_.-]{1,64})\/([A-Za-z0-9_-]{43})\/?$/);
+  if (!m) return false;
+  replace('/setup');
+  try {
+    store.setItem(SETUP_LINK_KEY, m[2]!);
+    if (m[1] !== '-') {
+      store.setItem('dash-instance', m[1]!);
+      sessionStorage.removeItem('dash-all-instances');
+    }
+  } catch {
+    // no storage: the link can't be kept; open the step from the Setup page
+  }
+  return true;
+}
+if (inBrowser && !takeSetupLink()) {
+  // Back from signing in (the hub returns to /): a link still waiting opens the Setup page.
+  try {
+    if (sessionStorage.getItem(SETUP_LINK_KEY) && window.location.pathname === '/') window.history.replaceState(null, '', '/setup');
+  } catch {
+    // no storage: nothing waits
+  }
+}
+
+/** The setup link waiting in this tab, taken once. */
+export function pendingSetupLink(): string | null {
+  try {
+    const t = sessionStorage.getItem(SETUP_LINK_KEY);
+    sessionStorage.removeItem(SETUP_LINK_KEY);
+    return t;
+  } catch {
+    return null;
+  }
+}
+
 /** Someone's role on an instance (src/dashboard-auth.ts): from their permission on its repo. */
 export type Role = 'owner' | 'writer' | 'viewer';
 
@@ -552,6 +594,8 @@ export const getAsks = () => api<AsksView>('/api/asks');
 export const answerAsk = (id: string, answer: string) => api<{ ok: boolean }>(`/api/asks/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) });
 /** A pasted secret, straight to the instance's server; nothing keeps it on this side. */
 export const pasteSecret = (id: string, value: string) => api<{ ok: boolean }>(`/api/asks/${id}/secret`, { method: 'POST', body: JSON.stringify({ value }) });
+/** Exchange a one-time setup link: which ask it opens. Bound to this person's sign-in; it works once. */
+export const openSetupLink = (token: string) => api<{ ok: boolean; ask: string }>('/api/asks/link', { method: 'POST', body: JSON.stringify({ token }) });
 export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}/run`, { method: 'POST', body: '{}' });
 
 /** The setup console's Add project (src/console/add-project.ts), as GET /api/add-project serves it. */

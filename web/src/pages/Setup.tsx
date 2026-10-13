@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, pasteSecret, runRootStep, streamUrl, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, streamUrl, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { Header } from './Overview';
 
@@ -270,10 +270,11 @@ export function AddProjectView({ data, onChanged }: { data: AddProjectData; onCh
   );
 }
 
-export function SetupConsoleView({ data, onChanged, shown }: { data: AsksView; onChanged?: () => void; shown?: ReadonlySet<string> }) {
+export function SetupConsoleView({ data, onChanged, shown, focus }: { data: AsksView; onChanged?: () => void; shown?: ReadonlySet<string>; focus?: string | null }) {
   // An ask an add-project run raised is shown with that run, not twice.
   const asks = shown ? data.asks.filter((a) => !shown.has(a.id)) : data.asks;
-  const open = asks.filter((a) => a.status === 'open');
+  // Opened from a one-time Discord link: that step first.
+  const open = asks.filter((a) => a.status === 'open').sort((a, b) => Number(b.id === focus) - Number(a.id === focus));
   const done = asks.filter((a) => a.status !== 'open').reverse();
   return (
     <div className="space-y-6">
@@ -381,6 +382,8 @@ export function SetupPage() {
   const [adding, setAdding] = useState<AddProjectData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [inst, setInst] = useState<string | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const [linkErr, setLinkErr] = useState<string | null>(null);
   const load = () => {
     void getAsks()
       .then((d) => {
@@ -394,6 +397,12 @@ export function SetupPage() {
   useEffect(() => {
     load();
     void hubInstance.then(setInst);
+    // A one-time link from Discord (taken out of the address bar on load): exchanged once, by POST.
+    const link = pendingSetupLink();
+    if (link)
+      void openSetupLink(link)
+        .then((r) => setFocus(r.ask))
+        .catch((e: Error) => setLinkErr(e.message));
     // Live: each new event (an add-project step, an ask) reloads the console, debounced.
     let es: EventSource | null = null;
     let closed = false;
@@ -420,8 +429,18 @@ export function SetupPage() {
       <Header title="Setup console" sub="what the harness needs from you and can't do itself" />
       <div className="mx-auto max-w-4xl space-y-6 p-6">
         {err && <p className="text-[13px] text-red">{err}</p>}
+        {linkErr && (
+          <p className="text-[13px] text-red" data-testid="setup-link-error">
+            Your Discord link didn't open a step: {linkErr}
+          </p>
+        )}
+        {focus && (
+          <p className="text-[13px] text-ink-2" data-testid="setup-link-opened">
+            Opened from your one-time Discord link: the step it is for is first below.
+          </p>
+        )}
         {adding && <AddProjectView data={adding} onChanged={load} />}
-        {data && <SetupConsoleView data={data} onChanged={load} shown={shown} />}
+        {data && <SetupConsoleView data={data} onChanged={load} shown={shown} focus={focus} />}
         {inst && data?.role === 'owner' && <Terminal instance={inst} />}
       </div>
     </div>

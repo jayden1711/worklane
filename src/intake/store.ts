@@ -35,6 +35,18 @@ export function seen(stateDir: string, r: Pick<IncomingReport, 'source' | 'sourc
 }
 
 /**
+ * Record a message's id as seen without keeping any of its text (a reply in a setup step's thread, where a secret
+ * might be typed by mistake); returns false if it was seen before.
+ */
+export function markSeen(stateDir: string, r: Pick<IncomingReport, 'source' | 'sourceId'>): boolean {
+  if (seen(stateDir, r)) return false;
+  privateDir(join(stateDir, DIR));
+  privateDir(join(stateDir, DIR, 'seen'));
+  writePrivate(seenFile(stateDir, reportId(r)), '');
+  return true;
+}
+
+/**
  * Store a raw report and record its id as seen; returns false if it was seen before (a redelivery or retry). The raw
  * file is written first: a crash between the two still counts as seen, and recovery finds the raw file.
  */

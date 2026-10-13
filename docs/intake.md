@@ -53,7 +53,8 @@ senders. There are two sources: the Discord bot and in-product reports.
   direct-message intent.
 - **One server.** `intake.yaml` names the server (`discord.guild`, required when Discord is enabled) and its
   channels. A message from any other server, from a channel not listed, or sent as a direct message is dropped
-  on receipt and never stored. In a listed channel, the bot acts only on messages addressed to it (a mention,
+  on receipt and never stored. Any other server's event is dropped on its server id alone, before anything else
+  of it is read (one bot may sit in several servers: 2.1.6). In a listed channel, the bot acts only on messages addressed to it (a mention,
   or the configured prefix such as `bug:`).
 - **Allowed senders only.** `discord.allowed_senders` lists the Discord user ids whose messages are taken.
   Anyone else's message is dropped on their user id alone, before any of it is read or stored: no raw file,
@@ -61,9 +62,11 @@ senders. There are two sources: the Discord bot and in-product reports.
   so when Discord is on. Every trusted sender must be an allowed one; a trusted id that isn't allowed is a
   config error at start-up.
 - Replies go back through Discord's REST API to the same channel, at most 500 characters, and never ping
-  anyone.
-- Heartbeats and resume follow the gateway protocol; a dropped connection reconnects with backoff. The
-  adapter never stores the token anywhere but in memory.
+  anyone, except one approval's ping of the other owners in its thread (2.1.4).
+- Heartbeats and resume follow the gateway protocol: a dropped connection reconnects with backoff and resumes
+  its session (no new identify); when Discord says the session can't be resumed, it identifies again through
+  the machine-wide identify gate (2.1.6). A fatal close (a bad token, intents not allowed) stops the bot until
+  the instance restarts. The adapter never stores the token anywhere but in memory.
 
 ### 2.1.1 Discord as the owner's channel
 
@@ -95,6 +98,7 @@ discord:
   chat_channels: ["100000000000000004"]  # optional: the chat assistant (2.1.3)
   chat_model: haiku                      # its model (default haiku)
   chat_max_usd_per_day: 2                # its own daily cap (default 2, at most 20)
+  owners: ["100000000000000011", "100000000000000012"]  # optional: high-risk approvals and setup links (2.1.4, 2.1.5)
 ```
 
 A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
@@ -145,19 +149,118 @@ the template, and a reply that isn't an exact option is asked back without a run
 **Never on Discord.**
 
 - A secret (`paste_secret`) or root-step ask posts only "A setup step needs you on the dashboard" and the
-  setup console's link: no title, detail, credential name or place.
-- A high-risk merge (`land`) posts only a notice with links to the issue on GitHub and the dashboard's land
-  queue. It gets no thread and no options, and no reply anywhere in Discord answers it; admins approve it on
-  GitHub or the dashboard as before.
+  setup console's link: no title, detail, credential name or place. With `discord.owners` set it gets a thread
+  where an owner can ask for a one-time link to it by DM (2.1.5); nothing of the ask is posted either way, and
+  nothing typed in that thread is kept.
+- A high-risk merge (`land`, or a PR the merge policy left to an owner): without `discord.owners`, only a notice
+  with links to the issue on GitHub and the dashboard's land queue; no reply anywhere in Discord answers it.
+  With `discord.owners`, only those owners approve it, in its own thread, by naming its number (2.1.4).
 
 Every post is recorded before it is sent (`discord.posting`) and after (`discord.posted`); one cut off by a
-restart is marked unknown and never resent. Posts are at most 500 characters and ping nobody.
+restart is marked unknown and never resent. Posts are at most 500 characters and ping nobody, except an
+approval's ping of the other owners (2.1.4).
 
 **Running it.** The service (`src/intake/wire.ts`) reads only the instance's own home: no `intake.yaml`, no
 intake; Discord off, or no `intake.discord_token` in `credentials.yaml`, no bot connection. The bot connects
-only after the coordinator holds the instance's lock. `intake.yaml` is read again on every pass, but the
-server, channels and allowed senders the bot listens to are fixed when it connects: restart the instance after
-changing them.
+only after the coordinator holds the instance's lock, and after two start-up checks; either one failing leaves
+Discord off for the instance (it says why, `discord not started: ...`, and runs on without it):
+
+- every `discord.owners` entry maps (in `discord.people`) to a login that is an admin on the instance's repo,
+  read fresh (an entry that isn't mapped at all is a config error);
+- no other instance on the machine acts in the same server and channel (2.1.6).
+
+`intake.yaml` is read again on every pass, but the server, channels, allowed senders and owners the bot
+connects with are fixed then: restart the instance after changing them. A reply is still checked against the
+config and the role read at that moment.
+
+### 2.1.4 High-risk approvals from Discord (`discord.owners`)
+
+`discord.owners` (Discord user ids, empty by default) lists who may approve a high-risk merge from Discord.
+Each must be mapped in `discord.people` to a GitHub admin of the repo (checked at start-up, above). With it
+empty, high-risk merges stay off Discord as before.
+
+- **What gets a thread.** An L3 landing decision (`land`), and a PR the merge policy left to an owner
+  (`merge.decided` with `auto: false`: high-risk paths, a money path, a design change, size, any doubt), one
+  thread per PR head. The post names the number to approve and links the issue or PR and the dashboard.
+- **Who.** Only someone in `discord.owners` whose mapped login is an admin on the repo at that moment
+  (`mayApproveHighRisk` in `src/intake/people.ts`). Anyone else's reply, a mapped writer's or an admin's who
+  isn't listed included, is recorded as a comment (on the issue too), never as an answer.
+- **How.** The reply must name the number: `approve 12` (`approve #12`, `approve PR 12` too). A plain `approve`
+  approves nothing and is asked back. A landing decision also takes `reject 12` (or `reject`). No model reads
+  these replies. Like every decision or ask thread's reply, they are answered as they arrive (the fast path,
+  `src/coordinator/quick-replies.ts`), with the same checks, and taken once: never by the intake pass too.
+- **Checks.** The same as a dashboard approval. A landing decision answers through `answerDecision`
+  (`src/decide.ts`), with the decision's own role check and record. It is refused when the change was redone
+  since the decision (a newer head) or already acted on. A PR approval (`approveMerge`, recorded as
+  `merge.approved`) is refused unless the PR is open and still waits for an owner at exactly the head that was
+  decided on, and its required checks are green on that head. Both are refused under an emergency stop or while
+  auto-merge is stopped (a red main, or the main watch's unaccounted commit), and they say why. A wrong number
+  is refused: "this thread is about #12, not #13". The first approval stands; a later one is told who approved.
+- **No delay.** An approved landing decision lands as an approved one always has. An approved PR is looked at
+  on the PR watch's very next pass and merged through the normal merge path: its required checks green on the
+  approved head, GitHub able to merge it cleanly, the combined check with main (or, with PR batching, exactly
+  as its batch tested it), then GitHub's merge API pinned to that head. Something that holds it there is
+  recorded once (`merge.failed`).
+- **Audit.** Every approval is a `dashboard.audit` entry with `via: discord`, like an answer from the
+  dashboard but for `via`.
+- **Pings.** Once approved, every other owner in `discord.owners` is pinged in that thread: the one place a
+  post mentions anyone. The adapter itself allows a mention only of a `discord.owners` id, and only in one of
+  the bot's own threads.
+
+### 2.1.5 Setup steps: a one-time dashboard link by DM
+
+A secret or a root step is still never typed into Discord. With `discord.owners` set, the step's thread says
+so, and an owner (as in 2.1.4) who replies `link` there gets a direct message from the bot with a one-time link
+to that step's paste box on the dashboard:
+
+- The link is `<dashboard_url>/setup/link/<instance>/<token>`: a random 32-byte token in the path, never in a
+  query a proxy could log. The page takes it out of the address bar at once and exchanges it by POST
+  (`/api/asks/link`).
+- It is bound to that step and to that owner's GitHub login. The dashboard still needs their own sign-in, and
+  refuses anyone else's session or someone who isn't an owner there now. It works once and for 10 minutes,
+  and any use of it, refused or not, uses it up. Only the token's hash is recorded (`setup_link.issued`,
+  `setup_link.used`). The link grants nothing the owner's session doesn't already have: it only says which
+  step to open.
+- The DM carries the step's title and the link, nothing else of the step: no detail, credential name or
+  place. The DM is outbound only: the bot never reads DMs, and an incoming one (a reply to it) is dropped on
+  receipt, as every DM is.
+- Nothing typed in the step's thread is kept, not even in the private raw store (only its id, so it is taken
+  once), and no reply there answers the step.
+
+### 2.1.6 One bot, several instances
+
+One bot (one token) can serve several instances on the same machine, each in its own server, or several in
+one server with different channels. For example: instance A in server 1; instances B and C in server 2, each
+with its own channels; instance D in server 3.
+
+1. In the Discord developer portal, invite the one bot to each server, with read and send permissions in each
+   instance's channels (and "create public threads" in each asks channel).
+2. Install the same token for each instance that uses it: `credentials.sh <name> intake-discord` once per
+   instance (each keeps its own copy, 0400, readable only by its own coordinator user).
+3. In each instance's own `intake.yaml`, set `discord.guild` to its server and list only its own channels
+   (`channels`, `asks_channel`, `chat_channels`). Two instances may share a server only with different channels.
+
+How it runs:
+
+- **Separate sessions.** Each instance opens its own gateway session with the token and identifies on its own.
+  The gateway delivers every server's events to every session; each instance drops any other server's event the
+  moment it arrives, on its server id alone, before anything of it is read further, stored or logged.
+- **Identify limits.** Discord limits identifies per token, not per process: one per 5 seconds per rate-limit
+  bucket (`shard_id % max_concurrency`; every session here is unsharded, shard 0, so all share one bucket
+  whatever `max_concurrency` is), and a daily number of session starts. So every identify on the machine goes
+  through one gate (`src/intake/discord-gate.ts`): a lock file in the machine-wide agent slot directory, which
+  every instance's coordinator user can write. Holding it, an instance waits until 5 seconds have passed since
+  that token's last identify on the machine, asks Discord how many session starts are left
+  (`GET /gateway/bot`), and records the time. None left: it waits for the reset instead. The gate's state keys a
+  hash of the token, never the token. A dropped connection resumes its session, which doesn't count as an
+  identify.
+- **No two instances in one channel.** Before its bot connects, an instance reads every other instance's
+  `intake.yaml` it can read (the instances directory: on a single-user machine, all of them) and every running
+  bot's claim in the machine-wide slot directory. With one coordinator user per instance, homes are private to
+  each other, so the claims are how they see each other. A claim is written under a lock when a bot connects
+  and removed when it stops; a dead process's claim doesn't count. A claim holds only hashes of server+channel
+  pairs, no ids. Another instance in the same server with a channel in common refuses Discord at start-up,
+  naming that instance and the channel.
 
 ### 2.1.2 Ideas in conversation
 
@@ -360,6 +463,11 @@ test with an injection-style report.
    (`discord.people`), and set `discord.asks_channel` and `discord.dashboard_url`.
 5. **Chat channels** (2.1.3): list them in `discord.chat_channels`, and give the bot read and send permissions
    there; restart the instance.
+6. **High-risk approvals and setup links** (2.1.4, 2.1.5): list the owners' Discord user ids in
+   `discord.owners`, each mapped in `discord.people` to a GitHub admin of the repo; each owner allows direct
+   messages from the server's members (for the links). Restart the instance.
+7. **One bot for several instances** (2.1.6): invite it to each server, install the same token for each
+   instance, and give each instance its own server and channels in its own `intake.yaml`.
 
 ## 11. Build order
 

@@ -162,12 +162,19 @@ export const EventSchemas = {
    * filed (`issue`, `by`), dropped, failed (a run that ended without a usable result, why in `detail`).
    */
   'discord.idea': z.strictObject({ id: z.string(), stage: z.enum(['opened', 'said', 'asked', 'drafted', 'filed', 'dropped', 'failed']), by: z.string().nullable(), msg: z.string().nullable(), issue: issue.nullable(), detail: z.string().nullable() }),
-  'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused', 'question', 'confirm']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
+  'discord.reply': z.strictObject({ id: z.string(), thread: z.string(), target: z.string(), by: z.string(), outcome: z.enum(['answered', 'comment', 'ambiguous', 'already', 'refused', 'question', 'confirm', 'link']), answer: z.string().nullable(), excerpt: z.string().nullable() }),
   /**
    * A plain-language pick in a thread (src/intake/explain.ts): asked (the bot asked `by` to confirm `option`),
    * confirmed (their next message was yes: the answer is recorded through the decide path), dropped (their next
    * message was something else). Only the same person's yes confirms.
    */
+  /**
+   * A setup step's one-time dashboard link (src/console/links.ts), sent by DM to an owner who asked for it in the
+   * step's thread: for that ask and that GitHub login only, until `expires_at`, once. Only the token's hash is kept.
+   */
+  'setup_link.issued': z.strictObject({ ask: z.string(), login: z.string(), hash: z.string().regex(/^[0-9a-f]{64}$/), expires_at: z.string() }),
+  /** A one-time link was presented on the dashboard: opened (it pointed the owner to its ask), or refused and burnt. */
+  'setup_link.used': z.strictObject({ hash: z.string().regex(/^[0-9a-f]{64}$/), by: z.string(), outcome: z.enum(['opened', 'expired', 'wrong_login', 'not_owner', 'closed']) }),
   'discord.confirm': z.strictObject({ thread: z.string(), target: z.string(), by: z.string(), option: z.string(), stage: z.enum(['asked', 'confirmed', 'dropped']), msg: z.string() }),
   /**
    * A thread's plain-language summary, once per thread: `summary` (it passed the facts check) or `template` (the
@@ -368,6 +375,12 @@ export const EventSchemas = {
   /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
   'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),
   /** Auto-merged: a merge commit `sha` of the evaluated `head`. */
+  /**
+   * An owner approved a PR the merge policy left to them, at this head (from a Discord thread: `via`): it merges on
+   * the PR watch's next pass through the normal merge path, if its checks are still green on this head and
+   * auto-merge isn't stopped. The first approval at a head stands.
+   */
+  'merge.approved': z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string(), via: z.enum(['discord']) }),
   'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */

@@ -42,9 +42,12 @@ export abstract class QuickReplies extends ChannelChat {
     for (const s of d.intake?.sources ?? []) if (s.name === 'discord') s.onArrival?.(() => void this.wakeQuick());
   }
 
-  /** Is this a reply a person is waiting on: a chat-channel message, or a reply in a decision's or ask's thread? */
+  /**
+   * Is this a reply a person is waiting on: a chat-channel message, or a reply in a decision's, ask's or owner merge's
+   * thread (an L3 approval; a setup step's link)? Those are taken here only, never by the intake pass too.
+   */
   private quick(threads: Map<string, string>) {
-    return (r: IncomingReport) => r.thread?.kind === 'chat' || (r.thread?.kind === 'thread' && /^(?:decision|ask):/.test(threads.get(r.thread.id) ?? ''));
+    return (r: IncomingReport) => r.thread?.kind === 'chat' || (r.thread?.kind === 'thread' && /^(?:decision|ask|merge):/.test(threads.get(r.thread.id) ?? ''));
   }
 
   /** What the intake pass takes from the chat source: everything else (with no quick path, everything). */

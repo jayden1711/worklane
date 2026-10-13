@@ -34,7 +34,7 @@ export interface IncomingReport {
 export interface IntakeSource {
   name: Source;
   take(): Promise<IncomingReport[]>;
-  reply(thread: NonNullable<IncomingReport['thread']>, text: string): Promise<boolean>;
+  reply(thread: NonNullable<IncomingReport['thread']>, text: string, opts?: ReplyOptions): Promise<boolean>;
   /** Tell the source these reports are recorded (their ids are in the seen ledger), so it stops redelivering them. */
   ack?(sourceIds: string[]): Promise<void>;
   /**
@@ -54,6 +54,16 @@ export interface IntakeSource {
   onArrival?(fn: (r: IncomingReport) => void): void;
   /** A chat source only: show the typing indicator in a channel or thread. False on any failure. */
   typing?(where: string): Promise<boolean>;
+  /**
+   * A chat source only: send `text` to this user as a direct message, outbound only (the bot never reads DMs; an
+   * incoming one is dropped on receipt). True when it was sent.
+   */
+  dm?(user: string, text: string): Promise<boolean>;
+}
+
+/** How a reply is sent: `mentions`, the users it pings (only discord.owners, only in the bot's own thread; the adapter enforces both). */
+export interface ReplyOptions {
+  mentions?: string[];
 }
 
 /** Intake's daily caps. The instance settings win; these (or the intake config's) are the defaults. */
@@ -130,6 +140,14 @@ export const IntakeConfig = z.strictObject({
       chat_model: z.enum(['haiku', 'sonnet', 'opus']).default(CHAT_DEFAULTS.model),
       /** The chat's own daily spend cap, in dollars; its runs count against the instance's daily budget too. */
       chat_max_usd_per_day: z.number().positive().max(20).default(CHAT_DEFAULTS.max_usd_per_day),
+      /**
+       * The owners on Discord (user ids): the only people who may approve a high-risk (L3) merge from a thread
+       * ("approve <number>"), or ask for a setup step's one-time dashboard link by DM. Each must be mapped in
+       * `people`, and the login it maps to must be an admin on the instance's repo: checked at start-up, where one
+       * that isn't refuses Discord. They are also the only users a post may ever mention (an approval pings the
+       * others, in its thread). Empty (the default): no high-risk approval and no link comes from Discord.
+       */
+      owners: z.array(snowflake('user')).default([]),
     })
     .refine((d) => !d.enabled || d.guild, { message: 'discord.guild (the server id) is required when discord is enabled', path: ['guild'] })
     .refine((d) => !d.chat_channels.some((c) => d.channels.includes(c) || c === d.asks_channel), { message: 'a chat channel must not also be an ideas channel (discord.channels) or the asks channel', path: ['chat_channels'] })
@@ -184,6 +202,9 @@ export const IntakeConfig = z.strictObject({
   }
   for (const id of Object.keys(c.discord.people)) {
     if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['discord', 'people'], message: `${id} is mapped to a GitHub login but not in discord.allowed_senders; a mapped person must be allowed` });
+  }
+  for (const id of c.discord.owners) {
+    if (!Object.hasOwn(c.discord.people, id)) ctx.addIssue({ code: 'custom', path: ['discord', 'owners'], message: `${id} is in discord.owners but not mapped to a GitHub login in discord.people; every Discord owner must be mapped (to a GitHub admin)` });
   }
 });
 export type IntakeConfig = z.infer<typeof IntakeConfig>;
