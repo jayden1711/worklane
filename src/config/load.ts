@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import type { z } from 'zod';
 import { BRAND } from '../brand.js';
+import { optimizeProblems, type BenchmarksConfig } from '../optimize.js';
 import { FILES, type AgentsConfig, type AppConfig, type DeployConfig, type GuardrailsConfig, type ProjectConfig, type ReviewConfig, type TestsConfig } from './schema.js';
 
 export interface Config {
@@ -17,6 +18,8 @@ export interface Config {
   deploy?: DeployConfig;
   /** The project's app, for browser checks; absent: browser checks are off (Track B is inactive). */
   app?: AppConfig;
+  /** The project's declared benchmarks, for the weekly optimization pass (src/optimize.ts); absent: none. */
+  benchmarks?: BenchmarksConfig;
   /** Role prompts (roles/<role>.md by role) as committed, for a config read from git; absent: read from `dir`. */
   roles?: Record<string, string>;
 }
@@ -34,7 +37,7 @@ export class ConfigInvalid extends Error {
 }
 
 const REQUIRED = ['config.yaml', 'agents.yaml', 'guardrails.yaml', 'tests.yaml'] as const;
-const OPTIONAL = ['review.yaml', 'deploy.yaml', 'app.yaml'] as const;
+const OPTIONAL = ['review.yaml', 'deploy.yaml', 'app.yaml', 'benchmarks.yaml'] as const;
 
 function parseFile(text: string, file: string, errors: ConfigError[]): unknown {
   const doc = parseDocument(text, { uniqueKeys: true });
@@ -108,6 +111,7 @@ function configFrom(root: string, read: (file: string) => string | null): Config
     ...(out['review.yaml'] ? { review: out['review.yaml'] as ReviewConfig } : {}),
     ...(out['deploy.yaml'] ? { deploy: out['deploy.yaml'] as DeployConfig } : {}),
     ...(out['app.yaml'] ? { app: out['app.yaml'] as AppConfig } : {}),
+    ...(out['benchmarks.yaml'] ? { benchmarks: out['benchmarks.yaml'] as BenchmarksConfig } : {}),
   };
 }
 
@@ -128,5 +132,6 @@ function crossCheck(out: Record<string, unknown>, errors: ConfigError[]) {
     if ('connection' in r.match && !guardrails.fingerprints[r.match.connection.fingerprints]) {
       errors.push({ file: 'guardrails.yaml', path: `rules.${i}.match.connection.fingerprints`, message: `no fingerprint set named ${r.match.connection.fingerprints}` });
     }
-  });
+  });  // Every optimize target names a declared benchmark (or the slowest test, with a command to run one).
+  for (const e of optimizeProblems(project.optimize, out['benchmarks.yaml'] as BenchmarksConfig | undefined)) errors.push({ file: 'config.yaml', ...e });
 }

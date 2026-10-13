@@ -22,14 +22,14 @@ import { updateLog } from '../updates.js';
 import { readIncidents } from '../watchdog/incidents.js';
 import { scrub } from '../watchdog/post.js';
 import { runRoute } from './model-routing.js';
-import { PrHygiene } from './pr-hygiene.js';
+import { Optimizer } from './optimize.js';
 
 export const SUPERFAN_ROLE = 'superfan';
 /** The machine's superfan's lock and state, in the slot directory every coordinator shares. */
 export const MACHINE_LOCK = 'superfan-machine.lock';
 export const MACHINE_STATE = 'superfan-machine.json';
 
-export abstract class SuperfanWatch extends PrHygiene {
+export abstract class SuperfanWatch extends Optimizer {
   /** The superfan pass in flight. */
   protected superfanRun: Promise<void> = Promise.resolve();
   private superfanBusy = false;

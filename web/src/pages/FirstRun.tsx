@@ -1,20 +1,23 @@
-// The first-run page: `init`'s checklist as it recorded it (GET /api/first-run, src/init.ts), with its
-// progress, where it stopped and how to pick up, and what this mode can't do (each with why). The same checklist
-// `doctor` shows. Read-only: the steps run in the terminal (logins and installs need it), not from here.
-import { useEffect, useState } from 'react';
-import { getFirstRun, type FirstRun, type FirstRunAutoConfig, type FirstRunStatus, type FirstRunVerification, type State } from '../api';
+// The first-run page: every setup step (src/setup-steps.ts), checked live from the real state, grouped, each done or
+// not done, with a Fix for each that isn't: the screen that does it, or what to do today where there is no screen yet,
+// or the provider's own page (a login, a consent) with this page noticing when it's done. It checks again on a short
+// poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
+// and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
+import { useCallback, useEffect, useState } from 'react';
+import { getFirstRun, startCoordinator, type FirstRun, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
 import { navigate } from '../App';
-import { ago, Badge, Card, cx } from '../components/ui';
+import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
 
-const STATUS_LABEL: Record<FirstRunStatus, string> = { pending: 'not yet', done: 'done', skipped: 'skipped', failed: 'stopped here' };
-const STATUS_TONE: Record<FirstRunStatus, 'neutral' | 'ok' | 'warn' | 'danger'> = { pending: 'neutral', done: 'ok', skipped: 'neutral', failed: 'danger' };
-const MARK: Record<FirstRunStatus, string> = { pending: 'bg-inset text-ink-3 shadow-hairline', done: 'bg-green-tint text-green', skipped: 'bg-inset text-ink-3 shadow-hairline', failed: 'bg-red-tint text-red' };
+/** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
+export const POLL_MS = 15_000;
 
 const MODE_LINE = {
   local: 'Local mode: on this machine, as you. No server, no ssh, no root.',
   server: 'Server mode: the hardened multi-user Linux setup, each project as users of its own.',
 };
+
+const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
 
 const SLOT_LABEL: Record<FirstRunVerification['slot'], string> = { setup: 'worktree setup', full: 'runner.full', changed: 'runner.changed', one: 'runner.one' };
 
@@ -72,75 +75,227 @@ function AutoConfigView({ a }: { a: FirstRunAutoConfig }) {
   );
 }
 
-/** The checklist from its data (also what the render checks render). */
-export function FirstRunView({ f }: { f: FirstRun }) {
-  const pct = f.total ? Math.round((f.done / f.total) * 100) : 0;
+
+/** What a step's Fix shows when it has no screen to open: today's way, a provider's page, or a terminal command. */
+function FixPanel({ s }: { s: SetupStepView }) {
+  const f = s.fix;
+  if (f.kind === 'outside')
+    return (
+      <div className="space-y-2" data-testid="first-run-outside">
+        <p className="text-[12.5px] text-ink-2">This one happens on {f.label}: {f.why}. This page checks again every {POLL_MS / 1000} s and marks it done when it is.</p>
+        {f.url && (
+          <a href={f.url} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="first-run-outside-link">
+            Open {f.label}
+          </a>
+        )}
+        {f.command && <code className={code}>{f.command}</code>}
+      </div>
+    );
+  if (f.kind === 'terminal')
+    return (
+      <div className="space-y-2" data-testid="first-run-terminal">
+        <p className="text-[12.5px] text-ink-2">Only in a terminal: {f.why}.</p>
+        <code className={code}>{f.command}</code>
+      </div>
+    );
+  return (
+    <div className="space-y-1.5" data-testid="first-run-coming">
+      <p className="text-[12.5px] text-ink-2">
+        <span className="font-medium text-ink">Today: </span>
+        {s.today}
+      </p>
+      <p className="text-[12px] text-ink-3">A screen for this is coming.</p>
+    </div>
+  );
+}
+
+function StepRow({ s, open, onFix }: { s: SetupStepView; open: boolean; onFix: () => void }) {
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : 'Fix';
+  return (
+    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
+      <div className="flex gap-3">
+        <span className={cx('mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold', s.done ? 'bg-green-tint text-green' : s.optional ? 'bg-inset text-ink-3 shadow-hairline' : 'bg-red-tint text-red')} aria-hidden>
+          {s.done ? '✓' : ''}
+        </span>
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="text-[13px] font-medium text-ink">{s.title}</span>
+            {s.optional && <span className="text-[11.5px] text-ink-3">optional</span>}
+            <Badge tone={s.done ? 'ok' : s.optional ? 'neutral' : 'warn'}>{s.done ? 'done' : 'not done'}</Badge>
+          </div>
+          <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
+        </div>
+        {!s.done && (
+          <Button size="sm" variant={open ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+            {label}
+          </Button>
+        )}
+      </div>
+      {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
+        <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
+          <FixPanel s={s} />
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** Start: what it changes, shown first; then a confirmation; then what happened. */
+function StartCard({ start, canStart, blocked, confirming, setConfirming, onStarted }: { start: FirstRunStart; canStart: boolean; blocked: number; confirming: boolean; setConfirming: (b: boolean) => void; onStarted: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const go = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await startCoordinator();
+      setMsg({ ok: true, text: `started: ${r.detail}` });
+      setConfirming(false);
+      onStarted();
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card className="space-y-3 p-4" data-testid="first-run-start" id="first-run-start">
+      <div className="text-[13px] font-medium text-ink">Start the coordinator</div>
+      {start.kind === 'local' && (
+        <>
+          <div className="space-y-1.5 text-[12.5px] text-ink-2" data-testid="first-run-start-change">
+            <p>
+              Start installs a service for you with {start.manager}, which runs the coordinator now and again after a restart. It writes:
+            </p>
+            <code className={code}>{start.file}</code>
+            <p>runs these:</p>
+            <code className={code}>{start.commands.join('\n')}</code>
+            <p>and the service runs:</p>
+            <code className={code}>{start.program.join(' ')}</code>
+            <p>
+              Its log: <span className="break-all font-mono text-[12px] text-ink">{start.log}</span>. The CLI's <code className="font-mono text-[12px]">down</code> command removes the service again.
+            </p>
+          </div>
+          {blocked > 0 && <p className="text-[12.5px] text-orange">{blocked} required step{blocked === 1 ? " isn't" : "s aren't"} done yet: the coordinator may stop at {blocked === 1 ? 'it' : 'them'}.</p>}
+          {!canStart ? (
+            <p className="text-[12.5px] text-ink-3" data-testid="first-run-start-refused">
+              Only the instance's owners can start it.
+            </p>
+          ) : !confirming ? (
+            <Button size="sm" onClick={() => setConfirming(true)} data-testid="first-run-start-button">
+              Start…
+            </Button>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg bg-blue-tint p-3" data-testid="first-run-start-confirming">
+              <span className="text-[12.5px] text-ink">Make the change above and start it?</span>
+              <Button size="sm" disabled={busy} onClick={() => void go()} data-testid="first-run-start-confirm">
+                {busy ? 'Starting…' : 'Confirm start'}
+              </Button>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)} data-testid="first-run-start-cancel">
+                Cancel
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+      {start.kind === 'owner-command' && (
+        <div className="space-y-1.5 text-[12.5px] text-ink-2" data-testid="first-run-start-owner-command">
+          <p>
+            Not from here: {start.why}. It installs and starts <span className="font-mono text-[12px] text-ink">{start.unit}</span>.
+          </p>
+          <code className={code}>{start.command}</code>
+        </div>
+      )}
+      {start.kind === 'unsupported' && <p className="text-[12.5px] text-ink-2">{start.why}.</p>}
+      {msg && (
+        <p className={cx('break-words text-[12.5px]', msg.ok ? 'text-green' : 'text-red')} data-testid="first-run-start-result">
+          {msg.text}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean }) {
+  const [open, setOpen] = useState<string | null>(initialOpen);
+  const [confirming, setConfirming] = useState(initialConfirming);
+  const setup = f.setup;
+  const pct = setup?.total ? Math.round((setup.done / setup.total) * 100) : 0;
   const stopped = f.steps.find((s) => s.status === 'failed' && !s.optional);
+  const checkedAt = setup?.groups.flatMap((g) => g.steps.map((s) => s.checkedAt)).sort()[0] ?? null;
+  const fix = (s: SetupStepView) => {
+    if (s.fix.kind === 'screen') return navigate(s.fix.path);
+    if (s.fix.kind === 'start') {
+      document.getElementById('first-run-start')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    setOpen(open === s.id ? null : s.id);
+  };
   return (
     <div className="space-y-5">
-      {!f.recorded && (
-        <Card className="space-y-2 p-4" data-testid="first-run-none">
-          <div className="text-[13px] font-medium text-ink">Setup hasn't been walked here yet</div>
-          <p className="text-[12.5px] text-ink-2">Run this in a terminal on this machine. It checks each step, does what isn't done (asking before it installs anything), and this page follows along.</p>
-          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline">{f.command}</code>
-        </Card>
-      )}
       {f.mode && (
         <p className="text-[12.5px] text-ink-2" data-testid="first-run-mode" data-mode={f.mode}>
           {MODE_LINE[f.mode]}
         </p>
       )}
-      <section aria-label="Progress" className="space-y-1.5">
-        <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
-          <span className="font-medium text-ink">
-            {f.done} of {f.total} steps done
-          </span>
-          {f.updatedAt && <span className="text-ink-3">updated {ago(f.updatedAt)}</span>}
-        </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-inset shadow-hairline" role="progressbar" aria-valuemin={0} aria-valuemax={f.total} aria-valuenow={f.done} aria-label="Setup progress" data-testid="first-run-progress">
-          <div className={cx('h-full rounded-full transition-[width] duration-300', f.finishedAt ? 'bg-green' : 'bg-blue')} style={{ width: `${pct}%` }} />
-        </div>
-      </section>
-      <Card className="overflow-hidden">
-        <ol className="divide-y divide-line" data-testid="first-run-steps">
-          {f.steps.map((s, i) => (
-            <li key={s.id} className="flex gap-3 px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.status}>
-              <span className={cx('mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11.5px] font-semibold tabular-nums', MARK[s.status])} aria-hidden>
-                {s.status === 'done' ? '✓' : i + 1}
-              </span>
-              <div className="min-w-0 flex-1 space-y-0.5">
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className={cx('text-[13px] font-medium', s.status === 'pending' ? 'text-ink-3' : 'text-ink')}>{s.title}</span>
-                  {s.optional && <span className="text-[11.5px] text-ink-3">optional</span>}
-                  <Badge tone={STATUS_TONE[s.status]}>{STATUS_LABEL[s.status]}</Badge>
-                </div>
-                {s.status !== 'pending' && <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>}
-              </div>
-            </li>
-          ))}
-        </ol>
-      </Card>
+      {setup && (
+        <section aria-label="Progress" className="space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px]">
+            <span className="font-medium text-ink">
+              {setup.done} of {setup.total} steps done{setup.requiredLeft ? `, ${setup.requiredLeft} required left` : ', every required step done'}
+            </span>
+            <span className="flex items-center gap-2">
+              {checkedAt && (
+                <span className="text-ink-3" data-testid="first-run-checked">
+                  checked {ago(checkedAt)}
+                </span>
+              )}
+              {onRecheck && (
+                <Button size="sm" variant="outline" disabled={checking} onClick={onRecheck} data-testid="first-run-recheck">
+                  {checking ? 'Checking…' : 'Re-check'}
+                </Button>
+              )}
+            </span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-inset shadow-hairline" role="progressbar" aria-valuemin={0} aria-valuemax={setup.total} aria-valuenow={setup.done} aria-label="Setup progress" data-testid="first-run-progress">
+            <div className={cx('h-full rounded-full transition-[width] duration-300', setup.requiredLeft ? 'bg-blue' : 'bg-green')} style={{ width: `${pct}%` }} />
+          </div>
+        </section>
+      )}
+      {setup?.groups.map((g) => (
+        <section key={g.id} aria-label={g.title} className="space-y-1.5" data-testid="first-run-group" data-group={g.id} data-done={g.done} data-ready={g.ready}>
+          <div className="flex items-center gap-2">
+            <h2 className="text-[13px] font-medium text-ink">{g.title}</h2>
+            {g.optional && <span className="text-[11.5px] text-ink-3">optional</span>}
+            <span className="text-[12px] text-ink-3">
+              {g.steps.filter((s) => s.done).length}/{g.steps.length}
+            </span>
+          </div>
+          <Card className="overflow-hidden">
+            <ol className="divide-y divide-line" data-testid="first-run-steps">
+              {g.steps.map((s) => (
+                <StepRow key={s.id} s={s} open={open === s.id} onFix={() => fix(s)} />
+              ))}
+            </ol>
+          </Card>
+        </section>
+      ))}
+      <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} />
       {f.autoConfig && <AutoConfigView a={f.autoConfig} />}
-      {stopped && (
-        <Card className="space-y-2 p-4" data-testid="first-run-resume">
-          <div className="text-[13px] font-medium text-red">Stopped at {stopped.title}</div>
-          <p className="text-[12.5px] text-ink-2">Fix what it says above, then run the same command again: the steps already done are checked, not redone, and it picks up here.</p>
-          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline">{f.command}</code>
+      {!f.recorded && (
+        <Card className="space-y-2 p-4" data-testid="first-run-none">
+          <div className="text-[13px] font-medium text-ink">init hasn't been run here</div>
+          <p className="text-[12.5px] text-ink-2">The steps above are checked live either way. To walk them in a terminal (it does what isn't done, asking before it installs anything):</p>
+          <code className={code}>{f.command}</code>
         </Card>
       )}
-      {f.finishedAt && (
-        <p className="text-[12.5px] text-green" data-testid="first-run-finished">
-          Every required step is done ({ago(f.finishedAt)}).
-        </p>
-      )}
-      {f.mode === 'server' && (
-        <p className="text-[12.5px] text-ink-3">
-          Each project's own steps on a server (its instance, GitHub App, Claude token and checkout) show on the{' '}
-          <button onClick={() => navigate('/setup')} className="text-blue-ink hover:underline">
-            Setup console
-          </button>
-          's Add project.
-        </p>
+      {stopped && (
+        <Card className="space-y-2 p-4" data-testid="first-run-resume">
+          <div className="text-[13px] font-medium text-ink">init last stopped at {stopped.title}</div>
+          <p className="text-[12.5px] text-ink-2">{stopped.detail}. Once that's fixed, run it again: it picks up there.</p>
+          <code className={code}>{f.command}</code>
+        </Card>
       )}
       {!!f.unavailable.length && (
         <section aria-label={`Not available in ${f.mode} mode`} data-testid="first-run-unavailable">
@@ -168,15 +323,28 @@ export const firstRunRefusal = (state: Pick<State, 'canReadDigest' | 'user' | 'r
 export function FirstRunPage({ state }: { state: State }) {
   const refused = firstRunRefusal(state);
   const [f, setF] = useState<FirstRun | { error: string } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const load = useCallback(
+    (fresh: boolean) => {
+      if (refused) return;
+      if (fresh) setChecking(true);
+      getFirstRun(fresh)
+        .then(setF)
+        .catch((e: Error) => setF({ error: e.message }))
+        .finally(() => fresh && setChecking(false));
+    },
+    [refused],
+  );
+  useEffect(() => load(false), [load, state.lastId]);
+  // Live while open: a provider login done in another tab shows here without a click.
   useEffect(() => {
     if (refused) return;
-    getFirstRun()
-      .then(setF)
-      .catch((e: Error) => setF({ error: e.message }));
-  }, [refused, state.lastId]);
+    const t = window.setInterval(() => load(false), POLL_MS);
+    return () => window.clearInterval(t);
+  }, [load, refused]);
   return (
     <div data-testid="page-first-run">
-      <Header title="First run" sub={f && 'steps' in f ? `${f.done} of ${f.total} steps done` : 'the guided setup, step by step'} />
+      <Header title="First run" sub={f && 'setup' in f && f.setup ? `${f.setup.done} of ${f.setup.total} steps done` : 'the guided setup, step by step'} />
       <div className="mx-auto max-w-3xl space-y-4 p-4 sm:p-6">
         {refused ? (
           <div className="text-[13px] text-ink-3" data-testid="first-run-refused">
@@ -185,7 +353,7 @@ export function FirstRunPage({ state }: { state: State }) {
         ) : !f ? null : 'error' in f ? (
           <div className="text-[13px] text-red">Can't load the checklist: {f.error}</div>
         ) : (
-          <FirstRunView f={f} />
+          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} />
         )}
       </div>
     </div>
