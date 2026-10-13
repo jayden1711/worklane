@@ -19,6 +19,8 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { MainWatch, repoGit } from '../main-watch.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
+import { approveMerge, mergeApproval } from '../decide.js';
+import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
@@ -323,6 +325,9 @@ export abstract class MergeFlow extends FixRuns {
       .filter((p) => p.number === number && p.head === pr.headSha)
       .at(-1);
     if (prior && !prior.auto) {
+      // An owner's approval from a Discord thread at this very head: merged through the normal path below.
+      const approved = mergeApproval(this.d.log, number, pr.headSha);
+      if (approved) return this.mergeApproved(w, pr, approved.by);
       // Batching: the owner's approval (a review) merges it, on exactly the main its batch tested.
       if (this.prBatching() && !this.emergencyInForce() && (await this.ownerApproved(w, pr))) await this.mergeTested(w, pr, 'approved');
       return; // otherwise already waiting for the owner
@@ -407,6 +412,66 @@ export abstract class MergeFlow extends FixRuns {
     this.prPolled.clear(); // the next PR in the batch, and the other open PRs, on the next pass
     const what = how === 'approved' ? `Merged on your approval as \`${m.sha.slice(0, 8)}\`` : `Auto-merged as \`${m.sha.slice(0, 8)}\``;
     await this.d.backlog.comment(number, `[${BRAND.cli}] ${what} (a merge commit of \`${pr.headSha.slice(0, 8)}\` onto exactly the ${this.branch} its batch ${turn.batch} tested, full run included).`);
+  }
+
+  /**
+   * An owner's approval from a Discord thread, of PR `number` waiting for an owner at `head` (src/coordinator/
+   * channel.ts): the same checks as a merge, now, before anything is recorded: an open PR this instance opened,
+   * waiting for an owner at exactly this head (unchanged since the decision), its required checks green on it, no
+   * emergency stop and auto-merge not stopped (the main watch). Recorded through decide (approveMerge: an owner only,
+   * audited via discord); the PR watch then looks at it on its next pass, where mergeApproved merges it.
+   */
+  protected async chatApproveMerge(number: number, head: string, who: ChatPerson): Promise<{ ok: true } | { ok: false; already?: { answer: string; by: string }; error?: string }> {
+    const w = this.watchedPrs().find((p) => p.number === number);
+    if (!w) return { ok: false, error: `#${number} isn't an open PR of this instance's` };
+    const decided = this.d.log.read(0, ['merge.decided']).map((e) => e.payload as EventPayload<'merge.decided'>).filter((p) => p.number === number).at(-1);
+    if (!decided || decided.auto) return { ok: false, error: `PR #${number} isn't waiting for an owner` };
+    if (this.emergencyInForce()) return { ok: false, error: 'an emergency stop is in force; nothing is approved' };
+    const stopped = this.autoMergeStopped();
+    if (stopped) return { ok: false, error: `auto-merge is stopped on this instance (${stopped.slice(0, 200)}); an admin clears it on the dashboard first. Nothing is approved` };
+    const pr = await this.d.backlog.pullRequest(number);
+    if (pr.state !== 'open') return { ok: false, error: `PR #${number} is ${pr.state}` };
+    if (pr.headSha !== head || decided.head !== head) return { ok: false, error: `the head of PR #${number} moved since the decision (${head.slice(0, 8)}, now ${pr.headSha.slice(0, 8)}); nothing is approved: the new head is decided afresh` };
+    const batching = this.prBatching();
+    const r = this.prReadiness(w.issue, head, await this.d.backlog.checks(head), batching ? this.d.cfg.tests.land.pr_batch.full_checks : []);
+    if (!r.ready) return { ok: false, error: `PR #${number} isn't ready at ${head.slice(0, 8)}: ${r.reasons.join('; ').slice(0, 300) || 'its required checks are not all green'}` };
+    const got = approveMerge(this.d.log, { issue: w.issue, number, head, who: { login: who.login, role: who.role!, via: 'discord' }, instance: this.d.instance, repo: this.d.cfg.project.project.repo });
+    if (!got.ok) return got.status === 409 ? { ok: false, already: { answer: 'approve', by: got.by! } } : { ok: false, error: got.error };
+    // No waiting: the PR watch looks at it on its very next pass.
+    this.prPolled.delete(number);
+    return { ok: true };
+  }
+
+  /**
+   * Merge a PR an owner approved from Discord at this head, through the normal merge path: nothing under an emergency
+   * stop or a stopped auto-merge; GitHub must say it merges cleanly; batching, exactly as tested (mergeTested); else
+   * the combined check of main into it first, then GitHub's merge API pinned to the head (mergeOurs, which still
+   * never merges a PR the harness didn't open or a revert). A hold is recorded once per head and reason.
+   */
+  private async mergeApproved(w: EventPayload<'pr.opened'>, pr: PullRequest, by: string) {
+    const { issue: n, number } = w;
+    const hold = (why: string) => {
+      const said = this.d.log.read(0, ['merge.failed']).some((e) => (e.payload as EventPayload<'merge.failed'>).number === number && (e.payload as EventPayload<'merge.failed'>).head === pr.headSha && (e.payload as EventPayload<'merge.failed'>).why === why);
+      if (!said) this.emit('merge.failed', { issue: n, number, head: pr.headSha, why });
+    };
+    if (this.emergencyInForce()) return;
+    const stopped = this.autoMergeStopped();
+    if (stopped) return hold(`approved by @${by}, but auto-merge is stopped: ${stopped}`.slice(0, 500));
+    if (pr.mergeableState === 'draft' || pr.mergeable === null || pr.mergeableState === 'unknown') return; // GitHub still computing: next poll
+    if (!pr.mergeable || !['clean', 'unstable', 'has_hooks'].includes(pr.mergeableState)) return hold(`approved by @${by}, but GitHub can't merge it cleanly (${pr.mergeableState})`);
+    if (this.prBatching()) return this.mergeTested(w, pr, 'approved');
+    const gate = await this.combinedGate(w, pr);
+    if (gate === 'pending') return;
+    if (gate !== 'merge') return hold(`approved by @${by}, but ${gate === 'conflict' ? 'merging the default branch into it conflicts' : gate.hold}`.slice(0, 500));
+    if (this.emergencyInForce() || this.autoMergeStopped()) return;
+    const m = await this.mergeOurs(pr);
+    if (!m.ok) {
+      this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
+      return;
+    }
+    this.emit('merge.done', { issue: n, number, head: pr.headSha, sha: m.sha, url: pr.url, title: pr.title });
+    this.prPolled.clear();
+    await this.d.backlog.comment(number, `[${BRAND.cli}] Merged on @${by}'s approval (an owner, from Discord; audited) as \`${m.sha.slice(0, 8)}\`: a merge commit of the approved head \`${pr.headSha.slice(0, 8)}\`, its required checks green on it.`);
   }
 
   /** The owner's latest review on the PR approves it, given since this head was queued for a batch. */

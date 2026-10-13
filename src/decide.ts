@@ -66,3 +66,38 @@ export function answerDecision(log: EventLog, o: { id: string; answer: string; w
     throw e;
   }
 }
+
+/** The first owner approval of PR `number` at `head`, if any (merge.approved). */
+export function mergeApproval(log: EventLog, number: number, head: string): EventPayload<'merge.approved'> | null {
+  return log.read(0, ['merge.approved']).map((e) => e.payload as EventPayload<'merge.approved'>).find((a) => a.number === number && a.head === head) ?? null;
+}
+
+/**
+ * Record an owner's approval of a PR the merge policy left to them, at `head`: refused unless `who` is an owner
+ * (admin on the repo); refused with 409, naming who, when it is approved at this head already. The approval and
+ * its audit entry are written together. The merge itself is the merge flow's, on its next pass, with its own
+ * checks (src/coordinator/merge-flow.ts): nothing here merges.
+ */
+export function approveMerge(log: EventLog, o: { issue: number; number: number; head: string; who: Answerer & { via: 'discord' }; instance: string | null; repo: string }): DecideResult {
+  const { who } = o;
+  if (who.role !== 'owner') return { ok: false, status: 403, error: `@${who.login} can't approve this: a high-risk merge is for the instance's owners (admin on ${o.repo}); @${who.login} is a ${who.role}` };
+  log.db.exec('BEGIN IMMEDIATE');
+  try {
+    const first = mergeApproval(log, o.number, o.head);
+    if (first) {
+      log.db.exec('ROLLBACK');
+      return { ok: false, status: 409, error: `already approved by @${first.by}`, by: first.by, answer: 'approve' };
+    }
+    const e = log.append('merge.approved', { issue: o.issue, number: o.number, head: o.head, by: who.login, via: who.via }, who.login, 'human');
+    auditWrite(log, who, o.instance, 'merge.approved', { number: o.number, head: o.head });
+    log.db.exec('COMMIT');
+    return { ok: true, event: e.id, kind: 'merge' };
+  } catch (e) {
+    try {
+      log.db.exec('ROLLBACK');
+    } catch {
+      // already rolled back
+    }
+    throw e;
+  }
+}

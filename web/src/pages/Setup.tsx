@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { answerAsk, getAsks, hubInstance, pasteSecret, runRootStep, type Ask, type AsksView } from '../api';
+import { answerAsk, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, type Ask, type AsksView } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { Header } from './Overview';
 
@@ -136,8 +136,9 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
   );
 }
 
-export function SetupConsoleView({ data, onChanged }: { data: AsksView; onChanged?: () => void }) {
-  const open = data.asks.filter((a) => a.status === 'open');
+export function SetupConsoleView({ data, onChanged, focus }: { data: AsksView; onChanged?: () => void; focus?: string | null }) {
+  // Opened from a one-time Discord link: that step first.
+  const open = data.asks.filter((a) => a.status === 'open').sort((a, b) => Number(b.id === focus) - Number(a.id === focus));
   const done = data.asks.filter((a) => a.status !== 'open').reverse();
   return (
     <div className="space-y-6">
@@ -244,6 +245,8 @@ export function SetupPage() {
   const [data, setData] = useState<AsksView | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [inst, setInst] = useState<string | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
+  const [linkErr, setLinkErr] = useState<string | null>(null);
   const load = () =>
     void getAsks()
       .then((d) => (setData(d), setErr(null)))
@@ -251,13 +254,29 @@ export function SetupPage() {
   useEffect(() => {
     load();
     void hubInstance.then(setInst);
+    // A one-time link from Discord (taken out of the address bar on load): exchanged once, by POST.
+    const link = pendingSetupLink();
+    if (link)
+      void openSetupLink(link)
+        .then((r) => setFocus(r.ask))
+        .catch((e: Error) => setLinkErr(e.message));
   }, []);
   return (
     <div data-testid="page-setup">
       <Header title="Setup console" sub="what the harness needs from you and can't do itself" />
       <div className="mx-auto max-w-4xl space-y-6 p-6">
         {err && <p className="text-[13px] text-red">{err}</p>}
-        {data && <SetupConsoleView data={data} onChanged={load} />}
+        {linkErr && (
+          <p className="text-[13px] text-red" data-testid="setup-link-error">
+            Your Discord link didn't open a step: {linkErr}
+          </p>
+        )}
+        {focus && (
+          <p className="text-[13px] text-ink-2" data-testid="setup-link-opened">
+            Opened from your one-time Discord link: the step it is for is first below.
+          </p>
+        )}
+        {data && <SetupConsoleView data={data} onChanged={load} focus={focus} />}
         {inst && data?.role === 'owner' && <Terminal instance={inst} />}
       </div>
     </div>

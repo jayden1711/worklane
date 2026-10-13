@@ -68,7 +68,8 @@ export interface CoordinatorDeps {
    * sources. `pullMs`: how often the sources are pulled (default 30 s). `roleOf`: a person's role on the instance's
    * repo, read as the dashboard reads it (dashboard-auth.ts), for what a mapped chat sender may do (absent: nothing).
    */
-  intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number; roleOf?: RoleOf };
+  /** `name`: the instance's name, as the dashboard hub knows it (a setup step's one-time link names it). */
+  intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number; roleOf?: RoleOf; name?: string };
   /** The fast test runs on every open PR (src/coordinator/test-runs.ts); absent: tests.yaml has no test_run, or no sandbox. */
   prTestRuns?: PrTestRuns;
   /**

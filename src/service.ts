@@ -176,7 +176,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   console.error(`commits as: ${identity.name} <${identity.email}>`);
   const testRun: TestRunSetup = { instance: i.name, repo: i.repo.repo, token: tokens, api: githubApi(), ...(gh.kind === 'app' ? { app: { appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path } } : {}) };
   // Intake (docs/intake.md): this instance's own intake.yaml and bot token only; none means intake off.
-  const intake = () => intakeForInstance({ home: i.home, repo: i.repo.repo, tokenFile: i.credentials.intake?.discord_token, githubToken: tokens, githubApi: githubApi() });
+  const intake = () => intakeForInstance({ home: i.home, repo: i.repo.repo, instance: i.name, tokenFile: i.credentials.intake?.discord_token, githubToken: tokens, githubApi: githubApi() });
   // The main watch (GitHub only), and whose PRs get the full run: both from repo permissions, read with the instance's own token.
   const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
   const watchApi = new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi());
@@ -226,11 +226,14 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   }
   // Intake connects only once this process holds the instance's lock: never a second bot for one instance.
   const intake = opts.intake?.() ?? null;
+  // Discord connects after its start-up checks (no other instance on the machine in its channels; every
+  // discord.owners entry an admin); a refusal leaves Discord off and says why, and the instance runs on.
+  if (intake) await intake.start();
   // The same instance root keeps its dependency cache, in the group its agents share.
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
   // The coordinator's own test runs of every PR (tests.yaml test_run), once the sandbox's check passed.
   const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.protection ? { protection: opts.protection } : {}) });
+  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.protection ? { protection: opts.protection } : {}) });
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());

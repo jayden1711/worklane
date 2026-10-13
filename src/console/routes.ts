@@ -3,6 +3,7 @@
 //   POST /api/asks/<id>/answer     {answer}: an approve_link (approved|declined), a question, or declining a root step
 //   POST /api/asks/<id>/secret     {value}: a pasted secret, to the credential store; owner only
 //   POST /api/asks/<id>/run        a root step: recorded for the coordinator, which runs the machine helper; owner only
+//   POST /api/asks/link            {token}: a one-time link from Discord (links.ts): which ask to open; owner only
 // Writes are the owner's, except a question that lets writers answer. A secret's value appears in no event,
 // response or error: the secret route's errors are fixed texts or AskErrors, which never quote the body.
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -11,6 +12,7 @@ import { ASK_EVENTS, AskError, asks, asksFrom, mayAnswerAsk } from './asks.js';
 import { requestRootStep } from './root-steps.js';
 import { MACHINE_EVENTS, machineRequests } from '../machine-requests.js';
 import { readSecretBody, secretsDir, storeSecret } from './secrets.js';
+import { useSetupLink } from './links.js';
 import type { SessionOf } from './session.js';
 
 export interface AskRouteContext {
@@ -60,6 +62,26 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
       // A root step waiting on the coordinator shows its machine request (pending, running, or how it ended).
       const reqs = machineRequests(log.read(0, [...MACHINE_EVENTS]));
       send(res, 200, { role: who.role, login: who.login, asks: all.map((a) => ({ ...a, canAnswer: a.status === 'open' && mayAnswerAsk(a, who.role), request: reqs.filter((r) => r.ask === a.id).at(-1) ?? null })) });
+    } finally {
+      log.close();
+    }
+    return true;
+  }
+  // A one-time link from Discord: bound to this person's login and to one ask; used up by any presentation.
+  if (url.pathname === '/api/asks/link' && req.method === 'POST') {
+    if (!who.csrfOk) {
+      req.resume();
+      send(res, 403, { error: 'missing or wrong CSRF token' });
+      return true;
+    }
+    const log = new EventLog(ctx.eventsDb);
+    try {
+      const body = await readJson(req);
+      const r = useSetupLink(log, { token: typeof body.token === 'string' ? body.token : '', login: who.login, role: who.role });
+      send(res, r.ok ? 200 : r.status, r.ok ? { ok: true, ask: r.ask } : { error: r.error });
+    } catch (e) {
+      // Never the body (it holds the token): a fixed message.
+      send(res, e instanceof AskError ? e.status : 500, { error: e instanceof AskError ? e.message : "the link couldn't be checked" });
     } finally {
       log.close();
     }

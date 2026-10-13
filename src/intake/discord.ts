@@ -4,7 +4,14 @@
 // servers, other channels, direct messages) is dropped on receipt and never
 // stored. Replies go out through the REST API. Node's built-in
 // WebSocket and fetch; no dependency. The token lives only in memory here.
+//
+// One bot may serve several instances on one machine (one token, installed in several servers): each instance
+// opens its own gateway session with it, identifies through the machine-wide gate (discord-gate.ts: Discord's
+// identify limits are per token), and drops every event of another server the moment it arrives, before anything
+// of it is read further, stored or logged. A dropped connection resumes its session (no new identify) or, when
+// Discord says it can't, identifies again through the gate.
 import { addressed } from './addressing.js';
+import type { GateResult } from './discord-gate.js';
 import type { IncomingReport } from './report.js';
 
 export const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
@@ -31,12 +38,24 @@ export interface DiscordOptions {
   /** The only users whose messages are taken (discord.allowed_senders); anyone else's is dropped unread. */
   allowedSenders: string[];
   prefixes: string[];
+  /** discord.owners: the only users a post may ever mention, and only in the bot's own threads. */
+  owners?: string[];
+  /** The machine-wide identify gate (discord-gate.ts). Absent: identify at once (tests). */
+  gate?: () => Promise<GateResult>;
   connect?: (url: string) => Socket;
   fetch?: typeof fetch;
   setInterval?: (fn: () => void, ms: number) => unknown;
   clearInterval?: (h: unknown) => void;
+  setTimeout?: (fn: () => void, ms: number) => unknown;
   now?: () => Date;
+  /** Connection notes (never a token or message content). */
+  log?: (line: string) => void;
 }
+
+/** Close codes after which reconnecting can't help (bad token, bad intents, a shard problem): the bot stays off. */
+const FATAL_CLOSE = new Set([4004, 4010, 4011, 4012, 4013, 4014]);
+/** Close codes after which the session can't be resumed: identify again. */
+const FRESH_CLOSE = new Set([4007, 4009]);
 
 interface MessageCreate {
   id: string;
@@ -51,6 +70,13 @@ export class DiscordIntake {
   private seq: number | null = null;
   private heartbeat: unknown = null;
   private botId: string | null = null;
+  /** The gateway session (from READY), resumed after a dropped connection instead of identifying again. */
+  private sessionId: string | null = null;
+  private resumeUrl: string | null = null;
+  private stopped = true;
+  private attempts = 0;
+  /** Identifies sent by this adapter (each one counts against the token's daily session starts). */
+  identifies = 0;
   /**
    * Messages received and not yet taken. Known loss: this lives in memory only, so messages that arrived in the few
    * seconds before a coordinator crash (or that the gateway delivered while it was down) are not recovered; the
@@ -67,16 +93,78 @@ export class DiscordIntake {
   constructor(private o: DiscordOptions) {}
 
   start() {
-    const ws = (this.o.connect ?? ((u) => new WebSocket(u) as unknown as Socket))(GATEWAY_URL);
+    this.stopped = false;
+    this.open(GATEWAY_URL);
+  }
+
+  private open(url: string) {
+    const ws = (this.o.connect ?? ((u) => new WebSocket(u) as unknown as Socket))(url);
     this.socket = ws;
-    ws.addEventListener('message', (ev) => this.onFrame(String(ev.data ?? '')));
-    ws.addEventListener('close', () => this.stopHeartbeat());
+    ws.addEventListener('message', (ev) => {
+      if (this.socket === ws) this.onFrame(String(ev.data ?? ''));
+    });
+    ws.addEventListener('close', (ev) => {
+      if (this.socket !== ws) return;
+      this.stopHeartbeat();
+      this.socket = null;
+      this.reconnectLater(ev.code ?? 1006);
+    });
+  }
+
+  /** After a dropped connection: resume (or identify again) after a backoff; never after a fatal close or stop(). */
+  private reconnectLater(code: number) {
+    if (this.stopped) return;
+    if (FATAL_CLOSE.has(code)) {
+      this.stopped = true;
+      this.o.log?.(`discord: the gateway closed the connection (code ${code}); not reconnecting until the instance restarts`);
+      return;
+    }
+    if (FRESH_CLOSE.has(code)) this.forgetSession();
+    const ms = Math.min(60_000, 1000 * 2 ** this.attempts++);
+    (this.o.setTimeout ?? setTimeout)(() => {
+      if (!this.stopped && !this.socket) this.open(this.resumeUrl && this.sessionId ? `${this.resumeUrl.replace(/\/+$/, '')}/?v=10&encoding=json` : GATEWAY_URL);
+    }, ms);
+  }
+
+  /** Drop the current connection and open another (Discord asked us to reconnect). */
+  private reconnectNow() {
+    const ws = this.socket;
+    this.socket = null;
+    this.stopHeartbeat();
+    ws?.close(4000);
+    this.reconnectLater(4000);
+  }
+
+  private forgetSession() {
+    this.sessionId = null;
+    this.resumeUrl = null;
+    this.seq = null;
   }
 
   stop() {
+    this.stopped = true;
     this.stopHeartbeat();
-    this.socket?.close(1000);
+    const ws = this.socket;
     this.socket = null;
+    ws?.close(1000);
+  }
+
+  /** Identify, once the machine-wide gate lets this one go (Discord's identify limits are per token). */
+  private async identify() {
+    const ws = this.socket;
+    if (this.o.gate) {
+      const g = await this.o.gate();
+      if (this.stopped || this.socket !== ws) return;
+      if (!g.ok) {
+        this.o.log?.(`discord: identify deferred ${Math.round(g.retryInMs / 1000)}s: ${g.why}`);
+        (this.o.setTimeout ?? setTimeout)(() => {
+          if (!this.stopped && this.socket === ws) void this.identify();
+        }, g.retryInMs);
+        return;
+      }
+    }
+    this.identifies++;
+    this.send(2, { token: this.o.token, intents: INTENTS, properties: { os: 'node', browser: 'intake', device: 'intake' } });
   }
 
   /** Reports received since the last call. */
@@ -104,17 +192,53 @@ export class DiscordIntake {
     }
     if (typeof f.s === 'number') this.seq = f.s;
     if (f.op === 10) {
-      // Hello: heartbeat at the given interval, then identify.
+      // Hello: heartbeat at the given interval, then resume the session we had, or identify (through the gate).
       const ms = (f.d as { heartbeat_interval: number }).heartbeat_interval;
+      this.stopHeartbeat();
       this.heartbeat = (this.o.setInterval ?? setInterval)(() => this.send(1, this.seq), ms);
-      this.send(2, { token: this.o.token, intents: INTENTS, properties: { os: 'node', browser: 'intake', device: 'intake' } });
+      if (this.sessionId) this.send(6, { token: this.o.token, session_id: this.sessionId, seq: this.seq });
+      else void this.identify();
     } else if (f.op === 1) {
       this.send(1, this.seq);
-    } else if (f.op === 0 && f.t === 'READY') {
-      this.botId = (f.d as { user: { id: string } }).user.id;
-    } else if (f.op === 0 && f.t === 'MESSAGE_CREATE') {
-      this.onMessage(f.d as MessageCreate);
+    } else if (f.op === 7) {
+      // Reconnect: Discord wants this connection gone; the session is resumed on the next.
+      this.reconnectNow();
+    } else if (f.op === 9) {
+      // Invalid session: resumable (d true) or not; not, a fresh identify, through the gate.
+      if (f.d !== true || !this.sessionId) {
+        this.forgetSession();
+        void this.identify();
+      } else this.send(6, { token: this.o.token, session_id: this.sessionId, seq: this.seq });
+    } else if (f.op === 0) {
+      this.onDispatch(f.t ?? '', f.d);
     }
+  }
+
+  /**
+   * A dispatch. One bot may sit in several servers (one per instance that uses its token): an event of any other
+   * server, or a message of no server (a DM), is dropped here, on its guild id alone, before anything else of it
+   * is read.
+   */
+  private onDispatch(t: string, d: unknown) {
+    if (t === 'READY') {
+      const r = d as { user: { id: string }; session_id?: unknown; resume_gateway_url?: unknown };
+      this.botId = r.user.id;
+      this.sessionId = typeof r.session_id === 'string' ? r.session_id : null;
+      this.resumeUrl = typeof r.resume_gateway_url === 'string' && r.resume_gateway_url.startsWith('wss://') ? r.resume_gateway_url : null;
+      this.attempts = 0;
+      return;
+    }
+    if (t === 'RESUMED') {
+      this.attempts = 0;
+      return;
+    }
+    const guild = d && typeof d === 'object' ? (d as { guild_id?: unknown }).guild_id : undefined;
+    if (t === 'MESSAGE_CREATE' ? guild !== this.o.guild : guild !== undefined && guild !== this.o.guild) {
+      this.dropped++;
+      this.droppedBy.place++;
+      return;
+    }
+    if (t === 'MESSAGE_CREATE') this.onMessage(d as MessageCreate);
   }
 
   private onMessage(m: MessageCreate) {
@@ -122,13 +246,14 @@ export class DiscordIntake {
       this.dropped++;
       this.droppedBy[why]++;
     };
+    // Another server's message, or a DM (no guild), never gets this far (onDispatch); checked again here.
+    if (m.guild_id !== this.o.guild) return drop('place');
     if (m.author.bot || (this.botId && m.author.id === this.botId)) return drop('bot');
     // Only allowed senders, checked on the author id before anything of the message is read.
     if (!this.o.allowedSenders.includes(m.author.id)) return drop('sender');
-    // A DM has no guild: dropped like any message outside the configured server.
     const inThread = this.threads.has(m.channel_id);
     const inChat = !inThread && (this.o.chatChannels ?? []).includes(m.channel_id);
-    if (m.guild_id !== this.o.guild || (!inThread && !inChat && !this.o.channels.includes(m.channel_id))) return drop('place');
+    if (!inThread && !inChat && !this.o.channels.includes(m.channel_id)) return drop('place');
     const mentions = this.botId ? [`<@${this.botId}>`, `<@!${this.botId}>`] : [];
     // In the bot's own thread every message is a reply to it, and in a chat channel every message is to it (a
     // mention, if any, removed); in a channel, only an addressed one counts.
@@ -173,13 +298,36 @@ export class DiscordIntake {
     return id;
   }
 
-  /** Reply in the same channel, at most REPLY_CHARS. */
-  async reply(threadId: string, content: string): Promise<boolean> {
+  /**
+   * Reply in the same channel, at most REPLY_CHARS, pinging nobody, except `mentions`: users among discord.owners,
+   * and only in one of the bot's own threads (anywhere else, or anyone else, is never pinged).
+   */
+  async reply(threadId: string, content: string, mentions: string[] = []): Promise<boolean> {
+    const users = this.threads.has(threadId) ? [...new Set(mentions)].filter((u) => SNOWFLAKE.test(u) && (this.o.owners ?? []).includes(u)) : [];
+    const tail = users.length ? ` ${users.map((u) => `<@${u}>`).join(' ')}` : '';
     const r = await (this.o.fetch ?? fetch)(`${API}/channels/${encodeURIComponent(threadId)}/messages`, {
       method: 'POST',
       headers: { authorization: `Bot ${this.o.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ content: content.slice(0, REPLY_CHARS), allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({ content: `${content.slice(0, REPLY_CHARS - tail.length)}${tail}`, allowed_mentions: { parse: [], ...(users.length ? { users } : {}) } }),
     });
     return r.ok;
   }
+
+  /**
+   * A direct message to one user, outbound only: open (or reuse) the DM channel and post in it, at most REPLY_CHARS,
+   * pinging nobody. The DM channel is never watched: a reply there is dropped like every incoming DM.
+   */
+  async dm(user: string, content: string): Promise<boolean> {
+    if (!SNOWFLAKE.test(user)) return false;
+    const f = this.o.fetch ?? fetch;
+    const headers = { authorization: `Bot ${this.o.token}`, 'content-type': 'application/json' };
+    const c = await f(`${API}/users/@me/channels`, { method: 'POST', headers, body: JSON.stringify({ recipient_id: user }) });
+    if (!c.ok) return false;
+    const id = String(((await c.json()) as { id?: unknown }).id ?? '');
+    if (!SNOWFLAKE.test(id)) return false;
+    const r = await f(`${API}/channels/${encodeURIComponent(id)}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: content.slice(0, REPLY_CHARS), allowed_mentions: { parse: [] } }) });
+    return r.ok;
+  }
 }
+
+const SNOWFLAKE = /^\d{5,25}$/;
