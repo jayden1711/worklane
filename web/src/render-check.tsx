@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AddProjectData, AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Waiting } from './api';
+import type { AddProjectData, AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -12,6 +12,7 @@ import { MachineSettingsView, type MachineData } from './components/MachineSetti
 import { UpdatesPanelView, type UpdatesPanelData } from './components/UpdatesPanel';
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
+import { TrustView } from './components/TrustPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -84,6 +85,7 @@ export const renderIntakePage = (state: State) => renderToStaticMarkup(<IntakePa
 export { intakeRefusal } from './pages/Intake';
 export const renderThroughput = (t: Throughput) => renderToStaticMarkup(<ThroughputView t={t} />);
 export const renderThroughputPanel = (state: State) => renderToStaticMarkup(<ThroughputPanel state={state} />);
+export const renderTrust = (t: Trust) => renderToStaticMarkup(<TrustView t={t} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);

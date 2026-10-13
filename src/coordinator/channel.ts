@@ -31,7 +31,8 @@ import { IntakeMeter, markSeen, reportId, storeRaw } from '../intake/store.js';
 import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/report.js';
 import { OWNER_DECISIONS } from '../dashboard-auth.js';
 import { BRAND } from '../brand.js';
-import { intakeCaps } from '../settings.js';
+import { currentValue, intakeCaps } from '../settings.js';
+import { trustDigest, trustView, trustWeek } from '../trust.js';
 import { excerpt } from '../intake/decide.js';
 import { ResearchOnDemand } from './research-on-demand.js';
 
@@ -630,10 +631,27 @@ export abstract class Channel extends ResearchOnDemand {
   }
 
   /**
+   * The weekly trust digest (src/trust.ts): once per week (Monday, UTC), a plain message in the ops channel, when one
+   * is set. Read-only measurement: it posts numbers and a recommendation, and changes nothing.
+   */
+  protected async trustDigestOutbound(cfg: IntakeConfig): Promise<void> {
+    const channel = cfg.discord.ops_channel;
+    const src = this.chatSource();
+    if (!cfg.discord.enabled || !channel || !src) return;
+    const now = this.d.now?.() ?? new Date();
+    const key = `trust-digest:${trustWeek(now)}`;
+    if (this.postedKeys().has(key)) return;
+    const agents = Number(currentValue(this.d.cfg, this.d.settings?.().settings ?? {}, 'workers'));
+    const text = trustDigest(trustView(this.d.log.read(0), { agents, now }), { instance: this.d.instance, dashboardUrl: cfg.discord.dashboard_url ?? null });
+    await this.channelSend(src, key, { channel }, { kind: 'notice', text });
+  }
+
+  /**
    * Post what waits on a person: each open decision and ask, once, in the asks channel (a thread each, or a notice
    * with a link); and in each thread, once, who decided it when it was decided elsewhere.
    */
   protected async channelOutbound(cfg: IntakeConfig): Promise<void> {
+    await this.trustDigestOutbound(cfg);
     const channel = cfg.discord.asks_channel;
     if (!this.channelOn(cfg) || !channel || !cfg.discord.dashboard_url) return;
     const src = this.chatSource()!;
