@@ -124,6 +124,8 @@
   "test/offsite-backup.test.ts": 1053,
   "test/offsite-panel.test.ts": 376,
   "test/offsite-setup.test.ts": 117,
+  "test/optimize-coordinator.test.ts": 7800,
+  "test/optimize.test.ts": 200,
   "test/package-files.test.ts": 3839,
   "test/pipefail.test.ts": 143,
   "test/plan-decisions.test.ts": 102,
