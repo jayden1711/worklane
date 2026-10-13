@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { redactString } from '../events/redact.js';
-import type { Backlog, CommitCheck, Issue, PrReview, PullRequest, RerunJobs } from './types.js';
+import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
 
 interface FilePr {
   head: string;
@@ -22,6 +22,8 @@ interface FilePr {
   mergeBody?: string;
   /** Submitted reviews (tests set them). */
   reviews?: PrReview[];
+  /** Inline review comments (tests set them). */
+  reviewComments?: PrReviewComment[];
   /** Who closed it (tests set it). */
   closedBy?: string;
   /** Lines added and removed, and files (tests set them); with them, the PR reports stats, its comments counted. */
@@ -217,6 +219,16 @@ export class FileBacklog implements Backlog {
   }
   async reviews(n: number): Promise<PrReview[]> {
     return this.load().issues.find((x) => x.number === n)?.pr?.reviews ?? [];
+  }
+  /** Test helper: an inline comment in a submitted review (`review`: its id, from addReview). */
+  addReviewComment(n: number, c: Omit<PrReviewComment, 'id' | 'at'> & { at?: string }) {
+    this.edit(n, (i) => {
+      const list = (i.pr!.reviewComments ??= []);
+      list.push({ id: n * 100_000 + list.length + 1, at: c.at ?? new Date().toISOString(), review: c.review, author: c.author, body: c.body, path: c.path, line: c.line });
+    });
+  }
+  async reviewComments(n: number): Promise<PrReviewComment[]> {
+    return this.load().issues.find((x) => x.number === n)?.pr?.reviewComments ?? [];
   }
   async closedBy(n: number): Promise<string | null> {
     const i = this.load().issues.find((x) => x.number === n);

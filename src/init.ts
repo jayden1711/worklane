@@ -1,8 +1,8 @@
 // `init`: the guided first setup, one checklist walked in order. Each step is checked first; only a step
 // that isn't done yet does anything (installs, a login, a hand-off), and it is checked again before the next one
 // starts. A required step that still isn't done stops the walk, saying what to do; run init again and it picks up
-// there (the state file keeps what is done, and when). `doctor` shows the same checklist, and so does the
-// dashboard's first-run page (from the state file).
+// there (the state file keeps what is done, and when). The steps and their checks come from the setup step registry
+// (src/setup-steps.ts): `doctor` and the dashboard's first-run page check the same steps the same way, live.
 //
 // Two modes, chosen explicitly (asked when not given):
 //   local   runs as you, on your own machine (macOS, Linux, or Windows through WSL2): no separate OS users, no ssh,
@@ -28,10 +28,10 @@ import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
+import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 
-export type Mode = 'local' | 'server';
-export const MODES: readonly Mode[] = ['local', 'server'];
+export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
 export type StepStatus = 'pending' | 'done' | 'skipped' | 'failed';
 
@@ -42,19 +42,12 @@ export interface StepDef {
   modes: readonly Mode[];
 }
 
-/** The checklist, in order. */
-export const STEPS: readonly StepDef[] = [
-  { id: 'tools', title: 'Tools present', optional: false, modes: MODES },
-  { id: 'claude', title: 'Claude login', optional: false, modes: MODES },
-  { id: 'github', title: 'GitHub', optional: false, modes: MODES },
-  { id: 'repo-config', title: 'Repo config', optional: false, modes: MODES },
-  // Server mode: add-project's last steps (the coordinator's service, test user, machine helper, dashboards). Local
-  // mode starts the coordinator with `up` after init, so it has no such step.
-  { id: 'coordinator', title: 'Coordinator running', optional: false, modes: ['server'] },
-  { id: 'protection', title: 'Protection', optional: false, modes: MODES },
-  { id: 'discord', title: 'Discord', optional: true, modes: MODES },
-  { id: 'tailscale', title: 'Tailscale', optional: true, modes: ['server'] },
-];
+/**
+ * The checklist, in order: the registry's walked groups (src/setup-steps.ts), so init, doctor and the page share one
+ * list. Server mode's Coordinator running is add-project's last steps (the coordinator's service, test user, machine
+ * helper, dashboards); local mode starts the coordinator with `up` after init, so it has no such step.
+ */
+export const STEPS: readonly StepDef[] = GROUPS.filter((g) => g.walked).map((g) => ({ id: g.id as StepId, title: g.title, optional: g.optional, modes: g.modes }));
 export const stepsFor = (mode: Mode) => STEPS.filter((s) => s.modes.includes(mode));
 
 export interface StepRecord {
@@ -146,12 +139,6 @@ export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) =>
   return out;
 }
 
-export interface RunResult {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-}
-
 /** Everything a step does to the world, so tests can stand in for it. */
 export interface InitIo {
   which(cmd: string): string | null;
@@ -197,19 +184,12 @@ export interface StepResult {
   detail: string;
 }
 
-const REQUIRED_TOOLS: Record<Mode, string[]> = { local: ['git', 'gitleaks', 'claude', 'gh'], server: ['git', 'gitleaks', 'claude'] };
-
-const nodeOk = () => {
-  const [maj, min] = process.versions.node.split('.').map(Number) as [number, number];
-  return maj > 22 || (maj === 22 && min >= 13);
-};
+/** A registry detector's answer as a walked step's result. */
+const asStep = (d: Detected): StepResult => ({ status: d.done ? 'done' : 'failed', detail: d.detail });
 
 function verifyTools(c: InitContext): StepResult & { missing: string[] } {
-  const missing = REQUIRED_TOOLS[c.mode].filter((t) => !c.io.which(t));
-  if (!nodeOk()) return { status: 'failed', detail: `Node ${process.versions.node}: the engine needs 22.13 or newer`, missing };
-  const docker = c.io.which('docker') ? 'docker' : 'no docker (optional: the test sandbox)';
-  if (missing.length) return { status: 'failed', detail: `missing: ${missing.join(', ')}`, missing };
-  return { status: 'done', detail: `node ${process.versions.node}, ${REQUIRED_TOOLS[c.mode].join(', ')}; ${docker}`, missing };
+  const d = detectTools(c.mode, c.io);
+  return { ...asStep(d), missing: d.missing };
 }
 
 async function tools(c: InitContext, act: boolean): Promise<StepResult> {
@@ -299,18 +279,7 @@ async function coordinator(c: InitContext, act: boolean): Promise<StepResult> {
   return handoff(c, 'coordinator', act);
 }
 
-function claudeStatus(c: InitContext): StepResult {
-  if (!c.io.which('claude')) return { status: 'failed', detail: 'claude is not installed (the tools step)' };
-  const r = c.io.run('claude', ['auth', 'status']);
-  let parsed: { loggedIn?: boolean; authMethod?: string } = {};
-  try {
-    parsed = JSON.parse(r.stdout) as typeof parsed;
-  } catch {
-    // older output: the exit status says it
-  }
-  if (r.status === 0 && parsed.loggedIn !== false) return { status: 'done', detail: `signed in${parsed.authMethod ? ` (${parsed.authMethod})` : ''}, per \`claude auth status\`` };
-  return { status: 'failed', detail: 'not signed in, per `claude auth status`' };
-}
+const claudeStatus = (c: InitContext): StepResult => asStep(detectClaudeLogin(c.io));
 
 async function claude(c: InitContext, act: boolean): Promise<StepResult> {
   if (c.mode === 'server') return handoff(c, 'claude', act);
@@ -322,15 +291,7 @@ async function claude(c: InitContext, act: boolean): Promise<StepResult> {
   return claudeStatus(c);
 }
 
-function githubStatus(c: InitContext): StepResult {
-  if (!c.io.which('gh')) return { status: 'failed', detail: 'gh is not installed (the tools step)' };
-  if (c.io.run('gh', ['auth', 'status']).status !== 0) return { status: 'failed', detail: 'gh is not signed in, per `gh auth status`' };
-  if (!c.repo) return { status: 'failed', detail: `gh is signed in, but the repo has no GitHub origin: add one (git remote add origin https://github.com/<owner>/<name>.git), then run \`${BRAND.cli} init\` again` };
-  const p = c.io.run('gh', ['api', `repos/${c.repo}`, '--jq', '.permissions.push']);
-  if (p.status !== 0) return { status: 'failed', detail: `gh is signed in, but can't read ${c.repo}: ${p.stderr.trim().split('\n')[0] ?? ''}` };
-  if (p.stdout.trim() !== 'true') return { status: 'failed', detail: `gh is signed in, but your login can't push to ${c.repo}` };
-  return { status: 'done', detail: `gh signed in; you can push to ${c.repo}` };
-}
+const githubStatus = (c: InitContext): StepResult => asStep(detectGithubLogin(c.io, c.repo));
 
 async function github(c: InitContext, act: boolean): Promise<StepResult> {
   if (c.mode === 'server') return handoff(c, 'github', act);
@@ -371,22 +332,7 @@ export const autoConfig: AutoConfig = async (c) => {
   return null;
 };
 
-function repoConfigStatus(c: InitContext): StepResult {
-  const root = c.root!;
-  if (!existsSync(join(root, BRAND.configDir, 'config.yaml'))) {
-    const pr = c.state.autoConfig?.pr;
-    const open = c.state.autoConfig?.questions.length ?? 0;
-    return { status: 'failed', detail: `no ${BRAND.configDir}/config.yaml${pr ? `: proposed in ${pr.url}, to merge` : open ? `: ${open} question${open === 1 ? '' : 's'} to answer (\`${BRAND.cli} init\`)` : ''}` };
-  }
-  if (!existsSync(join(root, '.claude', 'settings.json'))) return { status: 'failed', detail: 'the hooks for local runs are not installed (.claude/settings.json)' };
-  try {
-    const cfg = loadConfig(root);
-    const placeholders = /your-github-handle|owner\/repo/.test(JSON.stringify(cfg.project)) ? `; still has template placeholders: set the owners in ${BRAND.configDir}/config.yaml` : '';
-    return { status: 'done', detail: `${BRAND.configDir}/ valid (${cfg.project.project.repo}), hooks installed${placeholders}` };
-  } catch (e) {
-    return { status: 'failed', detail: (e as Error).message.split('\n')[0] ?? 'invalid config' };
-  }
-}
+const repoConfigStatus = (c: InitContext): StepResult => asStep(detectRepoConfig(c.root!, c.state.autoConfig?.questions.length ?? 0, c.state.autoConfig?.pr?.url ?? null));
 
 async function repoConfig(c: InitContext, act: boolean): Promise<StepResult> {
   if (c.mode === 'server') return handoff(c, 'repo-config', act);
@@ -434,26 +380,12 @@ async function discord(): Promise<StepResult> {
   return { status: 'skipped', detail: 'optional, not set up here; the Discord setup page comes later (docs/intake.md has it by hand)' };
 }
 
-function tailscaleStatus(c: InitContext): StepResult | null {
-  if (!c.io.which('tailscale')) return null;
-  const r = c.io.run('tailscale', ['status', '--json']);
-  try {
-    const s = JSON.parse(r.stdout) as { BackendState?: string; Self?: { DNSName?: string } };
-    if (s.BackendState === 'Running') return { status: 'done', detail: `on the tailnet as ${(s.Self?.DNSName ?? '').replace(/\.$/, '') || 'this machine'}` };
-  } catch {
-    // not running
-  }
-  return null;
-}
-
 async function tailscale(c: InitContext): Promise<StepResult> {
-  return tailscaleStatus(c) ?? { status: 'skipped', detail: 'optional, not on a tailnet: the dashboard stays on this machine (docs/dashboard.md sets up Tailscale sign-in)' };
+  const t = detectTailscale(c.io);
+  return t ? asStep(t) : { status: 'skipped', detail: 'optional, not on a tailnet: the dashboard stays on this machine (docs/dashboard.md sets up Tailscale sign-in)' };
 }
 
 const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': repoConfig, coordinator, protection, discord, tailscale };
-
-/** What can be checked again at any time with no side effects: what doctor checks live (local mode). */
-const LIVE: Partial<Record<StepId, (c: InitContext) => StepResult>> = { tools: verifyTools, claude: claudeStatus, github: githubStatus, 'repo-config': repoConfigStatus };
 
 export interface ChecklistItem extends StepDef {
   status: StepStatus;
@@ -466,17 +398,6 @@ export function recordedChecklist(state: InitState | null, mode: Mode): Checklis
   return stepsFor(mode).map((s) => {
     const r = state?.mode === mode ? state.steps[s.id] : undefined;
     return { ...s, status: r?.status ?? 'pending', detail: r?.detail ?? 'not reached yet', at: r?.at ?? null };
-  });
-}
-
-/** The checklist as doctor shows it: local mode's checkable steps checked now, the rest as recorded. */
-export function liveChecklist(c: Omit<InitContext, 'yes' | 'interactive'>): ChecklistItem[] {
-  const ctx: InitContext = { ...c, yes: false, interactive: false };
-  return recordedChecklist(c.state, c.mode).map((item) => {
-    const check = c.mode === 'local' ? LIVE[item.id] : undefined;
-    if (!check) return item;
-    const v = check(ctx);
-    return { ...item, status: v.status, detail: v.detail };
   });
 }
 
@@ -695,11 +616,55 @@ export interface FirstRunView {
   command: string;
   /** Auto-config (local mode): the questions still open, each command's result on the default branch, the setup PR. */
   autoConfig: { questions: Question[]; verified: Verification[]; pr: { number: number | null; url: string } | null; answer: string } | null;
+  /** Every setup step that applies to the mode, checked live from the real state (src/setup-steps.ts); doctor shows the same. */
+  setup: SetupView | null;
 }
 
-export function firstRunView(file: string, o: { root: string; repo: string; instance: string | null; has?: (cmd: string) => boolean }): FirstRunView {
+/** How the page checks the steps live: the probe (none: the real one, off the main thread), where the state is, and the poll's cache. */
+export interface FirstRunLive {
+  probe?: SetupProbe;
+  stateDir: string;
+  policyFile: string | null;
+  cache?: DetectCache;
+  fresh?: boolean;
+  localMs?: number;
+  netMs?: number;
+  context?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
+}
+
+/** The setup context for a checkout or an instance, with what init recorded (auto-config's questions and PR). */
+export function setupContext(state: InitState | null, o: { mode: Mode; root: string; repo: string | null; instance: string | null; stateDir: string; policyFile: string | null }): SetupContext {
+  // Server mode: the setup PR add-project waits on, as it said (the service step's detail).
+  const serverPr = /https:\/\/\S+\/pull\/\d+/.exec(state?.handoffDetail?.service ?? '')?.[0] ?? null;
+  return {
+    mode: o.mode,
+    root: o.root,
+    repo: o.repo,
+    instance: o.instance,
+    stateDir: o.stateDir,
+    policyFile: o.policyFile,
+    openQuestions: state?.autoConfig?.questions.length ?? 0,
+    setupPr: state?.autoConfig?.pr?.url ?? serverPr,
+    ...(state?.mode === 'server' ? { handoff: state.handoff, handoffDetail: state.handoffDetail ?? {} } : {}),
+  };
+}
+
+/**
+ * The first-run view with every step checked live (the dashboard's): a checkout without a recorded mode is local, an
+ * instance's is server. With no probe given, the real one runs in a worker so the dashboard keeps answering.
+ */
+export async function firstRunLiveView(file: string, o: { root: string; repo: string; instance: string | null; has?: (cmd: string) => boolean; live: FirstRunLive }): Promise<FirstRunView> {
   const state = readInitState(file);
-  const mode = state?.mode ?? (o.instance ? 'server' : null);
+  const mode: Mode = state?.mode ?? (o.instance ? 'server' : 'local');
+  const ctx = setupContext(state, { mode, root: o.root, repo: o.repo, instance: o.instance, stateDir: o.live.stateDir, policyFile: o.live.policyFile });
+  const opts = { cache: o.live.cache ?? new Map(), fresh: !!o.live.fresh, localMs: o.live.localMs ?? 0, netMs: o.live.netMs ?? 0 };
+  const setup = o.live.probe ? checkSetup({ ...ctx, ...o.live.context }, o.live.probe, opts) : await checkSetupOffThread({ ...ctx, ...(o.live.context?.machine ? { machine: o.live.context.machine } : {}) }, opts);
+  return firstRunView(file, { root: o.root, repo: o.repo, instance: o.instance, ...(o.has ? { has: o.has } : {}), setup });
+}
+
+export function firstRunView(file: string, o: { root: string; repo: string; instance: string | null; has?: (cmd: string) => boolean; setup?: SetupView | null }): FirstRunView {
+  const state = readInitState(file);
+  const mode = state?.mode ?? o.setup?.mode ?? (o.instance ? 'server' : null);
   const steps = recordedChecklist(state, mode ?? 'local');
   const command = mode === 'server' ? `sudo ${BRAND.cli} init --mode server ${o.repo} --instance ${o.instance ?? '<name>'}` : `${BRAND.cli} init ${mode ? '' : '--mode local '}${o.root}`;
   return {
@@ -720,5 +685,6 @@ export function firstRunView(file: string, o: { root: string; repo: string; inst
           answer: `${BRAND.cli} init ${o.root} --answer <id>=<choice>`,
         }
       : null,
+    setup: o.setup ?? null,
   };
 }

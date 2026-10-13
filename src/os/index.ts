@@ -641,6 +641,64 @@ export interface ServiceSpec {
   env?: Record<string, string>;
 }
 
+/**
+ * What installService would write and how it starts it, without doing either: the file, the service manager and the
+ * commands it runs. The first-run page shows this before its Start button does anything.
+ */
+export function serviceChange(label: string): { path: string; manager: string; commands: string[] } | null {
+  if (process.platform === 'darwin') {
+    const uid = process.getuid?.() ?? 0;
+    const path = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+    return { path, manager: 'launchd (a per-user agent: KeepAlive, starts at login)', commands: [`launchctl bootout gui/${uid}/${label}`, `launchctl bootstrap gui/${uid} ${path}`] };
+  }
+  if (process.platform === 'linux') {
+    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
+    return { path, manager: 'systemd --user (Restart=always)', commands: ['systemctl --user daemon-reload', `systemctl --user enable --now ${label}.service`] };
+  }
+  return null;
+}
+
+/** Whether this user's service (installService's label) is loaded and running now; null where there is no service manager to ask. */
+export function serviceRunning(label: string): boolean | null {
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('launchctl', ['print', `gui/${process.getuid?.() ?? 0}/${label}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+      return /\bstate = running\b/.test(out);
+    } catch {
+      return false;
+    }
+  }
+  if (process.platform === 'linux') return unitActive(['--user', 'is-active', `${label}.service`]);
+  return null;
+}
+
+/** Whether a system unit (an instance's `<cli>-<name>.service`) is active; null off Linux. Any user may ask systemd this. */
+export function systemUnitActive(unit: string): boolean | null {
+  if (process.platform !== 'linux') return null;
+  return unitActive(['is-active', unit]);
+}
+
+function unitActive(args: string[]): boolean {
+  try {
+    return execFileSync('systemctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim() === 'active';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Linux only: whether this user's services run without a login session (loginctl's Linger). null elsewhere (launchd
+ * agents need no such thing) or when loginctl can't tell.
+ */
+export function lingerEnabled(user = userInfo().username): boolean | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    return execFileSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim() === 'yes';
+  } catch {
+    return null;
+  }
+}
+
 /** Install and start a per-user service that restarts on failure and survives logout of any session. */
 export function installService(spec: ServiceSpec): { path: string; started: boolean; detail: string } {
   if (process.platform === 'darwin') {

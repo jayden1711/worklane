@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -91,6 +91,58 @@ else console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: 
     for (const p of probes) assert.deepEqual(pick(p.env), pick(runEnv), 'each probe looks where the run looks, never in the coordinator\'s home');
     const h = '/home/shop-agent';
     assert.deepEqual(pick(runEnv), { HOME: h, USER: 'shop-agent', LOGNAME: 'shop-agent', CLAUDE_CONFIG_DIR: `${h}/.claude`, XDG_CONFIG_HOME: `${h}/.config`, XDG_DATA_HOME: `${h}/.local/share`, XDG_CACHE_HOME: `${h}/.cache`, XDG_STATE_HOME: `${h}/.local/state` }, "the agent user's, all of them");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resumed session runs as the same agent user, in that user's home, where its session lives; the run record keeps its session", { skip: process.platform === 'win32' && 'separate users are POSIX-only' }, async () => {
+  // A stand-in sudo records who each call runs as, its environment and claude's arguments, and plays claude.
+  const dir = mkdtempSync(join(tmpdir(), 'resume-as-'));
+  const calls = join(dir, 'calls.jsonl');
+  writeFileSync(
+    join(dir, 'sudo'),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+const user = a[a.indexOf('-u') + 1];
+const i = a.indexOf('-i');
+const env = {};
+let j = i + 1;
+for (; j < a.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[j]); j++) env[a[j].slice(0, a[j].indexOf('='))] = a[j].slice(a[j].indexOf('=') + 1);
+const argv = a.slice(j + 1);
+const probe = argv[0] === 'auth' && argv[1] === 'status';
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ probe, user, env, argv }) + '\\n');
+if (probe) console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }));
+else {
+  const r = argv.indexOf('--resume');
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 1, total_cost_usd: 0, session_id: r >= 0 ? argv[r + 1] : 'new-session' }));
+}
+`,
+  );
+  chmodSync(join(dir, 'sudo'), 0o755);
+  const runAs = { user: 'shop-agent', home: '/home/shop-agent' };
+  const coord = { PATH: dir, HOME: '/home/coord', USER: 'coord', LOGNAME: 'coord', CLAUDE_CONFIG_DIR: '/home/coord/.claude' };
+  const stateDir = join(dir, 'state');
+  const session = '3f1c2a4e-2222-4000-8000-00000000beef';
+  try {
+    const run = await new CliRunner('cli', coord, 'claude', runAs).run({ prompt: 'p', model: 'm', cwd: dir, allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, role: 'worker', stateDir, resume: session });
+    assert.equal(run.reason, 'succeeded', run.detail);
+    assert.equal(run.sessionId, session);
+    const seen = readFileSync(calls, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { probe: boolean; user: string; env: Record<string, string>; argv: string[] });
+    const claude = seen.find((c) => !c.probe)!;
+    assert.equal(claude.user, 'shop-agent', 'as the agent user, never the coordinator');
+    assert.deepEqual([claude.env.HOME, claude.env.CLAUDE_CONFIG_DIR], ['/home/shop-agent', '/home/shop-agent/.claude'], "the agent user's login, where its sessions are");
+    assert.deepEqual(claude.argv.slice(claude.argv.indexOf('--resume'), claude.argv.indexOf('--resume') + 2), ['--resume', session]);
+    const records = readdirSync(join(stateDir, 'runs')).filter((f) => f.endsWith('.json'));
+    assert.equal(records.length, 1);
+    const rec = JSON.parse(readFileSync(join(stateDir, 'runs', records[0]!), 'utf8')) as { sessionId?: string; resumed?: string };
+    assert.deepEqual([rec.sessionId, rec.resumed], [session, session]);
+    // An id that isn't one never reaches the command line.
+    const bad = await new CliRunner('cli', coord, 'claude', runAs).run({ prompt: 'p', model: 'm', cwd: dir, allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, role: 'worker', resume: '--dangerously-skip-permissions' });
+    assert.equal(bad.reason, 'failed');
+    assert.match(bad.detail, /not a session id/);
+    assert.ok(!cliArgs({ prompt: 'p', model: 'm', cwd: '.', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 1, timeoutMs: 1, role: 'worker', resume: '-x' }).includes('--resume'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
