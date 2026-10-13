@@ -6,7 +6,10 @@ import { type DoneWhenList } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
-import { loadMoneyPaths } from '../review.js';
+import { computeLevel, loadMoneyPaths } from '../review.js';
+import type { ReviewConfig } from '../config/schema.js';
+import { waitCategoriesOf } from '../merge-policy.js';
+import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
 import { checkedPush } from '../push-check.js';
 import { DIRECT_LAND_REFUSED, directLandRefusal, localRemote } from '../direct-land.js';
 import { receiptLines } from '../receipts.js';
@@ -15,7 +18,7 @@ import { fullRunLock } from '../slots.js';
 import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
-import { sh, evalLines, pushRefusal } from './shared.js';
+import { sh, evalLines, pushRefusal, DEFAULT_REVIEW } from './shared.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
@@ -302,7 +305,18 @@ export abstract class Landing extends Decisions {
     const browser = last<EventPayload<'browser.evidence'>>('browser.evidence');
     const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
     const issue = await this.d.backlog.get(n);
+    // The top of the body (src/pr-rules.ts): the worker's intent, and the risk class computed from the changed paths,
+    // raised (never lowered) by the worker's own claim. A body without both is refused: no PR opens.
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const files = this.changeFiles(this.d.repo, claimedBase, q.head);
+    const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+    const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
+    const claims = last<EventPayload<'worker.claims'>>('worker.claims');
+    const cls = effectiveClass(computed.cls, claims?.risk_class);
+    const why = cls === computed.cls ? computed.why : [`raised from ${computed.cls} by the worker`, ...computed.why];
     const body = [
+      prBodyHead({ intent: claims?.intent ?? '', cls, why }),
+      '',
       `Closes #${n}`,
       '',
       `Opened by ${BRAND.name}. It merges this itself only if the instance's merge policy allows (required checks green on the evaluated commit, nothing high-risk, design-level, big or in doubt); otherwise it waits for a human.`,
@@ -316,6 +330,12 @@ export abstract class Landing extends Decisions {
       // An optimization task (src/optimize.ts): the benchmark's before and after, and every raw run.
       ...((o) => (o.length ? ['', ...o] : []))(optimizePrLines(this.events(n), q.head)),
     ].join('\n');
+    const refused = prBodyProblems(body, computed.cls);
+    if (refused.length) {
+      this.emit('land.result', { issue: n, outcome: 'rejected', landed: null, detail: `PR body refused: ${refused.join('; ')}`.slice(0, 2000) });
+      await this.block(n, this.ownerOf(n), `no PR opened for ${branch}: its body was refused (${refused.join('; ')})`);
+      return;
+    }
     let url: string;
     try {
       // A draft until its required checks pass on the commit the evaluator approved (the PR watcher marks it ready).

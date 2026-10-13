@@ -61,6 +61,8 @@ export interface MergeInput {
   instructionEvals?: string[];
   /** A planned task: high-risk or design-level paths changed outside its approved plan (outsidePlanReasons). */
   outsidePlan?: string[];
+  /** The worker raised the PR's risk class to protected (src/pr-rules.ts): protected waits for the owner. */
+  claimedProtected?: boolean;
 }
 
 export interface InstructionEvalResult {
@@ -205,6 +207,7 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   // High-risk paths or categories, and design-level: the evaluator's flag is binding; new dependencies and new
   // top-level modules are seen in code too.
   reasons.push(...riskAndDesignReasons({ level: i.level, waitCategories: i.waitCategories, design: { flag: i.verdict?.design_change, reason: i.verdict?.design_reason, by: 'the evaluator' }, newTopLevel: i.newTopLevel }));
+  if (i.claimedProtected) reasons.push('high-risk: the worker marked the change protected (a risk class can be raised, never lowered)');
 
   // Big.
   if (i.lines > i.limits.max_lines) reasons.push(`big: ${i.lines} changed lines (over ${i.limits.max_lines})`);
