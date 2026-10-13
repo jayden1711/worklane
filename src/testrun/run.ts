@@ -22,6 +22,8 @@ export interface TestRunRequest {
   changedFiles?: string[];
   /** This shard of a sharded full run: `index` is 1-based (1..total). */
   shard?: { index: number; total: number };
+  /** Only these tiers, of either kind, unsharded (the deploy gate's post-merge run); absent: the kind's tiers. */
+  tiers?: string[];
 }
 export interface TierResult {
   tier: string;
@@ -65,7 +67,8 @@ export interface TestRunDeps {
 }
 
 /** The tiers a request runs: its kind's, and of a sharded run's later shards only the shardable ones. */
-export function tiersFor(c: TestRunConfig, req: Pick<TestRunRequest, 'kind' | 'shard'>): TestRunTier[] {
+export function tiersFor(c: TestRunConfig, req: Pick<TestRunRequest, 'kind' | 'shard' | 'tiers'>): TestRunTier[] {
+  if (req.tiers) return c.tiers.filter((t) => req.tiers!.includes(t.name));
   return c.tiers.filter((t) => t.kind === req.kind && (!req.shard || req.shard.index === 1 || t.shardable));
 }
 
@@ -87,6 +90,8 @@ export function validateRequest(req: TestRunRequest): void {
   if (!/^[0-9a-f]{7,40}$/.test(req.sha)) throw new Error(`not a commit: ${req.sha}`);
   if (req.kind !== 'fast' && req.kind !== 'full') throw new Error(`a run is fast or full, not ${String(req.kind)}`);
   if (!Array.isArray(req.prs) || req.prs.some((n) => !Number.isInteger(n) || n < 1)) throw new Error('prs are PR numbers');
+  if (req.tiers !== undefined && (!Array.isArray(req.tiers) || !req.tiers.length || req.tiers.some((t) => typeof t !== 'string' || !t))) throw new Error('tiers names at least one tier');
+  if (req.tiers && req.shard) throw new Error('a run of named tiers is never sharded');
   if (req.shard) {
     const { index, total } = req.shard;
     if (!Number.isInteger(total) || total < 1 || !Number.isInteger(index) || index < 1 || index > total) throw new Error(`shard.index is 1-based, 1..${total}; got ${index}`);
