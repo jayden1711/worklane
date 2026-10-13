@@ -8,7 +8,7 @@ import { machineView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { MACHINE_HELPER } from '../src/machine.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
-import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { asFreshPerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
 
 function setup(o: { updates?: boolean | null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dash-machine-'));
@@ -24,27 +24,27 @@ function setup(o: { updates?: boolean | null } = {}) {
   const eventsDb = join(dir, 'events.db');
   new EventLog(eventsDb).close();
   const { dir: root } = exampleProject();
-  return { dir, root, cfg: loadConfig(root), slotsDir, eventsDb, machine: { changesPath, updatesConfigPath, updatesLogPath } };
+  return { dir, root, cfg: loadConfig(root), slotsDir, eventsDb, machine: { changesPath, updatesConfigPath, updatesLogPath }, machineOwnersFile: machineOwnersFile('example-owner') };
 }
 
 test('the machine settings: the slot cap and its bounds, engine updates, who may change them, and the history newest first', () => {
   const s = setup();
-  const v = machineView({ cfg: s.cfg, user: 'example-owner', role: 'owner', slotsDir: s.slotsDir, machine: s.machine });
+  const v = machineView({ cfg: s.cfg, user: 'example-owner', role: 'owner', slotsDir: s.slotsDir, machine: s.machine, machineOwnersFile: s.machineOwnersFile });
   assert.equal(v.canChange, true);
   assert.deepEqual(v.slots, { cap: 3, running: 0, min: 1, max: 16 });
   assert.deepEqual(v.updates, { configured: true, enabled: true, branch: 'main', requiredChecks: ['test'] });
   assert.deepEqual(v.changes.map((c) => [c.by, c.what, c.to]), [['wl-code', 'updates', true], ['wl-site', 'slots', 3]], 'newest first; a torn line skipped');
   assert.deepEqual(v.history.map((h) => h.event), ['rolled_back', 'installed'], 'newest first; an unknown event skipped');
   assert.equal(v.helper, MACHINE_HELPER);
-  assert.equal(machineView({ cfg: s.cfg, user: 'example-collaborator', role: 'writer', slotsDir: s.slotsDir, machine: s.machine }).canChange, false, 'a writer is not the owner');
+  assert.equal(machineView({ cfg: s.cfg, user: 'example-collaborator', role: 'writer', slotsDir: s.slotsDir, machine: s.machine, machineOwnersFile: s.machineOwnersFile }).canChange, false, 'a writer is not the owner');
   const bare = setup({ updates: null });
-  assert.deepEqual(machineView({ cfg: bare.cfg, user: 'example-owner', role: 'owner', slotsDir: bare.slotsDir, machine: bare.machine }).updates, { configured: false, enabled: null }, 'the updater not set up here');
+  assert.deepEqual(machineView({ cfg: bare.cfg, user: 'example-owner', role: 'owner', slotsDir: bare.slotsDir, machine: bare.machine, machineOwnersFile: bare.machineOwnersFile }).updates, { configured: false, enabled: null }, 'the updater not set up here');
 });
 
 async function serve(s: ReturnType<typeof setup>, user: string) {
-  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: s.slotsDir, machine: s.machine });
+  const d = await startDashboard({ root: s.root, cfg: s.cfg, eventsDb: s.eventsDb, stateDir: s.dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: s.slotsDir, machine: s.machine, machineOwnersFile: s.machineOwnersFile });
   const base = d.url.split('/?')[0]!;
-  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(user) };
+  const h = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asFreshPerson(user) };
   const post = (what: string, value: unknown) => fetch(`${base}/api/machine`, { method: 'POST', headers: h, body: JSON.stringify({ what, value }) });
   const view = async () => (await (await fetch(`${base}/api/machine`, { headers: h })).json()) as { requests: { args: string[]; status: string; detail: string }[] };
   return { d, base, h, post, view };
@@ -54,7 +54,7 @@ async function serve(s: ReturnType<typeof setup>, user: string) {
 function coordinatorTick(s: ReturnType<typeof setup>, exec: (file: string, args: string[]) => string) {
   const log = new EventLog(s.eventsDb);
   try {
-    return runMachineRequests({ log, instance: 'site', exec });
+    return runMachineRequests({ log, instance: 'site', exec, ownersFile: s.machineOwnersFile });
   } finally {
     log.close();
   }
