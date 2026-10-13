@@ -171,6 +171,11 @@ function AddProjectRunCard({ run, onChanged }: { run: AddProjectRun; onChanged?:
             <span className={cx('min-w-48', s.state === 'pending' ? 'text-ink-3' : 'text-ink')}>{STEP_LABEL[s.step] ?? s.step}</span>
             <Badge tone={STEP_TONE[s.state]}>{STEP_STATE[s.state]}</Badge>
             {s.detail && <span className="text-ink-3">{s.detail}</span>}
+            {s.state === 'failed' && s.retry && (
+              <span className="text-ink-2" data-testid="add-project-retry">
+                To retry: <code>{s.retry}</code>
+              </span>
+            )}
           </li>
         ))}
       </ol>

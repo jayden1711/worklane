@@ -559,6 +559,8 @@ export interface AddProjectStep {
   step: string;
   state: 'pending' | 'started' | 'done' | 'failed' | 'ask';
   detail: string;
+  /** A failed step: how to try again (absent from older servers). */
+  retry?: string | null;
   at: string | null;
 }
 export interface AddProjectRun {
@@ -587,14 +589,18 @@ export interface AddProjectData {
   runs: AddProjectRun[];
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
-export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
-/** The name and repo add-project takes: the same rules as the server's and the machine helper's. */
+export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
+/**
+ * The name and repo add-project takes: the same rules as the server's and the machine helper's (addProjectNameOk and
+ * addProjectRepoOk in src/machine.ts; test/web-render.test.ts holds the two to the same answers).
+ */
 export const PROJECT_NAME = /^[a-z][a-z0-9-]{0,20}$/;
-export const PROJECT_REPO = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+export const PROJECT_REPO = /^([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})\/([A-Za-z0-9_.-]{1,100})$/;
 /** Why this name and repo won't be accepted; null when they will. */
 export function addProjectInvalid(name: string, repo: string): string | null {
-  if (!PROJECT_NAME.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters.';
-  if (!PROJECT_REPO.test(repo) || repo.includes('..')) return 'The repo is owner/name, as on GitHub.';
+  if (!PROJECT_NAME.test(name) || name === 'dash' || /-(agent|eval|work)$/.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters, not "dash" and not ending in -agent, -eval or -work.';
+  const m = PROJECT_REPO.exec(repo);
+  if (!m || m[2] === '.' || m[2] === '..') return 'The repo is owner/name, as on GitHub.';
   return null;
 }
 

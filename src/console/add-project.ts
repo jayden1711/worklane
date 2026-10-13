@@ -1,30 +1,28 @@
 // The setup console's "Add project": the dashboard's half. The root half is scripts/setup/add-project.sh, run by
 // the machine helper's one add-project command.
 //
-//   GET  /api/add-project   whether this person may add a project now (and why not), the machine owners, and each
-//                           add-project run: its machine request, its steps in order, and the asks it raised
-//   POST /api/add-project   {name, repo}: recorded as the machine request `add-project <name> <owner/repo>`
-//                           (src/machine-requests.ts) for the coordinator, which runs the helper. Never runs anything.
+//   GET  /api/add-project            whether this person may add a project now (and why not), the machine owners,
+//                                    and each add-project run: its machine request, its steps in order, its asks
+//   POST /api/machine/add-project    {name, repo}: the one way to start one (src/dashboard.ts, requestAddProject in
+//                                    src/machine-requests.ts), which checks all of this again
 //
 // Who may: the instance's owner who is one of the machine's owners, with a GitHub sign-in in the last 5 minutes and
 // an allowed console device, as for the terminal (src/machine-owners.ts); the break-glass too. The name and the
-// repo are checked here, again by the coordinator (the helper's allowlist), and again by the helper itself.
+// repo are checked in the page, by the dashboard, again by the coordinator (the helper's allowlist), and by the
+// helper itself.
 //
 // Progress: add-project.sh prints one line per step, which the coordinator records as an `add_project.step`
-// event: {request_id, name, repo, step, state, detail}. The view folds them, per request, into the nine steps in
-// the script's order. The two GitHub clicks and the Claude token are setup-console asks (approve_link,
-// paste_secret), shown with the run that raised them: the asks created while it ran. One run at a time, so an
-// ask belongs to exactly one run.
-import type { EventLog } from '../events/log.js';
+// event (src/coordinator/add-project.ts). The view folds them, per request, into the nine steps in the script's
+// order. The two GitHub clicks and the Claude token are setup-console asks (approve_link, paste_secret), shown with
+// the run that raised them: the ask a step line names, and any other ask created while the run was open. One run at
+// a time, so an ask belongs to exactly one run.
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from '../machine-owners.js';
-import { MACHINE_EVENTS, machineRequests, requestMachineChange, type MachineRequest } from '../machine-requests.js';
-import { INSTANCE_NAME, validRepo } from '../setup/app-manifest.js';
+import { MACHINE_EVENTS, machineRequests, type MachineRequest } from '../machine-requests.js';
+import { ADD_PROJECT_STEPS, type AddProjectStep as AddProjectStepName } from '../coordinator/add-project.js';
 import { ASK_EVENTS, asksFrom, mayAnswerAsk, type Ask, type Role } from './asks.js';
 
-/** add-project.sh's steps, in the order it runs them. */
-export const ADD_PROJECT_STEPS = ['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'] as const;
-export type AddProjectStepName = (typeof ADD_PROJECT_STEPS)[number];
+export { ADD_PROJECT_STEPS };
 export type AddProjectStepState = 'pending' | 'started' | 'done' | 'failed' | 'ask';
 export const ADD_PROJECT_EVENTS = [...MACHINE_EVENTS, ...ASK_EVENTS, 'add_project.step'] as const;
 
@@ -32,6 +30,8 @@ export interface AddProjectStep {
   step: AddProjectStepName;
   state: AddProjectStepState;
   detail: string;
+  /** A failed line: how to try again. */
+  retry: string | null;
   at: string | null;
 }
 
@@ -54,12 +54,6 @@ export interface AddProjectRun {
   asks: (Ask & { canAnswer: boolean })[];
 }
 
-/** Why this name and repo can't be added; null when they can. The same rules as the helper's. */
-export function addProjectRefusal(name: unknown, repo: unknown): string | null {
-  if (typeof name !== 'string' || !INSTANCE_NAME.test(name)) return 'the name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters';
-  if (!validRepo(repo)) return 'the repo is owner/name, as on GitHub';
-  return null;
-}
 
 const isRun = (r: MachineRequest) => r.args[0] === 'add-project' && r.args.length === 3;
 
@@ -74,17 +68,22 @@ export function addProjectRuns(events: readonly StoredEvent[], role: Role | null
     const p = e.payload as { id?: string; args?: string[] };
     if (e.type === 'machine.requested' && raised.has(p.id!)) open = p.id!;
     else if (e.type === 'machine.finished' && p.id === open) open = null;
-    else if (e.type === 'ask.created' && open) {
+    else if (e.type === 'add_project.step') {
+      // The ask a step line names is that run's, whenever it was made.
+      const s = e.payload as EventPayload<'add_project.step'>;
+      const list = raised.get(s.request_id);
+      if (s.ask && list && allAsks.has(s.ask) && !list.includes(s.ask)) list.push(s.ask);
+    } else if (e.type === 'ask.created' && open) {
       const a = allAsks.get(p.id!);
-      if (a && (a.kind === 'approve_link' || a.kind === 'paste_secret')) raised.get(open)!.push(a.id);
+      if (a && (a.kind === 'approve_link' || a.kind === 'paste_secret') && !raised.get(open)!.includes(a.id)) raised.get(open)!.push(a.id);
     }
   }
   return runs.map((r) => {
-    const steps = new Map<AddProjectStepName, AddProjectStep>(ADD_PROJECT_STEPS.map((s) => [s, { step: s, state: 'pending', detail: '', at: null }]));
+    const steps = new Map<AddProjectStepName, AddProjectStep>(ADD_PROJECT_STEPS.map((s) => [s, { step: s, state: 'pending', detail: '', retry: null, at: null }]));
     for (const e of events) {
       if (e.type !== 'add_project.step') continue;
       const p = e.payload as EventPayload<'add_project.step'>;
-      if (p.request_id === r.id && steps.has(p.step)) steps.set(p.step, { step: p.step, state: p.state, detail: p.detail, at: e.ts });
+      if (p.request_id === r.id && steps.has(p.step)) steps.set(p.step, { step: p.step, state: p.state, detail: p.detail, retry: p.retry ?? null, at: e.ts });
     }
     const list = ADD_PROJECT_STEPS.map((s) => steps.get(s)!);
     const asks = raised.get(r.id)!.map((id) => allAsks.get(id)!).map((a) => ({ ...a, canAnswer: a.status === 'open' && mayAnswerAsk(a, role) }));
@@ -110,24 +109,4 @@ export function addProjectView(events: readonly StoredEvent[], who: { role: Role
     machineOwners: machineOwners(o.ownersFile ?? MACHINE_OWNERS_FILE),
     runs,
   };
-}
-
-export class AddProjectError extends Error {
-  constructor(
-    message: string,
-    readonly status: 400 | 403 | 409,
-  ) {
-    super(message);
-  }
-}
-
-/** Record `add-project <name> <repo>` for the coordinator, after the gate and the checks; one run at a time. */
-export function requestAddProject(log: EventLog, body: { name?: unknown; repo?: unknown }, who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string; now?: number } = {}): MachineRequest {
-  const why = addProjectGate(who, o);
-  if (why) throw new AddProjectError(why, 403);
-  const bad = addProjectRefusal(body.name, body.repo);
-  if (bad) throw new AddProjectError(bad, 400);
-  const busy = machineRequests(log.read(0, [...MACHINE_EVENTS])).find((r) => isRun(r) && (r.status === 'pending' || r.status === 'running'));
-  if (busy) throw new AddProjectError(`adding ${busy.args[1]} is still running; one project at a time`, 409);
-  return requestMachineChange(log, { args: ['add-project', body.name as string, body.repo as string], requester: who.requester, via: 'settings', ...(o.ownersFile ? { ownersFile: o.ownersFile } : {}), ...(o.now !== undefined ? { now: o.now } : {}) });
 }

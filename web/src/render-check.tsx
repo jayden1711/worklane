@@ -100,3 +100,4 @@ export { elapsed } from './pages/Board';
 export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
 export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<AddProjectView data={data} />);
 export { keyData } from './pages/Setup';
+export { addProjectInvalid } from './api';
