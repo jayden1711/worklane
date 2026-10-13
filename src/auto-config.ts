@@ -17,6 +17,8 @@ import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
 import { TestsConfig } from './config/schema.js';
 import { sh } from './coordinator/shared.js';
+import type { Config } from './config/load.js';
+import type { RunAs } from './runner.js';
 import { projectStateDir } from './guardrails/context.js';
 import { scaffoldConfig } from './install.js';
 import { defaultBranchRefusal } from './push-guard.js';
@@ -506,7 +508,8 @@ export interface RunResult {
 /** What auto-config does to the world: git, gh (the person's own login), the terminal. Commands run through sh. */
 export interface AutoConfigIo {
   git(args: string[], cwd: string): RunResult;
-  gh(args: string[], cwd: string): RunResult;
+  /** gh's command line (local mode), or the same few calls answered over GitHub's REST API (src/server-auto-config.ts). */
+  gh(args: string[], cwd: string): RunResult | Promise<RunResult>;
   /** null: there's no terminal to ask on. */
   ask(question: string): Promise<string | null>;
   say(line: string): void;
@@ -523,6 +526,17 @@ export interface AutoConfigOptions {
   timeoutMs?: number;
   /** Keep the state (each answer and result is saved as it comes). */
   save(): void;
+  /** Server mode: the drafted commands run as the instance's agent user, never as the user holding the credentials. */
+  runAs?: RunAs;
+  /** Where the scratch worktree goes (default: under the project's state dir), and where its ownership record is kept. */
+  worktreeRoot?: string;
+  worktreeStateDir?: string;
+  /** The config's owner when gh can't say who is running it (an App's token has no user): the machine's first owner. */
+  owner?: string;
+  /** Fit the drafted config folder to its setting before it is validated (a server instance's policy: budget, workers). */
+  adjust?(cfgDir: string): void;
+  /** Problems beyond the schema (an instance's policy), each one line: any stops the proposal. */
+  check?(cfg: Config): string[];
 }
 
 export type AutoConfigResult =
@@ -533,8 +547,8 @@ export type AutoConfigResult =
 
 export const DEFAULT_TIMEOUT_MS = 15 * 60_000;
 
-function defaultBranchOf(o: AutoConfigOptions): string | null {
-  const gh = o.io.gh(['repo', 'view', o.repo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name'], o.root);
+async function defaultBranchOf(o: AutoConfigOptions): Promise<string | null> {
+  const gh = await o.io.gh(['repo', 'view', o.repo, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name'], o.root);
   const name = gh.status === 0 ? gh.stdout.trim() : '';
   if (/^[A-Za-z0-9._/-]+$/.test(name)) return name;
   const head = o.io.git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], o.root);
@@ -591,14 +605,14 @@ const questionsDetail = (open: Question[]) =>
 export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigResult> {
   const s = o.state;
   const git = (args: string[], cwd = o.root) => o.io.git(args, cwd);
-  const branch = defaultBranchOf(o);
+  const branch = await defaultBranchOf(o);
   if (!branch) return { kind: 'failed', detail: `can't tell ${o.repo}'s default branch (gh repo view, origin/HEAD): run \`git remote set-head origin --auto\`, then init again` };
   if (branch === SETUP_BRANCH) return { kind: 'failed', detail: `the default branch is ${SETUP_BRANCH}, the branch the config would be proposed from` };
   const fetch = git(['fetch', '-q', 'origin', branch]);
   if (fetch.status !== 0) return { kind: 'failed', detail: `git fetch origin ${branch} failed: ${fetch.stderr.trim().split('\n')[0] ?? ''}` };
   if (git(['cat-file', '-e', `origin/${branch}:${BRAND.configDir}/config.yaml`]).status === 0) return { kind: 'merged', branch };
   if (s.pr?.number) {
-    const v = o.io.gh(['pr', 'view', String(s.pr.number), '--repo', o.repo, '--json', 'state', '--jq', '.state'], o.root);
+    const v = await o.io.gh(['pr', 'view', String(s.pr.number), '--repo', o.repo, '--json', 'state', '--jq', '.state'], o.root);
     const state = v.status === 0 ? v.stdout.trim() : '';
     if (state === 'OPEN') return { kind: 'proposed', detail: `proposed in PR #${s.pr.number} (${s.pr.url}), from ${s.pr.branch}: review and merge it, then run \`${BRAND.cli} init\` again (it picks up here)` };
     if (state === 'MERGED') return { kind: 'failed', detail: `PR #${s.pr.number} merged, but origin/${branch} has no ${BRAND.configDir}/config.yaml: fetch, check, and run init again` };
@@ -607,7 +621,7 @@ export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigRes
   }
   const base = git(['rev-parse', `origin/${branch}`]).stdout.trim();
   s.base = base;
-  const wt: WorktreeOptions = { repo: o.root, root: join(projectStateDir(o.root), 'worktrees'), stateDir: projectStateDir(o.root), setup: [] };
+  const wt: WorktreeOptions = { repo: o.root, root: o.worktreeRoot ?? join(projectStateDir(o.root), 'worktrees'), stateDir: o.worktreeStateDir ?? projectStateDir(o.root), setup: [] };
   let path: string;
   try {
     path = createWorktree(wt, 'setup', SETUP_BRANCH, base).path;
@@ -641,7 +655,7 @@ export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigRes
         const command = sample ? cmd.replaceAll('{file}', sample) : cmd;
         o.io.say(`   running ${slot === 'setup' ? 'the setup' : `runner.${slot}`} on ${branch} (${base.slice(0, 8)}): ${command}`);
         const t0 = Date.now();
-        const r = await sh(command, path, timeoutMs);
+        const r = await sh(command, path, timeoutMs, o.runAs);
         if (slot === 'setup') setUp = true;
         const v: Verification = { slot, command: cmd, base, code: r.code, passed: r.code === 0, ms: Date.now() - t0, tail: r.tail.slice(-2000), at: new Date().toISOString() };
         s.verified = [...s.verified.filter((x) => !(x.command === cmd && x.base === base)), v];
@@ -680,14 +694,16 @@ export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigRes
 
 async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: string, base: string): Promise<AutoConfigResult> {
   const git = (...args: string[]) => o.io.git(args, path);
-  const login = o.io.gh(['api', 'user', '--jq', '.login'], o.root);
-  const owner = login.status === 0 && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login.stdout.trim()) ? login.stdout.trim() : undefined;
+  const login = await o.io.gh(['api', 'user', '--jq', '.login'], o.root);
+  const owner = login.status === 0 && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login.stdout.trim()) ? login.stdout.trim() : o.owner;
   const cfgDir = join(path, BRAND.configDir);
   if (existsSync(cfgDir)) rmSync(cfgDir, { recursive: true, force: true });
   scaffoldConfig(cfgDir, { name: o.repo.split('/')[1]!, repo: o.repo, defaultBranch: branch, ...(owner ? { owner } : {}) });
   try {
     writeFileSync(join(cfgDir, 'tests.yaml'), draftTests(p, o.state.verified));
-    loadConfig(path);
+    o.adjust?.(cfgDir);
+    const problems = o.check?.(loadConfig(path)) ?? [];
+    if (problems.length) return { kind: 'failed', detail: `the drafted config doesn't fit: ${problems.join('; ')}` };
   } catch (e) {
     return { kind: 'failed', detail: (e as Error).message.split('\n').slice(0, 3).join(' ') };
   }
@@ -699,15 +715,28 @@ async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: stri
   const ref = `HEAD:refs/heads/${SETUP_BRANCH}`;
   const refused = defaultBranchRefusal({ defaultBranch: branch, blocked: () => undefined }, ref, head);
   if (refused) return { kind: 'failed', detail: refused };
-  const push = git('push', '-q', 'origin', ref);
-  if (push.status !== 0) return { kind: 'failed', detail: `pushing ${SETUP_BRANCH} failed: ${push.stderr.trim().split('\n')[0] ?? ''}${/non-fast-forward|rejected/.test(push.stderr) ? ` (origin has a ${SETUP_BRANCH} from before: delete it on GitHub, or merge it, then run init again)` : ''}` };
-  const listed = o.io.gh(['pr', 'list', '--repo', o.repo, '--head', SETUP_BRANCH, '--state', 'open', '--json', 'number,url', '--jq', '.[0] | "\\(.number) \\(.url)"'], o.root);
+  // An open PR from the setup branch (an earlier run's, its state lost): reused as it is, never pushed over, since
+  // the person may have changed the config on it while reviewing.
+  const listed = await o.io.gh(['pr', 'list', '--repo', o.repo, '--head', SETUP_BRANCH, '--state', 'open', '--json', 'number,url', '--jq', '.[0] | "\\(.number) \\(.url)"'], o.root);
   let number: number | null = null;
   let url = '';
   const m = /^(\d+) (\S+)/.exec(listed.status === 0 ? listed.stdout.trim() : '');
-  if (m) [number, url] = [Number(m[1]), m[2]!];
-  else {
-    const created = o.io.gh(['pr', 'create', '--repo', o.repo, '--base', branch, '--head', SETUP_BRANCH, '--title', `Add ${BRAND.name} config`, '--body', prBody(p, o.state, branch, base, owner)], o.root);
+  if (m) {
+    [number, url] = [Number(m[1]), m[2]!];
+    o.io.say(`   ${SETUP_BRANCH} already has an open PR (#${number}): kept as it is`);
+  } else {
+    let push = git('push', '-q', 'origin', ref);
+    if (push.status !== 0 && /non-fast-forward|rejected|fetch first/.test(push.stderr)) {
+      // A setup branch from before with no open PR (an earlier run's, or a closed PR's): this run's draft replaces it,
+      // only while it is still the commit seen here (a lease: nothing pushed meanwhile is lost).
+      const seen = /^([0-9a-f]{40})\s/.exec(git('ls-remote', 'origin', `refs/heads/${SETUP_BRANCH}`).stdout)?.[1];
+      if (seen) {
+        o.io.say(`   origin has a ${SETUP_BRANCH} from before (${seen.slice(0, 8)}) with no open PR: replacing it with this draft`);
+        push = git('push', '-q', `--force-with-lease=refs/heads/${SETUP_BRANCH}:${seen}`, 'origin', ref);
+      }
+    }
+    if (push.status !== 0) return { kind: 'failed', detail: `pushing ${SETUP_BRANCH} failed: ${push.stderr.trim().split('\n')[0] ?? ''}` };
+    const created = await o.io.gh(['pr', 'create', '--repo', o.repo, '--base', branch, '--head', SETUP_BRANCH, '--title', `Add ${BRAND.name} config`, '--body', prBody(p, o.state, branch, base, owner)], o.root);
     if (created.status !== 0) return { kind: 'failed', detail: `${SETUP_BRANCH} is pushed, but opening its PR failed: ${created.stderr.trim().split('\n')[0] ?? ''}` };
     url = created.stdout.trim().split('\n').pop() ?? '';
     const n = /\/pull\/(\d+)/.exec(url)?.[1];

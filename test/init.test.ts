@@ -16,11 +16,13 @@ import { doctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
-import { launchdUnload, toolPlatform, which } from '../src/os/index.js';
+import { launchdUnload, shareReadWithGroup, toolPlatform, which } from '../src/os/index.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX tools (tar, sh)';
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'init-state-'));
+// Server mode's records: the machine's (/var/lib/... on a server), here a scratch directory.
+process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] = mkdtempSync(join(tmpdir(), 'init-machine-'));
 
 /** The example project with a GitHub origin. */
 function repo(): string {
@@ -249,13 +251,82 @@ test('init, server mode: as root only; tools are never installed; the Claude log
   assert.equal(await initCommand(stopped.args({ target: 'example-org/shop', mode: 'server', instance: 'shopb' }), stopped.io, () => true), 1);
   assert.match(readInitState(serverInitFile('shopb'))!.steps.claude!.detail, /add-project stopped \(exit 1\): app failed: no dashboard hub/);
   const all = Object.fromEntries(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'].map((s) => [s, 'done']));
-  const ok = world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 0, steps: all, last: '' }) });
+  const manifest = { app: "the instance's GitHub App is set up (credentials.yaml github: kind app), made through the manifest flow" };
+  const ok = world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 0, steps: all, details: manifest, last: '' }) });
   assert.equal(await initCommand(ok.args({ target: 'example-org/shop', mode: 'server', instance: 'shopb' }), ok.io, () => true), 0, ok.out());
-  assert.equal(ok.addProjects(), 1, 'one hand-off covers the Claude login, GitHub and the checkout');
+  assert.equal(ok.addProjects(), 1, 'one hand-off covers the Claude login, GitHub, the checkout and the coordinator');
   const s = readInitState(serverInitFile('shopb'))!;
-  assert.deepEqual(stepsFor('server').map((x) => [x.id, s.steps[x.id]?.status]), [['tools', 'done'], ['claude', 'done'], ['github', 'done'], ['repo-config', 'done'], ['protection', 'done'], ['discord', 'skipped'], ['tailscale', 'skipped']]);
+  assert.deepEqual(stepsFor('server').map((x) => [x.id, s.steps[x.id]?.status]), [['tools', 'done'], ['claude', 'done'], ['github', 'done'], ['repo-config', 'done'], ['coordinator', 'done'], ['protection', 'done'], ['discord', 'skipped'], ['tailscale', 'skipped']]);
   assert.match(s.steps.github!.detail, /GitHub App \(made through the manifest flow\)/);
   assert.equal(await initCommand(ok.args({ target: 'not a repo', mode: 'server' }), ok.io, () => true), 2);
+});
+
+test('init, server mode: the true status. A failed or waiting add-project step is never "all done"; how the App was made, as add-project found it', async () => {
+  const steps = (over: Record<string, string>) => ({ ...Object.fromEntries(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'].map((s) => [s, 'done'])), ...over });
+  const byHand = "the instance's GitHub App is set up (credentials.yaml github: kind app), made by hand (credentials.sh github-app)";
+  // The audit's run: the service step failed, after every step before it was done. Exit 1, the coordinator step failed.
+  const failed = world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 1, steps: steps({ service: 'failed', 'test-user': 'started' }), details: { app: byHand, service: '.worklane: missing' }, last: 'service failed: .worklane: missing' }) });
+  assert.equal(await initCommand(failed.args({ target: 'example-org/shop', mode: 'server', instance: 'shopc' }), failed.io, () => true), 1, failed.out());
+  assert.doesNotMatch(failed.out(), /all \d+ steps done/);
+  assert.match(failed.out(), /stopped at Coordinator running/);
+  const f = readInitState(serverInitFile('shopc'))!;
+  assert.deepEqual([f.steps.github?.status, f.steps['repo-config']?.status, f.steps.coordinator?.status, f.finishedAt], ['done', 'done', 'failed', null]);
+  assert.match(f.steps.coordinator!.detail, /add-project stopped \(exit 1\): service failed: \.worklane: missing/);
+  // Never claims the manifest flow for an App made by hand.
+  assert.match(f.steps.github!.detail, /GitHub App \(made by hand \(credentials\.sh github-app\)\)/);
+  assert.doesNotMatch(f.steps.github!.detail, /manifest/);
+  assert.equal(failed.addProjects(), 1, 'add-project runs once per init');
+
+  // A repo with no config: the service waits for the setup PR (exit 3). The repo config isn't done until it merges.
+  const pr = 'https://github.com/example-org/shop/pull/1';
+  const waiting = world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 3, steps: steps({ service: 'waiting', 'test-user': 'started' }), details: { app: byHand, service: `waiting for the setup PR ${pr} to merge: review it, merge it, and the coordinator starts` }, last: '' }) });
+  assert.equal(await initCommand(waiting.args({ target: 'example-org/shop', mode: 'server', instance: 'shopd' }), waiting.io, () => true), 1, waiting.out());
+  const w = readInitState(serverInitFile('shopd'))!;
+  assert.equal(w.steps['repo-config']!.status, 'failed');
+  assert.match(w.steps['repo-config']!.detail, new RegExp(`waiting for the setup PR ${pr.replaceAll('/', '\\/').replaceAll('.', '\\.')} to merge.*\\(add-project: service\\)`));
+  assert.equal(w.steps.coordinator, undefined, 'not reached');
+  assert.equal(waiting.addProjects(), 1);
+
+  // Merged since: the rerun's add-project goes on to the end, and only then is it all done.
+  const merged = world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 0, steps: steps({}), details: { app: byHand }, last: '' }) });
+  assert.equal(await initCommand(merged.args({ target: 'example-org/shop', mode: 'server', instance: 'shopd' }), merged.io, () => true), 0, merged.out());
+  assert.match(merged.out(), /all 8 steps done or skipped/);
+  assert.deepEqual(stepsFor('server').map((x) => readInitState(serverInitFile('shopd'))!.steps[x.id]?.status), ['done', 'done', 'done', 'done', 'done', 'done', 'skipped', 'skipped']);
+});
+
+test('init, server mode: the record is the machine\'s, outside root\'s home, so doctor as the coordinator reads it; one it cannot read is said, never "not reached yet"', async () => {
+  const machine = process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`]!;
+  assert.equal(serverInitFile('shope'), join(machine, 'shope.json'));
+  assert.ok(!serverInitFile('shope').startsWith(process.env[`${BRAND.envPrefix}_STATE_DIR`]!), "not under root's own state");
+  const t = world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 3, steps: { instance: 'done', app: 'done', 'claude-token': 'done', checkout: 'done', policy: 'done', service: 'waiting' }, details: { service: 'waiting for the setup PR https://github.com/example-org/shop/pull/2 to merge' }, last: '' }) });
+  await initCommand(t.args({ target: 'example-org/shop', mode: 'server', instance: 'shope' }), t.io, () => true);
+  const root = repo();
+  const checks = doctor(root, { mode: 'server', instance: 'shope', initIo: t.io }).filter((c) => c.name.startsWith('setup'));
+  const level = Object.fromEntries(checks.map((c) => [c.name, c.level]));
+  assert.deepEqual([level['setup tools'], level['setup claude'], level['setup github'], level['setup repo-config']], ['ok', 'ok', 'ok', 'fail'], JSON.stringify(checks));
+  assert.match(checks.find((c) => c.name === 'setup repo-config')!.detail, /waiting for the setup PR https:\/\/github\.com\/example-org\/shop\/pull\/2/);
+  assert.ok(!checks.some((c) => c.level === 'ok' && /not reached yet/.test(c.detail)));
+  // Opened to one group, read only, owner kept (Linux): what writeServerInitState does with the coordinator's group.
+  const f = join(mkdtempSync(join(tmpdir(), 'init-share-')), 'x.json');
+  writeFileSync(f, '{}', { mode: 0o600 });
+  const group = spawnSync('id', ['-gn'], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(shareReadWithGroup(f, group, 'darwin'), false, 'only on Linux');
+  if (process.platform === 'linux') {
+    assert.equal(shareReadWithGroup(f, group), true);
+    assert.equal(statSync(f).mode & 0o777, 0o640);
+    assert.equal(shareReadWithGroup(f, 'no-such-group-here'), false);
+  }
+  // A record there that this user can't read (another user's, closed): one failure saying so.
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    chmodSync(serverInitFile('shope'), 0o000);
+    try {
+      const closed = doctor(root, { mode: 'server', instance: 'shope', initIo: t.io }).filter((c) => c.name.startsWith('setup'));
+      assert.deepEqual(closed.map((c) => [c.name, c.level]), [['setup', 'fail']]);
+      assert.match(closed[0]!.detail, /can't read init's record .*shope\.json as this user \(EACCES\)/);
+    } finally {
+      chmodSync(serverInitFile('shope'), 0o600);
+    }
+  }
 });
 
 test('doctor: the same checklist (local steps checked live), and what the mode cannot do, each saying why; never a failure', async () => {

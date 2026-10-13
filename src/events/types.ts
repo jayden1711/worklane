@@ -339,7 +339,8 @@ export const EventSchemas = {
     name: z.string(),
     repo: z.string(),
     step: z.enum(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards']),
-    state: z.enum(['started', 'done', 'failed', 'ask']),
+    /** waiting: the step waits for what only time or someone else settles (the service: its setup PR's merge). */
+    state: z.enum(['started', 'done', 'failed', 'ask', 'waiting']),
     detail: z.string(),
     /** An ask line: the setup-console ask the coordinator made of it. */
     ask: z.string().optional(),

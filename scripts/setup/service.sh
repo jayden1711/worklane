@@ -118,6 +118,16 @@ as_root "${all_args[@]}"
 id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
 
+# No config on the checkout yet (its setup PR not merged): nothing to start, and that isn't a failure. Exit 3, the
+# setup scripts' "waiting", naming what it waits for (add-project.sh waits for it; bootstrap reports it).
+status="$(run_as "$coord" 'worklane instance setup-status "$1"' "$name" 2>/dev/null || true)"
+if [[ "$status" == *'"config":false'* ]]; then
+  pr="$(printf '%s' "$status" | sed -n 's/.*"pr":"\([^"]*\)".*/\1/p')"
+  if [ -n "$pr" ]; then echo "waiting for the setup PR $pr: the coordinator starts once it has merged (checkout.sh brings the checkout up to it; then run this again)"
+  else echo "waiting for the repo config: no setup PR yet (checkout.sh drafts it; it may have questions to answer)"; fi
+  exit 3
+fi
+
 say "check the instance as $coord (credentials, repo scope)"
 run_as "$coord" '
   worklane instance show "$1"

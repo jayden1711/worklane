@@ -20,7 +20,7 @@ import type { MachineRequest } from '../machine-requests.js';
 
 export const ADD_PROJECT_STEPS = ['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'] as const;
 export type AddProjectStep = (typeof ADD_PROJECT_STEPS)[number];
-const STATES = ['started', 'done', 'failed', 'ask'] as const;
+const STATES = ['started', 'done', 'failed', 'ask', 'waiting'] as const;
 /** The paste_secret ask's credential name: the file the dashboard writes it to, in secretsDir(<new instance>). */
 export const CLAUDE_TOKEN_CREDENTIAL = 'claude-token';
 /** How long the Claude token ask stays open before the step gives up (the script then fails, naming the retry). */
@@ -191,7 +191,8 @@ export function runAddProject(d: AddProjectDeps, r: MachineRequest): Promise<voi
         return;
       }
       if (l.step === 'app' && (l.state === 'done' || l.state === 'failed')) settleAppAsks(l.state === 'done', l.detail);
-      if (l.state === 'failed') lastFailed = l;
+      // A waiting step (service: the setup PR not merged yet) ends the run too, saying what it waits for.
+      if (l.state === 'failed' || l.state === 'waiting') lastFailed = l;
       step(l);
     });
     child.on('close', (code) => {

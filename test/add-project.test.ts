@@ -58,6 +58,7 @@ install_claude_token() {
   echo "install_claude_token $1" >> "$T/calls"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
+SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || true)"
 `,
   );
   const stub = (file: string, step: string, body: string) => {
@@ -65,13 +66,20 @@ SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHIN
     chmodSync(file, 0o755);
   };
   stub(join(s, 'instance.sh'), 'instance', 'touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
-  stub(join(T, 'bin', 'worklane'), 'app', `[ "$1" = app-manifest ] || exit 2
+  // `instance auto-config`: the setup PR, open; merged from the check numbered in <root>/merge-after on.
+  stub(join(T, 'bin', 'worklane'), 'app', `if [ "$1 $2" = "instance auto-config" ]; then
+  n=$(( $(cat "$T/ac-count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$T/ac-count"
+  if [ -e "$T/merge-after" ] && [ "$n" -ge "$(cat "$T/merge-after")" ]; then rm -f "$T/no-config"; echo '{"kind":"merged","detail":"the config is on main","pr":"https://github.com/example/alpha/pull/1","questions":[]}'; exit 0; fi
+  echo '{"kind":"proposed","detail":"proposed in PR #1","pr":"https://github.com/example/alpha/pull/1","questions":[]}'; exit 0
+fi
+[ "$1" = app-manifest ] || exit 2
 echo 'open, as a machine owner: https://hub.example.test/setup/app-manifest/start/amf-1'
 echo 'ask: {"kind":"approve_link","title":"Create '"$2"'-worklane on GitHub","detail":"Approve it.","url":"https://hub.example.test/setup/app-manifest/start/amf-1"}'
 d="$T/homes/wl-$2/.local/state/worklane/instances/$2"; printf 'version: 1\\ngithub:\\n  kind: app\\n  app_id: 91\\n' > "$d/credentials.yaml"
 mkdir -p "$T/homes/wl-$2/.config/$2-app"; echo key > "$T/homes/wl-$2/.config/$2-app/private-key.pem"
 echo "OK: App x (id 91), installation 4242"`);
-  stub(join(s, 'checkout.sh'), 'checkout', 'mkdir -p "$T/srv/$1/${2#*/}/.git" "$T/srv/$1/${2#*/}/.worklane"; printf "suites: {}\\n" > "$T/srv/$1/${2#*/}/.worklane/tests.yaml"');
+  // <root>/no-config: the repo has no config on its default branch yet (its setup PR not merged), so none in the checkout.
+  stub(join(s, 'checkout.sh'), 'checkout', 'mkdir -p "$T/srv/$1/${2#*/}/.git"; [ -e "$T/no-config" ] && exit 0; mkdir -p "$T/srv/$1/${2#*/}/.worklane"; printf "suites: {}\\n" > "$T/srv/$1/${2#*/}/.worklane/tests.yaml"');
   stub(join(s, 'service.sh'), 'service', 'touch "$T/active/worklane-$1.service"');
   stub(join(s, 'test-user.sh'), 'test-user', 'touch "$T/users/wl-test-$2" "$T/active/worklane-test-$2-docker.service"');
   stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
@@ -155,6 +163,34 @@ test('a failed step stops the run there, naming the exact retry; the rerun skips
   for (const step of ['instance', 'app', 'claude-token']) assert.match(again.events.find((e) => e.step === step && e.state === 'done')!.detail, /there|set up|has a Claude login/, step);
   assert.equal(m.calls().filter((c) => c.startsWith('instance ') || c.startsWith('app ')).length, 2, 'the instance and the App were not made again');
   assert.equal(m.calls().filter((c) => c.startsWith('checkout ')).length, 2, 'the failed step ran again');
+  assert.ok(again.events.some((e) => e.step === 'dashboards' && e.state === 'done'));
+});
+
+test('regression (audit B4): a repo with no config: the service step waits for its setup PR, never fails on it; goes on once it merges', { skip: !posix }, () => {
+  const m = machine();
+  writeFileSync(join(m.T, 'no-config'), '');
+  writeFileSync(join(m.T, 'wait-seconds'), '0');
+  const r = m.run();
+  // Before: service.sh ran and failed (".worklane: missing"), exit 1.
+  assert.equal(r.status, 3, r.stderr);
+  assert.ok(!r.events.some((e) => e.state === 'failed'), JSON.stringify(r.events));
+  const last = r.events.at(-1)!;
+  assert.deepEqual([last.step, last.state], ['service', 'waiting']);
+  assert.match(last.detail, /^waiting for the setup PR https:\/\/github\.com\/example\/alpha\/pull\/1 to merge/);
+  assert.equal(last.retry, `sudo bash ${m.s}/add-project.sh alpha example/alpha, once that is done (it skips the steps already done)`);
+  assert.ok(!m.calls().some((c) => c.startsWith('service ')), 'service.sh never ran without the config');
+  assert.ok(!r.events.some((e) => ['test-user', 'machine-helper', 'dashboards'].includes(e.step)));
+
+  // How the App was made, as recorded beside its key: by hand here.
+  writeFileSync(join(m.T, 'homes', 'wl-alpha', '.config', 'alpha-app', 'made-by'), 'by-hand\n');
+  // Rerun: still open on the first check, merged on the next; the checkout is brought up to it and the run goes on.
+  writeFileSync(join(m.T, 'wait-seconds'), '600');
+  writeFileSync(join(m.T, 'merge-after'), '3');
+  const again = m.run(undefined, '');
+  assert.equal(again.status, 0, again.stderr);
+  assert.deepEqual(again.events.filter((e) => e.step === 'service').map((e) => e.state), ['started', 'waiting', 'done']);
+  assert.match(again.events.find((e) => e.step === 'app' && e.state === 'done')!.detail, /, made by hand \(credentials\.sh github-app\)$/);
+  assert.deepEqual(m.calls().filter((c) => /^(checkout|service) /.test(c)), ['checkout alpha example/alpha', 'checkout alpha example/alpha', 'service alpha']);
   assert.ok(again.events.some((e) => e.step === 'dashboards' && e.state === 'done'));
 });
 

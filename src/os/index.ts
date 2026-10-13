@@ -468,6 +468,23 @@ export function homesRoot(platform: NodeJS.Platform = process.platform): string 
 }
 
 /** A user's home directory from the system's user database (null: no such user, or no way to ask here). */
+/**
+ * Open a file to one group, read only (0640), keeping its owner: on Linux, when the group exists and this process may
+ * hand the file to it (root, or a member). Anywhere else, or when it can't, it stays as it was: false.
+ */
+export function shareReadWithGroup(file: string, group: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'linux' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(group) || typeof process.getuid !== 'function') return false;
+  try {
+    const gid = Number(execFileSync('getent', ['group', group], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).split(':')[2]);
+    if (!Number.isInteger(gid)) return false;
+    chownSync(file, statSync(file).uid, gid);
+    chmodSync(file, 0o640);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function homeOf(user: string, platform: NodeJS.Platform = process.platform): string | null {
   if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) return null;
   try {
@@ -781,10 +798,11 @@ export function diskFree(path: string): { freePct: number; freeGb: number; total
 /**
  * Replace a file's content atomically: a temp file beside it (so the rename stays on one filesystem), with
  * `mode` and, on POSIX, the original's owner and group; then rename over it. On failure the temp file is
- * removed and the original is untouched.
+ * removed and the original is untouched. `ownerOf`: the file (or directory) whose owner and group it gets, for a
+ * file that doesn't exist yet (root writing into a user's home keeps it that user's).
  */
-export function replaceFileAtomically(path: string, data: string, mode: number): void {
-  const st = statSync(path);
+export function replaceFileAtomically(path: string, data: string, mode: number, ownerOf = path): void {
+  const st = statSync(existsSync(path) ? path : ownerOf);
   const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(4).toString('hex')}.tmp`);
   try {
     writeFileSync(tmp, data, { mode });
