@@ -9,10 +9,11 @@ import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
 import { loadMoneyPaths } from '../review.js';
-import { issueBrief } from '../roles.js';
+import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
-import { decisionsMade, objection, PLAN_DISALLOWED, PLAN_SCHEMA, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, readPlan, type Plan, type PlanAnswer } from '../plan-mode.js';
+import { decisionsMade, objection, PLAN_DISALLOWED, PLAN_REVIEW_SCHEMA, PLAN_SCHEMA, PLAN_SEND_BACKS, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, planReviewExtra, readPlan, readPlanReview, sendBackNote, type Plan, type PlanAnswer } from '../plan-mode.js';
+import { decisionIndex, type DecisionEntry } from '../plan-decisions.js';
 import { Recovery } from './recovery.js';
 import { laneOf, DEFAULT_REVIEW } from './shared.js';
 import { routeRun } from './model-routing.js';
@@ -35,35 +36,31 @@ export abstract class Decisions extends Recovery {
       return { plan: posted.plan as unknown as Plan, commentsAt: (await this.d.backlog.comments(n)).length };
     }
     const note = decided?.answer === 'revise' ? decided.note : null;
-    const workers = this.d.cfg.agents.roles.workers!;
-    const planModel = routeRun(this.d.cfg, 'planner');
-    const r = await this.d.runner.run({
-      env: this.projectEnv(),
-      role: 'planner',
-      ...laneOf(issue),
-      stateDir: this.d.stateDir,
-      prompt: issueBrief(issue, doneWhen, [...planExtra(), ...decisionsMade(this.d.log.read(0, ['decision.asked', 'decision.answered'])), ...(note ? ['', `The owner asked for a revised plan: ${note}`] : [])]),
-      cwd: path,
-      model: planModel,
-      allowedTools: PLAN_TOOLS,
-      disallowedTools: PLAN_DISALLOWED,
-      maxTurns: 60,
-      maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
-      jsonSchema: PLAN_SCHEMA,
-      stallMs: 20 * 60_000,
-      timeoutMs: this.commandTimeoutMs,
-      onStart: (p) => this.emit('run.started', { issue: n, role: 'planner', model: planModel, worktree: path, pid: p, pgid: p, attempt: 1 }),
-    });
-    this.cost(n, 'planner', r);
-    this.emit('run.finished', { issue: n, role: 'planner', reason: r.reason, detail: r.detail.slice(0, 1000) });
-    if (r.reason !== 'succeeded') {
-      await this.block(n, owner, `the plan run ended: ${r.reason} (${r.detail.slice(0, 300)})`);
-      return { stop: true };
-    }
-    const plan = readPlan(r.structured);
-    if ('invalid' in plan) {
-      await this.block(n, owner, plan.invalid);
-      return { stop: true };
+    // The decisions index: the decisions made and the decision records in this checkout (the plan's base).
+    const index = decisionIndex(path, this.d.log.read(0, ['decision.asked', 'decision.answered']));
+    let sentBack: string[] = [];
+    let plan: Plan | null = null;
+    for (let round = 0; !plan; round++) {
+      const r = await this.planRun(issue, doneWhen, path, [...planExtra(), ...decisionsMade(index), ...(note ? ['', `The owner asked for a revised plan: ${note}`] : []), ...sentBack]);
+      if (r.reason !== 'succeeded') {
+        await this.block(n, owner, `the plan run ended: ${r.reason} (${r.detail.slice(0, 300)})`);
+        return { stop: true };
+      }
+      // The plan contract check, then plan review against the recorded decisions: a refusal goes back to the planner.
+      const read = readPlan(r.structured, index);
+      const verdict = 'invalid' in read ? { sendBack: read.invalid, by: 'contract' as const } : await this.planReview(issue, doneWhen, path, read, index);
+      if (verdict === null) plan = read as Plan;
+      else if ('block' in verdict) {
+        await this.block(n, owner, verdict.block);
+        return { stop: true };
+      } else {
+        this.emit('plan.sent_back', { issue: n, by: verdict.by, why: verdict.sendBack.slice(0, 2000), round: round + 1 });
+        if (round >= PLAN_SEND_BACKS) {
+          await this.block(n, owner, `the plan was sent back ${round + 1} times; the last time: ${verdict.sendBack}`);
+          return { stop: true };
+        }
+        sentBack = sendBackNote(verdict.sendBack);
+      }
     }
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const reasons = planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 });
@@ -79,6 +76,50 @@ export abstract class Decisions extends Recovery {
     }
     this.emit('plan.posted', { issue: n, plan: plan as unknown as Record<string, unknown>, held: false, reasons: [], comments_at: commentsAt, decision: null });
     return { plan, commentsAt };
+  }
+
+  /** One read-only plan run: the planner, or the plan reviewer (its own instructions are in `extra`). */
+  private async planRun(issue: Issue, doneWhen: DoneWhenList, path: string, extra: string[], role: 'planner' | 'plan-reviewer' = 'planner') {
+    const n = issue.number;
+    const workers = this.d.cfg.agents.roles.workers!;
+    const model = routeRun(this.d.cfg, 'planner');
+    const r = await this.d.runner.run({
+      env: this.projectEnv(),
+      role,
+      ...laneOf(issue),
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, extra),
+      cwd: path,
+      model,
+      allowedTools: PLAN_TOOLS,
+      disallowedTools: PLAN_DISALLOWED,
+      maxTurns: 60,
+      maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+      jsonSchema: role === 'planner' ? PLAN_SCHEMA : PLAN_REVIEW_SCHEMA,
+      stallMs: 20 * 60_000,
+      timeoutMs: this.commandTimeoutMs,
+      onStart: (p) => this.emit('run.started', { issue: n, role, model, worktree: path, pid: p, pgid: p, attempt: 1 }),
+    });
+    this.cost(n, role, r);
+    this.emit('run.finished', { issue: n, role, reason: r.reason, detail: r.detail.slice(0, 1000) });
+    return r;
+  }
+
+  /**
+   * Plan review: a fresh read-only run gets the plan, the full text of every entry it cites and the decisions
+   * index, and names each recorded decision the plan contradicts without arguing against it. Null: it passes;
+   * sendBack: why it goes back to the planner; block: the review couldn't run. With nothing recorded at all there
+   * is nothing to contradict, and no review runs.
+   */
+  private async planReview(issue: Issue, doneWhen: DoneWhenList, path: string, plan: Plan, index: readonly DecisionEntry[]): Promise<{ sendBack: string; by: 'review' } | { block: string } | null> {
+    if (!index.length) return null;
+    const r = await this.planRun(issue, doneWhen, path, ['', defaultRolePrompt('plan-reviewer'), ...planReviewExtra(plan, index)], 'plan-reviewer');
+    if (r.reason !== 'succeeded') return { block: `the plan review run ended: ${r.reason} (${r.detail.slice(0, 300)})` };
+    const found = readPlanReview(r.structured, plan, index);
+    if (found === null) return { block: 'the plan review gave no verdict' };
+    this.emit('plan.reviewed', { issue: issue.number, contradictions: found });
+    if (!found.length) return null;
+    return { sendBack: `plan review found it contradicts recorded decisions it doesn't name under "Argues against": ${found.map((c) => `[${c.ref}] ${c.why}`).join('; ')}`, by: 'review' };
   }
 
   /** An objection to a plan that is being built: the task stops (blocked, saying who objected and why). */

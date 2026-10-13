@@ -255,6 +255,10 @@ export const EventSchemas = {
   'plan.posted': z.strictObject({ issue, plan: z.record(z.string(), z.unknown()), held: z.boolean(), reasons: z.array(z.string()), comments_at: z.number().int().nonnegative(), decision: z.string().nullable() }),
   /** The owner's answer on a held plan: approve builds it, revise plans again with the note, reject stops the task. */
   'plan.decided': z.strictObject({ issue, decision: z.string(), answer: z.enum(['approve', 'revise', 'reject']), by: z.string(), note: z.string() }),
+  /** Plan review: the recorded decisions the plan contradicts without arguing against them (empty: it passed). */
+  'plan.reviewed': z.strictObject({ issue, contradictions: z.array(z.strictObject({ ref: z.string(), why: z.string() })) }),
+  /** A plan sent back to the planner: refused by the plan contract check, or by plan review. */
+  'plan.sent_back': z.strictObject({ issue, by: z.enum(['contract', 'review']), why: z.string(), round: z.number().int().positive() }),
   /** The owner (or a writer) objected to a plan that was built at once: the task stopped. */
   'plan.objected': z.strictObject({ issue, by: z.string(), why: z.string() }),
   /** A writer corrected the harness (a rejected PR or landing, a revised or rejected plan, a review asking for changes, a chat correction): recorded once per source. */
