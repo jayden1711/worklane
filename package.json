@@ -16,12 +16,18 @@
   },
   "files": [
     "dist/src",
+    "!dist/src/**/*.map",
+    "!dist/src/**/*.d.ts",
     "dist/web",
+    "scripts/setup/app-permissions.mjs",
     "examples/basic",
     "templates",
     "LICENSE",
     "NOTICE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "!**/.env",
+    "!**/.env.*",
+    "!**/*.pem"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
