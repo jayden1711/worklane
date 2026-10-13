@@ -17,6 +17,7 @@ import { abortMerge, mergeBaseInto } from '../merge-base.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
+import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { MainWatch, repoGit } from '../main-watch.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
@@ -32,6 +33,10 @@ export abstract class MergeFlow extends FixRuns {
   /** Polls of the merge flow's capped waits (wait-caps.ts). */
   protected readonly waitPolls = new PollCounter();
   private batcher: PrBatcher | null = null;
+  /** The merge train: this pass's merges, up to tests.yaml land.parallel_merges. */
+  protected readonly mergePass = new MergePass(() => this.d.cfg.tests.land.parallel_merges);
+  /** The merge train's clock for deferrals (tests move it). */
+  protected trainNow: () => number = () => Date.now();
 
   // ---------------------------------------------------------------- PR batches
 
@@ -152,6 +157,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   protected async watchPrs() {
     const now = Date.now();
+    this.mergePass.start();
     const interval = this.d.prPollMs ?? 60_000;
     // A merge into the default branch (by anyone) is when PRs start conflicting: look at all of them now.
     if (this.watchedPrs().length && now - this.tipCheckedAt >= TIP_CHECK_MS) {
@@ -168,7 +174,7 @@ export abstract class MergeFlow extends FixRuns {
     const due = this.watchedPrs()
       .filter((p) => now - (this.prPolled.get(p.number) ?? 0) >= interval)
       .sort((a, b) => (this.prPolled.get(a.number) ?? 0) - (this.prPolled.get(b.number) ?? 0))
-      .slice(0, 10);
+      .slice(0, Math.max(10, this.d.cfg.tests.land.parallel_merges));
     for (const watched of due) {
       this.prPolled.set(watched.number, now);
       await this.watchPr(watched);
@@ -261,7 +267,70 @@ export abstract class MergeFlow extends FixRuns {
   private async mergeOurs(pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
     const never = neverAutoMerge({ branch: pr.head, openedByHarness: this.openedByUs(pr.number) });
     if (never.length) return { ok: false, why: never.join('; ') };
-    return this.d.backlog.mergePr(pr.number, pr.headSha, `${pr.title} (#${pr.number})`);
+    const msg = mergeMessage({ title: pr.title, number: pr.number, head: pr.headSha, product: BRAND.name });
+    return this.d.backlog.mergePr(pr.number, pr.headSha, msg.subject, msg.body);
+  }
+
+  // ---------------------------------------------------------------- merge train
+
+  /**
+   * The merge train's one door to mergeOurs (src/merge-policy-train.ts): within this pass's cap (a PR over it merges
+   * on the next pass); at the head GitHub reports right now, since an earlier merge of the pass or a push may have
+   * moved it (a moved head is never merged: it is decided afresh); and a branch GitHub calls behind its base (strict
+   * protection) or a base that moved mid-merge is put off with a backoff, never retried in a loop and never made to
+   * merge the default branch in. null: not merged this pass, nothing to record; a failure is the caller's to record.
+   */
+  private async trainMerge(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string } | null> {
+    const { number } = w;
+    if (this.mergeDeferred(number, pr.headSha)) return null;
+    if (!this.mergePass.room()) {
+      this.prPolled.delete(number); // first in line on the next pass
+      return null;
+    }
+    const now = await this.d.backlog.pullRequest(number);
+    if (now.state !== 'open' || now.headSha !== pr.headSha) {
+      this.prPolled.delete(number);
+      return null;
+    }
+    if (isBehind(now)) {
+      await this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
+      return null;
+    }
+    const m = await this.mergeOurs(pr);
+    if (m.ok) {
+      this.mergePass.took();
+      return m;
+    }
+    const refusal = mergeRefusal(m.why);
+    if (deferrable(refusal)) {
+      await this.deferMerge(w, pr, refusal as 'behind' | 'base_moved', `GitHub refused the merge: ${m.why}`);
+      return null;
+    }
+    if (refusal === 'head_moved') this.prPolled.delete(number);
+    return m;
+  }
+
+  private deferrals(): Deferral[] {
+    return this.d.log.read(0, ['merge.deferred']).map((e) => e.payload as EventPayload<'merge.deferred'>);
+  }
+
+  /** PR `number` at `head` was put off and its retry time hasn't come. */
+  protected mergeDeferred(number: number, head: string): boolean {
+    return mergeDeferral(this.deferrals(), number, head, this.trainNow()).waiting;
+  }
+
+  /**
+   * Put off merging PR `number` at this head, for longer each time (deferDelay). The first time a head is put off as
+   * behind, one comment says why and what lets it through; the owner isn't asked: it isn't theirs to decide.
+   */
+  private async deferMerge(w: EventPayload<'pr.opened'>, pr: PullRequest, kind: 'behind' | 'base_moved', why: string) {
+    const now = this.trainNow();
+    const { times } = mergeDeferral(this.deferrals(), w.number, pr.headSha, now);
+    const retryAt = now + deferDelay(times);
+    this.emit('merge.deferred', { issue: w.issue, number: w.number, head: pr.headSha, why: why.slice(0, 500), retry_at: new Date(retryAt).toISOString() });
+    if (kind === 'behind' && times === 0) {
+      await this.d.backlog.comment(w.number, `[${BRAND.cli}] Ready to merge, but this repo requires branches to be up to date with ${this.branch} (strict branch protection), and ${BRAND.name} doesn't merge ${this.branch} into a PR to get there. It tries again later, waiting longer each time (up to ${deferDelay(99) / 60_000} min). Updating the branch, or turning off "require branches to be up to date", lets it merge.`);
+    }
   }
 
   /** The policy's call on a ready PR at its current head. */
@@ -334,6 +403,10 @@ export abstract class MergeFlow extends FixRuns {
     }
     const d = this.mergeDecisionFor(n, number, pr);
     if (d.auto) {
+      // The merge train put it off (behind its base under strict protection, or its base moved mid-merge): not before
+      // its retry time. Behind is never a human's call, and never merged by merging the default branch in.
+      if (this.mergeDeferred(number, pr.headSha)) return;
+      if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
       if (pr.mergeableState === 'draft') return;
       if (pr.mergeable === null || pr.mergeableState === 'unknown') {
@@ -371,7 +444,8 @@ export abstract class MergeFlow extends FixRuns {
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
     if (this.prBatching()) return this.mergeTested(w, pr, 'auto');
-    const m = await this.mergeOurs(pr);
+    const m = await this.trainMerge(w, pr);
+    if (!m) return;
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -403,7 +477,8 @@ export abstract class MergeFlow extends FixRuns {
       if (how === 'approved') await this.d.backlog.comment(number, `[${BRAND.cli}] Approved, but not merged yet: ${turn.why}. It is tested again on the current ${this.branch} first, and merges once that passes.`);
       return;
     }
-    const m = await this.mergeOurs(pr);
+    const m = await this.trainMerge(w, pr);
+    if (!m) return;
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
@@ -458,13 +533,16 @@ export abstract class MergeFlow extends FixRuns {
     const stopped = this.autoMergeStopped();
     if (stopped) return hold(`approved by @${by}, but auto-merge is stopped: ${stopped}`.slice(0, 500));
     if (pr.mergeableState === 'draft' || pr.mergeable === null || pr.mergeableState === 'unknown') return; // GitHub still computing: next poll
+    if (this.mergeDeferred(number, pr.headSha)) return;
+    if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `approved by @${by}, but GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
     if (!pr.mergeable || !['clean', 'unstable', 'has_hooks'].includes(pr.mergeableState)) return hold(`approved by @${by}, but GitHub can't merge it cleanly (${pr.mergeableState})`);
     if (this.prBatching()) return this.mergeTested(w, pr, 'approved');
     const gate = await this.combinedGate(w, pr);
     if (gate === 'pending') return;
     if (gate !== 'merge') return hold(`approved by @${by}, but ${gate === 'conflict' ? 'merging the default branch into it conflicts' : gate.hold}`.slice(0, 500));
     if (this.emergencyInForce() || this.autoMergeStopped()) return;
-    const m = await this.mergeOurs(pr);
+    const m = await this.trainMerge(w, pr);
+    if (!m) return;
     if (!m.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: m.why.slice(0, 500) });
       return;
