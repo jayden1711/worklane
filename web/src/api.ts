@@ -907,6 +907,30 @@ export interface Trust {
   hidden: string[];
 }
 
+/**
+ * Flaky tests (GET /api/flaky, src/flaky.ts; owners and writers): the quarantined checks, those released lately, and
+ * the flake rate (flaky re-runs over red runs on the default branch) over 7 and 30 days.
+ */
+export interface FlakyTest {
+  test: string;
+  state: 'quarantined' | 'released';
+  firstSeen: string;
+  lastSeen: string;
+  sightings: number;
+  issue: number | null;
+  url: string | null;
+  passes: number;
+  released: { at: string; how: 'passes' | 'owner'; by: string } | null;
+}
+export interface Flaky {
+  releaseAfter: number;
+  quarantined: FlakyTest[];
+  released: FlakyTest[];
+  rates: { days: number; redRuns: number; flakyReruns: number; rate: number | null }[];
+  canClear: boolean;
+}
+export const clearFlaky = (test: string) => api<{ ok: boolean }>('/api/flaky/clear', { method: 'POST', body: JSON.stringify({ test }) });
+
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {

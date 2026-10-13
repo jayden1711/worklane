@@ -52,6 +52,7 @@ import { throughput } from './throughput.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { trustForViewer, trustView } from './trust.js';
+import { flakyView, releaseByOwner } from './flaky.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
@@ -1065,6 +1066,25 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (req.method !== 'GET') return json(res, 405, { error: 'the trust numbers are read-only' });
           const view = trustView(readEvents(opts.eventsDb), { agents: instanceAgents(opts) });
           return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
+        }
+        // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
+        // and writers' to read; only an owner clears a test from quarantine, audited.
+        if (url.pathname === '/api/flaky' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: `the flaky tests are for the instance's owners and writers; @${who.login} is a ${who.role}` });
+          return json(res, 200, { ...flakyView(readEvents(opts.eventsDb), { now: new Date(), releaseAfter: opts.cfg.project.flaky.release_after_passes }), canClear: isOwnerHere });
+        }
+        if (url.pathname === '/api/flaky/clear' && req.method === 'POST') {
+          const body = (await readBody(req)) as { test?: unknown };
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may clear a test from quarantine; @${who.login} is a ${who.role}` });
+          const log = new EventLog(opts.eventsDb);
+          try {
+            const r = releaseByOwner(log, body.test, who.login);
+            if (!r.ok) return json(res, r.status, { error: r.error });
+            audit(who, 'flaky.cleared', { test: body.test });
+            return json(res, 200, { ok: true });
+          } finally {
+            log.close();
+          }
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
