@@ -220,8 +220,7 @@ test("the server: a viewer gets 403 on Watch and no run fields on the board; a w
     const step = asks(s.log).create({ instance: 'shop', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
     assert.equal((await post('example-collaborator', `/api/asks/${step.id}/run`, {})).status, 403, "a writer can't run a root step");
     assert.equal((await post('example-collaborator', `/api/asks/${step.id}/answer`, { answer: 'declined' })).status, 403, "a writer can't answer a root step");
-    const now = Date.now();
-    assert.match(terminalRefusal({ login: 'example-collaborator', role: 'writer', authenticatedAt: now, csrfOk: true }, { consoleUser: 'console-admin', hubUser: 'hub-viewer' }, now) ?? '', /owner's alone/, "a writer can't open the terminal");
+    assert.match(terminalRefusal({ login: 'example-collaborator', role: 'writer', csrfOk: true }, { consoleUser: 'console-admin', hubUser: 'hub-viewer' }) ?? '', /owner's alone/, "a writer can't open the terminal");
 
     const audit = s.log.read(0, ['dashboard.audit']).map((e) => e.payload as { login: string; role: string; action: string; instance: string | null });
     assert.deepEqual(audit.map((a) => [a.login, a.role, a.action, a.instance]), [

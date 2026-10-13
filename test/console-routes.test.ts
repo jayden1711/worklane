@@ -44,7 +44,7 @@ async function site(roles: Record<string, Role> = { olive: 'owner', wendy: 'writ
     // A person signed in just now, from an allowed console device (a machine change needs both).
     session: (req) => {
       const login = String(req.headers['x-login'] ?? '');
-      return login ? { login, role: roles[login] ?? null, authenticatedAt: Date.now(), csrfOk: true, deviceOk: true } : null;
+      return login ? { login, role: roles[login] ?? null, csrfOk: true, deviceOk: true } : null;
     },
   });
   const base = d.url.split('/?')[0]!;

@@ -28,8 +28,10 @@ export interface MachineData {
   machineOwners?: string[];
   /** Whether this person is one of them; absent from older servers. */
   machineOwner?: boolean;
-  /** What a change needs besides (a fresh sign-in, an allowed device); absent from older servers. */
+  /** What a change needs besides (an allowed device); absent from older servers. */
   needs?: string | null;
+  /** Whether this page came from one of the console's allowed devices (the hub says); absent from older servers. */
+  deviceReady?: boolean;
   helper: string;
   slots: { cap: number; running: number; min: number; max: number };
   /** The machine's test-run slot cap; absent from older servers. */
@@ -153,8 +155,8 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
         </div>
       )}
       {data.canChange && data.needs && (
-        <div className="text-[12px] text-ink-3" data-testid="machine-needs">
-          A change needs {data.needs}.
+        <div className="text-[12px] text-ink-3" data-testid="machine-needs" data-ready={data.deviceReady === undefined ? undefined : data.deviceReady ? 'yes' : 'no'}>
+          {data.deviceReady === true ? `You may change these: this page came from ${data.needs}.` : data.deviceReady === false ? `A change needs ${data.needs}, and this page didn't come from one.` : `A change needs ${data.needs}.`}
         </div>
       )}
       <div className="overflow-hidden rounded-card bg-surface shadow-card">

@@ -11,11 +11,10 @@ import { isMachineOwner, machineChangeRefusal, machineOwners, MACHINE_OWNERS_FIL
 import { MachineRequestError, machineRequests, requestMachineChange } from '../src/machine-requests.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { BRAND } from '../src/brand.js';
-import { freshRequester, machineOwnersFile, repoRoot } from './helpers.js';
+import { ownerRequester, machineOwnersFile, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const setup = join(repoRoot, 'scripts', 'setup');
-const MIN = 60_000;
 
 test('the machine owners file: two logins, matched case-insensitively; missing, malformed or open to others is no owners', () => {
   assert.equal(MACHINE_OWNERS_FILE, `/etc/${BRAND.cli}/machine-owners.json`);
@@ -40,28 +39,24 @@ test('the machine owners file: two logins, matched case-insensitively; missing, 
   }
 });
 
-test('machine changes are refused for an instance-only owner, a stale sign-in and a disallowed device, for set-slots and set-updates; the break-glass is allowed', () => {
+test('machine changes are refused for an instance-only owner and a disallowed device, for set-slots and set-updates; the break-glass is allowed', () => {
   const owners = machineOwnersFile('ada', 'olu');
-  const now = Date.now();
   const log = new EventLog(':memory:');
   for (const args of [['set-slots', '4'], ['set-updates', 'on']]) {
-    const ask = (requester: Parameters<typeof machineChangeRefusal>[0]) => () => requestMachineChange(log, { args, requester, via: 'settings', ownersFile: owners, now });
-    assert.throws(ask({ ...freshRequester('ivy'), authenticatedAt: now }), (e: Error) => e instanceof MachineRequestError && e.status === 403 && /machine owners: @ada, @olu\); @ivy isn't one/.test(e.message), `${args[0]}: instance-only owner`);
-    assert.throws(ask({ ...freshRequester('ada'), authenticatedAt: now - 6 * MIN }), /sign-in within the last 5 minutes/, `${args[0]}: stale`);
-    assert.throws(ask({ ...freshRequester('ada'), authenticatedAt: null }), /sign-in within the last 5 minutes/, `${args[0]}: no sign-in time`);
-    assert.throws(ask({ ...freshRequester('ada'), authenticatedAt: now + 5 * MIN }), /sign-in within the last 5 minutes/, `${args[0]}: a sign-in time from the future`);
-    assert.throws(ask({ ...freshRequester('ada'), authenticatedAt: now, deviceOk: false }), /allowed devices/, `${args[0]}: disallowed device`);
-    assert.equal(ask({ ...freshRequester('ada'), authenticatedAt: now - 4 * MIN })().status, 'pending', `${args[0]}: the first machine owner`);
-    assert.equal(ask({ ...freshRequester('OLU'), authenticatedAt: now })().status, 'pending', `${args[0]}: the second, any case`);
-    // The break-glass: no person, no sign-in, no device, and no owners file at all.
-    const glass = requestMachineChange(log, { args, requester: { login: 'example-owner', breakGlass: true, authenticatedAt: null, deviceOk: false }, via: 'settings', ownersFile: join(tmpdir(), 'no-such-owners.json') });
+    const ask = (requester: Parameters<typeof machineChangeRefusal>[0]) => () => requestMachineChange(log, { args, requester, via: 'settings', ownersFile: owners });
+    assert.throws(ask(ownerRequester('ivy')), (e: Error) => e instanceof MachineRequestError && e.status === 403 && /machine owners: @ada, @olu\); @ivy isn't one/.test(e.message), `${args[0]}: instance-only owner`);
+    assert.throws(ask({ ...ownerRequester('ada'), deviceOk: false }), /allowed devices/, `${args[0]}: disallowed device`);
+    assert.equal(ask(ownerRequester('ada'))().status, 'pending', `${args[0]}: the first machine owner`);
+    assert.equal(ask(ownerRequester('OLU'))().status, 'pending', `${args[0]}: the second, any case`);
+    // The break-glass: no person, no device, and no owners file at all.
+    const glass = requestMachineChange(log, { args, requester: { login: 'example-owner', breakGlass: true, deviceOk: false }, via: 'settings', ownersFile: join(tmpdir(), 'no-such-owners.json') });
     assert.equal(glass.breakGlass, true);
   }
   assert.deepEqual(machineRequests(log.read(0)).map((r) => r.by), ['ada', 'OLU', 'example-owner', 'ada', 'OLU', 'example-owner'], 'only the allowed were recorded');
   // A root step goes through the same gate.
   const step = asks(log).create({ instance: 'site', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
-  assert.throws(() => requestRootStep(log, step.id, { by: 'ivy', role: 'owner', requester: freshRequester('ivy'), ownersFile: owners }), /@ivy isn't one/);
-  assert.equal(requestRootStep(log, step.id, { by: 'ada', role: 'owner', requester: freshRequester('ada'), ownersFile: owners }).request.by, 'ada');
+  assert.throws(() => requestRootStep(log, step.id, { by: 'ivy', role: 'owner', requester: ownerRequester('ivy'), ownersFile: owners }), /@ivy isn't one/);
+  assert.equal(requestRootStep(log, step.id, { by: 'ada', role: 'owner', requester: ownerRequester('ada'), ownersFile: owners }).request.by, 'ada');
 });
 
 test('the coordinator refuses a request written straight to the log by someone who is not a machine owner, and runs nothing', () => {

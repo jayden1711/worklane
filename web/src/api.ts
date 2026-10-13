@@ -442,6 +442,16 @@ async function authHeaders(): Promise<Record<string, string>> {
   return { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(csrf ? { 'x-csrf-token': csrf } : {}), 'content-type': 'application/json' };
 }
 
+/**
+ * The subprotocols the owner terminal's WebSocket offers: its own (src/dashboard-auth.ts TERMINAL_PROTOCOL) and the
+ * session's CSRF token as `csrf.<token>` (CSRF_PROTOCOL_PREFIX), since a browser can't set headers on the upgrade.
+ * The token never goes in the URL; the hub answers with the terminal's protocol alone.
+ */
+export async function terminalProtocols(): Promise<string[]> {
+  await me;
+  return ['terminal.v1', ...(csrf ? [`csrf.${csrf}`] : [])];
+}
+
 /** A stream's URL: the break-glass token on it (EventSource sends no headers); a session's cookie goes by itself. */
 export const streamUrl = (path: string) => (token ? `${path}?t=${encodeURIComponent(token)}` : path);
 

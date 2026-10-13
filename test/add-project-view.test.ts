@@ -13,7 +13,7 @@ import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { MACHINE_EVENTS, machineRequests } from '../src/machine-requests.js';
-import { asFreshPerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
+import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 
@@ -33,11 +33,11 @@ async function dashboard(owners: string[]) {
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: ownersFile, secretsHome: home, slotsDir: join(dir, 'slots') });
   const base = d.url.split('/?')[0]!;
   const headers = (h: Record<string, string>) => ({ authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...h });
-  const post = async (body: unknown, h: Record<string, string> = asFreshPerson('example-owner'), path = '/api/machine/add-project') => {
+  const post = async (body: unknown, h: Record<string, string> = asDevicePerson('example-owner'), path = '/api/machine/add-project') => {
     const r = await fetch(`${base}${path}`, { method: 'POST', headers: headers(h), body: JSON.stringify(body) });
     return { status: r.status, body: (await r.json()) as { error?: string; request?: { id: string; args: string[] } } };
   };
-  const get = async (h: Record<string, string> = asFreshPerson('example-owner')) => (await fetch(`${base}/api/add-project`, { headers: headers(h) })).json() as Promise<View>;
+  const get = async (h: Record<string, string> = asDevicePerson('example-owner')) => (await fetch(`${base}/api/add-project`, { headers: headers(h) })).json() as Promise<View>;
   const events = () => {
     const log = new EventLog(eventsDb);
     try {
@@ -60,15 +60,12 @@ test("the server refuses an Add project submit from an instance owner who isn't 
     assert.match(r.body.error!, /machine owners: @ada\); @example-owner isn't one/);
     const owner = await dashboard(['example-owner', 'example-collaborator']);
     try {
-      assert.equal((await owner.get()).allowed, true, 'a machine owner, fresh, on an allowed device');
+      assert.equal((await owner.get()).allowed, true, 'a machine owner on an allowed device');
       // A machine owner who only writes on this instance's repo isn't an owner here: refused too.
-      const writer = await owner.post({ name: 'shop', repo: 'acme/shop' }, asFreshPerson('example-collaborator'));
+      const writer = await owner.post({ name: 'shop', repo: 'acme/shop' }, asDevicePerson('example-collaborator'));
       assert.equal(writer.status, 403);
       assert.match(writer.body.error!, /only the instance's owners/);
-      const stale = await owner.post({ name: 'shop', repo: 'acme/shop' }, asFreshPerson('example-owner', Date.now() - 6 * 60_000));
-      assert.equal(stale.status, 403);
-      assert.match(stale.body.error!, /sign-in within the last 5 minutes/);
-      const elsewhere = await owner.post({ name: 'shop', repo: 'acme/shop' }, { ...asFreshPerson('example-owner'), 'x-dashboard-console-device': '0' });
+      const elsewhere = await owner.post({ name: 'shop', repo: 'acme/shop' }, { ...asDevicePerson('example-owner'), 'x-dashboard-console-device': '0' });
       assert.equal(elsewhere.status, 403);
       assert.match(elsewhere.body.error!, /allowed devices/);
       // The name and the repo are checked on the server too, whatever the page checked.
@@ -77,7 +74,7 @@ test("the server refuses an Add project submit from an instance owner who isn't 
       }
       assert.deepEqual(machineRequests(owner.events().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))), [], 'nothing recorded for the coordinator');
       // The view's own path takes no submit: one way in.
-      assert.equal((await owner.post({ name: 'shop', repo: 'acme/shop' }, asFreshPerson('example-owner'), '/api/add-project')).status, 404);
+      assert.equal((await owner.post({ name: 'shop', repo: 'acme/shop' }, asDevicePerson('example-owner'), '/api/add-project')).status, 404);
     } finally {
       await owner.d.close();
     }
@@ -137,7 +134,7 @@ test('a machine owner submit is accepted, and the view follows the coordinator: 
       assert.deepEqual(v.runs[0]!.asks.filter((a) => a.kind === 'approve_link').map((a) => a.url), ['https://hub.example.test/setup/app-manifest/start/amf-1', 'https://github.com/apps/shop-app/installations/new'], 'both GitHub links, in order');
       assert.ok(secret.canAnswer, 'the owner may paste it');
       // The owner pastes the token through the dashboard's paste box; the coordinator hands it to the script.
-      const pasted = await fetch(`${s.d.url.split('/?')[0]}/api/asks/${secret.id}/secret`, { method: 'POST', headers: { authorization: `Bearer ${s.d.token}`, 'content-type': 'application/json', ...asFreshPerson('example-owner') }, body: JSON.stringify({ value: `sk-ant-oat01-${'Z'.repeat(40)}` }) });
+      const pasted = await fetch(`${s.d.url.split('/?')[0]}/api/asks/${secret.id}/secret`, { method: 'POST', headers: { authorization: `Bearer ${s.d.token}`, 'content-type': 'application/json', ...asDevicePerson('example-owner') }, body: JSON.stringify({ value: `sk-ant-oat01-${'Z'.repeat(40)}` }) });
       assert.equal(pasted.status, 200, await pasted.text());
       await run;
     } finally {

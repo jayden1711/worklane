@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, streamUrl, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, streamUrl, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { navigate } from '../App';
 import { Header } from './Overview';
@@ -200,7 +200,7 @@ function AddProjectRunCard({ run, onChanged }: { run: AddProjectRun; onChanged?:
 /**
  * Add project: a name and an owner/repo, checked here and again on the server, recorded as a machine request that
  * the coordinator runs as root through the machine helper. Enabled only when the server says this person may (a
- * machine owner, freshly signed in, on an allowed device); otherwise it says why.
+ * machine owner, on an allowed device); otherwise it says why.
  */
 export function AddProjectView({ data, onChanged }: { data: AddProjectData; onChanged?: () => void }) {
   const [name, setName] = useState('');
@@ -322,12 +322,13 @@ function Terminal({ instance }: { instance: string }) {
   useEffect(() => {
     if (screen.current) screen.current.scrollTop = screen.current.scrollHeight;
   }, [out]);
-  const open = () => {
+  const open = async () => {
     setOut('');
     setNote(null);
     setState('opening');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const s = new WebSocket(`${proto}://${location.host}/api/terminal?instance=${encodeURIComponent(instance)}&cols=120&rows=32`);
+    // The session's CSRF token goes as a subprotocol: a browser can't set headers on a WebSocket upgrade.
+    const s = new WebSocket(`${proto}://${location.host}/api/terminal?instance=${encodeURIComponent(instance)}&cols=120&rows=32`, await terminalProtocols());
     ws.current = s;
     s.onopen = () => setState('open');
     s.onmessage = (m) => {
@@ -342,10 +343,10 @@ function Terminal({ instance }: { instance: string }) {
       <div className="flex items-center gap-2">
         <div className="flex-1">
           <div className="text-[14px] font-medium text-ink">Owner terminal</div>
-          <p className="text-[12px] text-ink-3">A login shell as this machine's admin user. Needs a GitHub sign-in in the last 5 minutes and one of your allowed Tailscale devices; sudo asks for your password; every command is recorded; it closes after 10 minutes idle.</p>
+          <p className="text-[12px] text-ink-3">A login shell as this machine's admin user. Needs one of your allowed Tailscale devices; sudo asks for your password; every command is recorded; it closes after 10 minutes idle.</p>
         </div>
         {state === 'closed' ? (
-          <Button size="sm" variant="outline" onClick={open} data-testid="terminal-open">
+          <Button size="sm" variant="outline" onClick={() => void open()} data-testid="terminal-open">
             Open
           </Button>
         ) : (
