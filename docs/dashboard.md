@@ -92,6 +92,10 @@ sudo bash scripts/setup/credentials.sh dashboard-signin
 
 It asks for the client secret (not shown), writes it to `~wl-dash/.config/dashboard-signin/client-secret` (0400, `wl-dash` only), and generates a session secret beside it the first time (`--rotate-session` makes a new one, which signs everyone out). The client id isn't secret: pass it to `dashboards.sh --client-id`.
 
+### Making the Apps through GitHub's manifest flow
+
+Instead of creating an App by hand, `sudo worklane app-manifest <name> <owner/repo>` makes the instance's agent App, and `sudo worklane app-manifest <name> <owner/repo> --signin --public-url https://<machine>.<tailnet>.ts.net` makes the sign-in App. With the hub running, it prints a link. A machine owner opens it, signed in to the dashboard, and approves the App on GitHub. The link works once and lasts 10 minutes. GitHub then sends the browser back to the hub's `/setup/app-manifest/callback`. The hub exchanges the code, and the command writes the result for its one user, at the paths above: the agent App's key for `wl-<name>` (0400), or the sign-in App's client secret for `wl-dash`. Neither is ever logged. For the agent App, it then prints the install link: install the App on exactly `<owner/repo>`. It finds the installation and runs the same check as `credentials.sh` (`app-permissions.mjs`), refusing an installation that reaches any other repo. Only after that check passes does it write `credentials.yaml`. The agent App asks for contents, issues, pull requests and checks write, plus actions and metadata read: never Workflows, Administration or Actions write. `credentials.sh` stays the manual fallback.
+
 ### Tailscale HTTPS (the owner's step)
 
 The hub is reachable only over your tailnet, never the public internet:
