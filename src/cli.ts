@@ -17,6 +17,7 @@ import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
 import { homeDir } from './os/index.js';
+import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
@@ -64,7 +65,8 @@ usage: ${BRAND.cli} <command> [options]
                                    when not given. local: this checkout (default: here), as you; server:
                                    <owner/repo>, as root, through scripts/setup/add-project.sh (--timeout:
                                    how long it waits for a GitHub click or the setup PR's merge). --yes
-                                   installs missing tools as shown
+                                   installs missing tools as shown. Run through npx (npx ${BRAND.pkg} init),
+                                   local mode first installs the engine under ~/.local, then goes on from there
   export [--instance name] [--out file]
                                    one file with this checkout's (or instance's) config and history (the
                                    event log, init's checklist, findings); never secrets, locks or logs
@@ -152,6 +154,15 @@ usage: ${BRAND.cli} <command> [options]
   hook <event>                     (called by Claude Code) pre-tool-use | stop | session-end
 
 options: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;
+
+/** One command's lines of USAGE (its synopsis and description). */
+function commandUsage(name: string, usage = USAGE): string {
+  const lines = usage.split('\n');
+  const at = lines.findIndex((l) => l.startsWith(`  ${name} `) || l === `  ${name}`);
+  if (at < 0) return usage;
+  const end = lines.findIndex((l, i) => i > at && !/^ {4,}\S/.test(l));
+  return [`usage: ${BRAND.cli} ${lines[at]!.trim()}`, ...lines.slice(at + 1, end < 0 ? undefined : end)].join('\n');
+}
 
 function flag(args: string[], name: string): boolean {
   const i = args.indexOf(name);
@@ -269,6 +280,10 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'init': {
+      if (flag(args, '--help') || flag(args, '-h')) {
+        console.log(commandUsage('init'));
+        return 0;
+      }
       const modeOpt = option(args, '--mode');
       if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
         console.error('init: --mode is local or server');
@@ -298,7 +313,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(`init: unexpected ${unknown.join(' ')}`);
         return 2;
       }
-      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: process.env[`${BRAND.envPrefix}_PREFIX`] ?? join(homeDir(), '.local'), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), ...(Object.keys(answers).length ? { answers } : {}), ...(timeoutOpt ? { timeout: Number(timeoutOpt) } : {}) });
+      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: toolPrefix(), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY), ...(Object.keys(answers).length ? { answers } : {}), ...(timeoutOpt ? { timeout: Number(timeoutOpt) } : {}) });
     }
 
     case 'export': {
@@ -596,7 +611,7 @@ async function main(argv: string[]): Promise<number> {
           workingDir: i.home,
           logFile: join(i.stateDir, 'coordinator.log'),
           // Only what's needed to find tools and the instance; its credentials come from the instance itself.
-          env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
+          env: { PATH: toolPath(), HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
         });
         console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
         return r.started ? 0 : 1;
@@ -607,7 +622,7 @@ async function main(argv: string[]): Promise<number> {
         program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--root', root],
         workingDir: root,
         logFile: join(projectStateDir(root), 'coordinator.log'),
-        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+        env: { PATH: toolPath(), HOME: process.env.HOME ?? '' },
       });
       console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
       return r.started ? 0 : 1;

@@ -61,9 +61,9 @@ export function ActivityPage({ state }: { state: State }) {
                   ) : (
                     <span className="w-12 shrink-0" />
                   )}
-                  <span className="min-w-0 flex-1 truncate">{a.summary}</span>
+                  <span className="min-w-0 flex-1 truncate max-md:whitespace-normal max-md:break-words">{a.summary}</span>
                   <span className="hidden w-28 truncate text-right text-xs text-muted-foreground md:inline">{a.actor}</span>
-                  <Badge className="hidden sm:inline-flex">{a.type}</Badge>
+                  <Badge className="max-sm:hidden">{a.type}</Badge>
                 </li>
               ))}
             </ul>

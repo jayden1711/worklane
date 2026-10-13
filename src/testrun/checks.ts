@@ -30,7 +30,12 @@ export class ChecksPermissionMissing extends Error {
 
 const fmt = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s` : `${Math.round(ms / 1000)} s`);
 
-/** The checks a result posts: each check name, its tiers, and its conclusion. */
+/**
+ * The checks a result posts: each check name, its tiers, and its conclusion. A tier whose PR predates the test-run
+ * config is a failure too, not action_required: GitHub shows a failure's title in the PR's checks list, where the
+ * predates title says what to do, while action_required wants a details page to act on (this check may have none),
+ * and the engine's own gate reads action_required as a hold, waiting on something, where this is a fail to fix.
+ */
 export function checksFor(result: TestRunResult, checkNames: Record<string, string>): { name: string; conclusion: 'success' | 'failure'; tiers: TestRunResult['tiers'] }[] {
   const by = new Map<string, TestRunResult['tiers']>();
   for (const t of result.tiers) {
@@ -40,20 +45,42 @@ export function checksFor(result: TestRunResult, checkNames: Record<string, stri
   return [...by.entries()].map(([name, tiers]) => ({ name, conclusion: tiers.length && tiers.every((t) => t.ok) ? 'success' : 'failure', tiers }));
 }
 
+export const PREDATES_TITLE = 'This PR predates the test-run config: update it with main';
+// GitHub takes a summary of at most 65535 characters.
+const SUMMARY_MAX = 60_000;
+
 /**
- * A check's title and summary. Each tier's pass or fail and how long it took; never a tier's log (a check is readable
- * by everyone who can read the repo). A run that failed in setup says which step, why, and the last lines of that
- * step's stderr, redacted (never its stdout: db-start prints the database's password there).
+ * A check's title and summary. Each tier's pass or fail and how long it took, and its last lines of output (as the
+ * run captured them, stdout and stderr together), redacted: a check is readable by everyone who can read the repo,
+ * and the full log stays in the instance's state. A tier the PR's head is too old to run as configured gets the
+ * predates title, what the head lacks, the config's commit, and the fix. A run that failed in setup says which step,
+ * why, and the last lines of that step's stderr, redacted (never its stdout: db-start prints the database's
+ * password there).
  */
-export function checkOutput(result: TestRunResult, tiers: TestRunResult['tiers'], conclusion: 'success' | 'failure'): { title: string; summary: string } {
+export function checkOutput(result: TestRunResult, tiers: TestRunResult['tiers'], conclusion: 'success' | 'failure', detailsUrl?: string): { title: string; summary: string } {
   const head = `${result.kind} test run ${result.id}`;
-  const foot = "Logs are on the instance's dashboard.";
+  const foot = detailsUrl ? `Full logs: [the instance's dashboard](${detailsUrl})` : "Full logs are on the instance's dashboard.";
+  const clean = (x: string) => redactString(x).replace(/```/g, "'''");
   const s = result.setup;
   if (!s) {
-    const lines = tiers.map((t) => `- ${t.ok ? 'passed' : 'failed'}: ${t.tier} (${fmt(t.durationMs)})`);
-    return { title: conclusion === 'success' ? 'Passed' : 'Failed', summary: `${head}\n\n${lines.join('\n')}\n\n${foot}` };
+    const lines = tiers.map((t) => `- ${t.ok ? 'passed' : t.predates?.notRun ? 'not run' : 'failed'}: ${t.tier} (${fmt(t.durationMs)})`);
+    const old = tiers.filter((t) => t.predates);
+    let why = '';
+    if (old.length) {
+      const commits = [...new Set(old.map((t) => t.predates!.configCommit))];
+      why =
+        `This PR's head is older than the test-run config: it doesn't contain ${commits.map((c) => `\`${c}\``).join(', ')}, the commit that last changed \`test_run\` in tests.yaml on the default branch. So:\n\n` +
+        old.map((t) => `- ${t.tier}: ${t.predates!.what}${t.predates!.notRun ? ' (not run)' : ''}`).join('\n') +
+        '\n\nTo update it: merge main into the branch (for a Dependabot PR, comment `@dependabot rebase`).\n\n';
+    }
+    const outputs = tiers
+      .filter((t) => !t.predates?.notRun)
+      .map((t) => `**${t.tier}**, its last lines of output (redacted):\n\n\`\`\`\n${t.summary.trim() ? clean(t.summary.trim()).slice(-4000) : '(no output)'}\n\`\`\``)
+      .join('\n\n');
+    const title = old.length ? PREDATES_TITLE : conclusion === 'success' ? 'Passed' : 'Failed';
+    const body = `${head}\n\n${why}${lines.join('\n')}${outputs ? `\n\n${outputs}` : ''}`;
+    return { title, summary: `${body.slice(0, SUMMARY_MAX)}\n\n${foot}` };
   }
-  const clean = (x: string) => redactString(x).replace(/```/g, "'''");
   const err = s.stderr.trim() ? `\n\nThe last lines of its stderr (redacted):\n\n\`\`\`\n${clean(s.stderr.trim()).slice(-4000)}\n\`\`\`` : '';
   const lines = tiers.map((t) => `- not run: ${t.tier}`);
   const title = s.step === 'helper' ? 'Not run: the test sandbox helper is outdated' : `Failed in setup: ${s.step}`.slice(0, 200);
@@ -78,7 +105,7 @@ export async function postChecks(d: ChecksDeps, sha: string, result: TestRunResu
       completed_at: new Date().toISOString(),
       external_id: result.id,
       ...(d.detailsUrl ? { details_url: d.detailsUrl } : {}),
-      output: checkOutput(result, c.tiers, c.conclusion),
+      output: checkOutput(result, c.tiers, c.conclusion, d.detailsUrl),
     };
     const res = await f(`${api}/repos/${d.repo}/check-runs`, {
       method: 'POST',

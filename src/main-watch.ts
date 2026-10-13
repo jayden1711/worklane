@@ -7,7 +7,9 @@
 //       it), with required_checks green on the PR's head at merge time.
 // Anything else is unaccounted: a direct push, a PR merged with failing, missing or pending checks, an unknown actor
 // or a bot, a rewritten history. The coordinator then stops auto-merge (the stop file), alerts, and opens a revert PR
-// for a human (coordinator/merge-flow.ts). The last checked commit is kept in a state file, so a restart neither
+// for a human (coordinator/merge-flow.ts). A commit that landed without a PR at all (GitHub's commit-to-PR link has
+// no merged PR for it, or a force-push rewrote the branch) is also posted to the ops channel at once, mentioning the
+// Discord owners (src/direct-push-alert.ts; config.yaml main_watch.direct_push_alert, on by default). The last checked commit is kept in a state file, so a restart neither
 // checks a commit twice nor skips one; so is the time of the last call, so the limit holds across restarts too.
 //
 // A bootstrap merge: while a project's required check can't run yet, an admin's hand merge is unaccounted. An admin
@@ -68,12 +70,19 @@ export interface MainWatchApi {
   checkRuns(sha: string): Promise<CheckRunAt[]>;
   statuses(sha: string): Promise<StatusAt[]>;
   role(login: string): Promise<Role | null>;
+  /**
+   * Who pushed `sha` to `branch`: the GitHub login of the push that made it the branch's tip (the repo's activity),
+   * else the commit's own GitHub author (`from: 'commit'`); null when neither is known. A login only, never an email.
+   */
+  pusher?(branch: string, sha: string): Promise<{ login: string; from: 'activity' | 'commit' } | null>;
 }
 
 /** What is known about the commit being checked; each field is one API call's answer (harness: the log's). */
 export interface Facts {
   harness: { number: number; head: string; at: string } | null;
   pulls?: MergedPull[];
+  /** A merge commit's own subject names this PR ("Merge #N: …", "Merge pull request #N …"): asked directly when the pulls link is empty. */
+  subjectPr?: number | null;
   pr?: MergedPull;
   role?: Role | null;
   runs?: CheckRunAt[];
@@ -84,7 +93,7 @@ export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call
 export type Verdict =
   | { done: true; accounted: true; how: 'harness' | 'person'; number: number }
   | { done: true; accounted: true; how: 'accepted'; number: number | null; acceptance: Acceptance }
-  | { done: true; accounted: false; reason: string; number: number | null }
+  | { done: true; accounted: false; reason: string; number: number | null; direct?: true }
   | { done: false; need: Need };
 
 /**
@@ -158,10 +167,18 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   } else {
     if (!f.pulls) return { done: false, need: { call: 'pulls' } };
     const merged = f.pulls.filter((p) => p.mergedAt && p.base === o.branch);
-    const cand = merged.find((p) => p.mergeCommit === sha) ?? merged.find((p) => p.mergeCommit && o.inMerge?.(p.mergeCommit));
+    let cand = merged.find((p) => p.mergeCommit === sha) ?? merged.find((p) => p.mergeCommit && o.inMerge?.(p.mergeCommit));
+    // GitHub links a merge commit to its PR a few seconds after the merge, so the pulls call can be empty for a normal
+    // merge (main 09f60340, judged 6 s after #307 landed). A merge commit whose subject names a PR: ask that PR, and
+    // take it only when its own merge commit is this one (a made-up subject still counts as a direct push).
+    if (!cand && f.subjectPr) {
+      if (!f.pr || f.pr.number !== f.subjectPr) return { done: false, need: { call: 'pull', number: f.subjectPr } };
+      if (f.pr.mergedAt && f.pr.base === o.branch && f.pr.mergeCommit === sha) cand = f.pr;
+    }
     if (!cand) {
       const other = f.pulls.find((p) => !p.mergedAt);
-      return { done: true, accounted: false, number: null, reason: `${short} was pushed to ${o.branch} directly: no merged PR has it${other ? ` (#${other.number} has it, unmerged)` : ''}` };
+      // GitHub's own commit-to-PR link (the pulls call) says no merged PR has it: a direct push.
+      return { done: true, accounted: false, number: null, direct: true, reason: `${short} was pushed to ${o.branch} directly: no merged PR has it${other ? ` (#${other.number} has it, unmerged)` : ''}` };
     }
     if (!f.pr || f.pr.number !== cand.number) return { done: false, need: { call: 'pull', number: cand.number } };
     number = f.pr.number;
@@ -245,6 +262,8 @@ export interface WatchGit {
   firstParents(from: string, to: string): string[];
   /** The content of `path` (from the repo root) as committed at `rev`, or null when git can't read it. */
   show(rev: string, path: string): string | null;
+  /** For a merge commit (two parents), the PR number its subject names, or null. */
+  mergeSubjectPr?(sha: string): number | null;
 }
 
 /** The config file whose required_checks judge a commit, from the repo root. */
@@ -266,7 +285,28 @@ export function requiredAt(git: WatchGit, sha: string): { required: string[] } |
   return { required: r.data };
 }
 
+/**
+ * Whether a commit that landed without a PR is posted to the ops channel (config.yaml main_watch.direct_push_alert),
+ * as committed at `rev`: the config in force before the push, so a push can't turn off its own alert. On unless it
+ * says false; on too when the config can't be read (the alert fails open).
+ */
+export function directPushAlertAt(git: WatchGit, rev: string): boolean {
+  const text = git.show(rev, CONFIG_PATH);
+  if (text === null) return true;
+  const doc = parseDocument(text, { uniqueKeys: true });
+  if (doc.errors.length) return true;
+  const raw: unknown = doc.toJS();
+  const mw = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).main_watch : undefined;
+  return !(mw && typeof mw === 'object' && (mw as Record<string, unknown>).direct_push_alert === false);
+}
+
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
+/** The PR number a merge subject names: "Merge #N: …" (this repo's merges) or GitHub's "Merge pull request #N from …". */
+export function subjectPrNumber(subject: string): number | null {
+  const m = /^Merge (?:pull request )?#(\d{1,7})\b/.exec(subject);
+  return m ? Number(m[1]) : null;
+}
+
 export function repoGit(repo: string, remote: string, branch: string): WatchGit {
   const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
   return {
@@ -280,6 +320,12 @@ export function repoGit(repo: string, remote: string, branch: string): WatchGit 
     show: (rev, path) => {
       const r = git('show', `${rev}:${path}`);
       return r.status === 0 ? r.stdout : null;
+    },
+    mergeSubjectPr: (sha) => {
+      const r = git('log', '-1', '--format=%P%n%s', sha);
+      if (r.status !== 0) return null;
+      const [parents = '', subject = ''] = r.stdout.split('\n');
+      return parents.trim().split(' ').length === 2 ? subjectPrNumber(subject) : null;
     },
   };
 }
@@ -299,8 +345,12 @@ export interface MainWatchDeps {
   checked(sha: string, how: 'harness' | 'person', number: number): void;
   /** An admin accepted it as a bootstrap merge (acceptMerge): accounted, recorded as main_watch.accepted. */
   accepted(sha: string, number: number | null, a: Acceptance): void;
-  /** Stop auto-merge, alert, open the revert PR (`revert`: whether one can be made: not for a rewritten history). */
-  unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean }): Promise<void>;
+  /**
+   * Stop auto-merge, alert, open the revert PR (`revert`: whether one can be made: not for a rewritten history).
+   * `push`: it landed without a PR, pushed directly (GitHub confirms no merged PR has it) or by a rewrite (a
+   * force-push), with `alert` whether that is posted to the ops channel (directPushAlertAt); null otherwise.
+   */
+  unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null }): Promise<void>;
 }
 
 export class MainWatch {
@@ -375,14 +425,14 @@ export class MainWatch {
       }
       if (!this.d.git.isAncestor(s.last, tip)) {
         const was = s.last;
-        await this.d.unaccounted({ sha: tip, reason: `${this.d.branch} was rewritten: ${was.slice(0, 8)}, checked before, is no longer in its history (a force-push)`, number: null, revert: false });
+        await this.d.unaccounted({ sha: tip, reason: `${this.d.branch} was rewritten: ${was.slice(0, 8)}, checked before, is no longer in its history (a force-push)`, number: null, revert: false, push: { kind: 'rewrite', alert: directPushAlertAt(this.d.git, was) } });
         s.last = tip;
         s.lastAt = new Date(this.now).toISOString();
         return writeWatchState(this.d.stateFile, s);
       }
       const next = this.d.git.firstParents(s.last, tip)[0];
       if (!next) return;
-      s.pending = { sha: next, facts: { harness: this.d.harnessMerge(next) } };
+      s.pending = { sha: next, facts: { harness: this.d.harnessMerge(next), subjectPr: this.d.git.mergeSubjectPr?.(next) ?? null } };
       writeWatchState(this.d.stateFile, s);
     }
     const p = s.pending;
@@ -409,7 +459,7 @@ export class MainWatch {
     }
     if (v.accounted && v.how === 'accepted') this.d.accepted(p.sha, v.number, v.acceptance);
     else if (v.accounted) this.d.checked(p.sha, v.how, v.number);
-    else await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true });
+    else await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true, push: v.direct ? { kind: 'direct', alert: directPushAlertAt(this.d.git, `${p.sha}^1`) } : null });
     this.judgedBy = null;
     s.last = p.sha;
     s.lastAt = new Date(this.now).toISOString();
