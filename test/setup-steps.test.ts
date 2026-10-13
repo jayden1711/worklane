@@ -338,7 +338,9 @@ test("off the main thread (the dashboard's way): the real probe in a worker, the
   const { instanceFacts: _facts, ...plain } = f.ctx('local');
   const cache = new Map();
   const v = await checkSetupOffThread({ ...plain, machine: { ...f.machine, enginePackage: join(repoRoot, 'package.json') } }, { cache, localMs: 10_000, netMs: 120_000 });
-  assert.deepEqual(v.groups.flatMap((g) => g.steps).map((s) => s.id), checkSetup(f.ctx('local'), probeFor(world())).groups.flatMap((g) => g.steps).map((s) => s.id).filter((id) => id !== 'linger' || v.groups.some((g) => g.steps.some((s) => s.id === 'linger'))));
+  // linger shows only where loginctl answers (the real one on Linux; the stand-in never does).
+  const ids = (x: SetupView) => x.groups.flatMap((g) => g.steps).map((s) => s.id).filter((id) => id !== 'linger');
+  assert.deepEqual(ids(v), ids(checkSetup(f.ctx('local'), probeFor(world()))));
   assert.equal(stepIn(v, 'engine')!.done, true, 'it read the real engine');
   assert.equal(stepIn(v, 'origin')!.done, true, 'and the real checkout');
   assert.ok(cache.has('engine') && cache.has('gh-login'));
