@@ -23,7 +23,8 @@ import { projectStateDir } from './guardrails/context.js';
 import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
 import { handOffFromNpx, type HandOff } from './npx-engine.js';
-import { detectOs, isRoot, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { findTool, withToolPath } from './tool-path.js';
+import { detectOs, isRoot, stateDir, writeOwnerOnly } from './os/index.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 
 export type Mode = 'local' | 'server';
@@ -99,7 +100,7 @@ export interface Unavailable {
 }
 
 /** What this mode can't do, each with why. Server mode has everything; local mode lacks what needs root or other users. */
-export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) => which(c) !== null): Unavailable[] {
+export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) => findTool(c) !== null): Unavailable[] {
   if (mode === 'server') return [];
   const out: Unavailable[] = [
     { feature: 'separate OS users', why: `local mode runs the agents as you, with your files and your logins; agents as a user of their own that holds no credentials and can't read yours need a Linux server set up in server mode (sudo bash scripts/bootstrap.sh --hardened)` },
@@ -427,16 +428,16 @@ export const engineRoot = () => fileURLToPath(new URL('../../', import.meta.url)
 export function systemIo(o: { interactive: boolean }): InitIo {
   let rl: ReturnType<typeof createInterface> | null = null;
   return {
-    which,
+    which: (cmd) => findTool(cmd),
     run: (cmd, args, opt = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, ...(opt.cwd ? { cwd: opt.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: withToolPath(), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     interactive: (cmd, args) =>
       new Promise((done) => {
         rl?.close();
         rl = null;
-        const p = spawn(cmd, args, { stdio: 'inherit' });
+        const p = spawn(cmd, args, { stdio: 'inherit', env: withToolPath() });
         p.on('exit', (code) => done(code ?? 1));
         p.on('error', () => done(1));
       }),

@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { which } from '../os/index.js';
+import { findTool } from '../tool-path.js';
 
 export interface Finding {
   rule: string;
@@ -20,7 +20,7 @@ export type ScanResult =
 const LEAKS_EXIT = 3;
 
 /** Scan a file or directory. Findings never include the secret itself. */
-export function scanPath(path: string, binary = which('gitleaks')): ScanResult {
+export function scanPath(path: string, binary = findTool('gitleaks')): ScanResult {
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   const report = join(dir, 'report.json');
@@ -45,7 +45,7 @@ export function scanPath(path: string, binary = which('gitleaks')): ScanResult {
 }
 
 /** Scan what a `git commit` is about to record: staged changes, plus unstaged ones for `commit -a`. */
-export function scanCommit(cwd: string, includeUnstaged: boolean, binary = which('gitleaks')): ScanResult {
+export function scanCommit(cwd: string, includeUnstaged: boolean, binary = findTool('gitleaks')): ScanResult {
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
   const findings: Finding[] = [];
   for (const args of includeUnstaged ? [['--staged'], []] : [['--staged']]) {
@@ -63,7 +63,7 @@ export function scanCommit(cwd: string, includeUnstaged: boolean, binary = which
  * the commits rather than the worktree keeps dependencies (node_modules and
  * their bundled test keys) out of it.
  */
-export function scanRange(cwd: string, range: string, binary = which('gitleaks')): Promise<ScanResult> {
+export function scanRange(cwd: string, range: string, binary = findTool('gitleaks')): Promise<ScanResult> {
   if (!binary) return Promise.resolve({ status: 'unavailable', error: 'gitleaks not found on PATH' });
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   const report = join(dir, 'report.json');

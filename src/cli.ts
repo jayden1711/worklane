@@ -17,6 +17,7 @@ import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
 import { homeDir } from './os/index.js';
+import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
@@ -289,7 +290,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(`init: unexpected ${unknown.join(' ')}`);
         return 2;
       }
-      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: process.env[`${BRAND.envPrefix}_PREFIX`] ?? join(homeDir(), '.local'), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) });
+      return initCommand({ target: target ?? rootOpt, mode: modeOpt as Mode | undefined, instance: instanceOpt, yes, reset, cwd: root, prefix: toolPrefix(), interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) });
     }
 
     case 'export': {
@@ -587,7 +588,7 @@ async function main(argv: string[]): Promise<number> {
           workingDir: i.home,
           logFile: join(i.stateDir, 'coordinator.log'),
           // Only what's needed to find tools and the instance; its credentials come from the instance itself.
-          env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
+          env: { PATH: toolPath(), HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
         });
         console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
         return r.started ? 0 : 1;
@@ -598,7 +599,7 @@ async function main(argv: string[]): Promise<number> {
         program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--root', root],
         workingDir: root,
         logFile: join(projectStateDir(root), 'coordinator.log'),
-        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+        env: { PATH: toolPath(), HOME: process.env.HOME ?? '' },
       });
       console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
       return r.started ? 0 : 1;

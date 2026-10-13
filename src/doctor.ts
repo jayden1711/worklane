@@ -14,7 +14,8 @@ import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, which, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { findTool, toolBin } from './tool-path.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { liveChecklist, localInitFile, localRepo, newState, readInitState, serverInitFile, systemIo, unavailableIn, type InitIo, type Mode } from './init.js';
 
@@ -159,8 +160,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   // Secret scanning
-  const gl = which('gitleaks');
-  if (!gl) add('gitleaks', 'fail', 'not on PATH: commit and transcript scans cannot run');
+  const gl = findTool('gitleaks');
+  if (!gl) add('gitleaks', 'fail', `not on PATH or in ${toolBin()}: commit and transcript scans cannot run`);
   else add('gitleaks', 'ok', execFileSync(gl, ['version'], { encoding: 'utf8' }).trim());
   try {
     const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
@@ -172,8 +173,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   // Agent runtime
-  const claude = which('claude');
-  if (!claude) add('claude', cfg?.project.agent_runtime.kind === 'cli' ? 'fail' : 'warn', 'Claude Code CLI not on PATH');
+  const claude = findTool('claude');
+  if (!claude) add('claude', cfg?.project.agent_runtime.kind === 'cli' ? 'fail' : 'warn', `Claude Code CLI not on PATH or in ${toolBin()}`);
   else {
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');

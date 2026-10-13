@@ -347,7 +347,6 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
   }
 }
 
-/** Full path of an executable on PATH, or null. */
 /** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
 export function userExists(user: string): boolean {
   if (process.platform === 'win32') return false;
@@ -359,9 +358,10 @@ export function userExists(user: string): boolean {
   }
 }
 
-export function which(cmd: string): string | null {
+/** Full path of an executable on `path` (PATH by default), or null. */
+export function which(cmd: string, path: string = process.env.PATH ?? ''): string | null {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
-  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+  for (const dir of path.split(delimiter)) {
     for (const ext of exts) {
       const p = join(dir, cmd + ext.toLowerCase());
       if (dir && existsSync(p)) return p;
