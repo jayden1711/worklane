@@ -32,6 +32,7 @@ import { testRunsView } from './testrun/status.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
+import { usageView } from './usage-limit.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount, flockHolders } from './os/index.js';
@@ -1027,6 +1028,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadDigest(who.role)) return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
           const digest = waitingOnYou(readEvents(opts.eventsDb));
           return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
+        }
+        // Usage: the Claude usage-limit pause in force (its reset time, for the banner's countdown) and today's runs and
+        // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
+        if (url.pathname === '/api/usage' && req.method === 'GET') {
+          const v = usageView(readEvents(opts.eventsDb));
+          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null });
         }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;

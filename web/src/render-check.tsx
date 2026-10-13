@@ -34,6 +34,8 @@ import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
 import { ClaudeAccountView } from './components/ClaudeAccount';
+import { UsageBanner, UsageLines } from './components/Usage';
+import type { UsageInfo } from './api';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -105,3 +107,7 @@ export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
+export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
+export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
+export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
+export { countdown } from './components/Usage';

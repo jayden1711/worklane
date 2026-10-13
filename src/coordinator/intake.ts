@@ -137,7 +137,8 @@ export abstract class Intake extends QuickReplies {
       // Only a message in an ideas channel (or a source with no threads) is ever a report: never a chat-channel one.
       const batch = inbound.filter((r) => !r.thread || r.thread.kind === 'channel');
       for (const r of batch) {
-        if (this.halt.signal.aborted || this.stopped) break;
+        // Paused on the usage limit: the report isn't taken (so not acknowledged); it comes again after the reset.
+        if (this.halt.signal.aborted || this.stopped || this.usagePause()) break;
         try {
           await this.intakeReport(cfg, r);
         } catch (e) {
