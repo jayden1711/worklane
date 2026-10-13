@@ -15,6 +15,8 @@ import type { EventPayload } from '../src/events/types.js';
 import type { RunRequest } from '../src/runner.js';
 import { agents, approve, commitAll, coordinator, fixture, git, lastOf, skip } from './repro-state-graph/harness.js';
 
+// A clean environment for the project's own tests: inside node --test, NODE_TEST_CONTEXT would make them report to this run instead.
+const ciEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'NODE_TEST_CONTEXT'));
 const RENAME = 'Rename totalCents to totalInCents';
 const REPORT = 'Add an order report';
 
@@ -71,7 +73,7 @@ async function redAfterTwoMerges() {
     let ok = true;
     let out = '';
     try {
-      out = execFileSync('node', ['--test', '--test-reporter=spec'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      out = execFileSync('node', ['--test', '--test-reporter=spec'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: ciEnv });
     } catch (e) {
       ok = false;
       out = `${(e as { stdout?: string }).stdout ?? ''}${(e as { stderr?: string }).stderr ?? ''}`;
