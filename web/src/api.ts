@@ -554,6 +554,50 @@ export const answerAsk = (id: string, answer: string) => api<{ ok: boolean }>(`/
 export const pasteSecret = (id: string, value: string) => api<{ ok: boolean }>(`/api/asks/${id}/secret`, { method: 'POST', body: JSON.stringify({ value }) });
 export const runRootStep = (id: string) => api<{ ok: boolean }>(`/api/asks/${id}/run`, { method: 'POST', body: '{}' });
 
+/** The setup console's Add project (src/console/add-project.ts), as GET /api/add-project serves it. */
+export interface AddProjectStep {
+  step: string;
+  state: 'pending' | 'started' | 'done' | 'failed' | 'ask';
+  detail: string;
+  at: string | null;
+}
+export interface AddProjectRun {
+  id: string;
+  name: string;
+  repo: string;
+  by: string;
+  at: string;
+  /** The machine request's status: pending (for the coordinator), running, done, failed, refused, interrupted. */
+  status: string;
+  detail: string;
+  /** add-project.sh's steps, in its order. */
+  steps: AddProjectStep[];
+  failedStep: string | null;
+  /** The asks it raised: GitHub's approve links and the Claude token. */
+  asks: Ask[];
+}
+export interface AddProjectData {
+  /** Whether this person may add a project now (the server checks again on submit). */
+  allowed: boolean;
+  /** Why not, when not. */
+  why: string | null;
+  login: string;
+  machineOwners: string[];
+  /** Newest first. */
+  runs: AddProjectRun[];
+}
+export const getAddProject = () => api<AddProjectData>('/api/add-project');
+export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
+/** The name and repo add-project takes: the same rules as the server's and the machine helper's. */
+export const PROJECT_NAME = /^[a-z][a-z0-9-]{0,20}$/;
+export const PROJECT_REPO = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+/** Why this name and repo won't be accepted; null when they will. */
+export function addProjectInvalid(name: string, repo: string): string | null {
+  if (!PROJECT_NAME.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters.';
+  if (!PROJECT_REPO.test(repo) || repo.includes('..')) return 'The repo is owner/name, as on GitHub.';
+  return null;
+}
+
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
 

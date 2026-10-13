@@ -16,7 +16,9 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asPerson, exampleProject, exampleRoles, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asPerson, exampleProject, exampleRoles, freshRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { addProjectView } from '../src/console/add-project.js';
+import { asks } from '../src/console/asks.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -33,6 +35,7 @@ interface Render {
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderSetup(data: unknown): string;
+  renderAddProject(data: unknown): string;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
@@ -1064,6 +1067,82 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
   assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
   assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
+});
+
+test("Add project: enabled for a machine owner, freshly signed in on an allowed device; otherwise disabled, saying why", () => {
+  const ownersFile = machineOwnersFile('ada', 'olu');
+  const view = (requester: ReturnType<typeof freshRequester>, role: 'owner' | 'writer' = 'owner') => r.renderAddProject(addProjectView([], { role, requester }, { ownersFile }));
+  const controls = (html: string) => [...html.matchAll(/<(?:input|button)[^>]*data-testid="add-project-(?:name|repo|submit)"[^>]*>/g)].map((m) => m[0]);
+  const enabled = view(freshRequester('ada'));
+  assert.match(enabled, /data-testid="add-project" data-enabled="yes"/);
+  assert.equal(controls(enabled).length, 3);
+  assert.ok(controls(enabled).every((c) => !/disabled=""/.test(c)), 'the name, the repo and the button are live');
+  assert.doesNotMatch(enabled, /data-testid="add-project-disabled"/);
+  const cases: [string, ReturnType<typeof freshRequester>, RegExp][] = [
+    ['an instance-only owner', freshRequester('ivy'), /machine owners: @ada, @olu\); @ivy isn(&#x27;|')t one/],
+    ['a stale sign-in', { ...freshRequester('ada'), authenticatedAt: Date.now() - 6 * 60_000 }, /a GitHub sign-in within the last 5 minutes: sign in again/],
+    ['a disallowed device', { ...freshRequester('ada'), deviceOk: false }, /one of the console(&#x27;|')s allowed devices/],
+  ];
+  for (const [who, requester, why] of cases) {
+    const html = view(requester);
+    assert.match(html, /data-testid="add-project" data-enabled="no"/, who);
+    assert.ok(controls(html).length === 3 && controls(html).every((c) => /disabled=""/.test(c)), `${who}: every control disabled`);
+    assert.match(html.match(/data-testid="add-project-disabled"[\s\S]*?<\/p>/)?.[0] ?? '', why, `${who}: says why`);
+    assert.match(html, /data-testid="add-project-owners"[^>]*>Machine owners: @ada, @olu\./, `${who}: names the machine owners`);
+  }
+  assert.match(view(freshRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
+});
+
+test('Add project: the steps show in the script order as they arrive, and its asks (GitHub links, the Claude token) appear in the same view', () => {
+  const log = new EventLog(':memory:');
+  const ownersFile = machineOwnersFile('ada');
+  const a = asks(log);
+  // An ask from before the run isn't one of its asks.
+  a.create({ kind: 'question', instance: 'demo', title: 'Unrelated', detail: 'x', options: ['yes'] });
+  log.append('machine.requested', { id: 'mr-0000000000aa', args: ['add-project', 'shop', 'acme/shop'], by: 'ada', via: 'settings', ask: null }, 'ada', 'human');
+  log.append('machine.started', { id: 'mr-0000000000aa', instance: 'demo' }, 'demo', 'coordinator');
+  const step = (s: string, state: string, detail = '') => log.append('add_project.step', { request_id: 'mr-0000000000aa', name: 'shop', repo: 'acme/shop', step: s, state, detail } as never, 'demo', 'coordinator');
+  const render = () => {
+    const html = r.renderAddProject(addProjectView(log.read(0), { role: 'owner', requester: freshRequester('ada') }, { ownersFile }));
+    const run = html.match(/data-testid="add-project-run"[\s\S]*$/)?.[0] ?? '';
+    return { html, run, steps: [...run.matchAll(/data-testid="add-project-step" data-step="([^"]+)" data-state="([^"]+)"/g)].map((m) => `${m[1]}:${m[2]}`) };
+  };
+  const order = ['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'];
+  assert.deepEqual(render().steps, order.map((s) => `${s}:pending`), 'all nine, in order, before any line');
+  assert.match(render().html, /data-enabled="no"[\s\S]*adding shop is still running; one project at a time/, 'one run at a time');
+
+  step('instance', 'started');
+  assert.deepEqual(render().steps.slice(0, 2), ['instance:started', 'app:pending']);
+  step('instance', 'done', 'users wl-shop and wl-shop-agent');
+  step('app', 'ask', 'approve the App on GitHub');
+  a.create({ kind: 'approve_link', instance: 'shop', title: 'Create shop-app on GitHub', detail: 'x', url: 'https://hub.example.test/setup/app-manifest/start/amf-1' }, 'setup');
+  let v = render();
+  assert.deepEqual(v.steps.slice(0, 3), ['instance:done', 'app:ask', 'claude-token:pending']);
+  assert.match(v.run, /data-testid="add-project-asks"[\s\S]*data-testid="ask-link"[^>]*>https:\/\/hub\.example\.test\/setup\/app-manifest\/start\/amf-1/, 'the first GitHub link, in the run');
+  assert.doesNotMatch(v.run, /Unrelated/, "an earlier ask isn't the run's");
+
+  a.create({ kind: 'approve_link', instance: 'shop', title: 'Install shop-app on acme/shop only', detail: 'x', url: 'https://github.com/apps/shop-app/installations/new' }, 'setup');
+  step('app', 'done');
+  step('claude-token', 'ask', 'paste the token from claude setup-token');
+  a.create({ kind: 'paste_secret', instance: 'shop', title: "The agent's Claude token", detail: 'x', credential: 'claude-token', where: 'the agent user only' }, 'setup');
+  v = render();
+  assert.equal((v.run.match(/data-testid="ask-card"/g) ?? []).length, 3, 'both GitHub links and the token ask');
+  const secret = v.run.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
+  assert.match(secret, /type="password"/, "the token goes through the dashboard's paste box");
+  assert.doesNotMatch(secret, /value=/);
+
+  for (const s of order.slice(2)) step(s, 'done');
+  log.append('machine.finished', { id: 'mr-0000000000aa', outcome: 'done', detail: 'shop added' }, 'demo', 'coordinator');
+  v = render();
+  assert.deepEqual(v.steps, order.map((s) => `${s}:done`));
+  assert.match(v.html, /data-testid="add-project-run"[^>]*data-status="done"/);
+  assert.match(v.html, /data-enabled="yes"/, 'the next project may start');
+
+  // A failed step names the step to retry.
+  log.append('machine.requested', { id: 'mr-0000000000bb', args: ['add-project', 'blog', 'acme/blog'], by: 'ada', via: 'settings', ask: null }, 'ada', 'human');
+  log.append('add_project.step', { request_id: 'mr-0000000000bb', name: 'blog', repo: 'acme/blog', step: 'checkout', state: 'failed', detail: 'git clone failed' }, 'demo', 'coordinator');
+  log.append('machine.finished', { id: 'mr-0000000000bb', outcome: 'failed', detail: 'FAILED at checkout' }, 'demo', 'coordinator');
+  assert.match(render().html, /data-testid="add-project-failed"[^>]*>Stopped at &quot;Checkout of the repo&quot;/);
 });
 
 test("two instances on one machine: with one selected, no page shows any of the other's items; All instances shows both, labelled; the default is the selected one", async () => {

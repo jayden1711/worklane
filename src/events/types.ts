@@ -298,6 +298,19 @@ export const EventSchemas = {
   'machine.started': z.strictObject({ id: z.string(), instance: z.string() }),
   /** How it ended: done (detail: the helper's output), failed, refused (off the allowlist), interrupted (not re-run). */
   'machine.finished': z.strictObject({ id: z.string(), outcome: z.enum(['done', 'failed', 'refused', 'interrupted']), detail: z.string() }),
+  /**
+   * One step of add-project.sh, as the coordinator relays its line (src/console/add-project.ts): the machine
+   * request it belongs to, the step (instance, app, claude-token, checkout, policy, service, test-user,
+   * machine-helper, dashboards) and how it stands. Never a key or a token: the script prints none.
+   */
+  'add_project.step': z.strictObject({
+    request_id: z.string(),
+    name: z.string(),
+    repo: z.string(),
+    step: z.enum(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards']),
+    state: z.enum(['started', 'done', 'failed', 'ask']),
+    detail: z.string(),
+  }),
   // landing and deploys
   'land.queued': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']) }),
   'land.result': z.strictObject({ issue, outcome: z.enum(['landed', 'pr_opened', 'conflict', 'red', 'rejected', 'error', 'deferred']), landed: sha.nullable(), detail: z.string() }),

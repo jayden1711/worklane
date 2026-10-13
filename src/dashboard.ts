@@ -52,6 +52,7 @@ import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee } from './viewer-events.js';
 import { assertLoopbackHost, AUTH_AT_HEADER, breakGlassAllowed, DEVICE_HEADER, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
+import { ADD_PROJECT_EVENTS, AddProjectError, addProjectView, requestAddProject } from './console/add-project.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -1027,6 +1028,36 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch (e) {
             if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
             throw e;
+          }
+        }
+        // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs; only an owner
+        // here who is a machine owner, freshly signed in on an allowed device (or the break-glass), may start one. It's
+        // a machine request (`add-project <name> <owner/repo>`) for the coordinator, audited like a settings change.
+        if (url.pathname === '/api/add-project') {
+          const requester = { login: who.login, breakGlass: who.via === 'break-glass', authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk };
+          const gate = { role: who.role, requester };
+          const o = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
+          if (req.method === 'GET') {
+            if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
+            return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), gate, o));
+          }
+          if (req.method === 'POST') {
+            const body = (await readBody(req)) as { name?: unknown; repo?: unknown };
+            const log = new EventLog(opts.eventsDb);
+            let r: MachineRequest;
+            try {
+              r = requestAddProject(log, body ?? {}, gate, o);
+            } catch (e) {
+              if (e instanceof AddProjectError || e instanceof MachineRequestError) {
+                audit(who, 'add_project.refused', { name: String(body?.name ?? '').slice(0, 40), repo: String(body?.repo ?? '').slice(0, 200), why: e.message.slice(0, 300) });
+                return json(res, e.status, { error: e.message });
+              }
+              throw e;
+            } finally {
+              log.close();
+            }
+            audit(who, 'add_project.requested', { name: r.args[1], repo: r.args[2], request: r.id });
+            return json(res, 200, { ok: true, request: r });
           }
         }
         // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
