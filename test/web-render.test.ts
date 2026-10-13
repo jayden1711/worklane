@@ -44,6 +44,10 @@ interface Render {
   runsRefusal(state: unknown): string | null;
   renderRunResearch(data: unknown): string;
   renderStopBanner(state: State): string;
+  renderUsageBanner(usage: unknown[], now: number): string;
+  renderUsageLines(usage: unknown[], now: number): string;
+  renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
+  countdown(resetAt: string, now: number): string;
   renderProtection(protection: unknown, brand: string): string;
   renderMainWatchAlert(protection: unknown): string;
   renderPrs(view: unknown): string;
@@ -664,6 +668,36 @@ test('checks render as a table with failures tinted and their output; instances 
   assert.match(nav, /disabled=""/, 'an instance that isn\'t answering can\'t be picked');
   assert.equal(r.renderStopBanner({ ...asOwner, emergency: { inForce: null, halted: null, lastStop: null, lastResume: null } }), '');
   assert.match(r.renderStopBanner({ ...asOwner, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: null, lastStop: null, lastResume: null } }), /Emergency stop in force/);
+});
+
+test('the usage-limit pause: a banner per paused instance counting down to its reset, and a usage line per instance on the Overview', () => {
+  const now = Date.parse('2026-10-13T10:00:00Z');
+  const running = { instance: 'site', paused: null, today: { runs: 12, limitHits: 0 }, lastHit: null };
+  const paused = { instance: 'code', paused: { since: '2026-10-13T09:00:00Z', resetAt: '2026-10-13T12:05:09Z', source: 'claude', kind: 'five_hour' }, today: { runs: 4, limitHits: 1 }, lastHit: '2026-10-13T09:00:00Z' };
+  // The countdown, to the second, and "now" once the reset has passed.
+  assert.equal(r.countdown(paused.paused.resetAt, now), '2 h 05 min 09 s');
+  assert.equal(r.countdown(paused.paused.resetAt, now + 2 * 3600_000 + 5 * 60_000), '0 min 09 s');
+  assert.equal(r.countdown(paused.paused.resetAt, now + 3 * 3600_000), 'now');
+  // No banner while nothing is paused; one per paused instance, with its countdown.
+  assert.equal(r.renderUsageBanner([running], now), '');
+  const banner = r.renderUsageBanner([running, paused], now);
+  assert.equal((banner.match(/data-testid="usage-banner"/g) ?? []).length, 1);
+  assert.match(banner, /data-instance="code"/);
+  assert.match(banner, /Paused on the Claude usage limit/);
+  assert.match(banner, /data-testid="usage-countdown"[^>]*>resumes in 2 h 05 min 09 s</);
+  assert.match(banner, /requeued, not failed/);
+  assert.doesNotMatch(banner, /default wait/, 'claude named the reset');
+  assert.match(r.renderUsageBanner([{ ...paused, paused: { ...paused.paused, source: 'default' } }], now), /default wait/);
+  assert.match(r.renderUsageBanner([paused], now + 3 * 3600_000), />resuming now</);
+  // The Overview: a line per instance, running or paused, with today's runs and limit hits.
+  const lines = r.renderUsageLines([running, paused], now);
+  assert.equal((lines.match(/data-testid="usage-line"/g) ?? []).length, 2);
+  assert.match(lines, /12 runs today/);
+  assert.match(lines, /1 usage-limit hit today/);
+  assert.match(lines, /data-instance="code"[\s\S]*paused until [^<]*\(2 h 05 min 09 s\)/);
+  assert.match(lines, /data-instance="site"[\s\S]*>running</);
+  assert.match(r.renderOverviewWithUsage(asOwner, [running, paused], now), /data-testid="overview-usage"/);
+  assert.doesNotMatch(r.renderPage('overview', asOwner), /overview-usage/, 'no usage read yet: no line');
 });
 
 test('the protection mode on the Machine page, the last commit checked for writers, and the alert with its clear for an admin', () => {

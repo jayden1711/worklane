@@ -6,6 +6,7 @@ import { hub, instanceScope, needsSignIn, selectAllInstances, selectInstance, si
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { MainWatchAlert } from './components/Protection';
+import { UsageBanner, useNow, useUsage } from './components/Usage';
 import { ago, Kbd, cx } from './components/ui';
 import { Overview } from './pages/Overview';
 import { BoardPage } from './pages/Board';
@@ -236,6 +237,9 @@ export function App() {
 function Dashboard() {
   const path = useRoute();
   const { state, error, live, pulse, refresh } = useLiveState();
+  // The Claude usage limit: every instance's pause (a banner on every page) and usage (the Overview's lines).
+  const usage = useUsage(state?.lastId);
+  const now = useNow(usage.some((u) => u.paused));
   const [theme, toggleTheme] = useTheme();
   const [menu, setMenu] = useState(false);
 
@@ -299,7 +303,7 @@ function Dashboard() {
   else if (path === '/settings') page = <SettingsPage />;
   else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
   else if (path === '/machine') page = <MachinePage state={state} />;
-  else if (path === '/overview') page = <Overview state={state} pulse={pulse} />;
+  else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
 
   return (
@@ -349,6 +353,7 @@ function Dashboard() {
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
         {state && <StopBanner state={state} />}
+        <UsageBanner usage={usage} now={now} />
         {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
         {page}
       </main>
