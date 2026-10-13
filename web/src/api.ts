@@ -341,6 +341,8 @@ export interface Settings {
   reports: { times: string[]; to: string[] };
   governor: { max_load?: number; min_free_disk_pct: number };
   agents: { budget: number; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
+  /** INVARIANT: `from` null means the engine's default (item 32). */
+  routing: { key: string; task: string; value: string | number | boolean | string[]; from: string | null }[];
   tests: { gates: Record<string, string[]>; batchMax: number; nightlyAt: string | null; tiers: string[]; baselineParser: boolean };
   review: { levels: Record<string, string[]> } | null;
   guardrails: { rules: number; protectedPaths: string[]; secretPaths: number; network: string; preApproved: string[] };
