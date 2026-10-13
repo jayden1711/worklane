@@ -59,6 +59,11 @@ export interface CoordinatorDeps {
    * usage-limit pause raises and resolves its incident there. Absent: the pause reports only through its events.
    */
   incidents?: IncidentSink;
+  /**
+   * When the last Claude account switch put this instance on a new login and resumed it (src/claude-account.ts,
+   * switchedOnto): that time, else null. A usage-limit pause from before it ends then. Absent: only the reset ends it.
+   */
+  accountSwitched?: () => string | null;
   /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
   providerKeys?: Record<string, string>;
   /** The clock (tests). */

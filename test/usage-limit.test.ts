@@ -16,6 +16,7 @@ import { asPerson, exampleProject, exampleRoles, STDIN_LINE } from './helpers.js
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
+import { readSwitchLines, switchedOnto } from '../src/claude-account.js';
 
 const NOW = Date.parse('2026-10-13T10:20:00Z');
 
@@ -214,6 +215,59 @@ test('the incident model, when there is one: raised once on the pause, resolved 
     t.mock.timers.reset();
   }
   assert.equal(calls.at(-1), 'resolve claude_usage_limit alice');
+});
+
+test('a Claude account switch ends the pause of an instance it put on the new login and resumed; one whose check failed stays paused', { skip }, async () => {
+  // switch.jsonl as claude-account.sh writes it, for instance alice, after the pause began.
+  const switchLines = (check: 'done' | 'failed', resume: 'done' | 'failed') => {
+    const dir = mkdtempSync(join(tmpdir(), 'usage-switch-'));
+    const at = new Date(Date.now() + 2000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const lines = [
+      { step: 'switch', state: 'started', detail: '1 instance(s): alice; the token from this terminal' },
+      { step: 'pause', state: 'done', instance: 'alice', detail: 'starts no more runs' },
+      { step: 'token', state: 'done', detail: 'received' },
+      { step: 'wait', state: 'done', instance: 'alice', detail: 'its runs have finished; stopped' },
+      { step: 'install', state: 'done', instance: 'alice', user: 'wl-alice-agent', detail: 'stored' },
+      { step: 'check', state: check, instance: 'alice', user: 'wl-alice-agent', detail: check === 'done' ? 'signed in' : 'not logged in' },
+      { step: 'resume', state: resume, instance: 'alice', detail: resume === 'done' ? 'running again' : 'not resumed: its auth check failed' },
+      { step: 'switch', state: resume === 'done' ? 'done' : 'failed', detail: 'end' },
+    ];
+    writeFileSync(join(dir, 'switch.jsonl'), lines.map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+    return dir;
+  };
+  const run = async (dir: string | null) => {
+    const f = fixture();
+    f.backlog.open(easyIssue('Add a.js', 'a.js'));
+    const resetAt = Date.now() + 3600_000;
+    let limited = true; // the old account's limit; the new login has none
+    const runner = new FakeRunner((r: RunRequest) => (r.role === 'worker' && limited ? { reason: 'rate_limited', detail: 'usage or rate limit reached', limit: { resetAt: new Date(resetAt).toISOString(), source: 'claude', kind: null } } : {}));
+    const calls: string[] = [];
+    let switchDir: string | null = null;
+    const c = coordinator(f, runner, {
+      incidents: { raiseIncident: (kind, key) => void calls.push(`raise ${kind} ${key}`), resolveIncident: (kind, key) => void calls.push(`resolve ${kind} ${key}`) },
+      accountSwitched: () => (switchDir ? switchedOnto('alice', readSwitchLines(switchDir)) : null),
+    });
+    await c.tick();
+    await c.idle();
+    assert.ok(pauseOf(f.log.read(0)), 'paused on the limit');
+    limited = dir === null;
+    switchDir = dir; // the switch happens while it is paused, then the coordinator starts again
+    await c.tick();
+    await c.idle();
+    return { f, calls };
+  };
+  const ok = await run(switchLines('done', 'done'));
+  assert.equal(pauseOf(ok.f.log.read(0)), null, 'no pause after a successful switch');
+  const resumed = ok.f.log.read(0, ['usage.resumed']).map((e) => e.payload as EventPayload<'usage.resumed'>);
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0]!.reason, 'account switched');
+  assert.equal(ok.calls.at(-1), 'resolve claude_usage_limit alice', 'the incident resolved through the same hook');
+  const failed = await run(switchLines('failed', 'failed'));
+  assert.ok(pauseOf(failed.f.log.read(0)), 'a failed check keeps the pause');
+  assert.equal(failed.f.log.read(0, ['usage.resumed']).length, 0);
+  assert.ok(!failed.calls.some((x) => x.startsWith('resolve')));
+  const none = await run(null);
+  assert.ok(pauseOf(none.f.log.read(0)), 'no switch: paused until the reset');
 });
 
 test("/api/usage: the pause in force (its reset, for the countdown) and today's usage, for everyone with a role; no run detail", async () => {

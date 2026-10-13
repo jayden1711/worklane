@@ -157,6 +157,20 @@ export function readSwitchLines(dir = CLAUDE_ACCOUNT_DIR): SwitchLine[] {
   return out;
 }
 
+/**
+ * When the last switch put this instance on the new login and started it again: its resume line's time, else null.
+ * All of: a token was received (not "checked on its current login"), every one of the instance's agent users had it
+ * installed and passed the auth check, and the instance was resumed. Its usage-limit pause then ends (the old
+ * account's limit no longer applies); an instance whose check failed stays paused.
+ */
+export function switchedOnto(instance: string, lines: readonly SwitchLine[] = readSwitchLines()): string | null {
+  const v = switchView(lines);
+  const i = v?.instances.find((x) => x.name === instance);
+  if (!v || !i || v.token?.state !== 'done' || i.resume?.state !== 'done' || i.check?.state === 'failed') return null;
+  if (i.users.length === 0 || !i.users.every((u) => u.install?.state === 'done' && u.check?.state === 'done')) return null;
+  return i.resume.at;
+}
+
 /** The last switch, folded per instance and user in the script's order; null when there has been none. */
 export function switchView(lines: readonly SwitchLine[], now = Date.now()): SwitchView | null {
   const start = lines.findIndex((l) => l.step === 'switch' && l.state === 'started');

@@ -203,7 +203,7 @@ export const EventSchemas = {
   /** The instance paused on the Claude usage limit: no run starts until `reset_at`; the run's task (if any) was requeued. */
   'usage.paused': z.strictObject({ reset_at: z.string(), source: z.enum(['claude', 'default']), kind: z.string().nullable(), issue: issue.nullable(), role: z.string(), detail: z.string() }),
   /** The pause ended: its reset time passed. */
-  'usage.resumed': z.strictObject({ reset_at: z.string(), paused_ms: z.number().int().nonnegative() }),
+  'usage.resumed': z.strictObject({ reset_at: z.string(), paused_ms: z.number().int().nonnegative(), reason: z.enum(['reset', 'account switched']).optional() }),
   /**
    * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
    * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.

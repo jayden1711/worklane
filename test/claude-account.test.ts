@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_ACCOUNT_CREDENTIAL, ClaudeTokenError, claudeAccountView, requestClaudeAccount, storeSwitchToken, switchView, readSwitchLines, type SwitchLine } from '../src/claude-account.js';
+import { CLAUDE_ACCOUNT_CREDENTIAL, ClaudeTokenError, claudeAccountView, requestClaudeAccount, storeSwitchToken, switchedOnto, switchView, readSwitchLines, type SwitchLine, type SwitchState } from '../src/claude-account.js';
 import { secretsDir } from '../src/console/secrets.js';
 import { checkRootStep } from '../src/console/root-steps.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
@@ -35,6 +35,21 @@ const WAITING: Partial<SwitchLine>[] = [
   { step: 'pause', state: 'done', instance: 'beta', detail: 'starts no more runs' },
   { step: 'token', state: 'ask', detail: "paste the token in alpha's dashboard" },
 ];
+
+test('switchedOnto: only an instance whose users all got the new token, passed the check and were resumed', () => {
+  const user = (n: string, check: SwitchState): Partial<SwitchLine>[] => [
+    { step: 'install', state: 'done', instance: n, user: `wl-${n}-agent`, detail: 'stored' },
+    { step: 'check', state: check, instance: n, user: `wl-${n}-agent`, detail: check },
+  ];
+  const ended = (token: SwitchState, alpha: SwitchState, beta: SwitchState) =>
+    readSwitchLines(switchDir([...WAITING.slice(0, 2), { step: 'token' as const, state: token, detail: token }, ...(token === 'done' ? [...user('alpha', 'done'), ...user('beta', 'failed')] : []), { step: 'resume' as const, state: alpha, instance: 'alpha', detail: alpha }, { step: 'resume' as const, state: beta, instance: 'beta', detail: beta }, { step: 'switch' as const, state: 'failed' as const, detail: 'not resumed: beta' }]));
+  const lines = ended('done', 'done', 'failed');
+  assert.match(switchedOnto('alpha', lines) ?? '', /^\d{4}-\d\d-\d\dT/, 'alpha: new login, checked, resumed');
+  assert.equal(switchedOnto('beta', lines), null, 'beta: its check failed');
+  assert.equal(switchedOnto('gamma', lines), null, 'not in the switch');
+  assert.equal(switchedOnto('alpha', ended('failed', 'done', 'done')), null, 'no token: resumed on its current login, so its limit still applies');
+  assert.equal(switchedOnto('alpha', readSwitchLines(switchDir(WAITING))), null, 'still running');
+});
 
 test('switchView folds the lines per instance and user, and knows when it waits for the token, ended or stalled', () => {
   const v = switchView(readSwitchLines(switchDir(WAITING)))!;
