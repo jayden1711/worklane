@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { autoConfigure, emptyAutoConfig, type AutoConfigState, type Question, type Verification } from './auto-config.js';
 import { BRAND } from './brand.js';
+import { protectionAdvice } from './branch-protection.js';
 import { loadConfig } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { gitRemoteRepo, install } from './install.js';
@@ -343,18 +344,21 @@ async function protection(c: InitContext): Promise<StepResult> {
   if (c.mode === 'server') return { status: 'done', detail: `GitHub's enforcement or the main watch (policy main_watch: auto), on the dashboard's Settings once the coordinator has asked; ${later}` };
   if (!c.repo) return { status: 'done', detail: `no GitHub origin: nothing to protect; ${later}` };
   let branch = 'main';
+  let advice = '';
   try {
-    branch = loadConfig(c.root!).project.project.default_branch;
+    const p = loadConfig(c.root!).project;
+    branch = p.project.default_branch;
+    advice = `; ${protectionAdvice(p)}`;
   } catch {
     // the repo-config step reported it
   }
   const watch = readWatchState(join(projectStateDir(c.root!), 'main-watch.json'));
-  if (watch.mode === 'github') return { status: 'done', detail: `GitHub enforces protection on ${branch}; ${later}` };
-  if (watch.mode === 'main_watch') return { status: 'done', detail: `GitHub doesn't protect ${branch}: the main watch guards it; ${later}` };
+  if (watch.mode === 'github') return { status: 'done', detail: `GitHub enforces protection on ${branch}${advice}; ${later}` };
+  if (watch.mode === 'main_watch') return { status: 'done', detail: `GitHub doesn't protect ${branch}: the main watch guards it${advice}; ${later}` };
   const r = c.io.run('gh', ['api', `repos/${c.repo}/branches/${branch}/protection`, '--silent']);
-  if (r.status === 0) return { status: 'done', detail: `GitHub enforces protection on ${branch}; ${later}` };
+  if (r.status === 0) return { status: 'done', detail: `GitHub enforces protection on ${branch}${advice}; ${later}` };
   const code = r.stderr.match(/HTTP (\d{3})/)?.[1];
-  return { status: 'done', detail: `GitHub doesn't protect ${branch}${code ? ` (HTTP ${code})` : ''}: every change still lands through a PR you merge (land_mode pr); ${later}` };
+  return { status: 'done', detail: `GitHub doesn't protect ${branch}${code ? ` (HTTP ${code})` : ''}: every change still lands through a PR you merge (land_mode pr)${advice}; ${later}` };
 }
 
 async function discord(): Promise<StepResult> {

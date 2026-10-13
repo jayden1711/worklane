@@ -18,6 +18,10 @@ land_mode: pr               # direct (fast-forward to the default branch) | pr
 # listed here passed on the exact commit the evaluator approved. Names as GitHub shows
 # them, e.g. ["test", "build (ubuntu-latest)"]. Empty: nothing is ever marked ready.
 required_checks: []
+# Branch protection to set on the default branch (advice only; init reports it, nothing applies it): require the
+# checks above, not strict by default (a PR needn't be up to date with main first). Post-merge CI on main and the
+# main watch catch what strict would have, without PRs queueing to merge main in. true opts this repo in.
+# protection: { strict: false }
 # Files two tasks at once would both change and conflict on: such tasks never run together (the second
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.

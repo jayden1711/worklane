@@ -27,6 +27,12 @@
 // 120 minutes). While one runs, no other update starts. After an install, a canary that fails or runs out of time
 // rolls back as above (backups restored, the old engine, services restarted), holds the commit and raises a watchdog
 // incident. A daily canary that fails only raises the incident.
+// The root-owned helpers the setup scripts installed from scripts/machine/ (the test-run sandbox helper, the machine
+// helper, the console shell) follow the engine: with its services stopped, just before the switch, each one this
+// machine has is replaced by the new engine's copy when the two differ (atomically: a checked temp file beside it,
+// renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the machine doesn't
+// have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
+// the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
 // Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl.
 'use strict';
 const fs = require('node:fs');
@@ -45,6 +51,13 @@ const VERIFY_GIT = '/var/lib/worklane/verify.git'; // a root-owned bare clone, o
 const ALLOWED_SIGNERS = '/etc/worklane/allowed_signers';
 const BUILD_STATE = 'worklane-build'; // the DynamicUser's StateDirectory, /var/lib/worklane-build
 const BUILD_DIR = `/var/lib/${BUILD_STATE}`;
+
+// The root helpers an engine ships (scripts/machine/) and where the setup scripts install them: kept in step by syncHelpers.
+const HELPERS = [
+  { dest: '/usr/local/libexec/worklane-testrun', src: 'scripts/machine/worklane-testrun.sh', check: 'bash' }, // test-user.sh
+  { dest: '/usr/local/libexec/worklane-machine', src: 'scripts/machine/worklane-machine.cjs', check: 'node' }, // machine-helper.sh
+  { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' }, // console-shell.sh
+];
 
 const HEALTH_MS = 120_000;
 const STABLE_MS = 30_000;
@@ -242,6 +255,67 @@ function installTree(sha, opt = OPT, buildDir = BUILD_DIR, owner = 'root:root') 
   }
   fs.rmSync(dest, { recursive: true, force: true });
   fs.renameSync(tmp, dest);
+}
+
+/**
+ * Put each root helper this machine has in step with the engine in `engineDir` (its scripts/machine/ copy): left as
+ * it is when the content is the same; else replaced atomically by a temp file in the same directory with the
+ * installed file's owner and mode, syntax-checked (bash -n, node --check), then renamed over it, so a helper that is
+ * running keeps its old file and the next call gets the whole new one. A helper the machine doesn't have is never
+ * installed (its sudoers rule is the setup script's), and sudoers is never touched. Throws, having removed its temp
+ * file, when one can't be replaced; the ones before it stay replaced (the caller puts the old engine's back).
+ * Returns each helper's state: same, updated, absent (not installed here) or missing (not in this engine).
+ */
+function syncHelpers(engineDir, helpers = HELPERS, exec = execFileSync) {
+  const out = [];
+  for (const h of helpers) {
+    let st;
+    try {
+      st = fs.lstatSync(h.dest);
+    } catch {
+      out.push({ path: h.dest, state: 'absent' });
+      continue;
+    }
+    if (!st.isFile()) throw new Error(`${h.dest} isn't a regular file; not replacing it`);
+    const src = path.join(engineDir, h.src);
+    let next;
+    try {
+      next = fs.readFileSync(src);
+    } catch {
+      out.push({ path: h.dest, state: 'missing' });
+      continue;
+    }
+    if (fs.readFileSync(h.dest).equals(next)) {
+      out.push({ path: h.dest, state: 'same' });
+      continue;
+    }
+    // node --check refuses an unknown extension, so the machine helper's temp name ends in .cjs.
+    const tmp = path.join(path.dirname(h.dest), `.${path.basename(h.dest)}.update${h.check === 'node' ? '.cjs' : ''}`);
+    fs.rmSync(tmp, { force: true });
+    try {
+      fs.writeFileSync(tmp, next, { mode: 0o600, flag: 'wx' });
+      fs.chownSync(tmp, st.uid, st.gid);
+      fs.chmodSync(tmp, st.mode & 0o7777);
+      if (h.check === 'node') exec(process.execPath, ['--check', tmp], { stdio: ['ignore', 'pipe', 'pipe'] });
+      else exec('bash', ['-n', tmp], { stdio: ['ignore', 'pipe', 'pipe'] });
+      fs.renameSync(tmp, h.dest);
+    } catch (e) {
+      fs.rmSync(tmp, { force: true });
+      const said = String((e && e.stderr) || (e && e.message) || e).trim().split('\n')[0];
+      throw new Error(`couldn't replace ${h.dest} with ${src}: ${said}`);
+    }
+    out.push({ path: h.dest, state: 'updated' });
+  }
+  return out;
+}
+
+/** After a rollback: the old engine's helpers back. Never throws; what it couldn't do is returned for the log. */
+function helpersBack(deps, sha) {
+  try {
+    return { helpers: deps.syncHelpers(sha).filter((h) => h.state === 'updated') };
+  } catch (e) {
+    return { helpers_error: String((e && e.message) || e).slice(0, 500) };
+  }
 }
 
 /**
@@ -458,10 +532,24 @@ async function update(deps, cfg) {
       migrated.push({ inst, made: r.made, applied: r.applied });
     }
   }
+  // The root helpers from the new engine, before it starts: it never runs with a helper of another protocol.
+  let helpers;
+  try {
+    helpers = deps.syncHelpers(head).filter((h) => h.state === 'updated');
+  } catch (e) {
+    const why = String((e && e.message) || e).slice(0, 500);
+    const back = current ? helpersBack(deps, current) : {};
+    const unrestored = restoreAll();
+    const settled = await settle();
+    const reason = `rollback: the root helpers couldn't be put in step with the new engine: ${why}`;
+    deps.hold({ sha: head, at: new Date(deps.now()).toISOString(), failed: [reason] });
+    deps.log({ event: 'rolled_back', from: head, to: current, units, reason, ...back, back: settled.h, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+    return 'rolled_back';
+  }
   deps.switchTo(head);
   const after = await settle();
   if (after.h === 'healthy') {
-    deps.log({ event: 'installed', from: current, to: head, units, ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
+    deps.log({ event: 'installed', from: current, to: head, units, ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
     if (!cfg.canary) return 'installed';
     // The install stands only once the canary passes: until then the backups and the old engine are kept to go back to.
     const filed = startCanary(deps, cfg, 'update', { from: current, to: head, migrated: migrated.map((m) => ({ inst: m.inst, made: m.made })) });
@@ -486,11 +574,12 @@ async function update(deps, cfg) {
   // The old engine refuses config and state newer than it knows: put the migrations' backups back first.
   if (instances.length) deps.exec('systemctl', ['stop', ...units]);
   const unrestored = restoreAll();
+  const hb = current ? helpersBack(deps, current) : {};
   if (current) deps.switchTo(current);
   const back = current ? await settle() : { h: 'failed' };
   const at = new Date(deps.now()).toISOString();
   deps.hold({ sha: head, at, failed: down });
-  deps.log({ event: 'rolled_back', from: head, to: current, units, failed: down, back: back.h, diagnosis, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+  deps.log({ event: 'rolled_back', from: head, to: current, units, failed: down, back: back.h, diagnosis, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
   return 'rolled_back';
 }
 
@@ -659,11 +748,12 @@ async function rollbackAfterCanary(deps, pending, v) {
   const { units } = machineUnits(deps);
   if (migrated.length) deps.exec('systemctl', ['stop', ...units]);
   const unrestored = restoreBackups(deps, migrated);
+  const hb = from ? helpersBack(deps, from) : {};
   if (from) deps.switchTo(from);
   const back = from ? await settleUnits(deps, units) : { h: 'failed' };
   const at = new Date(deps.now()).toISOString();
   deps.hold({ sha: to, at, failed: [reason] });
-  deps.log({ event: 'rolled_back', from: to, to: from, units, reason, canary: { issue: pending.issue, url: pending.url, stage: v.stage, pr: v.pr || null }, back: back.h, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+  deps.log({ event: 'rolled_back', from: to, to: from, units, reason, canary: { issue: pending.issue, url: pending.url, stage: v.stage, pr: v.pr || null }, back: back.h, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
   raise(deps, pending, v);
   return 'rolled_back';
 }
@@ -721,6 +811,7 @@ function realDeps() {
       }
     },
     installTree: (sha) => installTree(sha),
+    syncHelpers: (sha) => syncHelpers(path.join(OPT, sha)),
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
     held: () => readJson(HELD),
@@ -782,4 +873,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

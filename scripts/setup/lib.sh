@@ -232,10 +232,10 @@ unit_start() { systemctl start "$1"; }
 
 # The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
 # joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
-# updater refuses a skipped required check. "bootstrap (macos-latest)" and "bootstrap (windows-wsl)" are left out
-# on purpose (the owner: macOS/Windows jobs don't gate updates). A test derives this list from the workflows,
-# minus those named exclusions.
-UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
+# updater refuses a skipped required check. Every other one is in, the main-only jobs (bootstrap on each OS, the
+# real systemd and real users ones) above all: a pull request no longer has to run them, so main is where they
+# gate. A test derives this list from the workflows.
+UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {

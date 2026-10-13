@@ -27,6 +27,10 @@ export interface UpdateEntry {
   diagnosis?: { unit: string; result: string; status: string; restarts: number; journal: string }[];
   /** On a rollback: the commit is now held. */
   held?: boolean;
+  /** On an install (the new engine's) or a rollback (the old engine's): the root helpers replaced to match it. */
+  helpers?: { path: string; state: string }[];
+  /** On a rollback: why the old engine's helpers couldn't all be put back. */
+  helpers_error?: string;
   /** On a rollback because an instance's migration failed: which, and why. */
   migration?: { instance: string; error: string; restored?: string[]; unrestored?: string[] };
   /** On a rollback because the canary failed: its issue, how far it got, its PR. */

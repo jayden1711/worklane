@@ -4,6 +4,7 @@
 // instances side by side), the test runs (queue, slots, the full-run lock's holder, tiers), and the machine-wide
 // settings (the slot caps, engine updates) with their history, and above them the Updates panel (the engine installed,
 // the last update, any rollback or hold, the canary's last result).
+import { DeployGateStatus } from '../components/DeployGate';
 import type { State } from '../api';
 import { HealthPanel } from '../components/HealthPanel';
 import { ProtectionStatus } from '../components/Protection';
@@ -56,6 +57,7 @@ export function MachinePage({ state }: { state: State }) {
       <div className="space-y-6 p-6">
         <MachineSlots slots={state.slots} />
         <ProtectionStatus protection={state.protection} brand={state.brand.name} />
+        <DeployGateStatus gate={state.deployGate} />
         <TestRunsPanel />
         <HealthPanel />
         {/* The agents' Claude account: the machine owners' only (it renders nothing for anyone else). */}

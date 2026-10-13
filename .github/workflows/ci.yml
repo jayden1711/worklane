@@ -1,11 +1,53 @@
 name: ci
+# Two tiers. A pull request runs the fast checks (test, desktop, agentshield, push-gate, denylist, dco; scan is
+# gitleaks.yml's), which are what the main ruleset requires. A push to main runs every job, and the engine updater
+# requires every one of them green on the exact main commit it installs (UPDATE_DEFAULT_CHECKS in
+# scripts/setup/lib.sh; test/update-checks.test.ts keeps the two equal). The main-only jobs (bootstrap, the real
+# systemd and real users ones) also run on a PR that touches what they exercise (see the scope job), or on any PR
+# labelled full-ci.
 on:
   push:
     branches: [main]
   pull_request:
+    # labeled: adding full-ci to a PR reruns it with the main-only jobs.
+    types: [opened, synchronize, reopened, labeled]
+# A new push to a PR cancels that PR's run in progress. Main's runs never share a group (one per run), so none is
+# ever cancelled, or replaced while pending: the updater refuses a main commit with a cancelled check.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
+  scope:
+    # PRs only: which main-only jobs this PR runs as well. All of them with the full-ci label or a workflow change;
+    # the bootstrap jobs when the install path changes; the real systemd and real users jobs when the root and
+    # machine scripts, the OS layer, the test-run host or the runner's sign-in check change. A push to main skips
+    # this job and runs everything.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      bootstrap: ${{ steps.scope.outputs.bootstrap }}
+      machine: ${{ steps.scope.outputs.machine }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: scope
+        env:
+          FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          files="$(git diff --name-only "$(git merge-base "$PR_BASE" "$PR_HEAD")" "$PR_HEAD")"
+          all=false
+          if [ "$FULL" = true ] || grep -qE '^\.github/workflows/' <<< "$files"; then all=true; fi
+          bootstrap=$all machine=$all
+          if grep -qE '^(scripts/bootstrap\.sh|Dockerfile|\.dockerignore|package(-lock)?\.json|scripts/ci/stand-ins/)' <<< "$files"; then bootstrap=true; fi
+          if grep -qE '^(scripts/(setup|machine|ci)/|src/os/|src/testrun/|src/runner\.ts)' <<< "$files"; then machine=true; fi
+          echo "full-ci label: $FULL; bootstrap jobs: $bootstrap; real systemd / real users jobs: $machine"
+          { echo "bootstrap=$bootstrap"; echo "machine=$machine"; } >> "$GITHUB_OUTPUT"
+
   test:
     # Ubuntu only (the owner's choice): the OS adapters stay in place, but only Linux runs in CI.
     strategy:
@@ -49,6 +91,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Tauri's Linux build libraries (WebKitGTK)
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev
+      # The crates and their build, keyed on the lockfile and the toolchain: a hit rebuilds only the app's own crate.
+      - name: rustc version (part of the cache key)
+        id: rustc
+        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+          key: desktop-cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: desktop-cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-
       - run: cargo test --locked --manifest-path desktop/Cargo.toml
 
   bootstrap:
@@ -57,7 +112,9 @@ jobs:
     # init's checklist and ending at doctor green, which shows that checklist and what local mode can't do; run twice,
     # the second changing nothing; on macOS, the coordinator as a launchd service (worklane up / down); then the demo
     # from the installed package. No GitHub: stand-in gh and claude (scripts/ci/stand-ins), and no token. macOS is
-    # not a required check (the owner decides).
+    # not a required check (the owner decides). Main-only, but in the updater's list.
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.bootstrap == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +130,7 @@ jobs:
         if: runner.os == 'macOS'
         with:
           node-version: '24'
+          cache: npm
       - name: pack this commit's engine (dist/ and the web UI built, as in a release)
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
@@ -140,9 +198,11 @@ jobs:
     # runs it: this commit's engine packed inside the distro, then, as a plain user, the bootstrap
     # (which fetches its own Node; nothing of ours is preinstalled), init's checklist, doctor green and naming the OS as
     # WSL, `worklane up` / `down` as a systemd --user unit, and the demo. No GitHub: the same stand-ins. Not a
-    # required check, and not one of the updater's checks (the owner decides). WSL setup: Vampire/setup-wsl
+    # required check on PRs; main-only, and one of the updater's checks. WSL setup: Vampire/setup-wsl
     # (Apache-2.0), used as an action, nothing copied. #214 (closed) explored the Windows side.
     name: bootstrap (windows-wsl)
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.bootstrap == 'true') }}
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
@@ -260,6 +320,8 @@ jobs:
     # systemd-run (the other jobs stand in for sudo and the helper). scripts/ci/testrun-real-systemd.mjs has the
     # assertions; its log shows systemd-run's raw summary, the text test/fixtures/systemd-run-255/ holds.
     name: test-run sandbox (real systemd)
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.machine == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     defaults:
@@ -332,6 +394,43 @@ jobs:
             grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo ci2 || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
+      - name: an outdated helper is replaced by the updater (and by update-helper), as root, with sudoers unchanged
+        run: |
+          H=/usr/local/libexec/worklane-testrun
+          need="$(sed -n 's/^PROTOCOL=\([0-9][0-9]*\)$/\1/p' scripts/machine/worklane-testrun.sh)"
+          sudo sha256sum /etc/sudoers.d/worklane-test-ci /etc/sudoers.d/worklane-test-ci2 > "$RUNNER_TEMP/sudoers.before"
+          old() {
+            # The helper as a machine had it before db-start took max_connections: no version command.
+            sudo install -o root -g root -m 0755 test/fixtures/testrun-helper-protocol-1.sh "$H"
+            if out="$(sudo -u wl-ci sudo -n "$H" ci version 2>&1)"; then echo "the old helper answered version: $out" >&2; exit 1; fi
+            grep -q 'unknown command version' <<<"$out"
+            echo "old helper in place; as wl-ci, version says: $out"
+          }
+          in_step() {
+            sudo cmp "$H" scripts/machine/worklane-testrun.sh
+            [ "$(stat -c '%U:%G %a' "$H")" = 'root:root 755' ] || { stat -c '%U:%G %a' "$H" >&2; exit 1; }
+            [ "$(sudo -u wl-ci sudo -n "$H" ci version)" = "$need" ]
+            sudo sha256sum -c "$RUNNER_TEMP/sudoers.before"
+            if sudo ls -A "$(dirname "$H")" | grep -q '^\.'; then echo "a temp file was left" >&2; sudo ls -la "$(dirname "$H")" >&2; exit 1; fi
+          }
+          # The updater's own function, as root, from an engine tree as it installs one: root-owned, under /opt.
+          old
+          E="$(sudo mktemp -d /opt/wl-engine-XXXXXX)"
+          sudo cp -r scripts "$E/"
+          sudo chown -R root:root "$E"
+          sync_helpers() { sudo "$(command -v node)" -e 'console.log(JSON.stringify(require(process.argv[1]).syncHelpers(process.argv[2])))' "$PWD/scripts/machine/worklane-update.cjs" "$E"; }
+          sync_helpers | tee "$RUNNER_TEMP/sync1.json"
+          jq -e --arg h "$H" 'map(select(.path == $h))[0].state == "updated"' "$RUNNER_TEMP/sync1.json"
+          in_step
+          sync_helpers | tee "$RUNNER_TEMP/sync2.json"
+          jq -e --arg h "$H" 'map(select(.path == $h))[0].state == "same"' "$RUNNER_TEMP/sync2.json"
+          # And the admin's fix the engine names: update-helper, nothing else.
+          old
+          sudo bash scripts/setup/test-user.sh update-helper | tee "$RUNNER_TEMP/update-helper.log"
+          grep -q "^installed $H (protocol $need)" "$RUNNER_TEMP/update-helper.log"
+          in_step
+          sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed'
+          sudo rm -rf "$E"
       - name: the database image, pinned to the digest it has today
         run: |
           docker pull -q postgres:17-alpine
@@ -406,6 +505,8 @@ jobs:
     # token: the checkout cloned through the App's credential helper, the coordinator's service active, the machine
     # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step.
     name: add-project (real systemd)
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.machine == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     defaults:
@@ -608,6 +709,8 @@ jobs:
     # HOME it is given; the probe run as the coordinator through sudo, as its service runs it, finds it signed in.
     # scripts/ci/auth-probe-real-users.mjs has the assertions.
     name: Claude sign-in probe (real users)
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.machine == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

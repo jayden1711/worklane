@@ -1,12 +1,14 @@
 // Setting an instance's test runs up at coordinator start: only with tests.yaml test_run, and only once the sandbox's
 // own check passed (a check that can't run is a failure). Records the sandbox's state and the App's Checks
-// permission, which health and the dashboard read.
+// permission, which health and the dashboard read. First it asks the helper its protocol version (./helper.ts), once:
+// with an outdated helper the runs are set up but none starts; each PR's check says so and how to fix it.
 import { join } from 'node:path';
 import type { Config } from '../config/load.js';
 import type { EventLog } from '../events/log.js';
 import type { AppCredentials } from '../github-app.js';
 import { listOpenPrs, PrTestRuns } from '../coordinator/test-runs.js';
 import { checksPermission } from './checks.js';
+import { checkHelper } from './helper.js';
 import { sandboxHost, type RunHost } from './host.js';
 import { checkNamesFor, postChecks, startTestRun, useTestRuns, type TestRunRequest, type TestRunResult } from './index.js';
 import type { TestRunConfig } from './config.js';
@@ -42,11 +44,17 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
   if (!config) return undefined;
   const host = s.host ?? sandboxHost(s.instance);
   if (s.app) d.log.append('testrun.checks_permission', await checksPermission(s.app, s.api ? { api: s.api } : {}), d.actor);
-  const checked = host.kind === 'sandbox' ? await host.check().catch((e: Error) => ({ ok: false, detail: `the check didn't run: ${e.message}` })) : { ok: false, detail: 'not the sandbox' };
-  d.log.append('testrun.sandbox', { ok: checked.ok, detail: checked.detail.slice(0, 2000) }, d.actor);
-  if (!checked.ok) return undefined;
+  // Asked once here and cached for every run of this coordinator: an update that replaces the helper restarts it.
+  const helper = await checkHelper(host, s.instance);
+  d.log.append('testrun.helper', { ok: helper.ok, have: helper.have, need: helper.need, detail: helper.detail.slice(0, 1000) }, d.actor);
+  // An outdated helper's own check proves nothing about this engine's sandbox: skipped, and every run refused.
+  if (helper.ok) {
+    const checked = host.kind === 'sandbox' ? await host.check().catch((e: Error) => ({ ok: false, detail: `the check didn't run: ${e.message}` })) : { ok: false, detail: 'not the sandbox' };
+    d.log.append('testrun.sandbox', { ok: checked.ok, detail: checked.detail.slice(0, 2000) }, d.actor);
+    if (!checked.ok) return undefined;
+  }
   useTestRuns({
-    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs') },
+    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper },
     checks: { repo: s.repo, token: s.token, log: d.log, actor: d.actor, ...(s.api ? { api: s.api } : {}) },
   });
   const names = checkNamesFor(config);

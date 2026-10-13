@@ -55,43 +55,75 @@ test('which push triggers run on a push to main', () => {
   assert.equal(pushRunsOn({ pull_request: null }), false);
 });
 
-/** Every check run a push to main creates, from the workflows: job names, matrix jobs expanded as GitHub names them. */
-function pushChecks(): string[] {
-  const dir = join(repoRoot, '.github', 'workflows');
-  const out: string[] = [];
-  for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x))) {
-    const wf = parse(readFileSync(join(dir, f), 'utf8')) as { on?: unknown; jobs?: Record<string, { name?: string; if?: string; strategy?: { matrix?: Record<string, unknown[]> } }> };
-    if (!pushRunsOn(wf.on)) continue;
-    for (const [key, job] of Object.entries(wf.jobs ?? {})) {
-      if (job.if && /event_name\s*==\s*'pull_request'/.test(job.if)) continue; // PR-only: always skipped on main
-      const name = job.name ?? key;
-      const matrix = job.strategy?.matrix;
-      if (!matrix) {
-        out.push(name);
-        continue;
-      }
-      const axes = Object.entries(matrix).filter(([k]) => k !== 'include' && k !== 'exclude');
-      let combos: string[][] = [[]];
-      for (const [, values] of axes) combos = combos.flatMap((c) => values.map((v) => [...c, String(v)]));
-      for (const c of combos) out.push(`${name} (${c.join(', ')})`);
-    }
+type Job = { name?: string; if?: string; needs?: string | string[]; strategy?: { matrix?: Record<string, unknown[]> } };
+/** both: every PR and every push to main. pr-only: never on main. main-only: every push to main, a PR only sometimes. */
+type Tier = 'both' | 'pr-only' | 'main-only';
+type Check = { name: string; tier: Tier; push: boolean; pr: boolean };
+
+const PR_ONLY = /^github\.event_name == 'pull_request'$/;
+/** Always on a push; on a PR only when the scope job says so (what the PR touches, or the full-ci label). */
+const MAIN_ONLY = /^\$\{\{ !cancelled\(\) && \(github\.event_name == 'push' \|\| needs\.scope\.outputs\.[a-z]+ == 'true'\) \}\}$/;
+/** ci.yml's PR-only helper that picks the main-only jobs a PR runs: not a check anything requires. */
+const HELPERS = ['scope'];
+
+function tier(file: string, key: string, job: Job): Tier {
+  if (!job.if) return 'both';
+  if (PR_ONLY.test(job.if)) return 'pr-only';
+  if (MAIN_ONLY.test(job.if)) {
+    assert.ok(([] as string[]).concat(job.needs ?? []).includes('scope'), `${file} ${key}: a main-only job needs the scope job`);
+    return 'main-only';
   }
-  return out.sort();
+  return assert.fail(`${file} ${key}: an if: this test doesn't know (${job.if}); say whether it runs on main and on PRs`);
 }
 
-/**
- * Push-to-main checks the updater deliberately does not wait for. Only these may differ; any other drift fails.
- * - bootstrap (macos-latest): the owner's decision. It is required to merge (.worklane/config.yaml), but engine
- *   updates on servers must not wait on the macOS run.
- * - bootstrap (windows-wsl): owner: macOS/Windows jobs don't gate updates. Not a required check either.
- */
-const UPDATER_EXCLUDED = ['bootstrap (macos-latest)', 'bootstrap (windows-wsl)'];
+/** Every check run the workflows create, with when: job names, matrix jobs expanded as GitHub names them. */
+function checks(): Check[] {
+  const dir = join(repoRoot, '.github', 'workflows');
+  const out: Check[] = [];
+  for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x))) {
+    const wf = parse(readFileSync(join(dir, f), 'utf8')) as { on?: unknown; jobs?: Record<string, Job> };
+    const on = wf.on as Record<string, { branches?: string[] } | null> | string[] | undefined;
+    const push = pushRunsOn(wf.on);
+    // Every pull request: a pull_request trigger without a paths filter (one with paths runs on some PRs only).
+    const prOn = Array.isArray(on) ? on.includes('pull_request') : !!on && 'pull_request' in on;
+    const prFilter = !Array.isArray(on) && on && typeof on === 'object' ? (on as Record<string, { paths?: string[] } | null>).pull_request : null;
+    const pr = prOn && !prFilter?.paths;
+    // A workflow that neither runs on a push to main nor on every PR (tags only, or paths-filtered PRs) creates no check either list holds.
+    if (!push && !pr) continue;
+    for (const [key, job] of Object.entries(wf.jobs ?? {})) {
+      if (HELPERS.includes(key)) continue;
+      const t = tier(f, key, job);
+      const name = job.name ?? key;
+      const axes = Object.entries(job.strategy?.matrix ?? {}).filter(([k]) => k !== 'include' && k !== 'exclude');
+      let combos: string[][] = [[]];
+      for (const [, values] of axes) combos = combos.flatMap((c) => values.map((v) => [...c, String(v)]));
+      for (const c of combos) out.push({ name: c.length ? `${name} (${c.join(', ')})` : name, tier: t, push: !!push, pr });
+    }
+  }
+  return out;
+}
 
-test('the updater\'s default required checks are exactly the checks a push to main runs (no PR-only ones), minus the named exclusions', () => {
-  const push = pushChecks();
-  for (const x of UPDATER_EXCLUDED) assert.ok(push.includes(x), `exclusion "${x}" still names a check a push to main runs`);
-  assert.deepEqual([...defaults()].sort(), push.filter((c) => !UPDATER_EXCLUDED.includes(c)));
+/** Every check run a push to main creates. */
+const pushChecks = () => checks().filter((c) => c.push && c.tier !== 'pr-only').map((c) => c.name).sort();
+/** Every check run every pull request creates. */
+const prChecks = () => checks().filter((c) => c.pr && c.tier !== 'main-only').map((c) => c.name).sort();
+
+const MAIN_ONLY_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)'];
+
+test('the updater\'s default required checks are exactly the checks a push to main runs (no PR-only ones)', () => {
+  assert.deepEqual([...defaults()].sort(), pushChecks());
   assert.ok(!defaults().includes('dco'), 'dco runs on pull requests only, so on main it is always skipped');
+  for (const x of MAIN_ONLY_CHECKS) {
+    assert.equal(checks().find((c) => c.name === x)?.tier, 'main-only', `${x} runs on every push to main, on a PR only when it touches what it tests`);
+    assert.ok(defaults().includes(x), `${x} gates the updater: a PR may not have run it`);
+  }
+});
+
+test('the engine repo requires to merge exactly the checks every pull request runs, never a main-only one a PR may skip', () => {
+  const cfg = parse(readFileSync(join(repoRoot, '.worklane', 'config.yaml'), 'utf8')) as { required_checks: string[] };
+  assert.deepEqual([...cfg.required_checks].sort(), prChecks());
+  for (const x of ['dco', 'scan', 'desktop', 'test (ubuntu-latest, 22)']) assert.ok(prChecks().includes(x), x);
+  for (const x of MAIN_ONLY_CHECKS) assert.ok(!prChecks().includes(x), x);
 });
 
 test('check names with commas reach updates.json whole, never split', { skip: process.platform === 'win32' && 'bash' }, () => {

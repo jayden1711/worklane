@@ -21,6 +21,7 @@ worktree:
 land:
   pre: []
   # defer_timeout_minutes: 180  # a land waiting on the machine-wide full-run slot goes to the owner after this long
+  # parallel_merges: 4         # PR mode: most ready PRs auto-merged in one pass (each green on its own head; no merging main in first)
 # How the runner lists failures; enables the baseline gate (no NEW failures vs main).
 # failures: { section: '^✖ failing tests:', item: '^✖ (.+?) \(\d' }   # node --test with --test-reporter=spec (Node 22 defaults to TAP without a TTY)
 # idle_probe: "..."        # exits 0 when no full test run is live on this machine; queued full runs wait for it

@@ -2,6 +2,10 @@ name: gitleaks
 on:
   push:
   pull_request:
+# As ci.yml: a new push to a PR cancels its run in progress; a push's runs (main's among them) are never cancelled.
+concurrency:
+  group: gitleaks-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 jobs:
