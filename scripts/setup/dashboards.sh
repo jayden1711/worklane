@@ -21,7 +21,13 @@
 #     4398 (the token, on this machine only), which it never forwards.
 #
 #   bash scripts/setup/credentials.sh dashboard-signin      (first, once)
-#   bash scripts/setup/dashboards.sh [--console-user <admin user> --console-devices <tags,names>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+#
+#   --machine-owner: the GitHub logins that may change the machine itself from the dashboard (the slot caps, engine
+#     updates), comma-separated. Written to /etc/worklane/machine-owners.json, root:root 0644. An instance's owners
+#     who aren't machine owners see the machine settings read-only. A machine change also needs a GitHub sign-in in
+#     the last 5 minutes and one of the --console-devices, as the terminal does. Left out: the file is kept as it
+#     is (none yet: only the break-glass may change the machine).
 #
 #   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh
 #     with the same user first. Without it the terminal never opens. With it, the hub's unit drops
@@ -33,14 +39,15 @@
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh [--console-user <admin user> --console-devices <tags,names>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
-client_id="" public_url="" console_user="" console_devices=""
+usage="usage: dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
+client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
     --console-user) console_user="${2:-}"; shift 2 ;;
     --console-devices) console_devices="${2:-}"; shift 2 ;;
+    --machine-owner) machine_owner="${2:-}"; machine_owner_set=1; shift 2 ;;
     --) shift; break ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *) break ;;
@@ -57,6 +64,7 @@ if [ -n "$console_devices" ]; then
   [ -n "$console_user" ] || { echo "--console-devices goes with --console-user" >&2; exit 2; }
   [[ "$console_devices" =~ ^[a-z0-9:.,-]+$ ]] || { echo "--console-devices: Tailscale tags (tag:x) and/or node names, comma-separated, lowercase" >&2; exit 2; }
 fi
+[ -z "$machine_owner_set" ] || machine_owners_json "$machine_owner" >/dev/null || exit 2
 [ -z "$console_user" ] || [ -n "$console_devices" ] || echo "note: no --console-devices, so the owner terminal refuses every device until you list yours" >&2
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
@@ -153,6 +161,11 @@ put() {
 
 wait_for() { for _ in $(seq 1 30); do [ -s "$1" ] && return 0; sleep 1; done; echo "no $1 after 30 s; see journalctl -u $2" >&2; exit 1; }
 
+if [ -n "$machine_owner_set" ]; then
+  say "machine owners: who may change the machine from the dashboard"
+  install_machine_owners "$machine_owner"
+fi
+
 say "viewer user $viewer (runs the hub; holds no credential)"
 ensure_user "$viewer"
 
@@ -202,4 +215,5 @@ echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS
 echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
 echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/?t=<the token in $hub_token_file>"
 echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"
+if [ -s "$MACHINE_OWNERS" ]; then echo "machine owners (may change the slot caps and engine updates): $(cat "$MACHINE_OWNERS")"; else echo "machine owners: none yet, so only the break-glass may change the machine; rerun with --machine-owner <login>"; fi
 echo "logs: journalctl -u worklane-dashboard-hub.service; journalctl -u worklane-dashboard-<name>.service"

@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { checkRootStep } from './console/root-steps.js';
+import { MACHINE_OWNERS_FILE, machineChangeRefusal, type MachineRequester } from './machine-owners.js';
 
 export const MACHINE_EVENTS = ['machine.requested', 'machine.started', 'machine.finished'] as const;
 
@@ -28,6 +29,8 @@ export interface MachineRequest {
   by: string;
   via: 'settings' | 'ask';
   ask: string | null;
+  /** Asked for on the owner's break-glass (no person named), which needs no machine owner. */
+  breakGlass: boolean;
   at: string;
   status: MachineRequestStatus;
   /** The helper's output, or why it failed or was refused. */
@@ -65,7 +68,7 @@ export function machineRequests(events: readonly StoredEvent[]): MachineRequest[
   for (const e of events) {
     if (e.type === 'machine.requested') {
       const p = e.payload as EventPayload<'machine.requested'>;
-      if (!byId.has(p.id)) byId.set(p.id, { id: p.id, args: p.args, by: p.by, via: p.via, ask: p.ask, at: e.ts, status: 'pending', detail: '', finishedAt: null });
+      if (!byId.has(p.id)) byId.set(p.id, { id: p.id, args: p.args, by: p.by, via: p.via, ask: p.ask, breakGlass: p.breakGlass === true, at: e.ts, status: 'pending', detail: '', finishedAt: null });
     } else if (e.type === 'machine.started') {
       const r = byId.get((e.payload as EventPayload<'machine.started'>).id);
       if (r && r.status === 'pending') r.status = 'running';
@@ -85,17 +88,22 @@ export function machineRequests(events: readonly StoredEvent[]): MachineRequest[
 const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'running';
 
 /**
- * Record a machine change for the coordinator to run. The caller has checked who may (the owner); this checks
- * the helper's allowlist, and that a root-step ask doesn't already have one pending. Never runs anything.
+ * Record a machine change for the coordinator to run. The caller has checked the instance role (its owner); this
+ * checks the requester is a machine owner with a fresh sign-in on an allowed device, or the break-glass
+ * (src/machine-owners.ts), the helper's allowlist, and that a root-step ask doesn't already have one pending.
+ * Never runs anything.
  */
-export function requestMachineChange(log: EventLog, r: { args: string[]; by: string; via: 'settings' | 'ask'; ask?: string | null }): MachineRequest {
+export function requestMachineChange(log: EventLog, r: { args: string[]; requester: MachineRequester; via: 'settings' | 'ask'; ask?: string | null; ownersFile?: string; now?: number }): MachineRequest {
+  const who = machineChangeRefusal(r.requester, { file: r.ownersFile ?? MACHINE_OWNERS_FILE, ...(r.now !== undefined ? { now: r.now } : {}) });
+  if (who) throw new MachineRequestError(who, 403);
   const why = machineRefusal(r.args);
   if (why) throw new MachineRequestError(why, 400);
+  const by = r.requester.login;
   const id = `mr-${randomBytes(6).toString('hex')}`;
   log.db.exec('BEGIN IMMEDIATE');
   try {
     if (r.ask && machineRequests(log.read(0, [...MACHINE_EVENTS])).some((x) => x.ask === r.ask && open(x))) throw new MachineRequestError(`ask ${r.ask} already has a machine change waiting for the coordinator`, 409);
-    log.append('machine.requested', { id, args: [...r.args], by: r.by, via: r.via, ask: r.ask ?? null }, r.by, 'human');
+    log.append('machine.requested', { id, args: [...r.args], by, via: r.via, ask: r.ask ?? null, ...(r.requester.breakGlass ? { breakGlass: true } : {}) }, by, 'human');
     log.db.exec('COMMIT');
   } catch (e) {
     log.db.exec('ROLLBACK');
