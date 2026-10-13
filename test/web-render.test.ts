@@ -14,7 +14,9 @@ import { seedDemo } from '../src/demo.js';
 import { SETTING_KEYS } from '../src/settings.js';
 import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
-import { asPerson, exampleRoles, repoRoot } from './helpers.js';
+import { tryAgentSlot } from '../src/slots.js';
+import { tryTestSlot } from '../src/testrun/slots.js';
+import { asPerson, exampleProject, exampleRoles, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -36,7 +38,6 @@ interface Render {
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
   renderRunResearch(data: unknown): string;
-  renderInstances(hub: unknown, current: string): string;
   renderStopBanner(state: State): string;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
@@ -51,7 +52,13 @@ interface Render {
   LABEL: Record<string, string>;
   probeHub(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
   probeMe(servedByHub: boolean, get: (url: string, init?: unknown) => Promise<{ ok: boolean; json(): Promise<unknown> }>, auth?: string): Promise<unknown>;
-  renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], filter?: string | null, now?: number): string;
+  renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], now?: number): string;
+  renderBoardTestRuns(boards: { name: string | null; data: unknown; error: string | null }[]): string;
+  renderTestRuns(data: unknown, compact?: boolean): string;
+  renderInstances(hub: unknown, current: string, all?: boolean): string;
+  scopeOf(hub: unknown, saved: string | null, all: boolean): { current: string | null; all: boolean; instances: (string | null)[] };
+  loadBoards(scope: unknown, get: (instance: string | null, path: string) => Promise<unknown>): Promise<{ name: string | null; data: unknown; error: string | null }[]>;
+  onInstance(instance: string | null, path: string, init: unknown, scope: Promise<unknown>): Promise<unknown>;
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
   renderSignIn(): string;
@@ -876,7 +883,7 @@ function clean(render: () => string): string {
   }
 }
 
-test('the Board renders for the owner, a writer and a viewer without errors: five columns, every card, the instance filter', () => {
+test('the Board renders for the owner, a writer and a viewer without errors: five columns, every card, which instance it shows', () => {
   for (const role of ['owner', 'writer', 'viewer'] as const) {
     const b = boards[role];
     assert.equal(b.role, role, `the server read ${role}`);
@@ -885,7 +892,7 @@ test('the Board renders for the owner, a writer and a viewer without errors: fiv
     assert.equal((html.match(/data-testid="board-column"/g) ?? []).length, 5);
     for (const [col, label] of [['planning', 'Planning'], ['building', 'Building'], ['verifying', 'Verifying'], ['waiting', 'Waiting on you'], ['landing', 'Landing']]) assert.match(html, new RegExp(`data-column="${col}"[^>]*>[\\s\\S]*?${label}`));
     assert.equal((html.match(/data-testid="board-card"/g) ?? []).length, b.cards.length, `${role}: every card`);
-    for (const id of ['board', 'board-filter', 'board-card-ref', 'board-card-title', 'board-card-elapsed']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
+    for (const id of ['board', 'board-scope', 'board-card-ref', 'board-card-title', 'board-card-elapsed']) assert.match(html, new RegExp(`data-testid="${id}"`), `${role}: ${id}`);
     if (role === 'viewer') {
       // A viewer's cards carry no run or agent details, no change size and no checks: the server left them out.
       for (const c of b.cards) for (const k of ['run', 'diff', 'comments', 'checks']) assert.ok(!(k in c), `a viewer's card has no ${k}`);
@@ -898,15 +905,17 @@ test('the Board renders for the owner, a writer and a viewer without errors: fiv
     // The page itself, and the Machine page, render for each role too.
     assert.match(clean(() => r.renderPage('board', { owner: asOwner, writer: asWriter, viewer: asOther }[role])), /data-testid="page-board"[\s\S]*<h1[^>]*>Board</);
   }
-  // On a hub: every instance, a filter to pick one, the instance on each card.
+  // All instances (chosen in the switcher): every instance's board, each card labelled, one that failed named.
   const hub = clean(() => r.renderBoard([{ name: 'a', data: boards.owner, error: null }, { name: 'b', data: { ...boards.viewer, instance: 'b', cards: boards.viewer.cards.map((c) => ({ ...c, instance: 'b' })) }, error: null }, { name: 'c', data: null, error: 'answered 502' }]));
-  assert.match(hub, /<select[^>]*data-testid="board-filter"/);
-  assert.match(hub, /<option value=""[^>]*>All instances \(3\)<\/option>/);
+  assert.match(hub, /data-testid="board-scope" data-scope="all"[^>]*>[\s\S]*All instances[\s\S]*\(3\)/);
+  assert.doesNotMatch(hub, /<select/, 'no per-page instance picker: the switcher decides');
   assert.equal((hub.match(/data-testid="board-card"/g) ?? []).length, boards.owner.cards.length + boards.viewer.cards.length);
   assert.match(hub, /data-testid="board-instance-error"[^>]*>c: can&#x27;t load its board: answered 502/);
-  const onlyB = clean(() => r.renderBoard([{ name: 'a', data: boards.owner, error: null }, { name: 'b', data: { ...boards.viewer, cards: boards.viewer.cards.map((c) => ({ ...c, instance: 'b' })) }, error: null }], 'b'));
+  // One instance: its board only, no labels needed.
+  const onlyB = clean(() => r.renderBoard([{ name: 'b', data: { ...boards.viewer, cards: boards.viewer.cards.map((c) => ({ ...c, instance: 'b' })) }, error: null }]));
+  assert.match(onlyB, /data-testid="board-scope" data-scope="b"/);
   assert.equal((onlyB.match(/data-testid="board-card"/g) ?? []).length, boards.viewer.cards.length);
-  assert.doesNotMatch(onlyB, /data-instance="demo"/, 'filtered to b');
+  assert.doesNotMatch(onlyB, /data-testid="board-card-instance"/);
 });
 
 test("the Board's Landing column shows the PR batches, and a card where its PR stands with them; a viewer's without what happened", () => {
@@ -990,4 +999,99 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
   assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
   assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
+});
+
+test("two instances on one machine: with one selected, no page shows any of the other's items; All instances shows both, labelled; the default is the selected one", async () => {
+  const marks: Record<'a' | 'b', InstanceMarks> = {
+    a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 8101, pr: 8170, run: 'tr-alpha-1', title: 'Alpha-only' },
+    b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 9201, pr: 9270, run: 'tr-beta-1', title: 'Beta-only' },
+  };
+  // Both instances' coordinators hold slots in the machine's one slots dir, as on a real machine.
+  const shared = mkdtempSync(join(tmpdir(), 'web-render-shared-slots-'));
+  const servers: Record<string, Awaited<ReturnType<typeof startDashboard>>> = {};
+  for (const name of ['a', 'b'] as const) {
+    const m = marks[name];
+    const { dir: root } = exampleProject();
+    const cfg = loadConfig(root);
+    cfg.project.project.name = m.project;
+    const dir = mkdtempSync(join(tmpdir(), `web-render-${name}-`));
+    const log = new EventLog(join(dir, 'events.db'));
+    seedInstanceItems(log, m);
+    log.close();
+    tryAgentSlot(`${BRAND.cli} ${m.project} #${m.issue}`, shared);
+    tryTestSlot(`${m.actor} test run ${m.run}`, shared);
+    servers[name] = await startDashboard({ root, cfg, eventsDb: join(dir, 'events.db'), stateDir: dir, user: 'example-owner', roleOf: exampleRoles, instance: name, slotsDir: shared, actor: m.actor });
+  }
+  const ask = async (instance: string | null, path: string) => {
+    const d = servers[instance!]!;
+    const res = await fetch(`${d.url.split('/?')[0]}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson('example-owner') } });
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    return res.json();
+  };
+  const hub = { instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: true, error: null }] };
+  try {
+    for (const [sel, other] of [['a', 'b'], ['b', 'a']] as const) {
+      const leak = marksOf(marks[other]);
+      const own = marksOf(marks[sel]);
+      const scope = r.scopeOf(hub, sel, false);
+      assert.deepEqual(scope, { current: sel, all: false, instances: [sel] }, `${sel} selected: the scope is ${sel} alone`);
+      // What the pages for the selected instance receive: its state, and what each page asks its server for.
+      const state = (await ask(sel, '/api/state')) as State;
+      const boardsIn = await r.loadBoards(scope, ask);
+      const [served, waiting, prs, live] = await Promise.all(['/api/test-runs', '/api/waiting', '/api/prs', '/api/live'].map((p) => ask(sel, p)));
+      // As the server serves them, shown as where test runs are set up (the example project has none set up).
+      const testRuns = { ...(served as object), configured: true };
+      assert.deepEqual(boardsIn.map((b) => b.name), [sel], `the Board asks ${sel}'s server only`);
+      const rendered: Record<string, string> = {
+        board: clean(() => r.renderBoard(boardsIn)),
+        'board test runs': clean(() => r.renderBoardTestRuns(boardsIn)) + clean(() => r.renderTestRuns(testRuns, true)),
+        'machine test runs': clean(() => r.renderTestRuns(testRuns)),
+        waiting: clean(() => r.renderWaiting(waiting)) + clean(() => r.renderWaitingPage(state)),
+        prs: clean(() => r.renderPrs(prs)) + clean(() => r.renderPage('prs', state)),
+        agents: clean(() => r.renderAgents(state, live)),
+        machine: clean(() => r.renderPage('machine', state)) + clean(() => r.renderMachineSlots((state as unknown as { slots: unknown }).slots)),
+        switcher: clean(() => r.renderInstances(hub, sel)),
+      };
+      for (const page of ['overview', 'inbox', 'decisions', 'issues', 'activity']) rendered[page] = clean(() => r.renderPage(page, state));
+      const leaking = Object.entries(rendered).filter(([, html]) => leak.test(html)).map(([page]) => page);
+      assert.deepEqual(leaking, [], `${sel} selected: these pages show ${other}'s items`);
+      for (const page of ['board', 'board test runs', 'waiting', 'prs', 'agents', 'overview', 'decisions', 'issues', 'activity']) assert.match(rendered[page]!, own, `${sel} selected: the ${page} shows ${sel}'s own items`);
+      // Board columns and counts: the selected instance's cards only, Waiting on you among them.
+      assert.match(rendered.board!, new RegExp(`data-testid="board-column" data-column="waiting"[^>]*>[^]*?>2</span>[^]*?#${marks[sel].issue + 1}[^]*?#${marks[sel].issue + 2}`), "Waiting on you: the selected instance's decision and blocked task, counted 2");
+      assert.match(rendered.board!, /3 in flight/);
+      assert.doesNotMatch(rendered.board!, /data-testid="board-card-instance"/, 'one instance: no labels');
+      assert.equal((rendered['board test runs']!.match(/data-testid="board-test-runs-instance"/g) ?? []).length, 1, 'one test-runs strip, the selected instance\'s');
+      assert.match(rendered.switcher!, /data-scope="[ab]"/);
+      assert.doesNotMatch(rendered.switcher!, /data-testid="instance-all"[^>]*aria-current/, 'All instances: off');
+      // Asking another instance's server from a page scoped to one is refused before anything is sent.
+      await assert.rejects(r.onInstance(other, '/api/board', {}, Promise.resolve(scope)), /isn't selected/);
+    }
+
+    // The default: the instance picked last, else the first that answers; never All instances.
+    assert.deepEqual(r.scopeOf(hub, null, false), { current: 'a', all: false, instances: ['a'] });
+    assert.deepEqual(r.scopeOf({ instances: [{ name: 'a', up: false, error: 'down' }, { name: 'b', up: true, error: null }] }, null, false), { current: 'b', all: false, instances: ['b'] });
+    assert.deepEqual(r.scopeOf({ instances: [{ name: 'a', up: true, error: null }] }, 'a', true), { current: 'a', all: false, instances: ['a'] }, 'one instance: nothing to show all of');
+    assert.deepEqual(r.scopeOf(null, null, true), { current: null, all: false, instances: [null] }, "an instance's own dashboard: itself");
+
+    // All instances, chosen in the switcher: both boards, every card labelled with its instance; both test-runs strips, labelled.
+    const all = r.scopeOf(hub, 'a', true);
+    assert.deepEqual(all, { current: 'a', all: true, instances: ['a', 'b'] });
+    const both = await r.loadBoards(all, ask);
+    const board = clean(() => r.renderBoard(both));
+    assert.match(board, /data-scope="all"/);
+    for (const n of ['a', 'b'] as const) {
+      assert.match(board, marksOf(marks[n]));
+      assert.match(board, new RegExp(`data-instance="${n}"[^>]*>[\\s\\S]*?data-testid="board-card-instance"[^>]*>${n}<`), `${n}'s cards say they are ${n}'s`);
+    }
+    assert.match(board, /data-column="waiting"[^>]*>[^]*?>4<\/span>/, "Waiting on you counts both instances' items");
+    assert.match(board, /6 in flight/);
+    const strips = clean(() => r.renderBoardTestRuns(both));
+    assert.match(strips, /data-instance="a"[^>]*><div[^>]*>a<\/div>[\s\S]*data-instance="b"[^>]*><div[^>]*>b<\/div>/);
+    const sw = clean(() => r.renderInstances(hub, 'a', true));
+    assert.match(sw, /data-scope="all"/);
+    assert.match(sw, /data-testid="instance-all"[^>]*aria-current="true"/);
+    assert.match(sw, /data-testid="instance-all-note"[^>]*>The Board shows every instance; the other pages show a\./);
+  } finally {
+    for (const d of Object.values(servers)) await d.close();
+  }
 });

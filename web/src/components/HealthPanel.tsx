@@ -3,7 +3,7 @@
 // long each check takes and which got slower; what the runs used per day; and
 // suggestions. On a hub, each instance's service and today's usage side by side.
 import { useEffect, useState } from 'react';
-import { api, hub, instanceApi, type HealthView } from '../api';
+import { api, hub, instanceScope, onInstance, type HealthView } from '../api';
 import { DotPill, Meter, RecordsTable } from './patterns';
 import { ago, Badge, Card, cx, EST_NOTE, estUsd } from './ui';
 
@@ -400,7 +400,7 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
   );
 }
 
-/** Loads /api/health (every 30 s while shown); on a hub, also each instance's own view for the side-by-side table. */
+/** Loads /api/health (every 30 s while shown); on a hub with All instances chosen, also each instance's own view for the side-by-side table. */
 export function HealthPanel() {
   const [view, setView] = useState<HealthView | null>(null);
   const [instances, setInstances] = useState<InstanceHealth[] | undefined>(undefined);
@@ -413,9 +413,11 @@ export function HealthPanel() {
         if (!live) return;
         setView(v);
         setError(null);
-        const h = await hub;
-        if (h && live) {
-          const all = await Promise.all(h.instances.map(async (i) => (i.up ? instanceApi<HealthView>(i.name, '/api/health').then((v2) => ({ name: i.name, view: v2, error: null }), (e: Error) => ({ name: i.name, view: null, error: e.message })) : { name: i.name, view: null, error: i.error ?? 'not answering' })));
+        // Side by side only when All instances is chosen in the switcher; otherwise this instance's view alone.
+        const [h, scope] = await Promise.all([hub, instanceScope]);
+        if (h && scope.all && live) {
+          const shown = h.instances.filter((i) => scope.instances.includes(i.name));
+          const all = await Promise.all(shown.map(async (i) => (i.up ? onInstance<HealthView>(i.name, '/api/health').then((v2) => ({ name: i.name, view: v2, error: null }), (e: Error) => ({ name: i.name, view: null, error: e.message })) : { name: i.name, view: null, error: i.error ?? 'not answering' })));
           if (live) setInstances(all);
         }
       } catch (e) {

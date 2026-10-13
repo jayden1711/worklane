@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { hub, hubInstance, needsSignIn, selectInstance, signOut, useLiveState, type HubInfo, type State } from './api';
+import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { hub, instanceScope, needsSignIn, selectAllInstances, selectInstance, signOut, useLiveState, type HubInfo, type InstanceScope, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { ago, Kbd, cx } from './components/ui';
@@ -356,10 +356,15 @@ function Dashboard() {
   );
 }
 
-/** On a hub: its instances as sidebar rows; the current one is active, one that isn't answering is marked and can't be picked. */
-export function InstanceList({ hub: info, current, onSelect }: { hub: HubInfo; current: string; onSelect: (name: string) => void }) {
+/**
+ * On a hub: its instances as sidebar rows (only those this person has a role on); the selected one is active, one
+ * that isn't answering is marked and can't be picked. With two or more, an explicit "All instances" row, off unless
+ * chosen: the Board and its test runs then show every instance, each item labelled; every other page stays on the
+ * selected instance.
+ */
+export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void }) {
   return (
-    <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher data-testid="instance-switcher">
+    <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher data-testid="instance-switcher" data-scope={all ? 'all' : current}>
       <div className="px-2 pt-1 pb-1 text-[11.5px] font-medium text-ink-3">Instances</div>
       {info.instances.map((i) => (
         <SidebarRow
@@ -367,24 +372,32 @@ export function InstanceList({ hub: info, current, onSelect }: { hub: HubInfo; c
           icon={<span className={cx('size-2 rounded-full', i.up ? 'bg-green' : 'bg-red')} />}
           label={i.up ? i.name : `${i.name} (not answering)`}
           title={i.error ?? undefined}
-          active={i.name === current}
+          active={!all && i.name === current}
           disabled={!i.up && i.name !== current}
-          onSelect={() => i.name !== current && onSelect(i.name)}
+          onSelect={() => (all || i.name !== current) && onSelect(i.name)}
           testId="instance-row"
         />
       ))}
+      {info.instances.length > 1 && (
+        <SidebarRow icon={<Layers size={15} />} label="All instances" title="The Board and its test runs for every instance you have a role on, each labelled" active={all} onSelect={() => !all && onSelectAll()} testId="instance-all" />
+      )}
+      {all && (
+        <div className="px-2 pt-1 text-[11.5px] text-ink-3" data-testid="instance-all-note">
+          The Board shows every instance; the other pages show {current}.
+        </div>
+      )}
     </nav>
   );
 }
 
-/** On a hub: which instance this page shows, and a switch to the others (each served by its own dashboard). */
+/** On a hub: which instance this page shows (or All instances, for the Board), and a switch to the others (each served by its own dashboard). */
 function InstanceSwitcher() {
-  const [info, setInfo] = useState<{ hub: HubInfo; current: string } | null>(null);
+  const [info, setInfo] = useState<{ hub: HubInfo; scope: InstanceScope } | null>(null);
   useEffect(() => {
-    void Promise.all([hub, hubInstance]).then(([h, current]) => h && current && setInfo({ hub: h, current }));
+    void Promise.all([hub, instanceScope]).then(([h, scope]) => h && scope.current && setInfo({ hub: h, scope }));
   }, []);
   if (!info) return null;
-  return <InstanceList hub={info.hub} current={info.current} onSelect={selectInstance} />;
+  return <InstanceList hub={info.hub} current={info.scope.current!} all={info.scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} />;
 }
 
 /** Read-only: an emergency stop in force on this machine, shown on every page. It is lifted on the machine itself. */
