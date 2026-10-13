@@ -131,6 +131,8 @@ How `imports` decides (src/testrun/affected.ts; the coordinator reads the code f
 - A full run (a batch in PR mode, the deploy gate's run) always runs everything: `{tests}` is empty there.
 - If the plan fails (git can't read the commit), the run takes the whole suite.
 
+The engine's own CI selects the same way on a pull request (scripts/ci/affected.mjs, run in each test shard after the build; a push to main, and a PR labelled `full-ci`, run every file). It forces the whole suite for `package.json` and its lockfile, any `tsconfig`, `.nvmrc`, `test/helpers.ts`, `scripts/ci/` and `.github/`. `test/helpers.ts` is described per export rather than scanned (most tests import it for `repoRoot` alone); `test/ci-affected.test.ts` keeps the description in step with the file. A test that runs `git ls-files` in the repo depends on which files exist, and runs when a change adds one. The selected files are split into the 4 shards by `test/timings.json`, and a shard with none of them passes.
+
 ## Agents skip local full runs
 
 With `test_run` on and full tiers in it, the coordinator's test run is the full run. So neither an agent nor the coordinator's verify of its change runs the full suite on the machine as well (src/testrun/local.ts):

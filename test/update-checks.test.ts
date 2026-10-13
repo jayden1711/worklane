@@ -112,9 +112,20 @@ test('each Node version\'s 4 test shards gate through a summary job under the re
     const node = String(jobs[shard]?.strategy?.matrix?.node);
     const names = all.filter((c) => c.key === shard).map((c) => c.name);
     assert.deepEqual(names, [1, 2, 3, 4].map((k) => `test shard ${k}/4 (ubuntu-latest, ${node})`), `${shard}: 4 shards, named apart from the required check`);
-    const run = (jobs[shard]!.steps ?? []).map((s) => s.run ?? '').join('\n');
-    assert.match(run, /node scripts\/ci\/shard\.mjs "\$SHARD\/4"/, `${shard}: each shard runs its share of the 4`);
+    const steps = jobs[shard]!.steps ?? [];
+    const run = steps.map((s) => s.run ?? '').join('\n');
+    assert.match(run, /node scripts\/ci\/shard\.mjs "\$SHARD\/4" --only "\$RUNNER_TEMP\/selected"/, `${shard}: each shard runs its share of the 4, of the selected files`);
     assert.match(run, /node --test "\$\{files\[@\]\}"/);
+    // The selection: affected.mjs, told the event (a push to main gets every file), diffing the PR's merge commit
+    // against its base; a shard with no selected file passes only on a pull request.
+    const tests = steps.find((s) => /node --test/.test(s.run ?? ''))!;
+    assert.equal(tests.env?.EVENT, '${{ github.event_name }}', `${shard}: the selection knows the event`);
+    assert.match(tests.run!, /if \[ "\$FULL_CI" = true \]; then EVENT=full-ci; fi/, `${shard}: the full-ci label runs every file`);
+    assert.equal(tests.env?.FULL_CI, "${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}");
+    assert.match(tests.run!, /node scripts\/ci\/affected\.mjs --event "\$EVENT" --base HEAD\^1 --explain > "\$RUNNER_TEMP\/selected"\n[\s\S]*mapfile -t files < <\(node scripts\/ci\/shard\.mjs "\$SHARD\/4" --only "\$RUNNER_TEMP\/selected"\)/);
+    assert.match(tests.run!, /\[ "\$\{#files\[@\]\}" -eq 0 \]; then\n\s+\[ "\$EVENT" = pull_request \] \|\| \{ echo "shard \$SHARD\/4 has no test files" >&2; exit 1; \}/, `${shard}: on main every shard has files`);
+    const checkout = steps.find((s) => (s as { uses?: string }).uses?.startsWith('actions/checkout@')) as { with?: Record<string, unknown> } | undefined;
+    assert.equal(checkout?.with?.['fetch-depth'], 2, `${shard}: the merge commit and its base (HEAD^1)`);
     for (const n of names) {
       assert.ok(!defaults().includes(n) && !cfg.required_checks.includes(n), `${n}: the summary gates it, nothing requires it`);
       assert.equal(all.filter((c) => c.name === n).length, 1, `${n}: one check by that name`);
