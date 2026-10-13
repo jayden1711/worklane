@@ -159,3 +159,17 @@ test('the dashboards setup gives the viewer read of each token and traverse on t
   assert.match(signin, /sudo -u "\$viewer" sh -c 'umask 077;[^']*chmod 0400 "\$1"'/, 'each secret: the viewer\'s, 0400, written under umask 077');
   assert.doesNotMatch(signin, /echo[^\n]*\$secret/, 'never printed');
 });
+
+test('regression: credentials.sh dashboard-signin runs under set -u up to the secret prompt (no unbound $dir)', { skip: process.platform === 'win32' && 'bash' }, () => {
+  // The say line used $dir two lines before dir= was set: "line 52: dir: unbound variable".
+  const creds = readFileSync(join(repoRoot, 'scripts', 'setup', 'credentials.sh'), 'utf8');
+  const start = creds.indexOf('if [ "${1:-}" = dashboard-signin ]');
+  const block = creds.slice(start, creds.indexOf('\nfi\n', start) + 4);
+  // The block as the script runs it (strict mode, root already), with the root-only steps stood in for.
+  const stubs = `say() { printf '== %s\\n' "$*"; }\nensure_user() { :; }\nhome_of() { echo /home/$1; }\nsudo() { :; }\n`;
+  const r = spawnSync('bash', ['-c', `set -euo pipefail\n${stubs}${block}`, 'credentials.sh', 'dashboard-signin'], { encoding: 'utf8', input: '' });
+  assert.doesNotMatch(r.stderr, /unbound variable/, r.stderr);
+  assert.match(r.stdout, /^== the dashboard sign-in App's secrets, for wl-dash only \(\/home\/wl-dash\/\.config\/dashboard-signin, 0400\)$/m, 'it got to the prompt with the directory named');
+  assert.notEqual(r.status, 0, 'with stdin closed the prompt reads nothing and it stops there');
+  assert.doesNotMatch(r.stdout, /installed /, 'nothing installed');
+});
