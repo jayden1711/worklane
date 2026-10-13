@@ -139,7 +139,9 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
     scratchConfig(root, o.runner.budgetUsd);
     git(root, 'add', '--', BRAND.configDir);
     commit(root, `${BRAND.cli} harness eval: scratch instance config`);
-    git(root, 'push', '-q', 'origin', branch);
+    // The remote takes it by fetching from the clone: the engine pushes only through checkedPush (push-check.ts).
+    git(remote, 'fetch', '-q', root, `+refs/heads/${branch}:refs/heads/${branch}`);
+    git(root, 'fetch', '-q', 'origin');
 
     const cfg = loadConfig(root);
     const state = join(dir, 'state');
