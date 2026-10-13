@@ -32,7 +32,8 @@ import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/repor
 import { OWNER_DECISIONS } from '../dashboard-auth.js';
 import { BRAND } from '../brand.js';
 import { currentValue, intakeCaps } from '../settings.js';
-import { trustDigest, trustView, trustWeek } from '../trust.js';
+import { metricsDigest, trustDigest, trustView, trustWeek } from '../trust.js';
+import { deliveryMetrics } from '../merge-metrics.js';
 import { excerpt } from '../intake/decide.js';
 import { ResearchOnDemand } from './research-on-demand.js';
 
@@ -633,7 +634,8 @@ export abstract class Channel extends ResearchOnDemand {
 
   /**
    * The weekly trust digest (src/trust.ts): once per week (Monday, UTC), a plain message in the ops channel, when one
-   * is set. Read-only measurement: it posts numbers and a recommendation, and changes nothing.
+   * is set, and the metrics digest after it (delivery figures, the slowest tests and those over the time budget).
+   * Read-only measurement: it posts numbers and a recommendation, and changes nothing.
    */
   protected async trustDigestOutbound(cfg: IntakeConfig): Promise<void> {
     const channel = cfg.discord.ops_channel;
@@ -641,10 +643,18 @@ export abstract class Channel extends ResearchOnDemand {
     if (!cfg.discord.enabled || !channel || !src) return;
     const now = this.d.now?.() ?? new Date();
     const key = `trust-digest:${trustWeek(now)}`;
-    if (this.postedKeys().has(key)) return;
-    const agents = Number(currentValue(this.d.cfg, this.d.settings?.().settings ?? {}, 'workers'));
-    const text = trustDigest(trustView(this.d.log.read(0), { agents, now }), { instance: this.d.instance, dashboardUrl: cfg.discord.dashboard_url ?? null });
-    await this.channelSend(src, key, { channel }, { kind: 'notice', text });
+    if (!this.postedKeys().has(key)) {
+      const agents = Number(currentValue(this.d.cfg, this.d.settings?.().settings ?? {}, 'workers'));
+      const text = trustDigest(trustView(this.d.log.read(0), { agents, now }), { instance: this.d.instance, dashboardUrl: cfg.discord.dashboard_url ?? null });
+      await this.channelSend(src, key, { channel }, { kind: 'notice', text });
+    }
+    // Beside it, the delivery metrics and the slow tests (src/trust.ts metricsDigest): one post per message, each once.
+    if ([0, 1].every((i) => this.postedKeys().has(`metrics-digest:${trustWeek(now)}:${i}`))) return;
+    const metrics = metricsDigest(deliveryMetrics(this.d.log.read(0), { now, budgetS: this.d.cfg.project.metrics.slow_test_budget_s }), { instance: this.d.instance, dashboardUrl: cfg.discord.dashboard_url ?? null });
+    for (const [i, part] of metrics.entries()) {
+      const k = `metrics-digest:${trustWeek(now)}:${i}`;
+      if (!this.postedKeys().has(k)) await this.channelSend(src, k, { channel }, { kind: 'notice', text: part });
+    }
   }
 
   /**
