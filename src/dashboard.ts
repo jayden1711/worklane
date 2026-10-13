@@ -20,6 +20,7 @@ import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
+import { deployGateView } from './deploy-gate/gate.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, siteForInstance, siteForRoot } from './service.js';
@@ -810,6 +811,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       prCounts: prCounts(prsView(events).prs),
       // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
       protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
+      // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why.
+      ...(opts.cfg.tests.deploy_gate ? { deployGate: deployGateView(opts.stateDir, events, repo, opts.cfg.tests.deploy_gate.branch) } : {}),
     };
     // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
     return isWriter(who.role) ? full : stateForViewer(full);
