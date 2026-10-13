@@ -33,6 +33,8 @@ import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages
 import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
+import { UsageBanner, UsageLines } from './components/Usage';
+import type { UsageInfo } from './api';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
@@ -103,3 +105,7 @@ export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsol
 export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<AddProjectView data={data} />);
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
+export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
+export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
+export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
+export { countdown } from './components/Usage';

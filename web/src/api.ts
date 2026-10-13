@@ -432,6 +432,14 @@ export async function signOut(): Promise<void> {
   window.location.assign('/');
 }
 
+/** An instance's Claude usage (/api/usage): the usage-limit pause in force, and today's runs and limit hits (UTC day). */
+export interface UsageInfo {
+  instance: string;
+  paused: { since: string; resetAt: string; source: 'claude' | 'default'; kind: string | null } | null;
+  today: { runs: number; limitHits: number };
+  lastHit: string | null;
+}
+
 /** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */
 export interface HubInfo {
   instances: { name: string; up: boolean; error: string | null }[];
