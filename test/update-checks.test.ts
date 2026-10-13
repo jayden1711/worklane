@@ -15,15 +15,53 @@ function defaults(): string[] {
   return [...m![1]!.matchAll(/"([^"]*)"/g)].map((x) => x[1]!);
 }
 
+/** A branch filter pattern (GitHub's glob: `*` within a path segment, `**` across them) matching a branch name. */
+const branchMatches = (pattern: string, branch: string) =>
+  new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '.*').replace(/\?/g, '.')}$`).test(branch);
+
+type PushFilter = { branches?: string[]; 'branches-ignore'?: string[]; tags?: string[]; 'tags-ignore'?: string[] } | null;
+
+/**
+ * Whether a workflow's `on:` runs it on a push to `branch`. A bare `push` runs on every branch; a push with tag
+ * filters and no branch filter runs on those tags only, never a branch; otherwise branches / branches-ignore decide.
+ */
+function pushRunsOn(on: unknown, branch = 'main'): boolean {
+  if (on === 'push') return true;
+  if (Array.isArray(on)) return on.includes('push');
+  if (!on || typeof on !== 'object' || !('push' in on)) return false;
+  const push = (on as { push: PushFilter }).push;
+  if (!push) return true;
+  if (push.branches) return push.branches.filter((p) => !p.startsWith('!')).some((p) => branchMatches(p, branch)) && !push.branches.filter((p) => p.startsWith('!')).some((p) => branchMatches(p.slice(1), branch));
+  if (push['branches-ignore']) return !push['branches-ignore'].some((p) => branchMatches(p, branch));
+  return !(push.tags || push['tags-ignore']);
+}
+
+test('which push triggers run on a push to main', () => {
+  assert.equal(pushRunsOn('push'), true);
+  assert.equal(pushRunsOn(['push', 'pull_request']), true);
+  assert.equal(pushRunsOn({ push: null }), true);
+  assert.equal(pushRunsOn({ push: { branches: ['main'] } }), true);
+  assert.equal(pushRunsOn({ push: { branches: ['release/*'] } }), false);
+  assert.equal(pushRunsOn({ push: { branches: ['**'] } }), true);
+  assert.equal(pushRunsOn({ push: { branches: ['*', '!main'] } }), false);
+  assert.equal(pushRunsOn({ push: { 'branches-ignore': ['main'] } }), false);
+  assert.equal(pushRunsOn({ push: { 'branches-ignore': ['dependabot/**'] } }), true);
+  assert.equal(pushRunsOn({ push: { paths: ['src/**'] } }), true);
+  // Tags only: a tag push, never a branch push.
+  assert.equal(pushRunsOn({ push: { tags: ['v*'] }, workflow_dispatch: null }), false);
+  assert.equal(pushRunsOn({ push: { 'tags-ignore': ['v*'] } }), false);
+  // Tags and branches: the branch filter decides.
+  assert.equal(pushRunsOn({ push: { tags: ['v*'], branches: ['main'] } }), true);
+  assert.equal(pushRunsOn({ pull_request: null }), false);
+});
+
 /** Every check run a push to main creates, from the workflows: job names, matrix jobs expanded as GitHub names them. */
 function pushChecks(): string[] {
   const dir = join(repoRoot, '.github', 'workflows');
   const out: string[] = [];
   for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x))) {
     const wf = parse(readFileSync(join(dir, f), 'utf8')) as { on?: unknown; jobs?: Record<string, { name?: string; if?: string; strategy?: { matrix?: Record<string, unknown[]> } }> };
-    const on = wf.on as Record<string, { branches?: string[] } | null> | string[] | undefined;
-    const push = Array.isArray(on) ? on.includes('push') : on && 'push' in on ? (on.push?.branches ?? ['main']).includes('main') : false;
-    if (!push) continue;
+    if (!pushRunsOn(wf.on)) continue;
     for (const [key, job] of Object.entries(wf.jobs ?? {})) {
       if (job.if && /event_name\s*==\s*'pull_request'/.test(job.if)) continue; // PR-only: always skipped on main
       const name = job.name ?? key;
