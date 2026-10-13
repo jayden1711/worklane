@@ -509,8 +509,8 @@ export const EventSchemas = {
   'coordinator.started': z.strictObject({ instance: z.string(), pid: z.number().int(), version: z.string() }),
   /** A task started in a worktree from the pool (worktree-pool.ts), not a fresh one: this claim's worktree is `name`. */
   'worktree.pooled': z.strictObject({ issue, name: z.string() }),
-  /** The worktree pool brought to main's tip: what was made and removed, and setups that failed. */
-  'worktree.pool_refilled': z.strictObject({ base: sha, created: z.array(z.string()), removed: z.array(z.string()), errors: z.array(z.string()) }),
+  /** The worktree pool brought to main's tip: what was made, moved to it with its install kept (setup_key), removed, and setups that failed. */
+  'worktree.pool_refilled': z.strictObject({ base: sha, created: z.array(z.string()), moved: z.array(z.string()).default([]), removed: z.array(z.string()), errors: z.array(z.string()) }),
   /** At start: state/ closed to other users (paths tightened, first 20 named) and old task files removed. */
   'state.tidied': z.strictObject({ tightened: z.number().int(), paths: z.array(z.string()), removed_tasks: z.number().int() }),
   /** A shutdown began (SIGTERM, SIGINT): runs in flight are aborted and their tasks requeued; `pending` is what was in flight. */
