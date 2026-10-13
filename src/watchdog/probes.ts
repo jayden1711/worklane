@@ -132,6 +132,8 @@ export interface InstanceFacts {
   stop: { reason: string; by: string | null } | null;
   /** The agent user's Claude sign-in, as `claude auth status` reports it (never the token); null: not checked. */
   auth: { loggedIn: boolean; expiresAt?: string | null } | null;
+  /** When the probe first said signed out, of the probes in a row that say so (ms); unset: not known. */
+  authFailingSince?: number;
   /** Why the instance's GitHub token couldn't be had just now (an App token that wouldn't mint); null when it was. */
   githubTokenError: string | null;
   /** An emergency stop is in force: no work moves, on purpose. */
@@ -150,8 +152,12 @@ export function instanceFindings(f: InstanceFacts): Finding[] {
   const lastAuthFail = [...recent].reverse().find((e) => e.type === 'run.finished' && (e.payload as { reason: string }).reason === 'auth_mismatch');
   const okAfter = lastAuthFail && f.events.some((e) => e.id > lastAuthFail.id && e.type === 'run.finished' && (e.payload as { reason: string }).reason === 'succeeded');
   const refreshes = recent.filter((e) => e.type === 'run.transient_retry' && (e.payload as { cause: string }).cause === 'token_refresh').length;
-  if ((lastAuthFail && !okAfter) || f.auth?.loggedIn === false) {
-    const why = f.auth?.loggedIn === false ? "the agent user's claude auth status says it is signed out" : `a run stopped on its Claude login: ${String((lastAuthFail!.payload as { detail: string }).detail).slice(0, 200)}`;
+  // A probe that says signed out counts only while no run on the login has succeeded since it started saying so: a run
+  // that finished well had a working login, so the probe was wrong (or the login came back), and no one is needed.
+  const since = f.authFailingSince;
+  const probeOut = f.auth?.loggedIn === false && !(since !== undefined && f.events.some((e) => at(e) >= since && e.type === 'run.finished' && (e.payload as { reason: string }).reason === 'succeeded'));
+  if ((lastAuthFail && !okAfter) || probeOut) {
+    const why = probeOut ? "the agent user's claude auth status says it is signed out" : `a run stopped on its Claude login: ${String((lastAuthFail!.payload as { detail: string }).detail).slice(0, 200)}`;
     out.push({ kind: 'claude_auth', key: i, instance: i, detail: why, fix: "Sign the instance's agent user in to Claude again (a new setup-token for that user), then check it with claude auth status as that user", tried: refreshes ? [`retried ${refreshes} run${refreshes === 1 ? '' : 's'} after a token refresh in the last hour`] : [] });
   }
   const exp = f.auth?.expiresAt ? Date.parse(f.auth.expiresAt) : NaN;

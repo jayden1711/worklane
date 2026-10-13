@@ -8,7 +8,7 @@ import { BRAND } from '../src/brand.js';
 import { ConfigInvalid } from '../src/config/load.js';
 import { initInstance, laneRuns, loadInstance } from '../src/instance.js';
 import { asUser, defaultAgentPath, projectCommand } from '../src/os/index.js';
-import { agentEnv, cliArgs, CliRunner, runAsEnv } from '../src/runner.js';
+import { agentEnv, claudeAuthStatus, claudeAuthStatusJson, cliArgs, CliRunner, runAsEnv } from '../src/runner.js';
 import { sandboxSettings } from '../src/sandbox.js';
 import { instanceEnv } from '../src/service.js';
 import { exampleProject } from './helpers.js';
@@ -52,6 +52,48 @@ test('an agent run as its own user gets its home and login, git trusts its workt
   const [file, args] = asUser('shop-agent', 'claude', ['-p', 'hi'], { HOME: '/home/shop-agent', X: undefined });
   assert.equal(file, 'sudo');
   assert.deepEqual(args, ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i', 'HOME=/home/shop-agent', 'claude', '-p', 'hi'], 'a clean environment: only what is passed');
+});
+
+test('regression: every claude auth status probe runs with the agent user\'s home, name and XDG dirs, the same as its runs', { skip: process.platform === 'win32' && 'separate users are POSIX-only' }, async () => {
+  // A stand-in sudo on PATH records the environment each call passes through env -i, and plays claude.
+  const dir = mkdtempSync(join(tmpdir(), 'probe-env-'));
+  const calls = join(dir, 'calls.jsonl');
+  writeFileSync(
+    join(dir, 'sudo'),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+const i = a.indexOf('-i');
+const env = {};
+let j = i + 1;
+for (; j < a.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[j]); j++) env[a[j].slice(0, a[j].indexOf('='))] = a[j].slice(a[j].indexOf('=') + 1);
+const probe = a[j + 1] === 'auth' && a[j + 2] === 'status';
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ probe, env }) + '\\n');
+if (probe) console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }));
+else console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 0, total_cost_usd: 0 }));
+`,
+  );
+  chmodSync(join(dir, 'sudo'), 0o755);
+  const runAs = { user: 'shop-agent', home: '/home/shop-agent' };
+  // The coordinator's own environment, as the service hands it to the watchdog: its home, its name, its XDG dirs.
+  const coord = { PATH: dir, HOME: '/home/coord', USER: 'coord', LOGNAME: 'coord', XDG_CONFIG_HOME: '/home/coord/.config', XDG_CACHE_HOME: '/home/coord/.cache', CLAUDE_CONFIG_DIR: '/home/coord/.claude' };
+  try {
+    const run = await new CliRunner('cli', coord, 'claude', runAs).run({ prompt: 'p', model: 'm', cwd: dir, allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, role: 'worker' });
+    assert.equal(run.reason, 'succeeded', run.detail);
+    assert.deepEqual(claudeAuthStatusJson(coord, runAs), { loggedIn: true }, "the watchdog's probe");
+    assert.equal(claudeAuthStatus(coord, runAs).method, 'claude.ai');
+    const seen = readFileSync(calls, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { probe: boolean; env: Record<string, string> });
+    const runEnv = seen.find((c) => !c.probe)!.env;
+    const probes = seen.filter((c) => c.probe);
+    assert.equal(probes.length, 3, "the run's own preflight, the watchdog's and claudeAuthStatus");
+    const KEYS = ['HOME', 'USER', 'LOGNAME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME'];
+    const pick = (e: Record<string, string>) => Object.fromEntries(KEYS.map((k) => [k, e[k]]));
+    for (const p of probes) assert.deepEqual(pick(p.env), pick(runEnv), 'each probe looks where the run looks, never in the coordinator\'s home');
+    const h = '/home/shop-agent';
+    assert.deepEqual(pick(runEnv), { HOME: h, USER: 'shop-agent', LOGNAME: 'shop-agent', CLAUDE_CONFIG_DIR: `${h}/.claude`, XDG_CONFIG_HOME: `${h}/.config`, XDG_DATA_HOME: `${h}/.local/share`, XDG_CACHE_HOME: `${h}/.cache`, XDG_STATE_HOME: `${h}/.local/state` }, "the agent user's, all of them");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // Acceptance, on a machine set up with separate users (see docs/separate-users.md):

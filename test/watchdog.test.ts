@@ -194,6 +194,27 @@ for (const t of TRIGGERS) {
   });
 }
 
+test('regression: a probe that says signed out raises no claude_auth incident once a run on the login has succeeded since it started saying so', async () => {
+  const { w, pass } = world();
+  await pass();
+  const open = () => readIncidents(w.dir).incidents.filter((x) => x.kind === 'claude_auth' && !x.resolvedAt);
+  // The probe says signed out (on the machine: it looked in the coordinator's home), but agents' runs go on working.
+  w.auth = { loggedIn: false };
+  await pass();
+  w.events.push(ev('run.finished', { issue: 1, role: 'worker', reason: 'succeeded', detail: '' }, new Date(w.now.getTime() + 5 * 60_000).toISOString()));
+  await pass(10);
+  assert.equal(open().length, 0, 'a run that worked since the probe says the login works');
+  // Probe after probe still says so: no incident while the run that worked came after the first of them.
+  for (let i = 0; i < 3; i++) await pass();
+  assert.equal(open().length, 0, 'still none');
+  // Signed in again, then signed out with no run working since: that one raises.
+  w.auth = { loggedIn: true };
+  await pass();
+  w.auth = { loggedIn: false };
+  await pass();
+  assert.equal(open().length, 1, 'a probe with no run working since it still raises');
+});
+
 test('raiseIncident dedupes an open incident, resolveIncident closes it once, and a quick relapse reopens the same one', () => {
   const dir = mkdtempSync(join(tmpdir(), 'incidents-'));
   const now = new Date('2026-10-13T00:00:00Z');
