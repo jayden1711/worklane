@@ -6,7 +6,8 @@ import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswe
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
-import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
+import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { Header } from './pages/Overview';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
@@ -123,3 +124,19 @@ export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToSt
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
 export { countdown } from './components/Usage';
+/** The page header with its menu button and the narrow-screen navigation drawer, open; on a hub, its instances with their dots. */
+export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo; status?: Record<string, HealthStatus> } = {}) => {
+  const open = o.open ?? true;
+  const status = o.status ?? {};
+  const switcher = o.hub ? <InstanceList hub={o.hub} current={o.hub.instances[0]!.name} onSelect={() => {}} status={status} /> : null;
+  return renderToStaticMarkup(
+    <NavMenu.Provider value={{ open, setOpen: () => {} }}>
+      <Header title="Board" />
+      <NavDrawer open={open} setOpen={() => {}}>
+        <SidebarBody state={state} path="/" counts={{}} health={{ hub: o.hub ?? null, status }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
+      </NavDrawer>
+    </NavMenu.Provider>,
+  );
+};
+export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
+export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));

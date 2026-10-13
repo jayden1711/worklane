@@ -169,7 +169,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
                         {ago(e.ts)}
                       </span>
                       <span className="min-w-0 flex-1">{a?.summary ?? e.type}</span>
-                      <Badge className="hidden shrink-0 sm:inline-flex">{e.type}</Badge>
+                      <Badge className="shrink-0 max-sm:hidden">{e.type}</Badge>
                     </li>
                   );
                 })}

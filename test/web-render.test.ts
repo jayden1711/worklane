@@ -88,6 +88,9 @@ interface Render {
   elapsed(since: string, now?: number): string;
   renderSignIn(): string;
   renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
+  renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
+  renderHeader(title: string): string;
+  navRows: { to: string; label: string; testId: string }[];
   renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
@@ -347,6 +350,52 @@ test('sign-in: the hub page shows a GitHub sign-in when nobody is signed in; the
   assert.match(audit, /decision\.answered/);
   assert.match(audit, /id d-1, answer approve/);
   assert.match(r.renderAudit([]), /No writes recorded yet/);
+});
+
+test('narrow screens: the page header\'s menu button opens a drawer with every page, the instance list and the status dots', () => {
+  // Rendered as on the server, with no window: the drawer's scroll lock measures the page only in a browser.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  const drawerOf = (o?: Parameters<Render['renderNavDrawer']>[1]) => r.renderNavDrawer(asOwner as never, o);
+  let open: string, amber: string, hub: string, closed: string;
+  try {
+    open = drawerOf();
+    amber = drawerOf({ status: { '': 'amber' } });
+    hub = drawerOf({ hub: { instances: [{ name: 'shop', up: true, error: null }, { name: 'web', up: false, error: 'down' }] }, status: { shop: 'red' } });
+    closed = drawerOf({ open: false });
+  } finally {
+    g.window = stub;
+  }
+  // The menu button: named, says the drawer is open, and points at it.
+  const button = open.match(/<button[^>]*data-testid="nav-menu"[^>]*>/)?.[0] ?? '';
+  assert.ok(button, 'the header has a menu button');
+  assert.match(button, /aria-label="Open navigation"/);
+  assert.match(button, /aria-expanded="true"/);
+  assert.match(button, /aria-controls="nav-drawer"/);
+  assert.match(button, /md:hidden/, 'only on a narrow screen: the sidebar is there on a wide one');
+  // The drawer: a dialog with that id, a title and a close button.
+  const drawer = open.slice(open.indexOf('id="nav-drawer"'));
+  assert.match(open, /<div[^>]*role="dialog"[^>]*id="nav-drawer"|<div[^>]*id="nav-drawer"[^>]*role="dialog"/, 'the drawer is a dialog with the id the button controls');
+  assert.match(drawer, /data-testid="nav-drawer-close"[^>]*aria-label="Close navigation"|aria-label="Close navigation"[^>]*data-testid="nav-drawer-close"/);
+  assert.match(drawer, />Navigation</);
+  // Every page of the sidebar, as a link to its route.
+  assert.ok(r.navRows.length >= 18, 'the sidebar rows were read');
+  for (const n of r.navRows) assert.match(drawer, new RegExp(`<a href="${n.to.replace(/[/]/g, '\\/')}"[^>]*data-testid="${n.testId}"`), `the drawer links to ${n.label}`);
+  assert.match(drawer, /data-testid="search-button"/);
+  assert.match(drawer, /data-testid="theme-toggle"/);
+  assert.match(drawer, /data-testid="live-indicator"/);
+  // Off a hub: this instance's status dot, linking to Health.
+  assert.match(amber.slice(amber.indexOf('id="nav-drawer"')), /<a href="\/health"[^>]*>.*?data-status="amber" data-testid="instance-status-dot"/);
+  // On a hub: the instance list, each with its dot.
+  const hubDrawer = hub.slice(hub.indexOf('id="nav-drawer"'));
+  assert.match(hubDrawer, /data-testid="instance-switcher"/);
+  assert.deepEqual([...hubDrawer.matchAll(/data-status="([a-z]+)" data-testid="instance-dot"/g)].map((m) => m[1]), ['red', 'red'], 'each instance has its dot (one not answering is red)');
+  // Closed: the button says so, and there's no drawer.
+  assert.match(closed, /data-testid="nav-menu"[^>]*aria-expanded="false"|aria-expanded="false"[^>]*data-testid="nav-menu"/);
+  assert.doesNotMatch(closed, /id="nav-drawer"/);
+  // A header outside the dashboard (no drawer to open) has no menu button.
+  assert.doesNotMatch(r.renderHeader('Board'), /nav-menu/);
 });
 
 test('the UI asks for hub instances only when a hub served the page (no 404 on an instance\'s own dashboard)', async () => {

@@ -13,6 +13,7 @@
 // Commands for `run` (short form or JSON):
 //   open decisions | {"op":"open","page":"/issues/3"}      navigate and wait for the page's heading
 //   click text:Approve | click testid:x | click <css>     a real mouse click at the element's centre
+//   click point:380,400                                    a real mouse click at that point of the page (e.g. an overlay beside a drawer)
 //   type hello | {"op":"type","target":"input","text":"x"}
 //   key j | key Meta+k | key Escape                        keyboard input (shortcuts, chords)
 //   text <target>                                          the element's text (default: main)
@@ -24,7 +25,8 @@
 //
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
 // --with-prs (add pull-request history for the PR views), --with-usage-pause (pause the demo on the Claude usage
-// limit, resetting in 2 h: the banner and the Overview's usage line), --viewport <w>x<h> (default 1440x1000; under
+// limit, resetting in 2 h: the banner and the Overview's usage line), --with-incidents (watchdog incidents for
+// Health: two open, one resolved, in a slot directory of its own under the temporary directory), --viewport <w>x<h> (default 1440x1000; under
 // 768 wide, e.g. 390x844, a phone), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
 // demo's owner, example-owner; the token is the owner's break-glass, so this only names who answers),
@@ -81,6 +83,8 @@ async function start() {
     // The demo, its dashboard and their state all live in the temporary directory, never the user's own:
     // in the children, and in this process too (the run record below is written from here).
     process.env[`${BRAND.envPrefix}_STATE_DIR`] = join(work, 'state');
+    // With incidents, the machine's slot directory (where the watchdog keeps them) is the temporary one too.
+    if (flag('--with-incidents')) process.env.AGENT_SLOTS_DIR = join(work, 'slots');
     const env = { ...process.env };
     const seeded = spawnSync(process.execPath, [cli, 'demo', join(work, 'demo')], { encoding: 'utf8', env });
     const root = seeded.stdout.match(/project (.+)/)?.[1]?.trim();
@@ -106,6 +110,7 @@ async function start() {
     const run = await seedRun(root, issue);
     if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
     if (flag('--with-usage-pause')) await seedUsagePause(root, issue);
+    if (flag('--with-incidents')) await seedIncidents(process.env.AGENT_SLOTS_DIR);
 
     const profile = join(work, 'chrome');
     mkdirSync(profile);
@@ -205,6 +210,18 @@ async function seedPrs(root, issues) {
   }
 }
 
+/** --with-incidents: two open watchdog incidents (one red, one amber) and a resolved one, in the temporary slot directory. */
+async function seedIncidents(dir) {
+  const mod = join(engine, 'dist', 'src', 'watchdog', 'incidents.js');
+  if (!existsSync(mod)) return;
+  const { raiseIncident, resolveIncident } = await import(pathToFileURL(mod).href);
+  const at = (h) => new Date(Date.now() - h * 3600_000);
+  raiseIncident('unit_down', 'coordinator', "this instance's coordinator is failed", 'start it again from the machine', { dir, tried: ['restarted it 5 times before giving up'], now: at(2) });
+  raiseIncident('disk_full', 'data', 'the data volume is 91% full', 'free space on that volume', { dir, severity: 'amber', now: at(1) });
+  raiseIncident('github_auth', 'app', 'GitHub refused the token', 'check the GitHub App', { dir, now: at(30) });
+  resolveIncident('github_auth', 'app', { dir, now: at(29) });
+}
+
 /** --with-usage-pause: a run hit the Claude usage limit and the instance is paused until 2 h from now. */
 async function seedUsagePause(root, issue) {
   const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
@@ -283,7 +300,8 @@ class Controller {
     return until(`${target}`, () => this.eval(`(() => { const e = ${targetExpr(target)}; if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`), 10_000);
   }
   async click(target) {
-    const { x, y } = await this.element(target);
+    const point = /^point:(\d+),(\d+)$/.exec(target);
+    const { x, y } = point ? { x: Number(point[1]), y: Number(point[2]) } : await this.element(target);
     for (const type of ['mousePressed', 'mouseReleased']) await this.cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
     await sleep(150);
     return { clicked: target };
