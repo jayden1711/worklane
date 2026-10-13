@@ -94,7 +94,7 @@ test('test-user.sh --print: the slice caps below the instances, rootless Docker 
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /# \/etc\/systemd\/system\/worklane-test\.slice\n\[Unit\][\s\S]*?\[Slice\]\nCPUWeight=10\nIOWeight=10\nAllowedCPUs=16-23\nCPUQuota=800%\nMemoryMax=5G\nMemorySwapMax=0\n/);
   const docker = r.stdout.slice(r.stdout.indexOf('# /etc/systemd/system/worklane-test-shop-docker.service'), r.stdout.indexOf('# sudoers rule'));
-  for (const line of ['User=wl-test-shop', 'Group=wl-test-shop', 'Slice=worklane-test.slice', 'ExecStart=/opt/worklane-test/docker-29.8.2/dockerd-rootless.sh --data-root /var/lib/worklane-test/shop/docker --ip 127.0.0.1']) {
+  for (const line of ['User=wl-test-shop', 'Group=wl-test-shop', 'Slice=worklane-test.slice', 'ExecStart=/opt/worklane-test/docker-29.8.2/dockerd-rootless.sh --data-root /var/lib/worklane-test/shop/docker --ip 127.0.0.1 --exec-opt native.cgroupdriver=cgroupfs']) {
     assert.ok(docker.split('\n').includes(line), `docker unit: ${line}`);
   }
   assert.match(r.stdout, /^wl-shop ALL=\(root\) NOPASSWD: \/usr\/local\/libexec\/worklane-testrun shop \*$/m, 'the coordinator reaches its own test user only');
@@ -109,6 +109,31 @@ test('regression: the Docker unit\'s PATH has /usr/sbin and /sbin (dockerd-rootl
   const docker = r.stdout.slice(r.stdout.indexOf('# /etc/systemd/system/worklane-test-shop-docker.service'), r.stdout.indexOf('# sudoers rule'));
   const path = /^Environment=PATH=(.+)$/m.exec(docker)?.[1]?.split(':') ?? [];
   for (const dir of ['/usr/sbin', '/sbin', '/usr/bin', '/bin']) assert.ok(path.includes(dir), `PATH has ${dir}: ${path.join(':')}`);
+});
+
+test('regression: rootless Docker\'s containers get cgroups of their own inside the unit\'s delegated subtree, not a user session\'s', { skip: !posix && 'bash' }, () => {
+  // With Docker's default systemd driver, db-start failed on a host where the test user has no session:
+  // "open /sys/fs/cgroup/user.slice/user-<uid>.slice/cgroup.controllers: no such file or directory".
+  const r = printInstall();
+  assert.equal(r.status, 0, r.stderr);
+  const docker = r.stdout.slice(r.stdout.indexOf('# /etc/systemd/system/worklane-test-shop-docker.service'), r.stdout.indexOf('# sudoers rule'));
+  const lines = docker.split('\n');
+  const execStart = lines.find((l) => l.startsWith('ExecStart=')) ?? '';
+  assert.match(execStart, / --exec-opt native\.cgroupdriver=cgroupfs( |$)/, 'the cgroupfs driver, never the systemd one');
+  assert.doesNotMatch(lines.filter((l) => !l.startsWith('#')).join('\n'), /native\.cgroupdriver=systemd|--cgroup-parent|user\.slice/);
+  // runc puts a container beside its own cgroup: the daemon in <unit>/daemon, so containers in <unit>/<id>.
+  assert.ok(lines.includes('DelegateSubgroup=daemon'), 'the daemon runs in the unit\'s subgroup daemon');
+  const delegate = lines.filter((l) => l.startsWith('Delegate='));
+  assert.equal(delegate.length, 1, delegate.join(' | '));
+  assert.deepEqual(delegate[0]!.slice('Delegate='.length).split(' ').sort(), ['cpu', 'io', 'memory', 'pids']);
+  assert.ok(lines.includes('Slice=worklane-test.slice'), 'under the test runs\' one shared cap');
+  // check fails unless the daemon is in that subgroup with those controllers.
+  const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
+  const checks = sh.slice(sh.indexOf('service_checks() {'), sh.indexOf('\n}\n', sh.indexOf('service_checks() {')));
+  assert.match(checks, /^\s*docker_cgroup_check \|\| fail=1$/m, 'check runs the Docker cgroup check');
+  const fn = sh.slice(sh.indexOf('docker_cgroup_check() {'), sh.indexOf('\n}\n', sh.indexOf('docker_cgroup_check() {')));
+  assert.match(fn, /"\$own" == "\$cg\/daemon"/);
+  assert.match(fn, /for c in cpu io memory pids;/);
 });
 
 test('regression: check, run as root through sudo, calls the helper as root, not as the admin who ran sudo', { skip: !posix && 'bash' }, () => {

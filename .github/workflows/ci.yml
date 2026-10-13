@@ -132,6 +132,10 @@ jobs:
           n="$(nproc)"
           sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
           tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
+      - name: the database image, pinned to the digest it has today
+        run: |
+          docker pull -q postgres:17-alpine
+          echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
       - name: the coordinator's sandbox host, as wl-ci, against real systemd-run
         run: |
           # What wl-ci runs, world-readable: the build, its one dependency, node, the driver and the fixtures.
@@ -145,10 +149,33 @@ jobs:
           chmod -R a+rX "$t"
           echo "T=$t" >> "$GITHUB_ENV"
           sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$t/ids"
+          sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$t/ids.db"
           sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
-            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1/dist" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" -
+            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1/dist" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" "$DB_IMAGE"
+      - name: the database container's processes are in a cgroup of their own, inside worklane-test.slice
+        run: |
+          c="$(cat "$T/ids.db")"
+          [ -n "$c" ] || { echo "the driver named no container" >&2; exit 1; }
+          pid="$(sudo -u wl-test-ci env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock \
+            /opt/worklane-test/docker/docker inspect --format '{{.State.Pid}}' "$c")"
+          echo "container $c, main pid $pid"
+          cat "/proc/$pid/cgroup"
+          cg="$(sed -n 's/^0:://p' "/proc/$pid/cgroup")"
+          unit="$(systemctl show worklane-test-ci-docker.service -p ControlGroup --value)"
+          echo "the container's cgroup: $cg"
+          echo "its controllers: $(cat "/sys/fs/cgroup$cg/cgroup.controllers")"
+          case "$cg" in /worklane.slice/worklane-test.slice/*) ;; *) echo "not inside /worklane.slice/worklane-test.slice/" >&2; exit 1 ;; esac
+          case "$cg" in "$unit"/daemon | "$unit"/daemon/*) echo "in the daemon's own cgroup, not one of its own" >&2; exit 1 ;; "$unit"/*) ;; *) echo "not inside $unit" >&2; exit 1 ;; esac
+          for k in cpu io memory pids; do grep -qw "$k" "/sys/fs/cgroup$cg/cgroup.controllers" || { echo "no $k controller in its cgroup" >&2; exit 1; }; done
+          echo "CG=$cg" >> "$GITHUB_ENV"
+      - name: wipe, as wl-ci
+        run: |
+          sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
+            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" --wipe "$1/dist" ci "$1/ids"' _ "$T"
       - name: nothing left of the run, seen as root
         run: |
+          if [ -e "/sys/fs/cgroup$CG" ]; then echo "the container's cgroup $CG is still there" >&2; exit 1; fi
+          echo "the container's cgroup $CG is gone"
           while IFS= read -r id; do
             [ -n "$id" ] || continue
             if sudo test -e "/var/lib/worklane-test/ci/runs/$id"; then echo "run $id's directory is still there" >&2; exit 1; fi
