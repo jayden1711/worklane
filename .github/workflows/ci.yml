@@ -137,7 +137,7 @@ jobs:
 
   bootstrap-windows:
     # Windows' documented route, local mode inside WSL2 (Ubuntu 24.04, systemd on), end to end as the bootstrap job
-    # runs it: this commit's engine packed on the Windows side, then in a fresh distro, as a plain user, the bootstrap
+    # runs it: this commit's engine packed inside the distro, then, as a plain user, the bootstrap
     # (which fetches its own Node; nothing of ours is preinstalled), init's checklist, doctor green and naming the OS as
     # WSL, `worklane up` / `down` as a systemd --user unit, and the demo. No GitHub: the same stand-ins. Not a
     # required check, and not one of the updater's checks (the owner decides). WSL setup: Vampire/setup-wsl
@@ -150,16 +150,6 @@ jobs:
         shell: wsl-bash {0}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-      - name: pack this commit's engine (on the Windows side; WSL gets only the tarball)
-        shell: bash
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build && npm run build:web
-          npm pack --pack-destination "$RUNNER_TEMP" > /dev/null
-          ls "$RUNNER_TEMP"/*.tgz
       - name: WSL2, Ubuntu 24.04, systemd on
         uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
         with:
@@ -177,6 +167,25 @@ jobs:
           loginctl enable-linger wl
           for _ in $(seq 30); do systemctl is-active --quiet user@"$(id -u wl)".service && break; sleep 1; done
           systemctl is-active user@"$(id -u wl)".service
+      - name: pack this commit's engine inside WSL (dist/ and the web UI built, as in a release), with a Node that's gone after
+        run: |
+          ws="$(wslpath -u '${{ github.workspace }}')" home="$(getent passwd wl | cut -d: -f6)"
+          # The bootstrap's own pinned Node, in a scratch place off every PATH, removed once the tarball is made.
+          v="$(sed -n 's/^NODE_VERSION=//p' "$ws/scripts/bootstrap.sh")"
+          sum="$(sed -n 's/^NODE_SHA256_LINUX_X64=//p' "$ws/scripts/bootstrap.sh")"
+          curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz"
+          echo "$sum  /tmp/node.tar.xz" | sha256sum -c -
+          mkdir -p /opt/pack-node && tar -xJf /tmp/node.tar.xz -C /opt/pack-node --strip-components 1
+          mkdir -p /root/src && tar -C "$ws" --exclude=./.git -cf - . | tar -C /root/src -xf -
+          (
+            export PATH="/opt/pack-node/bin:$PATH"
+            cd /root/src
+            npm ci --ignore-scripts --no-audit --no-fund
+            npm run build && npm run build:web
+            npm pack --pack-destination "$home" > /dev/null
+          )
+          rm -rf /opt/pack-node /tmp/node.tar.xz /root/src
+          chown wl: "$home"/*.tgz && ls -l "$home"/*.tgz
       - name: run the next steps as that user
         uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
         with:
@@ -186,7 +195,6 @@ jobs:
         run: |
           ws="$(wslpath -u '${{ github.workspace }}')"
           mkdir -p "$HOME/stand-ins" && cp "$ws"/scripts/ci/stand-ins/* "$HOME/stand-ins/" && chmod 0755 "$HOME"/stand-ins/*
-          cp "$(wslpath -u '${{ runner.temp }}')"/*.tgz "$HOME/"
           {
             echo "export PATH=\"\$HOME/stand-ins:\$HOME/.local/bin:\$PATH\""
             echo "export XDG_RUNTIME_DIR=/run/user/$(id -u)"
