@@ -16,6 +16,7 @@ test_run:
   database:
     image: postgres:16@sha256:<64 hex>   # pinned to its digest; a tag alone is refused
     name: test                           # the database DATABASE_URL names
+    max_connections: 200                 # 20 to 2000; lanes x (pool + ORM connections) + headroom
   caches:
     - { name: npm, env: npm_config_cache, key: [package-lock.json] }
   shared:                           # directories all runs share, never wiped (e.g. a test-port registry)
@@ -28,6 +29,7 @@ test_run:
 - **Tiers.** `fast` tiers run on every PR, and again on each new head. `full` tiers run once per batch of approved PRs (PR mode). Each tier is one command, run under bash with pipefail in the run's workspace. It posts one check.
 - **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
 - **Database.** A tier with `database: true` gets the run's own Postgres in `DATABASE_URL`: a container named after the run, on a port the daemon picks, on `127.0.0.1` only, with a random password. Its data is on a tmpfs, and it is removed with the run.
+- **Database connections.** `max_connections` (20 to 2000, default 200) starts the run's Postgres with `-c max_connections=<n>`; the image's own default, 100, runs out ("sorry, too many clients already") once many lanes share the database. Size it as lanes x (each lane's pool + its ORM's own connections) + headroom for migrations, psql and Postgres's reserved superuser slots: 22 lanes with a pool of 8 and 2 ORM connections each need 22 x 10 + 20 = 240. `shared_buffers` stays at the image's 128 MB: the per-connection shared memory (lock and process slots) is small, a few tens of MB even at 2000, and each connection's working memory is its own process's, not shared buffers. The helper takes it as a number in that range only, never as text.
 - **Checks.** Several tiers of one kind may map to one check (say three full tiers to `suite`): it passes only when all of them passed. A check can't have both fast and full tiers.
 - **Shared directories.** Concurrent runs that must coordinate (a registry of test ports, say) get a directory of the instance's that every run can write and no wipe removes, in the variable named. It lives outside each run's `TMPDIR`, which is wiped.
 - **Caches.** Each cache is a directory, given to the run in `env`. Its key is the sha256 of its `key` files at the run's commit, so a changed lockfile starts a new cache. The two newest keys of each cache are kept.
