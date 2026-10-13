@@ -13,6 +13,7 @@ import type { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
 import { killTree, shellCommand, spawnDetached } from '../os/index.js';
 import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
+import { HELPER_PROTOCOL } from './helper.js';
 import { cloneScript } from './workspace.js';
 
 export const SANDBOX_HELPER = `/usr/local/libexec/${BRAND.cli}-testrun`;
@@ -25,6 +26,23 @@ export interface ExecResult {
   out: string;
   /** What the command used, where the host can tell (the sandbox's unit reports it). */
   stats?: SystemdRunStats;
+  /** Its stderr alone (the sandbox's systemd-run lines taken out): what a failed setup step's check shows. */
+  err?: string;
+}
+
+/**
+ * A setup step of a run (its workspace, a cache, its database) failed. `step` names it; `stderr` is the end of what
+ * the helper or tool said on stderr, never its stdout (db-start prints the database's password there on success).
+ */
+export class SetupStepError extends Error {
+  constructor(
+    readonly step: string,
+    /** What failed and its exit, in a line (the message adds the stderr's last lines). */
+    readonly what: string,
+    readonly stderr: string,
+  ) {
+    super(stderr.trim() ? `${what}: ${stderr.trim().split('\n').slice(-5).join(' | ').slice(0, 800)}` : what);
+  }
 }
 
 // systemd's format_timespan suffixes (src/basic/time-util.c), in seconds; a month and a year as systemd counts them.
@@ -163,6 +181,8 @@ export interface RunHost {
   check(): Promise<{ ok: boolean; detail: string }>;
   /** Remove everything of the run: its processes, containers, volumes and files. `left`: what is still there. */
   wipe(id: string): Promise<{ ok: boolean; left: string[] }>;
+  /** The helper's protocol version (./helper.ts); null when it has none or couldn't be asked, with its stderr. */
+  helperVersion(): Promise<{ version: number | null; stderr: string }>;
 }
 
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
@@ -253,7 +273,24 @@ function run(file: string, args: string[], o: { env?: NodeJS.ProcessEnv; cwd?: s
   });
 }
 
-const fail = (what: string, r: ExecResult) => new Error(`${what} failed (exit ${r.code ?? 'killed'}): ${r.out.trim().split('\n').slice(-5).join(' | ').slice(0, 800)}`);
+/** The last lines of a text, at most `lines` of them. */
+const lastLines = (text: string, lines: number) => text.trim().split('\n').slice(-lines).join('\n');
+
+/** A step that failed: its stderr only, never its stdout (db-start prints the password there). */
+const fail = (step: string, what: string, r: Ran) => {
+  return new SetupStepError(step, `${what} failed (exit ${r.code ?? 'killed'})`, lastLines(r.stderr, 20));
+};
+
+/** A text without these [start, end) ranges. */
+function cut(text: string, ranges: ReadonlyArray<readonly [number, number]>): string {
+  let out = '';
+  let at = 0;
+  for (const [s, e] of [...ranges].sort((x, y) => x[0] - y[0])) {
+    if (s > at) out += text.slice(at, s);
+    at = Math.max(at, e);
+  }
+  return out + text.slice(at);
+}
 
 function postgresUrl(port: number, password: string, db: string): string {
   return `postgres://postgres:${password}@127.0.0.1:${port}/${db}`;
@@ -278,24 +315,24 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       checkId(id);
       checkRefs(id, refs);
       const r = await call(['create', id, refs.branch, refs.head, refs.base], { stdin: bundle, timeoutMs: 600_000 });
-      if (r.code !== 0) throw fail(`creating run ${id}'s workspace`, r);
+      if (r.code !== 0) throw fail('create', `creating run ${id}'s workspace`, r);
       return { workdir: lastLine(r) };
     },
     async changedFiles(id, files) {
       checkId(id);
       const r = await call(['file', id, 'changed-files'], { stdin: files.map((f) => `${f}\n`).join(''), timeoutMs: 60_000 });
-      if (r.code !== 0) throw fail(`writing run ${id}'s changed files`, r);
+      if (r.code !== 0) throw fail('changed-files', `writing run ${id}'s changed files`, r);
       return lastLine(r);
     },
     async cache(name, key) {
       const r = await call(['cache', name, key], { timeoutMs: 60_000 });
-      if (r.code !== 0) throw fail(`the ${name} cache`, r);
+      if (r.code !== 0) throw fail('caches', `the ${name} cache`, r);
       return lastLine(r);
     },
     async shared(name) {
       checkName(name);
       const r = await call(['shared', name], { timeoutMs: 60_000 });
-      if (r.code !== 0) throw fail(`the shared directory ${name}`, r);
+      if (r.code !== 0) throw fail('shared', `the shared directory ${name}`, r);
       return lastLine(r);
     },
     async startDb(id, db) {
@@ -303,7 +340,7 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       checkDb(db);
       const r = await call(['db-start', id, db.image, db.name, String(db.readyS), String(db.maxConnections)], { timeoutMs: (db.readyS + 300) * 1000 });
       const m = /^(\d{1,5}) ([0-9a-f]{32})$/.exec(lastLine(r));
-      if (r.code !== 0 || !m) throw fail(`starting run ${id}'s database`, r);
+      if (r.code !== 0 || !m) throw fail('db-start', `starting run ${id}'s database`, r);
       return { url: postgresUrl(Number(m[1]), m[2]!, db.name), port: Number(m[1]), container: `${BRAND.cli}-test-${instance}-${id}` };
     },
     async exec(id, command, env, timeoutMs, signal) {
@@ -314,7 +351,7 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       const r = await call([...args, '--', command], { timeoutMs: timeoutMs + 60_000, signal });
       // systemd-run's lines are in the stderr the run shares with it: taken out, and its summary read from there only.
       const s = systemdRunStats(r.stderr);
-      return { code: r.code, out: r.without(s.own), stats: s.stats };
+      return { code: r.code, out: r.without(s.own), stats: s.stats, err: cut(r.stderr, s.own) };
     },
     async check() {
       const r = await call(['check'], { timeoutMs: 300_000 });
@@ -326,6 +363,11 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       const r = await call(['wipe', id], { timeoutMs: 300_000 });
       if (r.code === 0) return { ok: true, left: [] };
       return { ok: false, left: r.stderr.trim().split('\n').filter((l) => /^(unit|container|volume|dir) /.test(l)).concat([`wipe exit ${r.code ?? 'killed'}`]) };
+    },
+    async helperVersion() {
+      const r = await call(['version'], { timeoutMs: 60_000 });
+      const v = r.stdout.trim();
+      return { version: r.code === 0 && /^[1-9][0-9]{0,5}$/.test(v) ? Number(v) : null, stderr: lastLines(r.stderr, 20) };
     },
   };
 }
@@ -358,11 +400,11 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       for (const sub of ['work', 'tmp', 'home']) mkdirSync(join(dir, sub), { recursive: true, mode: 0o700 });
       const file = join(dir, 'tree.bundle');
       const w = await run('sh', ['-c', 'cat > "$1"', '_', file], { stdin: bundle, timeoutMs: 600_000 });
-      if (w.code !== 0) throw fail(`receiving run ${id}'s bundle`, w);
+      if (w.code !== 0) throw fail('create', `receiving run ${id}'s bundle`, w);
       const [bash, args] = shellCommand(cloneScript());
       const env = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), LANG: 'C.UTF-8' };
       const r = await run(bash, [...args, '_', file, join(dir, 'work'), refs.branch, refs.head, refs.base], { env, cwd: dir, timeoutMs: 600_000 });
-      if (r.code !== 0) throw fail(`creating run ${id}'s workspace`, r);
+      if (r.code !== 0) throw fail('create', `creating run ${id}'s workspace`, r);
       return { workdir: join(dir, 'work') };
     },
     async changedFiles(id, files) {
@@ -400,20 +442,20 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const pull = await d(['image', 'inspect', db.image]);
       if (pull.code !== 0) {
         const p = await d(['pull', '-q', db.image], 600_000);
-        if (p.code !== 0) throw fail(`pulling ${db.image}`, p);
+        if (p.code !== 0) throw fail('db-start', `pulling ${db.image}`, p);
       }
       // A unique name and a port the daemon picks, on loopback only: never a fixed host port.
       const r = await d(['run', '-d', '--name', container, '--label', `${RUN_LABEL}=${id}`, '-p', '127.0.0.1::5432', '--tmpfs', '/var/lib/postgresql/data:rw', '-e', `POSTGRES_PASSWORD=${password}`, '-e', `POSTGRES_DB=${db.name}`, db.image, '-c', `max_connections=${db.maxConnections}`]);
-      if (r.code !== 0) throw fail(`starting run ${id}'s database`, r);
+      if (r.code !== 0) throw fail('db-start', `starting run ${id}'s database`, r);
       const p = await d(['port', container, '5432/tcp']);
       const m = /^127\.0\.0\.1:(\d{1,5})$/m.exec(p.out);
-      if (p.code !== 0 || !m) throw fail(`reading the port of ${container}`, p);
+      if (p.code !== 0 || !m) throw fail('db-start', `reading the port of ${container}`, p);
       for (let i = 0; i < db.readyS; i++) {
         const ready = await d(['exec', container, 'pg_isready', '-q', '-U', 'postgres', '-d', db.name, '-h', '127.0.0.1']);
         if (ready.code === 0) return { url: postgresUrl(Number(m[1]), password, db.name), port: Number(m[1]), container };
         await new Promise((res) => setTimeout(res, 1000));
       }
-      throw new Error(`${container} wasn't ready after ${db.readyS}s`);
+      throw new SetupStepError('db-start', `${container} wasn't ready after ${db.readyS}s`, '');
     },
     async exec(id, command, env, timeoutMs, signal) {
       checkId(id);
@@ -422,10 +464,14 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       // Exactly these variables: never this process's own environment.
       const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
       const r = await run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
-      return { code: r.code, out: r.out };
+      return { code: r.code, out: r.out, err: r.stderr };
     },
     async check() {
       return { ok: false, detail: 'the local host has no sandbox: for the engine\'s tests and development only' };
+    },
+    async helperVersion() {
+      // No helper: the local host does each step itself, so it always speaks this engine's protocol.
+      return { version: HELPER_PROTOCOL, stderr: '' };
     },
     async wipe(id) {
       checkId(id);

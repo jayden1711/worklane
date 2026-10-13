@@ -36,7 +36,7 @@ The canary's merges only ever land in its scratch repo. Each of these makes that
      `.worklane/config.yaml`, list yourself as the owner and as a writer.
    - a CI workflow with at least one check that runs on pull requests (a one-line `true` job is enough). The canary
      passes only when every check on its merged PR is green, and fails when there are none.
-   - branch protection on `main` that requires that check (or let the main watch guard it: see
+   - branch protection on `main` that requires that check, not strict (or let the main watch guard it: see
      [dashboard.md](dashboard.md)).
 2. **Add it as a project.** In the dashboard, open **Setup console → Add project** and enter a name (say `canary`)
    and the repo ([dashboard.md](dashboard.md#add-project)). The run creates the instance, and makes its GitHub App

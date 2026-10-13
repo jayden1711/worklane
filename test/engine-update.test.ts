@@ -134,6 +134,7 @@ function machine(over: Record<string, unknown> = {}) {
     slots: () => [],
     alive: () => false,
     installTree: (sha: string) => calls.push(`installTree ${sha.slice(0, 4)}`),
+    syncHelpers: (sha: string) => (calls.push(`syncHelpers ${sha.slice(0, 4)}`), [{ path: '/usr/local/libexec/worklane-testrun', state: 'updated' }]),
     switchTo: (sha: string) => {
       current = sha;
       calls.push(`switchTo ${sha.slice(0, 4)}`);
@@ -185,6 +186,37 @@ test('run: a service that doesn\'t come up rolls back to the previous engine and
   assert.equal(last.back, 'healthy');
   assert.deepEqual(last.failed, ['worklane-x.service: failed (failed), exit-code', 'worklane-dashboard-x.service: failed (failed), exit-code']);
   assert.deepEqual(m.calls.filter((c) => c.startsWith('switchTo')), ['switchTo bbbb', 'switchTo aaaa']);
+});
+
+test('run: the root helpers follow the engine: the new engine\'s before switching to it, the old engine\'s back on a rollback', async () => {
+  const m = machine();
+  assert.equal(await u.run(m.deps), 'installed');
+  const order = m.calls.filter((c) => /^(installTree|syncHelpers|switchTo)/.test(c));
+  assert.deepEqual(order, ['installTree bbbb', 'syncHelpers bbbb', 'switchTo bbbb']);
+  assert.deepEqual(m.logs.at(-1)!.helpers, [{ path: '/usr/local/libexec/worklane-testrun', state: 'updated' }], 'the install says which helpers it replaced');
+  const r = machine();
+  r.states[NEW] = ['failed'];
+  assert.equal(await u.run(r.deps), 'rolled_back');
+  assert.deepEqual(r.calls.filter((c) => /^(syncHelpers|switchTo)/.test(c)), ['syncHelpers bbbb', 'switchTo bbbb', 'syncHelpers aaaa', 'switchTo aaaa']);
+});
+
+test('run: a helper that can\'t be replaced holds the update: never switched to, the old engine\'s helpers back, a clear reason', async () => {
+  const m = machine({
+    syncHelpers: (sha: string) => {
+      m.calls.push(`syncHelpers ${sha.slice(0, 4)}`);
+      if (sha === NEW) throw new Error("couldn't replace /usr/local/libexec/worklane-testrun with /opt/worklane/bbbb/scripts/machine/worklane-testrun.sh: syntax error");
+      return [{ path: '/usr/local/libexec/worklane-testrun', state: 'updated' }];
+    },
+  });
+  assert.equal(await u.run(m.deps), 'rolled_back');
+  assert.equal(m.current(), OLD);
+  assert.ok(!m.calls.some((c) => c.startsWith('switchTo')), 'never switched');
+  assert.deepEqual(m.calls.filter((c) => c.startsWith('syncHelpers')), ['syncHelpers bbbb', 'syncHelpers aaaa']);
+  const last = m.logs.at(-1)!;
+  assert.equal(last.event, 'rolled_back');
+  assert.match(String(last.reason), /^rollback: the root helpers couldn't be put in step with the new engine: couldn't replace \/usr\/local\/libexec\/worklane-testrun/);
+  assert.equal(m.held()!.sha, NEW);
+  assert.equal(await u.run(m.deps), 'held', 'not retried by itself');
 });
 
 test('run: refuses a non-fast-forward, a skipped or failed required check; waits on pending checks or a busy machine', async () => {

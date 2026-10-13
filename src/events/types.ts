@@ -560,6 +560,8 @@ export const EventSchemas = {
   'deploy_gate.refused': z.strictObject({ branch: z.string(), deploy: sha.nullable(), main: sha, target: sha.nullable(), reason: z.string().max(2000) }),
   /** An owner's `deploy <sha>` from Discord: asked (waiting on their confirm), confirmed, cancelled or refused. */
   'deploy_gate.override': z.strictObject({ id: z.string(), thread: z.string().nullable(), sha: z.string().max(64), by: z.string(), stage: z.enum(['asked', 'confirmed', 'cancelled', 'refused']), detail: z.string().max(1000) }),
+  /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
+  'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;

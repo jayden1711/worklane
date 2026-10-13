@@ -13,6 +13,12 @@
 #   worklane-testrun <name> exec <id> <timeout_s> [--env K=V]... -- <command>
 #   worklane-testrun <name> wipe <id>                         the run's units, containers, volumes and files
 #   worklane-testrun <name> check                             the boundaries, as the test user and in the sandbox
+#   worklane-testrun <name> version                           this helper's protocol version (an integer)
+#
+# The protocol version is the engine's HELPER_PROTOCOL (src/testrun/helper.ts; a test checks they match). Bump both
+# whenever a command's arguments or output change: an engine refuses to start test runs with a helper whose version
+# isn't its own (a helper too old to have `version` dies with "unknown command", and counts as outdated), and says
+# how to reinstall it (scripts/setup/test-user.sh update-helper). The updater reinstalls it with each engine.
 #
 # exec runs <command> under bash -o pipefail as wl-test-<name>, as a transient unit in worklane-test.slice (the
 # test runs' CPU and memory caps), sandboxed: read-only system, no /home or /root, every worklane path and every
@@ -22,6 +28,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
+PROTOCOL=2
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -32,12 +39,14 @@ PROTECTED=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /etc/sudo
 
 die() { echo "worklane-testrun: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
-[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|file|cache|db-start|exec|wipe|check ..."
+[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|file|cache|db-start|exec|wipe|check|version ..."
 user="wl-test-$name"
 root="$BASE/$name"
 sock_dir="/run/worklane-test-$name-docker"
 # The coordinator of instance <name> only (sudo sets SUDO_USER; root running it by hand has none).
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "wl-$name" ]; then die "$SUDO_USER may not use $name's test runs"; fi
+# The version first: it reads nothing and needs no tool or test user, so an engine can always ask it.
+if [ "$cmd" = version ]; then [ "$#" -eq 2 ] || die "usage: version"; echo "$PROTOCOL"; exit 0; fi
 # Every tool this helper runs, found right after the caller check, before any probe: one clear line instead of a run of failed probes.
 for tool in runuser systemd-run systemctl git getent install id stat; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool (PATH=$PATH)"

@@ -84,6 +84,7 @@ function machine(o: { failFor?: string; newEngineDown?: boolean } = {}) {
     slots: () => [],
     alive: () => false,
     installTree: () => calls.push('installTree'),
+    syncHelpers: () => [],
     switchTo: (sha: string) => ((engine = sha), calls.push(`switchTo ${sha.slice(0, 4)}`)),
     now: () => clock,
     sleep: async (ms: number) => void (clock += ms),

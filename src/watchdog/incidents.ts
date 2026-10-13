@@ -42,6 +42,7 @@ export const KINDS = {
   auto_merge_stopped: { title: 'The main watch stopped auto-merge', severity: 'red' },
   disk_full: { title: 'Disk almost full', severity: 'red' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
+  helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.

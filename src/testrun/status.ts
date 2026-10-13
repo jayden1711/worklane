@@ -51,6 +51,7 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
   const rows = new Map<string, TestRunRow>();
   const st: TestRunStatus = { sandbox: null, checksPermission: null, checksBlocked: null, queue: [], running: [], recent: [], tierStats: [], wipeFailures: [], problems: [] };
   const tierRuns = new Map<string, { ms: number[]; mem: number[]; cpu: number[] }>();
+  let helperProblem: string | null = null;
   for (const e of events) {
     switch (e.type) {
       case 'testrun.queued': {
@@ -94,6 +95,11 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
         st.sandbox = { ok: p.ok, detail: p.detail, at: e.ts };
         break;
       }
+      case 'testrun.helper': {
+        const p = e.payload as EventPayload<'testrun.helper'>;
+        helperProblem = p.ok ? null : p.detail;
+        break;
+      }
       case 'testrun.checks_permission': {
         const p = e.payload as EventPayload<'testrun.checks_permission'>;
         st.checksPermission = { level: p.level, detail: p.detail, at: e.ts };
@@ -115,6 +121,7 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
   st.recent = all.filter((r) => r.finishedAt).slice(-recentN).reverse();
   st.tierStats = [...tierRuns.entries()].map(([tier, t]) => ({ tier, runs: t.ms.length, medianMs: median(t.ms), peakMemMb: t.mem.length ? Math.max(...t.mem) : null, maxCpuS: t.cpu.length ? Math.max(...t.cpu) : null }));
   st.wipeFailures = st.wipeFailures.slice(-10);
+  if (helperProblem) st.problems.push(`Test runs are off: ${helperProblem}`);
   if (st.sandbox && !st.sandbox.ok) st.problems.push(`Test runs are off: the sandbox failed its check (${st.sandbox.detail.split('\n')[0]}). An admin runs scripts/setup/test-user.sh check, fixes the FAIL lines, then restarts the instance.`);
   const cannotPost = st.checksBlocked ?? (st.checksPermission && st.checksPermission.level !== 'write' && st.checksPermission.level !== 'unknown' ? st.checksPermission : null);
   if (cannotPost) st.problems.push(`Test runs can't post their checks: the App has no Checks: write permission${st.checksPermission ? ` (it has ${st.checksPermission.level})` : ''}. The owner adds Checks: read & write in the App's settings and accepts it on the installation; until then results are only on the dashboard.`);
