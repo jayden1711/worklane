@@ -20,6 +20,8 @@ export interface AskRouteContext {
   session: SessionOf;
   /** The coordinator user's home, where secrets go (secretsDir); the process's own when unset. */
   secretsHome?: string;
+  /** The machine owners file (src/machine-owners.ts); the system's when unset. */
+  machineOwnersFile?: string;
 }
 
 const send = (res: ServerResponse, status: number, body: unknown) => {
@@ -91,7 +93,8 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
       ask = storeSecret(log, id, { by: who.login, role: who.role, value, dir: secretsDir(asks(log).get(id)?.instance ?? ctx.instance, ctx.secretsHome) });
     } else if (what === 'run') {
       req.resume();
-      ask = requestRootStep(log, id, { by: who.login, role: who.role }).ask;
+      const requester = { login: who.login, breakGlass: who.breakGlass === true, authenticatedAt: who.authenticatedAt, deviceOk: who.deviceOk === true };
+      ask = requestRootStep(log, id, { by: who.login, role: who.role, requester, ...(ctx.machineOwnersFile ? { ownersFile: ctx.machineOwnersFile } : {}) }).ask;
     } else {
       const body = await readJson(req);
       ask = asks(log).answer(id, { by: who.login, role: who.role, answer: String(body.answer ?? '') });
