@@ -9,6 +9,7 @@
 // instance's `model_cap` (policy.yaml settings) caps every run's model at a tier (in the coordinator's runner,
 // so no run escapes it), never raises one.
 import type { AgentsConfig } from './config/schema.js';
+import { OPTIMIZE_LABEL } from './optimize.js';
 
 export const MODEL_TIERS = ['haiku', 'sonnet', 'opus'] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
@@ -90,7 +91,8 @@ export function routedModel(r: ModelRouting, kind: RoutedRun): string {
  * attempt after `escalate_after` failed ones; else the usual build model. `why` says which applied.
  */
 export function buildModel(r: ModelRouting, labels: string[], attempt = 1): { model: string; why: 'high-risk' | 'escalated' | 'default' } {
-  const risky = labels.some((l) => r.high_risk_labels.includes(l));
+  // An optimization task (src/optimize.ts) always runs on the strongest model: the high-risk build model.
+  const risky = labels.some((l) => r.high_risk_labels.includes(l)) || labels.includes(OPTIMIZE_LABEL);
   const escalated = r.escalate_after > 0 && attempt > r.escalate_after;
   const why = risky ? 'high-risk' : escalated ? 'escalated' : 'default';
   return { model: why === 'default' ? r.build : r.build_high_risk, why };

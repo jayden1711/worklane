@@ -50,7 +50,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { PrHygiene } from './coordinator/pr-hygiene.js';
+import { Optimizer } from './coordinator/optimize.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
@@ -75,7 +75,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends PrHygiene {
+export class Coordinator extends Optimizer {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -125,6 +125,7 @@ export class Coordinator extends PrHygiene {
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);
     await step('gardener', () => this.checkGardener(), undefined);
+    await step('optimize', () => this.checkOptimize(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -142,6 +143,7 @@ export class Coordinator extends PrHygiene {
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;
+    await this.optimizeRun;
     await this.prBatchIdle();
   }
 
@@ -488,7 +490,7 @@ export class Coordinator extends PrHygiene {
       if (hold) break;
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
-      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
@@ -697,8 +699,15 @@ export class Coordinator extends PrHygiene {
       if (used >= maxAttempts) return await this.block(n, owner, `no passing change after ${used} attempts (counted across restarts and requeues)`);
       // Once a hosted model's change is refused, the task's later attempts run on Anthropic.
       let noOpenModel = false;
+      // An optimization task (src/coordinator/optimize.ts): its week's budget is a hard stop before every attempt.
+      const optimizing = this.optimizePassOf(n);
       for (let attempt = used + 1; attempt <= maxAttempts; attempt++) {
         if (plan && (await this.planObjected(n, owner, planComments))) return;
+        if (optimizing && this.optimizeLeft() <= 0) {
+          const why = `the week's optimization budget ($${this.d.cfg.project.optimize.budget_usd}) is spent ($${this.optimizeSpent().toFixed(2)})`;
+          this.emit('optimize.result', { issue: n, target: optimizing.target ?? '', head: null, outcome: 'discarded', why, before: optimizing.baseline, after: null, gain: null, pct: null, noise: null });
+          return await this.optimizeDiscard(n, why, optimizing.baseline);
+        }
         // The issue's budget: an incident at 85%, stopped at 100%.
         const budget = this.taskBudget(n);
         if (budget.raised) budgetRaised = true;
@@ -774,6 +783,8 @@ export class Coordinator extends PrHygiene {
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
+        // An optimization becomes a PR only if its benchmark beats main's by more than the noise; else discarded.
+        if (optimizing && !(await this.optimizeGate(n, optimizing, path, base, head))) return;
         // A change to the agents' own instructions is evaluated before it can land (the merge policy reads the result).
         if (verdict.patch_correct) await this.instructionEvals(n, path, base, head, change.files.map((f) => f.path));
         const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
@@ -1027,7 +1038,8 @@ export class Coordinator extends PrHygiene {
       route,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 200,
-      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining),
+      // An optimization task's run is also capped at what its week's budget has left (a hard stop).
+      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining, ...(this.optimizePassOf(n) ? [Math.max(0.01, this.optimizeLeft())] : [])),
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
