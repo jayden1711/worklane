@@ -132,10 +132,6 @@ jobs:
           n="$(nproc)"
           sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
           tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
-      - name: the database image, pinned to the digest it has today
-        run: |
-          docker pull -q postgres:17-alpine
-          echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
       - name: the coordinator's sandbox host, as wl-ci, against real systemd-run
         run: |
           # What wl-ci runs, world-readable: the build, its one dependency, node, the driver and the fixtures.
@@ -150,7 +146,7 @@ jobs:
           echo "T=$t" >> "$GITHUB_ENV"
           sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$t/ids"
           sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
-            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1/dist" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" "$DB_IMAGE"
+            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1/dist" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" -
       - name: nothing left of the run, seen as root
         run: |
           while IFS= read -r id; do
