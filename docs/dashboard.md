@@ -243,6 +243,13 @@ The Reports page opens with the Trust panel: this instance's DORA-style numbers,
 per risk area (money path, auth, other) over 30 days. It is read-only measurement (docs/design.md, the waiver of
 2026-10-13): `GET /api/trust` is the only route, and nothing it serves changes slots, caps or merges.
 
+Under it, **Flaky tests** (owners and writers; `GET /api/flaky`, src/flaky.ts): each check quarantined because it
+failed on the default branch and passed when re-run on the same commit, with when it was first seen, how many times
+it has been seen flaky since, its issue, and its passes in a row toward release; the ones released lately; and the
+flake rate, flaky re-runs over red runs, over 7 and 30 days. An owner's **Clear** puts a check back to blocking at
+once (`POST /api/flaky/clear`, audited). Quarantine changes only the harness's own red/green decisions after a merge;
+the updater still installs only a commit with every check green.
+
 - **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
   on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
   issue, or a title starting "fix") changed one of its files; or a production report was traced to it.
@@ -269,6 +276,33 @@ Raising the agent count stays a machine owner's action (the Machine page's slots
 allowlist (src/viewer-events.ts) shows every event field it is made of, and never cost; today that is the merge
 counts. **The weekly digest** posts the same numbers to the Discord ops channel (`discord.ops_channel` in
 intake.yaml), once a week, when one is set.
+
+## Metrics
+
+Under Trust, the Metrics panel (`GET /api/metrics`, the owner's and writers'; `deliveryMetrics` in
+src/merge-metrics.ts) shows how fast and how safely changes reach the default branch, over 7 days with the 30-day
+value under each. A figure whose source has recorded nothing yet says **not measured yet**, and why; never a 0.
+
+- **Merges per day**: merged PRs and direct lands the event log records, with the last 14 days as bars.
+- **Main red** and **time to green**: from the check of the default branch after each auto-merge
+  (`merge.main_result`): the times it went red, and the median minutes from red to its next green.
+- **Fix-forward versus revert**: revert PRs opened (on a red default branch, or for a commit the main watch couldn't
+  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward isn't built
+  yet; its slot fills from its `fix_forward.finished` events once it is.
+- **PR CI wall-clock**: on each merged PR's head, from the first check run starting to the last required check
+  (config.yaml `required_checks`; every check when none) completing. Read from GitHub's check runs once per PR
+  (`ci.pr_timing`, src/ci-metrics.ts), at most one read-only call a minute.
+- **Agent startup**: seconds from a task being claimed to its agent's process starting.
+- **Flake rate**: of the re-runs of a red default branch's failing checks, those that found a flaky check
+  (`flaky.rerun_result`); not measured until flaky-test re-runs exist.
+- **Slow tests**: the 20 slowest tests over 7 days and every test over the budget (config.yaml
+  `metrics.slow_test_budget_s`, 30 s by default), each by the median of its runs. Durations are read from test runs'
+  tier output (`testrun.durations`) and, once a day, from the GitHub Actions job logs on the newest merge commit
+  (`ci.test_durations`). Only formats that name one test per duration are read (src/test-durations.ts: node:test TAP
+  and spec, pytest `--durations`, `go test -v`, jest and vitest verbose), and only leaf tests.
+
+The weekly digest posts these after the trust numbers, with the slow-tests list (the weekly optimization pass's
+targets) in its own message.
 
 ## Pull requests
 

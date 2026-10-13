@@ -3,7 +3,7 @@
 // clears. A viewer is sent the mode only, so that is all this shows them. An admin may accept a hand merge as a
 // bootstrap merge (by sha, or by PR number before it merges); owners and writers see what was accepted.
 import { useState } from 'react';
-import { acceptBootstrapMerge, clearAutoMergeStop, type Protection } from '../api';
+import { acceptBootstrapMerge, clearAutoMergeStop, type DirectPush, type Protection } from '../api';
 import { ago, Badge, Button } from './ui';
 
 export function modeLabel(mode: Protection['mode'], brand: string): string {
@@ -18,7 +18,7 @@ export function ProtectionStatus({ protection, brand }: { protection: Protection
   if (!protection) return null;
   const tone = protection.mode === 'github' || protection.mode === 'main_watch' ? 'ok' : 'warn';
   return (
-    <section className="space-y-1.5" aria-label="Default branch protection" data-testid="protection-status">
+    <section id="main-watch" className="space-y-1.5" aria-label="Default branch protection" data-testid="protection-status">
       <div className="flex items-baseline gap-2">
         <span className="text-[13px] font-medium text-ink">Default branch protection</span>
         <Badge tone={tone}>
@@ -43,10 +43,32 @@ export function ProtectionStatus({ protection, brand }: { protection: Protection
               )}
             </div>
           )}
+          {protection.mode === 'main_watch' && protection.directPush && <DirectPushLine push={protection.directPush} />}
         </div>
       )}
       {protection.mode === 'main_watch' && <AcceptedMerges protection={protection} />}
     </section>
+  );
+}
+
+/** The last commit that landed without a PR, and whether its ops-channel alert went out (and whom it mentioned). */
+export function DirectPushLine({ push }: { push: DirectPush }) {
+  const what = push.kind === 'rewrite' ? 'Force-push (rewrite)' : 'Direct push';
+  const alert =
+    push.status === 'posted'
+      ? `posted to the ops channel${push.mentioned ? `, mentioning ${push.mentioned} owner${push.mentioned === 1 ? '' : 's'}` : ''}`
+      : push.status === 'pending'
+        ? 'waiting to be posted to the ops channel (the limit on ops posts)'
+        : 'not posted';
+  return (
+    <div className="text-ink-3" data-testid="main-watch-direct-push">
+      {what}:{' '}
+      <a className="font-mono text-ink underline-offset-2 hover:underline" href={push.url} target="_blank" rel="noreferrer">
+        {push.sha.slice(0, 8)}
+      </a>
+      {push.pusher ? ` by ${push.pusher}` : ''}, {ago(push.at)}; {alert}
+      {push.note ? `: ${push.note}` : ''}.
+    </div>
   );
 }
 

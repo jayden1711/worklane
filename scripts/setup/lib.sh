@@ -232,11 +232,12 @@ unit_drain() { systemctl kill --kill-whom=main --signal=SIGTERM "$1"; }
 unit_stop() { systemctl stop "$1"; }
 unit_start() { systemctl start "$1"; }
 
-# The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
-# joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
-# updater refuses a skipped required check. Every other one is in, the main-only jobs (bootstrap on each OS, the
-# real systemd and real users ones) above all: a pull request no longer has to run them, so main is where they
-# gate. A test derives this list from the workflows.
+# The engine repo's checks on main, one name per element (names hold commas, so never a joined string): the fast
+# ones every push to main runs (ci.yml, gitleaks.yml) and the slow ones (ci-slow.yml: bootstrap on each OS, the real
+# systemd and real users jobs), which run on main in batches, on the newest commit at most every 30 minutes
+# (ci-batch.yml). A pull request needn't run the slow ones, so main is where they gate, and only a batched commit
+# can be installed. Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the updater
+# refuses a skipped required check. A test derives this list from the workflows.
 UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.

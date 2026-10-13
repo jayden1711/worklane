@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
 import { hub, instanceScope, loadIncidents, needsSignIn, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { MainWatchAlert } from './components/Protection';
 import { UsageBanner, useNow, useUsage } from './components/Usage';
 import { ago, Kbd, cx } from './components/ui';
-import { Overview } from './pages/Overview';
+import { Header, Overview } from './pages/Overview';
 import { BoardPage } from './pages/Board';
 import { MachinePage } from './pages/Machine';
 import { InboxPage } from './pages/Inbox';
@@ -82,7 +82,7 @@ export function pageKey(e: KeyboardEvent) {
   return !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey && Date.now() >= chordUntil;
 }
 
-const NAV = [
+export const NAV = [
   { to: '/', label: 'Board', icon: SquareKanban, chord: 'b', testId: 'nav-board' },
   { to: '/overview', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i', testId: 'nav-inbox' },
@@ -245,6 +245,9 @@ function Dashboard() {
   const now = useNow(usage.some((u) => u.paused));
   const [theme, toggleTheme] = useTheme();
   const [menu, setMenu] = useState(false);
+  // The narrow-screen navigation drawer: closed on every change of page.
+  const [nav, setNav] = useState(false);
+  useEffect(() => setNav(false), [path]);
   const health = useHealth();
 
   useEffect(() => {
@@ -289,7 +292,8 @@ function Dashboard() {
   const issueMatch = path.match(/^\/issues\/(\d+)/);
   const runMatch = path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
   let page: React.ReactNode;
-  if (!state) page = error ? <div className="p-8 text-[13px] text-red">Can't load: {error}</div> : <Loading />;
+  // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
+  if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/waiting') page = <WaitingPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
@@ -312,66 +316,155 @@ function Dashboard() {
   else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
 
+  const sidebar = { state, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} /> };
   return (
-    <div className="flex h-full">
-      <aside className="flex w-56 shrink-0 flex-col bg-canvas max-md:hidden">
-        <div className="flex h-12 items-center gap-2 px-4">
-          <div className="flex size-6 shrink-0 items-center justify-center rounded-[7px] bg-ink text-[11px] font-semibold text-surface">{state?.brand.name[0] ?? '·'}</div>
-          <div className="min-w-0">
-            <div className="truncate text-[13.5px] font-medium leading-4 text-ink">{state?.project.name ?? '…'}</div>
-            <div className="truncate text-[11px] leading-4 text-ink-3">{state?.brand.name}</div>
-          </div>
-          {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}
-          {health && !health.hub && (
-            <a href="/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/health'))} title="Health">
-              <StatusDot status={health.status[''] ?? 'green'} testId="instance-status-dot" />
-            </a>
-          )}
+    <NavMenu.Provider value={{ open: nav, setOpen: setNav }}>
+      <div className="flex h-full">
+        <aside className="flex w-56 shrink-0 flex-col bg-canvas max-md:hidden">
+          <SidebarBody {...sidebar} />
+        </aside>
+        <main className="min-w-0 flex-1 scroll-pt-14 overflow-y-auto max-md:pb-20">
+          {state && <StopBanner state={state} />}
+          <UsageBanner usage={usage} now={now} />
+          {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
+          {page}
+        </main>
+        <NavDrawer open={nav} setOpen={setNav}>
+          <SidebarBody {...sidebar} />
+        </NavDrawer>
+        <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
+        {state && <ChatPanel cli={state.brand.cli} />}
+      </div>
+    </NavMenu.Provider>
+  );
+}
+
+type Counts = Partial<Record<string, number>>;
+type Health = { hub: HubInfo | null; status: Record<string, HealthStatus> };
+
+/**
+ * The sidebar's contents: the project and its status dot (off a hub), the instance list (on a hub), Search, the pages,
+ * who is signed in, the live indicator and the theme toggle. The desktop sidebar and the narrow-screen drawer show the
+ * same one.
+ */
+export function SidebarBody({ state, path, counts, health, live, theme, toggleTheme, openSearch, switcher }: { state: State | null; path: string; counts: Counts; health: Health | null; live: boolean; theme: string; toggleTheme: () => void; openSearch: () => void; switcher: ReactNode }) {
+  return (
+    <>
+      <div className="flex h-12 items-center gap-2 px-4">
+        <div className="flex size-6 shrink-0 items-center justify-center rounded-[7px] bg-ink text-[11px] font-semibold text-surface">{state?.brand.name[0] ?? '·'}</div>
+        <div className="min-w-0">
+          <div className="truncate text-[13.5px] font-medium leading-4 text-ink">{state?.project.name ?? '…'}</div>
+          <div className="truncate text-[11px] leading-4 text-ink-3">{state?.brand.name}</div>
         </div>
-        <InstanceSwitcher status={health?.status ?? {}} />
-        <button data-testid="search-button" onClick={() => setMenu(true)} className="mx-2 mt-2 flex h-8 items-center gap-2 rounded-control bg-surface px-2 text-[12.5px] text-ink-3 shadow-btn transition-colors hover:text-ink">
-          <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
-        </button>
-        <nav className="mt-3 flex flex-col gap-px px-2" aria-label="Pages">
-          {NAV.map((n) => (
-            <SidebarRow
-              key={n.to}
-              href={n.to}
-              icon={<n.icon className="size-4" />}
-              label={n.label}
-              count={counts[n.to as keyof typeof counts]}
-              countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
-              active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
-              onSelect={() => navigate(n.to)}
-              testId={n.testId}
-            />
-          ))}
-        </nav>
-        {state && (
-          <div className="mt-auto border-t border-line">
-            <WhoAmI state={state} onSignOut={() => void signOut()} />
-          </div>
+        {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}
+        {health && !health.hub && (
+          <a href="/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/health'))} title="Health">
+            <StatusDot status={health.status[''] ?? 'green'} testId="instance-status-dot" />
+          </a>
         )}
-        <div className={cx('mx-2 mb-2 flex items-center gap-2 px-2 pt-2 text-[11.5px] text-ink-3', !state && 'mt-auto border-t border-line pt-3')}>
-          <span data-testid="live-indicator" className={cx('inline-block size-2 rounded-full', live ? 'bg-green' : 'bg-red')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
-          {live ? 'Live' : 'Reconnecting'}
-          <span className="ml-auto flex items-center gap-1 tabular-nums">
-            <Activity className="size-3" /> {state?.lastId ?? 0}
-          </span>
-          <button data-testid="theme-toggle" onClick={toggleTheme} className="primitive-icon-button size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" title="Toggle theme" aria-label="Toggle theme">
-            {theme === 'dark' ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
-          </button>
+      </div>
+      {switcher}
+      <button data-testid="search-button" onClick={openSearch} className="mx-2 mt-2 flex h-8 items-center gap-2 rounded-control bg-surface px-2 text-[12.5px] text-ink-3 shadow-btn transition-colors hover:text-ink">
+        <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
+      </button>
+      <nav className="mt-3 flex flex-col gap-px px-2" aria-label="Pages">
+        {NAV.map((n) => (
+          <SidebarRow
+            key={n.to}
+            href={n.to}
+            icon={<n.icon className="size-4" />}
+            label={n.label}
+            count={counts[n.to]}
+            countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
+            active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
+            onSelect={() => navigate(n.to)}
+            testId={n.testId}
+          />
+        ))}
+      </nav>
+      {state && (
+        <div className="mt-auto border-t border-line">
+          <WhoAmI state={state} onSignOut={() => void signOut()} />
         </div>
-      </aside>
-      <main className="min-w-0 flex-1 overflow-y-auto">
-        {state && <StopBanner state={state} />}
-        <UsageBanner usage={usage} now={now} />
-        {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
-        {page}
-      </main>
-      <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
-      {state && <ChatPanel cli={state.brand.cli} />}
-    </div>
+      )}
+      <div className={cx('mx-2 mb-2 flex items-center gap-2 px-2 pt-2 text-[11.5px] text-ink-3', !state && 'mt-auto border-t border-line pt-3')}>
+        <span data-testid="live-indicator" className={cx('inline-block size-2 rounded-full', live ? 'bg-green' : 'bg-red')} title={live ? 'live: updates stream from the event log' : 'disconnected; retrying'} />
+        {live ? 'Live' : 'Reconnecting'}
+        <span className="ml-auto flex items-center gap-1 tabular-nums">
+          <Activity className="size-3" /> {state?.lastId ?? 0}
+        </span>
+        <button data-testid="theme-toggle" onClick={toggleTheme} className="primitive-icon-button size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" title="Toggle theme" aria-label="Toggle theme">
+          {theme === 'dark' ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** Whether the narrow-screen navigation drawer is open; the page header's menu button opens it. */
+export const NavMenu = createContext<{ open: boolean; setOpen: (open: boolean) => void } | null>(null);
+
+/** The id of the drawer the menu button controls. */
+export const NAV_DRAWER_ID = 'nav-drawer';
+
+/** On a narrow screen (under 768 px, where the sidebar is hidden): the button in the page header that opens the navigation drawer. */
+export function MenuButton() {
+  const menu = useContext(NavMenu);
+  if (!menu) return null;
+  return (
+    <button
+      type="button"
+      data-testid="nav-menu"
+      className="primitive-icon-button -ml-2 shrink-0 text-ink-2 hover:bg-hover-2 hover:text-ink md:hidden"
+      aria-label="Open navigation"
+      aria-haspopup="dialog"
+      aria-expanded={menu.open}
+      aria-controls={NAV_DRAWER_ID}
+      onClick={() => menu.setOpen(!menu.open)}
+    >
+      <Menu className="size-5" />
+    </button>
+  );
+}
+
+/**
+ * The sidebar as a drawer on a narrow screen, over the page with an overlay. Focus moves into it and back to the menu
+ * button after; it closes on the overlay, Escape, its close button and a change of page (the Dashboard closes it), and
+ * when the screen widens to where the sidebar shows.
+ */
+export function NavDrawer({ open, setOpen, children }: { open: boolean; setOpen: (open: boolean) => void; children: ReactNode }) {
+  useEffect(() => {
+    if (!open || typeof window.matchMedia !== 'function') return;
+    const wide = window.matchMedia('(min-width: 768px)');
+    const on = () => wide.matches && setOpen(false);
+    on();
+    wide.addEventListener('change', on);
+    return () => wide.removeEventListener('change', on);
+  }, [open, setOpen]);
+  return (
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog.Overlay className="fixed inset-0 z-40 bg-black/30 md:hidden" style={{ animation: 'fade-in 160ms ease-out both' }} data-testid="nav-drawer-overlay" />
+      <Dialog.Content
+        id={NAV_DRAWER_ID}
+        data-testid="nav-drawer"
+        aria-describedby={undefined}
+        onCloseAutoFocus={(e) => {
+          // Back to the menu button: the one that opened the drawer, or the new page's after a change of page.
+          e.preventDefault();
+          document.querySelector<HTMLElement>('[data-testid="nav-menu"]')?.focus();
+        }}
+        className="fixed inset-y-0 left-0 z-50 flex w-[min(18rem,85vw)] flex-col overflow-y-auto bg-canvas shadow-overlay md:hidden"
+        style={{ animation: 'drawer-in 200ms cubic-bezier(0.23,1,0.32,1) both' }}
+      >
+        <div className="flex items-center justify-between px-2 pt-2">
+          <Dialog.Title className="px-2 text-[12px] font-medium text-ink-3">Navigation</Dialog.Title>
+          <Dialog.Close className="primitive-icon-button text-ink-3 hover:bg-hover-2 hover:text-ink" aria-label="Close navigation" data-testid="nav-drawer-close">
+            <X className="size-5" />
+          </Dialog.Close>
+        </div>
+        {children}
+      </Dialog.Content>
+    </Dialog.Root>
   );
 }
 

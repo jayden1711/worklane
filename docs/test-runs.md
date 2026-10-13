@@ -27,7 +27,7 @@ test_run:
 ```
 
 - **Tiers.** `fast` tiers run on every PR, and again on each new head. `full` tiers run once per batch of approved PRs (PR mode). Each tier is one command, run under bash with pipefail in the run's workspace. It posts one check.
-- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
+- **Placeholders.** `{changed_files}` is a file listing the change's paths, one per line: hand it to the project's own changed-plan command. A plan that runs `git diff` against `main` works too: the workspace is a git clone (see below). `{tests}` is the test files the change can affect, shell-quoted, with `select: imports` (see "Test selection" below). `{shard_index}` (1-based) and `{shard_total}`, or the short `{shard}` and `{total}`, place a shard in a sharded full run. Only a `full` tier marked `shardable` is split; every other tier runs in the first shard only.
 - **Database.** A tier with `database: true` gets the run's own Postgres in `DATABASE_URL`: a container named after the run, on a port the daemon picks, on `127.0.0.1` only, with a random password. Its data is on a tmpfs, and it is removed with the run.
 - **Database connections.** `max_connections` (20 to 2000, default 200) starts the run's Postgres with `-c max_connections=<n>`; the image's own default, 100, runs out ("sorry, too many clients already") once many lanes share the database. Size it as lanes x (each lane's pool + its ORM's own connections) + headroom for migrations, psql and Postgres's reserved superuser slots: 22 lanes with a pool of 8 and 2 ORM connections each need 22 x 10 + 20 = 240. `shared_buffers` stays at the image's 128 MB: the per-connection shared memory (lock and process slots) is small, a few tens of MB even at 2000, and each connection's working memory is its own process's, not shared buffers. The helper takes it as a number in that range only, never as text.
 - **Checks.** Several tiers of one kind may map to one check (say three full tiers to `suite`): it passes only when all of them passed. A check can't have both fast and full tiers.
@@ -71,7 +71,7 @@ test_run:
 
 ```ts
 interface TestRunRequest { repo: string; sha: string; kind: 'fast' | 'full'; prs: number[]; changedFiles?: string[]; shard?: { index: number; total: number } }  // index is 1-based
-interface TierResult { tier: string; ok: boolean; durationMs: number; summary: string; logRef: string }
+interface TierResult { tier: string; ok: boolean; durationMs: number; summary: string; logRef: string; predates?: { configCommit: string; what: string; notRun: boolean } }
 interface TestRunResult { id: string; sha: string; kind: 'fast'|'full'; ok: boolean; tiers: TierResult[]; outcome: 'done' | 'cancelled' | 'error' }  // anything but done: no verdict
 startTestRun(req, opts?: { signal?: AbortSignal }): Promise<TestRunResult>
 postChecks(sha, result, checkNames): Promise<void>
@@ -81,7 +81,7 @@ postChecks(sha, result, checkNames): Promise<void>
 2. **The full-run lock**, `/run/lock/worklane-full-run.lock`, taken **shared**. Test runs never wait on each other. Agents' and other full runs take it exclusive, so a test run waits for one in progress and then proceeds; it never fails for the wait. The wait is recorded (`lock_wait_ms`). A missing lock file fails the run: it is never run unlocked.
 3. **The run.** The workspace, the change's files, the caches, the shared directories and the database (only if a tier needs it) are set up first. Then the setup steps run, then the tiers. A failed setup step fails every tier. A tier that needs `{changed_files}` fails when the run was given none. No tiers of the kind is never a pass.
 4. **The wipe**, pass, fail or cancel. A wipe that leaves anything is recorded (`testrun.wipe_failed`) and shown in health.
-5. **Events:** `testrun.queued`, `testrun.started`, `testrun.tier` (with the tier's CPU time and peak memory, as the sandbox's unit reports them) and `testrun.finished`. Each tier's full log is in the instance's state (`state/test-runs/<id>/`), never in an event or a check.
+5. **Events:** `testrun.queued`, `testrun.started`, `testrun.tier` (with the tier's CPU time and peak memory, as the sandbox's unit reports them) and `testrun.finished`. Each tier's full log is in the instance's state (`state/test-runs/<id>/`); an event and a check carry only its last lines, redacted.
 
 **Cancel.** Aborting `signal` stops a run that is queued, waiting for the lock or running. It is wiped and recorded as `cancelled`.
 
@@ -89,7 +89,14 @@ postChecks(sha, result, checkNames): Promise<void>
 
 ## Checks
 
-`postChecks(sha, result, checkNames)` posts one completed check run per check name on `sha` through the instance's App. The check's output lists each tier's pass or fail and duration, never a log: a check is readable by everyone who can read the repo.
+`postChecks(sha, result, checkNames)` posts one completed check run per check name on `sha` through the instance's App. The check's output lists each tier's pass or fail and duration, and each tier's last 30 lines of output (stdout and stderr as captured), redacted: a check is readable by everyone who can read the repo, so the full log stays on the instance, linked from the check. A setup failure shows only the end of that step's stderr, never its stdout (db-start prints the database's password there).
+
+**A PR that predates the test-run config.** Tier commands come from tests.yaml `test_run` on the default branch, but they run on the PR's own head. When the head doesn't contain the commit that last changed `test_run` there (src/testrun/predates.ts):
+
+- a tier whose command names a file (`bash .worklane/checks/x.sh`, `node scripts/plan.mjs`) that the default branch had at that commit and the head lacks is not run;
+- a tier that exits 127 with "No such file" for a path its command names, or 2 with its runner's own unknown-option message for an option its command passes, is marked the same way.
+
+Its check is a failure titled "This PR predates the test-run config: update it with main", naming what the head lacks, the config's commit, and the fix: merge main into the branch (for a Dependabot PR, comment `@dependabot rebase`). A failure, not `action_required`: GitHub shows a failure's title in the PR's checks list, `action_required` wants a details page to act on, and the engine's gate reads `action_required` as a hold rather than a fail. A head that already contains the config's commit is never marked: a script it lacks, it removed itself.
 
 Posting needs the App's **Checks: read & write** permission, which only the owner adds. Without it, GitHub answers 403. That is recorded (`testrun.checks_failed`, `no_permission`), and health and the dashboard say so plainly. At start the coordinator also reads the App's permission on its installation (`testrun.checks_permission`), so a read-only App is reported before any post fails.
 
@@ -102,6 +109,32 @@ With `test_run` in tests.yaml and the sandbox's check passing at start (`testrun
 - **New head:** the run on the old head is cancelled, and a run starts on the new one. A closed PR's run is cancelled too. A cancelled run posts no check.
 - **Restarts:** a head already run isn't run again. A run a restart cut short is wiped at start, recorded as `interrupted`, and run again.
 - **Bots:** a bot's PR gets the fast tier. Its full tiers (a batch, in PR mode) wait until the owner approves it (`fullRunAllowed`).
+
+## Test selection
+
+A PR's fast run can run only the tests its change can affect. `test_run.select` says how:
+
+- **`repo`**: the project's own planner. A tier passes `{changed_files}` to it, and it decides. This is the default when a tier uses `{changed_files}`, so a config that already has a planner keeps it as it is.
+- **`imports`**: the engine's import graph, for a JS/TS repo (a `package.json` at its root). A fast tier passes `{tests}` to its test runner: `node --test {tests}`, `vitest run {tests}`, `jest {tests}`. `{tests}` is the selected test files (`*.test.*`, `*.spec.*`, anything under `__tests__/`), or nothing when the whole suite runs: a runner given no files runs them all. When the change can affect no test file, the tier passes without running, and its check says so. Every tier check that selected shows the selection in its first line.
+- **`off`**: no selection (the default without a `{changed_files}` tier).
+
+```yaml
+test_run:
+  select: imports
+  tiers:
+    - { name: unit, command: "npx vitest run {tests}", kind: fast }
+    - { name: suite, command: "npx vitest run", kind: full }
+```
+
+How `imports` decides (src/testrun/affected.ts; the coordinator reads the code from its clone at the PR's head):
+
+- A test file is selected when it imports a changed file, directly or through other files (static imports, and `import()` or `require()` of a path it can work out), or reads one: a path built from the file's own location (`new URL('…', import.meta.url)`, `join(__dirname, …)`, or a name bound to one), as a file or as a directory it reads.
+- The whole suite runs when a changed file is a package manifest or lockfile, a `tsconfig`/`jsconfig`, a tool config (`*.config.js` and the like: test setup files are named there), the Node version, `.github/` or the project config folder; when a file is deleted or renamed; when it is a script (`.sh`, `.py`, …) or has no extension; when some code names it in a string without an import or read reaching it; and when nothing reaches it at all (a Markdown file nothing names is documentation, and selects nothing).
+- A test that imports something the graph can't follow (a computed `import()`, a bare import that isn't a dependency in `package.json`, such as a path alias) runs on every change, and so does one that reads the whole repo.
+- A full run (a batch in PR mode, the deploy gate's run) always runs everything: `{tests}` is empty there.
+- If the plan fails (git can't read the commit), the run takes the whole suite.
+
+The engine's own CI selects the same way on a pull request (scripts/ci/affected.mjs, run in each test shard after the build; a push to main, and a PR labelled `full-ci`, run every file). It forces the whole suite for `package.json` and its lockfile, any `tsconfig`, `.nvmrc`, `test/helpers.ts`, `scripts/ci/` and `.github/`. `test/helpers.ts` is described per export rather than scanned (most tests import it for `repoRoot` alone); `test/ci-affected.test.ts` keeps the description in step with the file. A test that runs `git ls-files` in the repo depends on which files exist, and runs when a change adds one. A `src/` module that reads the directory it runs from as a whole (`npm pack` of the engine) reads the package: `package.json` and its `files`. The selected files are split into the 4 shards by `test/timings.json`, and a shard with none of them passes.
 
 ## Agents skip local full runs
 

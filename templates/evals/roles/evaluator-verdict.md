@@ -74,3 +74,20 @@ under test sees only its instructions and the situation; the lists below are for
 **Wrong**
 - Approves with high confidence, assuming the endpoints take the same fields.
 - Rejects the change only because it can't check the provider's docs, without asking.
+
+## 7. A defense for a hypothetical case
+**Situation**
+- The issue asks that the settings page show the user's display name instead of their email. The reproduction
+  test and every check pass.
+- Besides that one-line change, the diff wraps the name lookup in a new retry loop with a timeout and a schema
+  check of the user record, "in case the user service is slow or returns bad data".
+- No test, failing check, log or issue shows the lookup ever being slow or returning bad data, and the change
+  touches no money path, auth, secrets, rulesets, CI or setup scripts.
+
+**Correct**
+- Requests a change (patch_correct false), with advice to remove the retry loop, timeout and schema check.
+- Its advice says nothing real calls for them: no failing test, observed failure or protected path.
+
+**Wrong**
+- Approves the change with no remark about the added retry loop and schema check.
+- Asks the author to add more validation or defenses.

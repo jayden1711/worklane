@@ -242,8 +242,12 @@ export const EventSchemas = {
   'check.result': z.strictObject({ issue, head: sha, stage: z.string(), checks: z.array(CheckRunSchema) }),
   /** The browser checks a verify ran (src/coordinator/browser.ts): the PR description's BROWSER CHECKS section. */
   'browser.evidence': z.strictObject({ issue, head: sha, lines: z.array(z.string().max(1000)).max(300) }),
-  /** The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts. */
-  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()) }),
+  /**
+   * The sentences of a worker's summary that claim verification (src/receipts.ts), for the PR's receipts; and the
+   * worker's intent paragraph and risk class for the top of the PR body (src/pr-rules.ts; the class can only raise
+   * the one computed from the paths). Both absent in older events.
+   */
+  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()), intent: z.string().max(4000).optional(), risk_class: z.enum(['docs-only', 'logic', 'protected']).optional() }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -415,7 +419,11 @@ export const EventSchemas = {
   'merge.deferred': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string(), retry_at: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
   /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
-  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()) }),
+  /**
+   * The default branch's required checks on an auto-merge's commit. `flaky`: failed, then passed on a re-run of the
+   * same commit; `quarantined`: failed, but quarantined as flaky (src/flaky.ts). Neither turns it red for the harness.
+   */
+  'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()), flaky: z.array(z.string()).optional(), quarantined: z.array(z.string()).optional() }),
   /** A wait reached its cap (coordinator/wait-caps.ts): recorded, the owner told, and it waits for them. `number`: the PR, if any. */
   'wait.capped': z.strictObject({ issue, number: z.number().int().positive().nullable(), kind: z.enum(['deferred_landing', 'mergeable_recheck', 'light_check_pending', 'main_checks']), detail: z.string() }),
   /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
@@ -438,6 +446,15 @@ export const EventSchemas = {
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
    */
   'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable() }),
+  /**
+   * An unaccounted commit that landed without a PR (src/direct-push-alert.ts): `direct`, GitHub's commit-to-PR link
+   * has no merged PR for it; `rewrite`, a force-push. `pusher`: a GitHub login only (`pusher_from`: the push's actor,
+   * or the commit's author when the push's isn't known). `alert`: whether it is posted to the ops channel
+   * (config.yaml main_watch.direct_push_alert as committed before it).
+   */
+  'main_watch.direct_push': z.strictObject({ sha, url: z.string(), kind: z.enum(['direct', 'rewrite']), pusher: z.string().nullable(), pusher_from: z.enum(['activity', 'commit']).nullable(), subject: z.string(), alert: z.boolean() }),
+  /** Its ops-channel post: sent (`ok`), how many owners it mentioned, and `note`: why nobody was, or why it wasn't sent. */
+  'main_watch.direct_push_alert': z.strictObject({ sha, ok: z.boolean(), mentioned: z.number().int().nonnegative(), note: z.string().nullable() }),
   /** No more fix runs on this PR; the owner is asked to look. */
   /** The combined-state check started: the default branch moved and touched what this PR touches (overlap). */
   'light_check.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()) }),
@@ -463,6 +480,20 @@ export const EventSchemas = {
     detail: z.string(),
   }),
   'ci_fix.gave_up': z.strictObject({ issue, number: z.number().int().positive(), head: sha, reason: z.string() }),
+  // stale PR hygiene (src/pr-hygiene.ts): the harness's own PRs whose base is older than pr_hygiene.stale_after_days
+  /** The default branch (base_sha) merged into a stale PR and pushed to its branch: `from` the head before, `head` the merge commit. */
+  'pr_hygiene.merged_in': z.strictObject({ issue, number: z.number().int().positive(), from: sha, head: sha, base_sha: sha, base_days: z.number().int().nonnegative() }),
+  /** An abandoned PR closed with a comment (its branch kept): its task closed or superseded, and no activity for a while. */
+  'pr_hygiene.closed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
+  /** One pass: how many PRs got the default branch merged in, conflict, were closed, were held for an owner, or skipped; each PR's result. */
+  'pr_hygiene.pass': z.strictObject({
+    merged_in: z.number().int().nonnegative(),
+    conflicting: z.number().int().nonnegative(),
+    closed: z.number().int().nonnegative(),
+    held: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    prs: z.array(z.strictObject({ number: z.number().int().positive(), outcome: z.enum(['merged_in', 'conflicting', 'closed', 'held', 'skipped']), why: z.string().max(500) })),
+  }),
   'land.batch': z.strictObject({ id: z.string(), issues: z.array(issue), tip: sha, outcome: z.enum(['started', 'landed', 'red', 'split', 'deferred']), detail: z.string() }),
   /**
    * PR mode with batching (coordinator/pr-batch.ts): a PR ready on its fast checks waits, at this head, for a batch.
@@ -548,6 +579,11 @@ export const EventSchemas = {
     results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
     detail: z.string().max(2000),
   }),
+  /**
+   * One tier's per-test durations, read from its output (src/test-durations.ts): its slowest tests (at most 100) and
+   * how many it printed durations for in all (0: its runner prints none this reads). For the metrics' slow tests.
+   */
+  'testrun.durations': z.strictObject({ id: z.string(), tier: z.string(), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative() }),
   'testrun.wipe_failed': z.strictObject({ id: z.string(), left: z.array(z.string()) }),
   'testrun.checks_posted': z.strictObject({ id: z.string(), sha, checks: z.array(z.strictObject({ name: z.string(), conclusion: z.enum(['success', 'failure', 'cancelled']) })) }),
   /** no_permission: the App lacks Checks: write (the owner adds it); the checks were not posted. */
@@ -592,6 +628,38 @@ export const EventSchemas = {
   }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
+  // CI timings read from GitHub for the metrics (src/ci-metrics.ts): each recorded once, so each is asked once.
+  /**
+   * A merged PR's CI wall-clock on its head: from the first check run starting to the last required check
+   * (config.yaml required_checks; every check when none) completing. `wall_ms` null: not measurable (`why`).
+   */
+  'ci.pr_timing': z.strictObject({ number: z.number().int().positive(), head: sha, wall_ms: z.number().int().nonnegative().nullable(), first_started: z.string().nullable(), last_completed: z.string().nullable(), why: z.string().max(500).nullable() }),
+  /** One GitHub Actions job's per-test durations on a default-branch commit, from its log (src/test-durations.ts). */
+  'ci.test_durations': z.strictObject({ sha, job: z.string().max(200), tests: z.array(z.strictObject({ name: z.string().max(300), ms: z.number().nonnegative() })).max(100), parsed: z.number().int().nonnegative(), error: z.string().max(500).nullable() }),
+  // flaky tests (src/flaky.ts, coordinator/flaky.ts): before the default branch counts as red, its failing checks re-run on the same commit
+  /**
+   * The default branch's required checks failed on `sha` (a red run): each failing check (`failed`) is re-run there.
+   * `via`: how each was: `actions` (its workflow run's failed jobs), `test_run` (the test run's tiers), or `none`
+   * (it can't be: `why`); `id` is the failing check run, so its re-run is told apart.
+   */
+  'flaky.rerun_requested': z.strictObject({
+    sha,
+    number: z.number().int().positive().nullable(),
+    failed: z.array(z.string()),
+    via: z.array(z.strictObject({ check: z.string(), how: z.enum(['actions', 'test_run', 'none']), id: z.number().int().nullable(), why: z.string().nullable() })),
+    /** When the re-run was asked for, by the coordinator's clock: rerun_timeout_min counts from it. */
+    at: z.string(),
+  }),
+  /** The re-run's verdict on `sha`: `flaky` passed on the re-run, `real` failed again (or couldn't re-run, or `timed_out`). */
+  'flaky.rerun_result': z.strictObject({ sha, number: z.number().int().positive().nullable(), flaky: z.array(z.string()), real: z.array(z.string()), timed_out: z.array(z.string()) }),
+  /** A test (a check: an Actions job or a test-run tier) put in quarantine: it still runs and reports, but no longer turns the branch red for the harness. `again`: it had been released. */
+  'flaky.quarantined': z.strictObject({ test: z.string(), sha, issue: z.number().int().positive().nullable(), url: z.string().nullable(), again: z.boolean() }),
+  /** A quarantined test was seen flaky again: `sightings` in all. */
+  'flaky.sighted': z.strictObject({ test: z.string(), sha, sightings: z.number().int().positive() }),
+  /** A quarantined test's result on a default-branch commit: `passes`, the passes in a row now. */
+  'flaky.observed': z.strictObject({ test: z.string(), sha, ok: z.boolean(), passes: z.number().int().nonnegative() }),
+  /** A test left quarantine (it blocks again): after `passes` passes in a row, or an owner cleared it. */
+  'flaky.released': z.strictObject({ test: z.string(), how: z.enum(['passes', 'owner']), by: z.string(), passes: z.number().int().nonnegative() }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
 } as const;

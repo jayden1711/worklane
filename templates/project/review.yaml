@@ -24,6 +24,18 @@ merge:
   # Categories you stopped waiting on through gradual delegation (below). L3 categories, ci-config and
   # dependency can never be listed here: the config is refused.
   loosened: []
+# Every agent PR body starts with a one-paragraph intent and a risk class (docs-only / logic / protected),
+# computed from the changed paths: protected is anything above that always waits for you. The worker can raise
+# it, never lower it. Over max_pr_lines changed lines (lockfiles and `generated` files not counted) a change goes
+# back to the worker to be split, unless it is mechanical: only renames, moves and formatting (whitespace ignored,
+# the added lines are exactly the removed ones).
+max_pr_lines: 600
+# generated: ['**/*.min.js', '**/dist/**', ...]   # the default list; yours replaces it
+# Docs-only PRs (only *.md and docs/**): the harness's merge call waits on just these of required_checks
+# (e.g. [lint, scan]). Empty: no fast path. GitHub's branch protection still requires every required check:
+# make the heavy jobs skip on docs-only changes with a job-level `if:` (a skipped job satisfies a required check;
+# a workflow-level paths filter leaves it pending, and the merge waits).
+docs_only_checks: []
 # Gradual delegation, suggest-only: when a category in wait_categories has min_clean PRs in a row approved
 # unchanged (none reverted, main never red after one, no later fix), you're asked whether to stop waiting on
 # it, with the evidence. A loosened category that goes wrong is proposed for waiting again. Never automatic.

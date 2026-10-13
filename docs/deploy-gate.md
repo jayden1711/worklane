@@ -25,7 +25,15 @@ The App needs **Contents: read & write** (for the ref update) and **Checks: read
 
 ## Configuration: tests.yaml `deploy_gate:`
 
-It is off by default: without `deploy_gate`, nothing runs and nothing moves.
+It is off by default, and has an explicit switch, `enabled`, which defaults to `false`. Without `deploy_gate`, or with it but without `enabled: true`, the whole gate is off:
+- no test run on the default branch for the gate;
+- `deploy` never moves;
+- no post-deploy check, and no ask for the host token;
+- a Discord `deploy <sha>` is refused, saying the gate is off.
+
+A present block is still fully validated while it is off (every rule below, the post-deploy check's included), so a mistake shows before it is switched on. The dashboard's Pre-deploy gate panel says "Configured, off", with what turning it on would do.
+
+**Turning it on is the owner's step:** `enabled: true`, in its own reviewed PR, after a green suite has posted. An agent adds the block switched off and leaves the switch to the owner.
 
 ```yaml
 test_run:
@@ -34,6 +42,7 @@ test_run:
     - { name: suite, command: "npm test", kind: full, database: true }
   # ...
 deploy_gate:
+  enabled: false           # default: false (off). The owner sets true in a reviewed PR.
   branch: deploy           # default: deploy. Never the default branch.
   tiers: [chain, suite]    # the full post-merge set: test_run tiers of either kind, all run unsharded on the commit
   notify: ops              # ops (default): post to discord.ops_channel when deploy moves and when it is held; off: dashboard only
@@ -49,7 +58,7 @@ The coordinator also refuses a gate on the default branch. The gate needs the te
 
 ## Where to see it
 
-- **Dashboard, Machine page:** the commit `deploy` is at, when and by whom it moved there, the last held commit and why, and a refusal in force.
+- **Dashboard, Machine page:** while it is off, "Configured, off" and what turning it on would do. While it is on: the commit `deploy` is at, when and by whom it moved there, the last held commit and why, and a refusal in force.
 - **Events:**
   - `deploy_gate.verdict`
   - `deploy_gate.moved` (with `by` and `override`)
@@ -87,7 +96,7 @@ Use an account or workspace token as `Authorization: Bearer $RAILWAY_TOKEN`. A p
      -d '{"query":"query($p:String!,$e:String!,$s:String!){deploymentTriggers(projectId:$p,environmentId:$e,serviceId:$s){edges{node{id branch repository checkSuites}}}}","variables":{"p":"<PROJECT_ID>","e":"<PRODUCTION_ENV_ID>","s":"<SERVICE_ID>"}}'
    ```
 
-2. **Create `deploy` first.** Turn the gate on and wait for its first green commit (the gate creates `deploy` there), or create it yourself at the commit production runs now. Then switch each production trigger to it:
+2. **Create `deploy` first.** Turn the gate on (the owner's reviewed PR setting `deploy_gate.enabled: true`) and wait for its first green commit (the gate creates `deploy` there), or create it yourself at the commit production runs now. Then switch each production trigger to it:
 
    ```sh
    curl -s https://backboard.railway.com/graphql/v2 \
@@ -110,6 +119,7 @@ Where this was checked: the mutation, the query and their fields are in Railway'
 
 ## How to verify
 
+0. While `enabled` isn't `true`: the Machine page says "Configured, off", no `full` run of the gate tiers starts after a merge, `deploy` doesn't move, and `deploy <sha>` in Discord is answered "Not deployed: the deploy gate is off". Then the owner merges the PR setting `enabled: true`.
 1. Merge a PR to `main`.
 2. Within about 90 s, the gate's run starts. The test runs on the Machine page show a `full` run of the gate tiers on the merge commit.
 3. When it ends, the merge commit has its tier checks and a `deploy-gate` check: `gh api repos/<repo>/commits/<sha>/check-runs --jq '.check_runs[] | [.name, .conclusion] | @tsv'`.

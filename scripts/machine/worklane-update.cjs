@@ -17,6 +17,9 @@
 //     until it has been on main for updates.json "pending_wait_minutes" (default 60, from its committer date); after
 //     that an older fully green commit may go in instead, and the pending one still installs later if it turns green.
 //     Installing an older commit than the tip logs a "chose" line: the commit, and why each newer one was skipped.
+//     On the engine repo the slow checks run in batches (.github/workflows/ci-batch.yml: main's newest commit, at
+//     most every 30 minutes), so only a batched commit can have every required check: one the batch skipped reads
+//     as pending ("hasn't run"), is waited for until pending_wait_minutes, then passed over, and never installed.
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
@@ -77,6 +80,7 @@ const LOOKBACK = 20; // updates.json max_lookback: first-parent commits looked a
 const LOOKBACK_MAX = 100;
 const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
+const CHECK_PAGES_MAX = 10; // pages of 100 check runs read for one commit
 const VERDICT_TTL_MS = 60 * 60_000; // how long an older commit's red verdict is reused before GitHub is asked again
 
 // ---------- decisions (pure) ----------
@@ -129,6 +133,25 @@ function firstParentLine(cmp, current, head, max) {
 }
 
 const short = (sha) => String(sha).slice(0, 7);
+/**
+ * Every check run on a commit, page by page: 100 a page, the next page (CHECKS_SPACING_MS later) while GitHub's
+ * total_count says there are more, at most CHECK_PAGES_MAX pages. A commit can carry well over 100: the CI batch's
+ * scheduled run adds one to main's tip every half hour, newest first, so the checks that matter can be on a later
+ * page. Returns { check_runs } (past CHECK_PAGES_MAX pages, the newest only: a required check among the older ones
+ * reads as not run, so that commit isn't installed), or null when GitHub gives no answer for any page.
+ */
+async function checkRunsOf(deps, api, sha) {
+  const all = [];
+  for (let page = 1; page <= CHECK_PAGES_MAX; page++) {
+    if (page > 1) await deps.sleep(CHECKS_SPACING_MS);
+    const data = await deps.fetchJson(`${api}/commits/${sha}/check-runs?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+    if (!data || !Array.isArray(data.check_runs)) return null; // a page missing could hide a red check
+    all.push(...data.check_runs);
+    if (data.check_runs.length < 100 || !(data.total_count > all.length)) break;
+  }
+  return { check_runs: all };
+}
+
 /** `a0685ce: required check "push-gate" ended failure; …` */
 const skippedText = (skipped) => skipped.map((s) => `${short(s.sha)}: ${s.reason}`).join('; ');
 const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`;
@@ -159,7 +182,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
-      const data = await deps.fetchJson(`${api}/commits/${c.sha}/check-runs?per_page=100`);
+      const data = await checkRunsOf(deps, api, c.sha);
       v = data ? evaluateChecks(data.check_runs, cfg.required_checks) : { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
       if (!v.ok && v.final && i > 0) {
         kept[c.sha] = { reason: v.reason, at: new Date(now).toISOString() };
@@ -594,7 +617,7 @@ async function update(deps, cfg) {
     // The commit whose checks count: the main commit the release was cut from.
     const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
     if (!v.ok) return deps.note('refused', head, v.reason, true);
-    const checks = evaluateChecks(((await deps.fetchJson(`${api}/commits/${v.base}/check-runs?per_page=100`)) || {}).check_runs, cfg.required_checks);
+    const checks = evaluateChecks(((await checkRunsOf(deps, api, v.base)) || {}).check_runs, cfg.required_checks);
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
     if (!Array.isArray(cfg.required_checks) || cfg.required_checks.length === 0) return deps.note('refused', head, 'no required checks configured in updates.json', true);
@@ -1010,4 +1033,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { chooseCommit, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

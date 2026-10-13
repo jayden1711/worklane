@@ -1301,7 +1301,7 @@ test('land_mode pr: an approved change goes out as a PR on its own branch; the d
   const prs = f.backlog.prs();
   assert.equal(prs.length, 1);
   assert.equal(prs[0]!.base, 'main');
-  assert.match(prs[0]!.body, new RegExp(`^Closes #${n}`));
+  assert.match(prs[0]!.body, new RegExp(`^\\*\\*Intent:\\*\\* fixed\\n\\n\\*\\*Risk class:\\*\\* logic\\n\\nCloses #${n}`), "the intent, the risk class, then the issue");
   assert.match(prs[0]!.body, /Independent evaluator:\*\* approves/);
   assert.equal((await f.backlog.get(n)).state, 'open', 'the issue closes when a human merges the PR');
   assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(n)), '', 'claim released');
@@ -2165,6 +2165,51 @@ test('auto-merge stop: main red after an auto-merge but already red before it: s
   assert.ok(!t.f.backlog.prs().some((p) => p.head.includes('revert')));
 });
 
+/** An auto-merged PR whose main commit fails `ci`; the tracker can re-run Actions jobs (recorded in `reruns`). */
+async function redAfterMerge() {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  realMerges(t);
+  const reruns: number[][] = [];
+  t.f.backlog.rerunFailedJobs = async (ids) => {
+    reruns.push(ids);
+    return new Map(ids.map((id) => [id, { ok: true as const, run: 1 }]));
+  };
+  const before = git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!;
+  t.f.backlog.setChecks(before, passing);
+  await green(t);
+  const done = lastOf(t.f.log, 'merge.done') as { sha: string };
+  t.f.backlog.setChecks(done.sha, failing(94));
+  await t.c.tick();
+  return { t, done, reruns };
+}
+
+test('flaky: main red after an auto-merge is re-run on the same commit first; green then: flaky, quarantined, one issue, no stop, revert or fix', { skip }, async () => {
+  const { t, done, reruns } = await redAfterMerge();
+  assert.deepEqual(reruns, [[94]], 'the failing job re-run');
+  assert.equal(t.f.log.read(0, ['merge.main_result', 'merge.stopped']).length, 0, 'not judged red while it re-runs');
+  t.f.backlog.setChecks(done.sha, [{ ...passing[0]!, id: 95 }]);
+  await t.c.tick();
+  assert.deepEqual(lastOf(t.f.log, 'merge.main_result'), { issue: t.n, number: t.opened.number, sha: done.sha, outcome: 'green', failed: [], flaky: ['ci'] });
+  assert.equal(t.f.log.read(0, ['merge.stopped']).length, 0, 'auto-merge goes on');
+  assert.equal(t.c.autoMergeStopped(), null);
+  assert.ok(!t.f.backlog.prs().some((p) => p.head.includes('revert')), 'no revert PR');
+  const filed = lastOf(t.f.log, 'flaky.quarantined') as { test: string; issue: number };
+  assert.equal(filed.test, 'ci');
+  assert.equal((await t.f.backlog.get(filed.issue)).title, 'Flaky test: ci', 'one issue for it');
+  assert.ok(!(await t.f.backlog.get(filed.issue)).labels.includes('ready'), 'not ready: no agent opens a fix for it');
+});
+
+test('flaky: main red, and red again on the re-run of the same commit: real, stopped and reverted as before', { skip }, async () => {
+  const { t, done, reruns } = await redAfterMerge();
+  assert.deepEqual(reruns, [[94]], 're-run first');
+  assert.equal(t.f.log.read(0, ['merge.main_result', 'merge.stopped']).length, 0, 'nothing judged, stopped or reverted before the re-run is in');
+  t.f.backlog.setChecks(done.sha, failing(96));
+  await t.c.tick();
+  assert.deepEqual(lastOf(t.f.log, 'merge.main_result'), { issue: t.n, number: t.opened.number, sha: done.sha, outcome: 'red', failed: ['ci'] });
+  assert.ok((lastOf(t.f.log, 'merge.stopped') as { revert: string | null }).revert, 'the revert PR');
+  assert.equal(t.f.log.read(0, ['flaky.quarantined']).length, 0);
+});
+
 test('auto-merge: main green after it is recorded and nothing stops', { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
   realMerges(t);
@@ -2940,4 +2985,123 @@ test('with test_run on, an agent run never starts the full suite: done_when suit
       assert.match(worker.prompt, /\{"suite":"full"\}/);
     }
   }
+});
+
+// ---- review rules (src/pr-rules.ts): the body's intent and class, the size limit, the docs-only fast path
+
+/** The default fix, reporting `out` (summary, intent, risk_class) as the worker's structured output. */
+const workerReporting = (out: object) => (req: RunRequest) => {
+  const p = join(req.cwd, 'src', 'price.js');
+  writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
+  commitAll(req.cwd, 'Ignore non-positive quantities in totals');
+  return out;
+};
+
+const check = (name: string, conclusion: string | null, id: number) => ({ name, source: 'check_run' as const, status: conclusion ? 'completed' : 'in_progress', conclusion, id });
+
+test("review rules: the PR body starts with the worker's intent and the risk class computed from its paths; a lower claim does not lower it", { skip }, async () => {
+  const t = await openPr({ worker: workerReporting({ summary: 'Fixed it.', intent: 'Totals ignore order lines\n\nwith a zero or negative quantity.', risk_class: 'docs-only' }) });
+  assert.match(t.pr().body, new RegExp(`^\\*\\*Intent:\\*\\* Totals ignore order lines with a zero or negative quantity\\.\\n\\n\\*\\*Risk class:\\*\\* logic\\n\\nCloses #${t.n}\\n`));
+});
+
+test('review rules: a worker that raises the class to protected gets a protected PR, and it waits for the owner', { skip }, async () => {
+  const t = await openPr({ worker: workerReporting({ summary: 'Fixed it. The price tests pass.', intent: 'Totals ignore non-positive quantities.', risk_class: 'protected' }), 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  assert.match(t.pr().body, /^\*\*Intent:\*\* Totals ignore non-positive quantities\.\n\n\*\*Risk class:\*\* protected \(raised from logic by the worker\)\n\n/);
+  await green(t);
+  assert.equal(reasonsOf(t).auto, false);
+  assert.ok(reasonsOf(t).reasons.includes('high-risk: the worker marked the change protected (a risk class can be raised, never lowered)'), reasonsOf(t).reasons.join('; '));
+  assert.ok(!t.pr().merged);
+});
+
+test('review rules: an agent PR without an intent is refused: no PR opens, and the issue is blocked with why', { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  const n = f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents({ worker: workerReporting({ summary: '' }) }), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.tick();
+  await c.idle();
+  await c.tick();
+  assert.equal(f.backlog.prs().length, 0, 'no PR');
+  assert.equal(f.log.read(0, ['pr.opened']).length, 0);
+  const r = lastOf(f.log, 'land.result') as { outcome: string; detail: string };
+  assert.equal(r.outcome, 'rejected');
+  assert.match(r.detail, /^PR body refused: the body does not start with a one-paragraph intent/);
+  const blocked = lastOf(f.log, 'issue.blocked') as { issue: number; why: string };
+  assert.equal(blocked.issue, n);
+  assert.match(blocked.why, /its body was refused/);
+});
+
+test('review rules: a change over max_pr_lines is sent back with "split it"; the same size as a pure rename goes on', { skip }, async () => {
+  const long = Array.from({ length: 700 }, (_, i) => `export const v${i} = ${i};`).join('\n') + '\n';
+  const run = async (worker: (req: RunRequest) => object) => {
+    const f = fixture({ files: { 'src/table.js': long } });
+    f.cfg.project.land_mode = 'pr';
+    f.backlog.open({ title: 'Move the rate table', body: 'Move it.\n\n```done_when\n- command: node --test\n```\n', author: 'example-owner', labels: ['ready'] });
+    const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents({ worker }), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 1 });
+    await c.tick();
+    await c.idle();
+    await c.tick();
+    return f;
+  };
+  const added = await run((req) => {
+    writeFileSync(join(req.cwd, 'src', 'rates.js'), long.replace(/export const v/g, 'export const r'));
+    commitAll(req.cwd, 'Add a rate table');
+    return { summary: 'added' };
+  });
+  const why = (lastOf(added.log, 'change.rejected') as { why: string }).why;
+  assert.match(why, /^split it: 700 changed lines \(over review\.yaml max_pr_lines 600, lockfiles and generated files not counted\), and not mechanical/);
+  assert.equal(added.backlog.prs().length, 0);
+  assert.equal(added.log.read(0, ['check.result']).length, 0, 'sent back before any test run');
+
+  const moved = await run((req) => {
+    git(req.cwd, 'mv', 'src/table.js', 'src/rates.js');
+    commitAll(req.cwd, 'Rename the rate table');
+    return { summary: 'renamed', intent: 'Rename the rate table to rates.js.' };
+  });
+  assert.equal(moved.log.read(0, ['change.rejected']).length, 0, 'mechanical: not sent back');
+  assert.ok(moved.log.read(0, ['check.result']).length, 'verified: it went on past the size check');
+});
+
+test("review rules: a docs-only PR is ready and merges on the light checks; GitHub's other required checks are waited out, not sent to the owner", { skip }, async () => {
+  const docsWorker = (req: RunRequest) => {
+    writeFileSync(join(req.cwd, 'README.md'), `${readFileSync(join(req.cwd, 'README.md'), 'utf8')}\nOrder lines with a zero or negative quantity are left out of totals.\n`);
+    commitAll(req.cwd, 'Document totals');
+    return { summary: 'Documented totals.', intent: 'Say how totals treat non-positive quantities.' };
+  };
+  const body = 'Document how totals work.\n\n```done_when\n- command: node --test\n```\n';
+  const light = (cfg: ReturnType<typeof fixture>['cfg']) => {
+    cfg.project.required_checks = ['ci', 'lint'];
+    cfg.review!.docs_only_checks = ['lint'];
+  };
+  const t = await openPr({ worker: docsWorker, 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: light, body });
+  assert.match(t.pr().body, /^\*\*Intent:\*\* Say how totals treat non-positive quantities\.\n\n\*\*Risk class:\*\* docs-only \(only documentation changes\)\n\n/);
+  // The light check passed; the heavy one still runs, and GitHub reports the PR blocked on it.
+  t.f.backlog.setChecks(t.opened.head, [check('lint', 'success', 1), check('ci', null, 2)]);
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'blocked' });
+  await t.c.tick();
+  assert.equal((lastOf(t.f.log, 'pr.ready') as { head: string } | undefined)?.head, t.opened.head, 'ready on the light check');
+  assert.ok(!t.pr().merged, 'GitHub still requires ci');
+  assert.equal(t.f.log.read(0, ['merge.decided']).length, 0, 'nothing decided while GitHub waits on ci');
+  assert.ok(!t.pr().labels.includes('needs-owner'));
+  // ci passes; GitHub lets it through.
+  t.f.backlog.setChecks(t.opened.head, [check('lint', 'success', 1), check('ci', 'success', 2)]);
+  t.f.backlog.setPr(t.opened.number, { mergeableState: 'clean' });
+  await t.c.tick();
+  assert.ok(t.pr().merged);
+
+  // The heavy check fails on GitHub: the owner looks.
+  const red = await openPr({ worker: docsWorker, 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: light, body });
+  red.f.backlog.setChecks(red.opened.head, [check('lint', 'success', 1), check('ci', 'failure', 2)]);
+  red.f.backlog.setPr(red.opened.number, { mergeableState: 'blocked' });
+  await red.c.tick();
+  assert.equal(reasonsOf(red).auto, false);
+  assert.ok(reasonsOf(red).reasons.some((r) => /docs-only fast path: the ruleset's required check\(s\) ci \(fail\) did not pass on GitHub/.test(r)), reasonsOf(red).reasons.join('; '));
+  assert.ok(!red.pr().merged);
+
+  // A logic change under the same config: not ready on the light check alone.
+  const logic = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: light });
+  logic.f.backlog.setChecks(logic.opened.head, [check('lint', 'success', 1), check('ci', null, 2)]);
+  await logic.c.tick();
+  assert.equal(logic.f.log.read(0, ['pr.ready']).length, 0, 'every required check for a logic PR');
+  assert.match((lastOf(logic.f.log, 'pr.status') as { reasons: string[] }).reasons.join(), /ci: pending/);
 });

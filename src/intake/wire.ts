@@ -123,7 +123,7 @@ export function intakeForInstance(o: {
       const f = o.discord?.fetch;
       const { now: _now, sleep: _sleep, alive: _alive, ...adapter } = o.discord ?? {};
       const gate = identifyGate({ dir: machine, token, owner: `discord identify ${name}`, ...(o.discord?.now ? { now: o.discord.now } : {}), ...(o.discord?.sleep ? { sleep: o.discord.sleep } : {}), limit: () => sessionStartLimit(token, f ?? fetch) });
-      const bot = new DiscordIntake({ token, guild: d.guild, channels: d.channels, chatChannels: d.chat_channels, allowedSenders: d.allowed_senders, prefixes: d.prefixes, owners: d.owners, gate, log: say, ...adapter });
+      const bot = new DiscordIntake({ token, guild: d.guild, channels: d.channels, chatChannels: d.chat_channels, allowedSenders: d.allowed_senders, prefixes: d.prefixes, owners: d.owners, ...(d.ops_channel ? { opsChannel: d.ops_channel } : {}), gate, log: say, ...adapter });
       const source = discordSource(bot);
       sources.push(source);
       let release = () => {};

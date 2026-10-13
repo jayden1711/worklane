@@ -94,6 +94,25 @@ test('a fast run: its tiers in a fresh workspace with its own database, every st
   assert.equal(r.events('testrun.wipe_failed').length, 0);
 });
 
+test('each tier records its per-test durations from its output (names and times only), and 0 when its runner prints none', { skip: !hasPerl && 'perl' }, async () => {
+  const tap = ['# Subtest: db', '    # Subtest: migrates', '    ok 1 - migrates', '      ---', '      duration_ms: 4500.25', '      ...', 'ok 1 - db', '  ---', '  duration_ms: 4600', '  ...'].join('\n');
+  const r = rig({
+    tiers: [
+      { name: 'node', command: `cat <<'EOF'\n${tap}\nEOF`, kind: 'fast' },
+      { name: 'plain', command: 'echo all good', kind: 'fast' },
+    ],
+  });
+  const res = await runTestRun(r.deps, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, true, JSON.stringify(res.tiers));
+  assert.deepEqual(
+    r.events('testrun.durations').map((e) => e.payload),
+    [
+      { id: res.id, tier: 'node', tests: [{ name: 'db > migrates', ms: 4500.3 }], parsed: 1 },
+      { id: res.id, tier: 'plain', tests: [], parsed: 0 },
+    ],
+  );
+});
+
 test('a failing setup fails every tier, and a tier that needs the change\'s files fails when given none', { skip: !hasPerl && 'perl' }, async () => {
   const r = rig({ setup: ['exit 3'], tiers: [{ name: 'a', command: 'true', kind: 'fast' }, { name: 'b', command: 'true', kind: 'fast' }] });
   const res = await runTestRun(r.deps, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
@@ -228,7 +247,7 @@ function fakeGitHub(status = 201, body: unknown = { id: 1 }) {
   return { f, calls };
 }
 
-test('checks are posted per tier with the right conclusion; tiers sharing a check pass only together; no log in them', async () => {
+test('checks are posted per tier with the right conclusion; tiers sharing a check pass only together; each tier\'s last lines in them', async () => {
   const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'tr-checks-')), 'events.db'));
   const gh = fakeGitHub();
   const sha = 'b'.repeat(40);
@@ -250,7 +269,7 @@ test('checks are posted per tier with the right conclusion; tiers sharing a chec
     ['https://gh.test/repos/example-org/example-shop/check-runs', 'suite', sha, 'completed', 'failure'],
     ['https://gh.test/repos/example-org/example-shop/check-runs', 'ledger', sha, 'completed', 'success'],
   ]);
-  assert.doesNotMatch(JSON.stringify(gh.calls), /secret log line/, 'a check never carries a log');
+  assert.match(String((gh.calls[1]!.body.output as { summary: string }).summary), /\*\*ledger\*\*, its last lines of output \(redacted\):\n\n```\nsecret log line\n```/, 'a check carries its tiers\' last lines');
   assert.match(String((gh.calls[0]!.body.output as { summary: string }).summary), /failed: timing/);
   assert.deepEqual((log.read(0, ['testrun.checks_posted'])[0]!.payload as EventPayload<'testrun.checks_posted'>).checks, [{ name: 'suite', conclusion: 'failure' }, { name: 'ledger', conclusion: 'success' }]);
   // A tier with no ok tiers can't pass, and an unmapped tier posts test-run/<tier>.
