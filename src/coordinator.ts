@@ -57,6 +57,10 @@ import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
 import { localDoneWhen } from './testrun/local.js';
+import { repoGit } from './main-watch.js';
+import { MergePosts, takeOpsSlot } from './merge-posts.js';
+import { redactPii } from './intake/redact.js';
+import { scrub } from './watchdog/post.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -108,6 +112,7 @@ export class Coordinator extends Gardener {
     await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('main watch', () => this.watchMain(), undefined);
+    await step('merge posts', () => this.postMerges(), undefined);
     await step('deploy gate', () => this.d.deployGate?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
@@ -131,6 +136,38 @@ export class Coordinator extends Gardener {
     await this.correctionsRun;
     await this.gardenerRun;
     await this.prBatchIdle();
+  }
+
+  private mergePoster: MergePosts | null = null;
+
+  /**
+   * Every merge to the default branch, posted once in the ops channel (src/merge-posts.ts): with GitHub, a Discord
+   * source, discord.ops_channel and discord.post_merges (on by default). Off, its place is forgotten.
+   */
+  protected async postMerges(): Promise<void> {
+    const m = this.d.mergePosts;
+    if (!m) return;
+    const intake = () => this.d.intake?.config() ?? null;
+    this.mergePoster ??= new MergePosts({
+      stateFile: join(this.d.stateDir, 'merge-posts.json'),
+      branch: this.branch,
+      api: m.api,
+      git: repoGit(this.d.repo, this.remote, this.branch),
+      redact: (s) => scrub(redactPii(s, { names: intake()?.redact.names ?? [], patterns: intake()?.redact.patterns ?? [] })),
+      send: async (key, text) => {
+        if (this.postedKeys().has(key)) return 'sent';
+        const channel = intake()?.discord.ops_channel;
+        const src = this.chatSource();
+        if (!channel || !src || !takeOpsSlot({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}), now: m.now?.() ?? Date.now() })) return 'limited';
+        await this.channelSend(src, key, { channel }, { kind: 'notice', text });
+        return 'sent';
+      },
+      ...(m.now ? { now: m.now } : {}),
+    });
+    const cfg = intake();
+    if (!cfg || !cfg.discord.enabled || !cfg.discord.ops_channel || !cfg.discord.post_merges) return this.mergePoster.off();
+    if (!this.chatSource()) return;
+    await this.mergePoster.step();
   }
 
   /**

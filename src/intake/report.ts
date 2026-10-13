@@ -133,6 +133,12 @@ export const IntakeConfig = z.strictObject({
        */
       ops_channel: snowflake('channel').optional(),
       /**
+       * Post every merge to the default branch in `ops_channel`, whoever made it (src/merge-posts.ts): the PR (linked),
+       * the merger's GitHub login, the merge commit's short sha and the first line of the PR's intent, redacted. On by
+       * default; nothing is posted without `ops_channel`.
+       */
+      post_merges: z.boolean().default(true),
+      /**
        * Ideas in conversation: an addressed message in `channels` from a mapped admin or writer opens a thread where
        * the bot asks what it must, drafts the five-part issue, shows it, and files it `ready` only on an explicit
        * yes (src/coordinator/conversation.ts), instead of being triaged and filed at once. Off: intake as before.

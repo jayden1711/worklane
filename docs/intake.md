@@ -99,11 +99,12 @@ discord:
   chat_model: haiku                      # its model (default haiku)
   chat_max_usd_per_day: 2                # its own daily cap (default 2, at most 20)
   owners: ["100000000000000011", "100000000000000012"]  # optional: high-risk approvals and setup links (2.1.4, 2.1.5)
-  ops_channel: "100000000000000005"    # optional: watchdog incidents and the weekly trust digest (below; needs dashboard_url)
+  ops_channel: "100000000000000005"    # optional: watchdog incidents, the weekly trust digest, merges (below; needs dashboard_url)
+  post_merges: true                    # optional: post every merge to the default branch in ops_channel (default true)
 ```
 
 **Ops channel.** `ops_channel` only receives posts (the bot never reads it, so instances may share one); it needs
-`dashboard_url`. Two things post there:
+`dashboard_url`. Three things post there:
 
 - **Incidents.** The machine's watchdog (`src/watchdog/`) posts each incident: a service down or crash-looping, an
   engine update rolled back or held, a Claude sign-in failing or a login about to expire, runs paused on the Claude usage limit, the GitHub App's token or
@@ -115,8 +116,16 @@ discord:
   `ops_channel` and `dashboard_url`.
 - **The weekly trust digest.** Once a week, the instance's trust numbers and recommendation (src/trust.ts; see
   docs/dashboard.md, "Trust").
+- **Merges** (`post_merges`, on by default; src/merge-posts.ts). Every merge to the default branch, whoever made it:
+  the harness, an owner, or anyone through GitHub's UI or CLI. One post per merge commit: the PR number (linked), who
+  merged it (their GitHub login, never an email), the merge commit's short sha, and the first line of the PR body's
+  first paragraph (redacted, at most 200 characters; the PR title when the body is empty). Nothing else from the body
+  is posted. Each new first-parent commit is matched to its PR through GitHub's API
+  (`GET /repos/{o}/{r}/commits/{sha}/pulls`); a commit no merged PR has (a direct push) gets no post here, since the
+  main watch alerts on those. Within the same machine-wide limit as the incidents; where it is in the branch is kept in
+  the instance's state dir, so a restart neither posts a merge twice nor skips one.
 
-Absent: neither is posted from this instance.
+Absent: none is posted from this instance.
 
 A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
 (admin: owner; maintain or write: writer; triage or read: viewer; none or an error: no access). Every mapped id
