@@ -645,6 +645,47 @@ export const EventSchemas = {
   'flaky.released': z.strictObject({ test: z.string(), how: z.enum(['passes', 'owner']), by: z.string(), passes: z.number().int().nonnegative() }),
   /** An off-machine backup attempt: ok only after the remote copy was read back, decrypted and matched (offsite-backup.ts). */
   'backup.offsite': z.strictObject({ ok: z.boolean(), destination: z.string(), key: z.string(), last_id: z.number().int().nonnegative(), error: z.string().optional() }),
+  /**
+   * One replay of a fixed past task through the real coordinator path (src/harness-evals/): success is its done_when
+   * checks passing and the evaluator approving; cost from its run.cost events; human interventions are the decisions
+   * it asked and the times it waited for the owner. `held_out`: a task from the private store (never named in a PR).
+   */
+  'harness_eval.task': z.strictObject({
+    run: z.string(),
+    task: z.string(),
+    held_out: z.boolean(),
+    sample: z.number().int().positive(),
+    success: z.boolean(),
+    done_when: z.boolean().nullable(),
+    verdict: z.boolean().nullable(),
+    outcome: z.enum(['queued', 'asked', 'blocked', 'budget', 'unfinished', 'error']),
+    cost_usd: z.number().nonnegative(),
+    wall_ms: z.number().int().nonnegative(),
+    interventions: z.number().int().nonnegative(),
+    detail: z.string(),
+  }),
+  /**
+   * A harness eval run: every task replayed `samples` times within `budget_usd`. `trigger`: weekly, a change to the
+   * engine's src/ (`engine`, and `pr`, the PR whose merge it is), or by hand. `stopped`: the budget ran out first.
+   */
+  'harness_eval.run': z.strictObject({
+    id: z.string(),
+    trigger: z.enum(['weekly', 'change', 'manual']),
+    engine: z.string().nullable(),
+    pr: z.number().int().positive().nullable(),
+    tasks: z.number().int().nonnegative(),
+    samples: z.number().int().positive(),
+    runs: z.number().int().nonnegative(),
+    passed: z.number().int().nonnegative(),
+    cost_usd: z.number().nonnegative(),
+    wall_ms: z.number().int().nonnegative(),
+    interventions: z.number().int().nonnegative(),
+    budget_usd: z.number().positive(),
+    stopped: z.enum(['budget']).nullable(),
+    error: z.string().optional(),
+  }),
+  /** The run's results posted on the PR whose merge triggered it, against the last baseline. */
+  'harness_eval.commented': z.strictObject({ run: z.string(), pr: z.number().int().positive(), baseline: z.string().nullable() }),
 } as const;
 
 export type EventType = keyof typeof EventSchemas;
