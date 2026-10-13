@@ -57,6 +57,12 @@ test('machine changes are refused for an instance-only owner, a stale sign-in an
     const glass = requestMachineChange(log, { args, requester: { login: 'example-owner', breakGlass: true, authenticatedAt: null, deviceOk: false }, via: 'settings', ownersFile: join(tmpdir(), 'no-such-owners.json') });
     assert.equal(glass.breakGlass, true);
   }
+  // With no machine owners set, the refusal says so in plain words, and how to set them.
+  const none = join(tmpdir(), 'no-such-owners.json');
+  assert.throws(
+    () => requestMachineChange(log, { args: ['set-slots', '4'], requester: freshRequester('ada'), via: 'settings', ownersFile: none }),
+    (e: Error) => e.message === "only the machine's owners may change the machine, and @ada isn't one. machine owners: none set yet. An admin sets them with dashboards.sh --machine-owner <login>",
+  );
   assert.deepEqual(machineRequests(log.read(0)).map((r) => r.by), ['ada', 'OLU', 'example-owner', 'ada', 'OLU', 'example-owner'], 'only the allowed were recorded');
   // A root step goes through the same gate.
   const step = asks(log).create({ instance: 'site', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
@@ -77,8 +83,14 @@ test('the coordinator refuses a request written straight to the log by someone w
   const byId = new Map(machineRequests(log.read(0)).map((r) => [r.id, r]));
   for (const id of ['forged-1', 'forged-2']) {
     assert.equal(byId.get(id)!.status, 'refused', id);
-    assert.match(byId.get(id)!.detail, /@ivy isn't one of the machine's owners \(machine owners: @ada\)/);
+    assert.match(byId.get(id)!.detail, /@ivy isn't one of the machine's owners \(machine owners: @ada\), so it wasn't run$/);
   }
+  // No owners set: the same refusal, worded plainly.
+  const empty = new EventLog(':memory:');
+  empty.append('machine.requested', { id: 'forged-3', args: ['set-slots', '9'], by: 'ivy', via: 'settings', ask: null }, 'ivy', 'human');
+  runMachineRequests({ log: empty, instance: 'site', ownersFile: join(tmpdir(), 'no-such-owners.json'), exec: (f, a) => (calls.push([f, ...a]), 'ok') });
+  assert.equal(machineRequests(empty.read(0))[0]!.detail, "@ivy isn't one of the machine's owners, so it wasn't run. machine owners: none set yet. An admin sets them with dashboards.sh --machine-owner <login>");
+  assert.equal(calls.length, 2, 'nothing more ran');
 });
 
 test('dashboards.sh --machine-owner writes the machine owners file root:root 0644, with exactly the logins given', { skip: !posix && 'bash' }, () => {

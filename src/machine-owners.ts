@@ -65,8 +65,14 @@ export interface MachineRequester {
   deviceOk: boolean;
 }
 
-/** The machine owners as the page names them: `@a, @b`, or that none are set and how to set them. */
-export const ownersText = (owners: string[]) => (owners.length ? owners.map((o) => `@${o}`).join(', ') : 'none set (an admin runs dashboards.sh --machine-owner <login>)');
+/** How to set the machine owners, for a refusal when none are set. */
+export const SET_OWNERS = 'An admin sets them with dashboards.sh --machine-owner <login>';
+
+/**
+ * The machine owners, for a refusal: ` (machine owners: @a, @b)` after the clause it qualifies, or, with none set,
+ * a sentence of its own saying so and how to set them (no nested parentheses).
+ */
+export const ownersNote = (owners: string[]) => (owners.length ? ` (machine owners: ${owners.map((o) => `@${o}`).join(', ')})` : `. machine owners: none set yet. ${SET_OWNERS}`);
 
 /**
  * Why this person may not ask for a machine change now; null when they may. The same rules as the owner terminal
@@ -77,7 +83,10 @@ export function machineChangeRefusal(r: MachineRequester, o: { now?: number; fil
   if (r.breakGlass) return null;
   const now = o.now ?? Date.now();
   const file = o.file ?? MACHINE_OWNERS_FILE;
-  if (!isMachineOwner(r.login, file)) return `only the machine's owners may change the machine (machine owners: ${ownersText(machineOwners(file))}); @${r.login} isn't one`;
+  if (!isMachineOwner(r.login, file)) {
+    const owners = machineOwners(file);
+    return owners.length ? `only the machine's owners may change the machine${ownersNote(owners)}; @${r.login} isn't one` : `only the machine's owners may change the machine, and @${r.login} isn't one${ownersNote(owners)}`;
+  }
   if (r.authenticatedAt === null) return 'a machine change needs a GitHub sign-in within the last 5 minutes, and this session has none: sign in again';
   if (now - r.authenticatedAt > FRESH_SIGN_IN_MS || r.authenticatedAt > now + 60_000) return 'a machine change needs a GitHub sign-in within the last 5 minutes: sign in again';
   if (!r.deviceOk) return "a machine change needs one of the console's allowed devices (dashboards.sh --console-devices, the same as the terminal); this request didn't come from one";

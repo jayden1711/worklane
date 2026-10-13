@@ -8,7 +8,7 @@ import { checkRootStep } from '../console/root-steps.js';
 import { recordAnswer } from '../console/asks.js';
 import type { Exec } from '../machine.js';
 import { MACHINE_EVENTS, machineRefusal, machineRequests, type MachineRequest } from '../machine-requests.js';
-import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners, ownersText } from '../machine-owners.js';
+import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners, ownersNote } from '../machine-owners.js';
 
 /** A claim older than this with no outcome is from a coordinator that stopped mid-run (the helper times out at 30 s). */
 export const STALE_CLAIM_MS = 5 * 60_000;
@@ -30,7 +30,9 @@ export interface MachineRequestDeps {
  */
 export function requesterRefusal(r: Pick<MachineRequest, 'by' | 'breakGlass'>, file = MACHINE_OWNERS_FILE): string | null {
   if (r.breakGlass) return null;
-  return isMachineOwner(r.by, file) ? null : `@${r.by} isn't one of the machine's owners (machine owners: ${ownersText(machineOwners(file))}), so it wasn't run`;
+  if (isMachineOwner(r.by, file)) return null;
+  const owners = machineOwners(file);
+  return owners.length ? `@${r.by} isn't one of the machine's owners${ownersNote(owners)}, so it wasn't run` : `@${r.by} isn't one of the machine's owners, so it wasn't run${ownersNote(owners)}`;
 }
 
 /** Claim a pending request: append machine.started inside a write transaction, so of two takers only one wins. */
