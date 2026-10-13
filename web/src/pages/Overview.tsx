@@ -1,8 +1,9 @@
-import type { State } from '../api';
+import type { State, UsageInfo } from '../api';
 import { navigate } from '../App';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
+import { UsageLines } from '../components/Usage';
 
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
@@ -42,7 +43,7 @@ export function MachineSummary({ state }: { state: State }) {
 
 const ACTIVE = new Set(['claimed', 'reproducing', 'building', 'verifying', 'evaluating']);
 
-export function Overview({ state, pulse }: { state: State; pulse: number }) {
+export function Overview({ state, pulse, usage = [], now = Date.now() }: { state: State; pulse: number; usage?: UsageInfo[]; now?: number }) {
   const active = state.tasks.filter((t) => ACTIVE.has(t.status));
   const open = state.decisions.filter((d) => !d.answer);
   const blocked = state.tasks.filter((t) => t.status === 'blocked');
@@ -148,6 +149,7 @@ export function Overview({ state, pulse }: { state: State; pulse: number }) {
         </div>
 
         <MachineSummary state={state} />
+        <UsageLines usage={usage} now={now} />
         <IntakeHealthPanel state={state} />
 
         <Card className="overflow-hidden">

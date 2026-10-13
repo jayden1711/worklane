@@ -9,9 +9,23 @@
 // or a bot, a rewritten history. The coordinator then stops auto-merge (the stop file), alerts, and opens a revert PR
 // for a human (coordinator/merge-flow.ts). The last checked commit is kept in a state file, so a restart neither
 // checks a commit twice nor skips one; so is the time of the last call, so the limit holds across restarts too.
+//
+// A bootstrap merge: while a project's required check can't run yet, an admin's hand merge is unaccounted. An admin
+// may accept such a commit on the dashboard before the watch judges it (acceptMerge): by its sha, once it is on the
+// branch and not judged yet, or in advance by PR number, pinned to the PR's head as it is then. The watch then judges
+// it accounted (how 'accepted'): no stop, no alert, no revert PR. A rewrite, a commit not on the branch and one
+// already judged can't be accepted, and accepting never clears a stop.
+//
+// The required_checks a commit is judged by are the ones in force when it landed: config.yaml as committed at its
+// first parent, read with git. Not the config loaded at startup: the clone's working tree isn't updated as the default
+// branch moves, so a check dropped since would still be required of every later merge, and never report.
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { parseDocument } from 'yaml';
+import { BRAND } from './brand.js';
+import { ProjectConfig } from './config/schema.js';
 import { writeGroupOnly } from './os/index.js';
 import type { Role } from './dashboard-auth.js';
 
@@ -67,7 +81,28 @@ export interface Facts {
 }
 
 export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string };
-export type Verdict = { done: true; accounted: true; how: 'harness' | 'person'; number: number } | { done: true; accounted: false; reason: string; number: number | null } | { done: false; need: Need };
+export type Verdict =
+  | { done: true; accounted: true; how: 'harness' | 'person'; number: number }
+  | { done: true; accounted: true; how: 'accepted'; number: number | null; acceptance: Acceptance }
+  | { done: true; accounted: false; reason: string; number: number | null }
+  | { done: false; need: Need };
+
+/**
+ * A commit an admin accepted as a bootstrap merge before the watch judged it: by `sha` (a commit already on the
+ * branch), or by `pr` with `head` its head when accepted (the merge of that PR at that head counts, however it was
+ * merged: merge commit, squash or rebase). `base` is the last commit checked when it was accepted: what it accepts
+ * must descend from it, so a rewrite of the branch voids it.
+ */
+export interface Acceptance {
+  id: string;
+  sha: string | null;
+  pr: number | null;
+  head: string | null;
+  base: string;
+  by: string;
+  reason: string;
+  at: string;
+}
 
 export type Outcome = 'pass' | 'fail' | 'pending' | 'missing' | 'unknown';
 
@@ -103,8 +138,14 @@ export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: Sta
  * share it. `inMerge(mergeCommit)`: whether `sha` is one of the commits a rebase merge ending at `mergeCommit` put
  * on the branch (git, no API call).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; inMerge?: (mergeCommit: string) => boolean }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; inMerge?: (mergeCommit: string) => boolean; accepted?: Acceptance[] }): Verdict {
   const short = sha.slice(0, 8);
+  const bySha = o.accepted?.find((a) => a.sha === sha);
+  if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
+  const byPr = (n: number, h: string): Verdict | null => {
+    const a = o.accepted?.find((x) => x.pr === n && x.head === h);
+    return a ? { done: true, accounted: true, how: 'accepted', number: n, acceptance: a } : null;
+  };
   let head: string;
   let at: string;
   let number: number;
@@ -112,6 +153,8 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   if (f.harness) {
     ({ head, at, number } = f.harness);
     who = `the harness merged #${number}`;
+    const ok = byPr(number, head);
+    if (ok) return ok;
   } else {
     if (!f.pulls) return { done: false, need: { call: 'pulls' } };
     const merged = f.pulls.filter((p) => p.mergedAt && p.base === o.branch);
@@ -122,6 +165,8 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
     }
     if (!f.pr || f.pr.number !== cand.number) return { done: false, need: { call: 'pull', number: cand.number } };
     number = f.pr.number;
+    const ok = byPr(number, f.pr.head);
+    if (ok) return ok;
     if (!f.pr.mergedBy) return { done: true, accounted: false, number, reason: `#${number} was merged into ${o.branch} by an unknown actor` };
     if (f.pr.mergedByBot) return { done: true, accounted: false, number, reason: `#${number} was merged into ${o.branch} by a bot, not a mapped admin or writer` };
     if (f.role === undefined) return { done: false, need: { call: 'role', login: f.pr.mergedBy } };
@@ -176,6 +221,21 @@ function writeWatchState(file: string, s: WatchState) {
   renameSync(tmp, file);
 }
 
+/** Where the admins' acceptances are kept, next to the watch's state file: the dashboard writes it, the watch reads it. */
+export function acceptedFileFor(stateFile: string): string {
+  return join(dirname(stateFile), 'main-watch-accepted.json');
+}
+
+export function readAccepted(file: string): Acceptance[] {
+  if (!existsSync(file)) return [];
+  try {
+    const j = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    return Array.isArray(j) ? (j as Acceptance[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** The default branch's commits, read with git (no API call). */
 export interface WatchGit {
   /** Fetch the default branch and return its tip, or null. */
@@ -183,6 +243,27 @@ export interface WatchGit {
   isAncestor(a: string, b: string): boolean;
   /** The first-parent commits after `from` up to `to`, oldest first. */
   firstParents(from: string, to: string): string[];
+  /** The content of `path` (from the repo root) as committed at `rev`, or null when git can't read it. */
+  show(rev: string, path: string): string | null;
+}
+
+/** The config file whose required_checks judge a commit, from the repo root. */
+export const CONFIG_PATH = `${BRAND.configDir}/config.yaml`;
+
+/**
+ * The required_checks in force when commit `sha` landed: config.yaml as committed at its first parent (the default
+ * branch just before it). An error when that can't be read or isn't valid; the caller falls back, and says so.
+ */
+export function requiredAt(git: WatchGit, sha: string): { required: string[] } | { error: string } {
+  const at = `${sha.slice(0, 8)}^1`;
+  const text = git.show(`${sha}^1`, CONFIG_PATH);
+  if (text === null) return { error: `${CONFIG_PATH} could not be read at ${at}` };
+  const doc = parseDocument(text, { uniqueKeys: true });
+  if (doc.errors.length) return { error: `${CONFIG_PATH} at ${at} is not valid YAML` };
+  const raw: unknown = doc.toJS();
+  const r = ProjectConfig.shape.required_checks.safeParse(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).required_checks : undefined);
+  if (!r.success) return { error: `${CONFIG_PATH} at ${at} has an invalid required_checks` };
+  return { required: r.data };
 }
 
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
@@ -196,12 +277,17 @@ export function repoGit(repo: string, remote: string, branch: string): WatchGit 
     },
     isAncestor: (a, b) => git('merge-base', '--is-ancestor', a, b).status === 0,
     firstParents: (from, to) => git('rev-list', '--first-parent', '--reverse', `${from}..${to}`).stdout.split('\n').filter(Boolean),
+    show: (rev, path) => {
+      const r = git('show', `${rev}:${path}`);
+      return r.status === 0 ? r.stdout : null;
+    },
   };
 }
 
 export interface MainWatchDeps {
   stateFile: string;
   branch: string;
+  /** The loaded config's required_checks: whether to watch at all, and the fallback when a commit's own can't be read. */
   required: () => string[];
   api: MainWatchApi;
   git: WatchGit;
@@ -211,12 +297,16 @@ export interface MainWatchDeps {
   /** The mode changed (or its detail): recorded as main_watch.mode. */
   mode(mode: ProtectionMode, detail: string): void;
   checked(sha: string, how: 'harness' | 'person', number: number): void;
+  /** An admin accepted it as a bootstrap merge (acceptMerge): accounted, recorded as main_watch.accepted. */
+  accepted(sha: string, number: number | null, a: Acceptance): void;
   /** Stop auto-merge, alert, open the revert PR (`revert`: whether one can be made: not for a rewritten history). */
   unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean }): Promise<void>;
 }
 
 export class MainWatch {
   private listedAt = -Infinity;
+  /** The required_checks the pending commit is judged by: read with git once per commit. */
+  private judgedBy: { sha: string; required: string[]; note: string } | null = null;
   constructor(private readonly d: MainWatchDeps) {}
 
   private get now() {
@@ -296,7 +386,14 @@ export class MainWatch {
       writeWatchState(this.d.stateFile, s);
     }
     const p = s.pending;
-    const ctx = { branch: this.d.branch, required, inMerge: (m: string) => m !== p.sha && this.d.git.isAncestor(p.sha, m) };
+    if (this.judgedBy?.sha !== p.sha) {
+      const at = requiredAt(this.d.git, p.sha);
+      this.judgedBy = 'required' in at ? { sha: p.sha, required: at.required, note: '' } : { sha: p.sha, required, note: ` (judged by the required_checks loaded at startup: ${at.error})` };
+    }
+    const { required: judgedBy, note } = this.judgedBy;
+    // What admins accepted, as long as it descends from the commit checked when they did (a rewrite voids it).
+    const accepted = readAccepted(acceptedFileFor(this.d.stateFile)).filter((a) => a.base !== p.sha && this.d.git.isAncestor(a.base, p.sha));
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted, inMerge: (m: string) => m !== p.sha && this.d.git.isAncestor(p.sha, m) };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
       if (!this.take(s)) return;
@@ -310,8 +407,10 @@ export class MainWatch {
       v = judge(p.sha, p.facts, ctx);
       if (!v.done) return;
     }
-    if (v.accounted) this.d.checked(p.sha, v.how, v.number);
-    else await this.d.unaccounted({ sha: p.sha, reason: v.reason, number: v.number, revert: true });
+    if (v.accounted && v.how === 'accepted') this.d.accepted(p.sha, v.number, v.acceptance);
+    else if (v.accounted) this.d.checked(p.sha, v.how, v.number);
+    else await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true });
+    this.judgedBy = null;
     s.last = p.sha;
     s.lastAt = new Date(this.now).toISOString();
     s.pending = null;
@@ -326,5 +425,84 @@ export function protectionView(file: string, repo: string) {
     mode: s.mode ?? ('unknown' as const),
     detail: s.detail,
     lastChecked: s.last ? { sha: s.last, url: `https://github.com/${repo}/commit/${s.last}`, at: s.lastAt } : null,
+    accepted: readAccepted(acceptedFileFor(file)),
   };
+}
+
+/** What acceptMerge reads with git: the watch's own, a commit's full sha, and an open PR's head on the remote. */
+export interface AcceptGit extends WatchGit {
+  /** The full sha of commit `ref` in the clone, or null. */
+  resolve(ref: string): string | null;
+  /** PR `n`'s head on the remote (refs/pull/n/head), or null. */
+  prHead(n: number): string | null;
+}
+
+/** AcceptGit over a clone (the instance's repo): the tip is fetched as the watch fetches it. */
+export function acceptGit(repo: string, remote: string, branch: string): AcceptGit {
+  const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
+  return {
+    ...repoGit(repo, remote, branch),
+    resolve: (ref) => {
+      const r = git('rev-parse', '--verify', '-q', `${ref}^{commit}`);
+      return r.status === 0 ? r.stdout.trim() || null : null;
+    },
+    prHead: (n) => {
+      const r = git('ls-remote', remote, `refs/pull/${n}/head`);
+      const sha = r.status === 0 ? (r.stdout.trim().split(/\s+/)[0] ?? '') : '';
+      return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+    },
+  };
+}
+
+export type AcceptTarget = { sha: string } | { pr: number };
+export type AcceptResult = { ok: true; acceptance: Acceptance } | { ok: false; status: 400 | 404 | 409; error: string };
+
+/**
+ * An admin accepts a commit as a bootstrap merge, before the watch judges it (the caller checks they are an admin
+ * and audits it). By sha: a commit on the branch's first-parent line after the last one checked, or the one being
+ * checked. By PR number: the PR's merge to come (or not judged yet), pinned to its head now, so a push to the PR
+ * after it needs accepting again. Refused: a branch rewritten since the last check, a commit not on the branch, one
+ * already judged (`judgedPrs`: the PRs the watch has judged already), one accepted already. A stop stays.
+ */
+export function acceptMerge(o: { stateFile: string; git: AcceptGit; branch: string; target: AcceptTarget; reason: string; by: string; judgedPrs: number[]; now?: () => number }): AcceptResult {
+  const reason = String(o.reason ?? '').trim();
+  if (!reason) return { ok: false, status: 400, error: 'a reason is required' };
+  if (reason.length > 500) return { ok: false, status: 400, error: 'the reason is too long (at most 500 characters)' };
+  const s = readWatchState(o.stateFile);
+  if (s.mode !== 'main_watch') return { ok: false, status: 409, error: `the main watch isn't guarding ${o.branch} (${s.mode ?? 'not started'}): there is nothing to accept` };
+  if (!s.last) return { ok: false, status: 409, error: `the main watch has no starting commit yet: the next tip of ${o.branch} is the baseline, and is not judged` };
+  const tip = o.git.tip();
+  if (!tip) return { ok: false, status: 409, error: `${o.branch} can't be read from the remote` };
+  if (!o.git.isAncestor(s.last, tip)) return { ok: false, status: 409, error: `${o.branch} was rewritten since the last commit checked (${s.last.slice(0, 8)}): a force-push can't be accepted` };
+  const file = acceptedFileFor(o.stateFile);
+  const list = readAccepted(file);
+  const base = { id: randomBytes(6).toString('hex'), base: s.last, by: o.by, reason, at: new Date(o.now?.() ?? Date.now()).toISOString() };
+  let a: Acceptance;
+  if ('sha' in o.target) {
+    const given = String(o.target.sha).trim().toLowerCase();
+    if (!/^[0-9a-f]{7,40}$/.test(given)) return { ok: false, status: 400, error: 'a commit sha is 7 to 40 hex characters' };
+    const sha = o.git.resolve(given);
+    if (!sha) return { ok: false, status: 404, error: `${given.slice(0, 12)} is not a commit on ${o.branch}` };
+    if (sha === s.last || o.git.isAncestor(sha, s.last)) return { ok: false, status: 409, error: `${sha.slice(0, 8)} was judged already (the last commit checked is ${s.last.slice(0, 8)})` };
+    if (sha !== s.pending?.sha) {
+      if (!o.git.isAncestor(sha, tip)) return { ok: false, status: 404, error: `${sha.slice(0, 8)} is not a commit on ${o.branch}` };
+      if (!o.git.firstParents(s.last, tip).includes(sha)) return { ok: false, status: 409, error: `${sha.slice(0, 8)} is on ${o.branch}, but not on its first-parent line: the watch judges the merge commit that brought it in; accept that, or the PR` };
+    }
+    if (list.some((x) => x.sha === sha)) return { ok: false, status: 409, error: `${sha.slice(0, 8)} is accepted already` };
+    a = { ...base, sha, pr: null, head: null };
+  } else {
+    const n = Number(o.target.pr);
+    if (!Number.isSafeInteger(n) || n <= 0) return { ok: false, status: 400, error: 'a PR number is a positive whole number' };
+    if (o.judgedPrs.includes(n)) return { ok: false, status: 409, error: `#${n}'s merge was judged already` };
+    const head = o.git.prHead(n);
+    if (!head) return { ok: false, status: 404, error: `no PR #${n} on the remote` };
+    if (o.git.resolve(head) && (head === s.last || o.git.isAncestor(head, s.last))) return { ok: false, status: 409, error: `#${n}'s head ${head.slice(0, 8)} is on ${o.branch} already, at or before the last commit checked: judged already` };
+    if (list.some((x) => x.pr === n && x.head === head)) return { ok: false, status: 409, error: `#${n} at ${head.slice(0, 8)} is accepted already` };
+    a = { ...base, sha: null, pr: n, head };
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeGroupOnly(tmp, JSON.stringify([...list, a], null, 2));
+  renameSync(tmp, file);
+  return { ok: true, acceptance: a };
 }
