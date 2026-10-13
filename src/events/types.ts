@@ -373,7 +373,7 @@ export const EventSchemas = {
     held_out_error: z.string().optional(),
   }),
   /** The merge policy's call on a ready PR at `head`: merge it (auto) or wait for a human, and why. */
-  'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()) }),
+  'merge.decided': z.strictObject({ issue, number: z.number().int().positive(), head: sha, auto: z.boolean(), reasons: z.array(z.string()), why: z.array(z.strictObject({ category: z.string(), text: z.string() })).optional() }),
   /** Auto-merged: a merge commit `sha` of the evaluated `head`. */
   /**
    * An owner approved a PR the merge policy left to them, at this head (from a Discord thread: `via`): it merges on

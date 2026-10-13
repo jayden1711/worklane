@@ -366,7 +366,7 @@ export abstract class MergeFlow extends FixRuns {
         }
       }
     }
-    if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons });
+    if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons, ...(d.auto ? {} : { why: d.why }) });
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
