@@ -2165,6 +2165,49 @@ test('auto-merge stop: main red after an auto-merge but already red before it: s
   assert.ok(!t.f.backlog.prs().some((p) => p.head.includes('revert')));
 });
 
+/** An auto-merged PR whose main commit fails `ci`; the tracker can re-run Actions jobs (recorded in `reruns`). */
+async function redAfterMerge() {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  realMerges(t);
+  const reruns: number[][] = [];
+  t.f.backlog.rerunFailedJobs = async (ids) => {
+    reruns.push(ids);
+    return new Map(ids.map((id) => [id, { ok: true as const, run: 1 }]));
+  };
+  const before = git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!;
+  t.f.backlog.setChecks(before, passing);
+  await green(t);
+  const done = lastOf(t.f.log, 'merge.done') as { sha: string };
+  t.f.backlog.setChecks(done.sha, failing(94));
+  await t.c.tick();
+  return { t, done, reruns };
+}
+
+test('flaky: main red after an auto-merge is re-run on the same commit first; green then: flaky, quarantined, one issue, no stop, revert or fix', { skip }, async () => {
+  const { t, done, reruns } = await redAfterMerge();
+  assert.deepEqual(reruns, [[94]], 'the failing job re-run');
+  assert.equal(t.f.log.read(0, ['merge.main_result', 'merge.stopped']).length, 0, 'not judged red while it re-runs');
+  t.f.backlog.setChecks(done.sha, [{ ...passing[0]!, id: 95 }]);
+  await t.c.tick();
+  assert.deepEqual(lastOf(t.f.log, 'merge.main_result'), { issue: t.n, number: t.opened.number, sha: done.sha, outcome: 'green', failed: [], flaky: ['ci'] });
+  assert.equal(t.f.log.read(0, ['merge.stopped']).length, 0, 'auto-merge goes on');
+  assert.equal(t.c.autoMergeStopped(), null);
+  assert.ok(!t.f.backlog.prs().some((p) => p.head.includes('revert')), 'no revert PR');
+  const filed = lastOf(t.f.log, 'flaky.quarantined') as { test: string; issue: number };
+  assert.equal(filed.test, 'ci');
+  assert.equal((await t.f.backlog.get(filed.issue)).title, 'Flaky test: ci', 'one issue for it');
+  assert.ok(!(await t.f.backlog.get(filed.issue)).labels.includes('ready'), 'not ready: no agent opens a fix for it');
+});
+
+test('flaky: main red, and red again on the re-run of the same commit: real, stopped and reverted as before', { skip }, async () => {
+  const { t, done } = await redAfterMerge();
+  t.f.backlog.setChecks(done.sha, failing(96));
+  await t.c.tick();
+  assert.deepEqual(lastOf(t.f.log, 'merge.main_result'), { issue: t.n, number: t.opened.number, sha: done.sha, outcome: 'red', failed: ['ci'] });
+  assert.ok((lastOf(t.f.log, 'merge.stopped') as { revert: string | null }).revert, 'the revert PR');
+  assert.equal(t.f.log.read(0, ['flaky.quarantined']).length, 0);
+});
+
 test('auto-merge: main green after it is recorded and nothing stops', { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
   realMerges(t);

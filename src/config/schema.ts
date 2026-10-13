@@ -79,6 +79,20 @@ export const ProjectConfig = z.strictObject({
    */
   protection: z.strictObject({ strict: z.boolean().default(false) }).prefault({}),
   /**
+   * Flaky tests (src/flaky.ts): when the default branch's required checks fail after a merge, the failing ones are
+   * re-run on the same commit first (`rerun`). Passing then: flaky, quarantined (they still run and report, but no
+   * longer turn the branch red for the harness's own stop, revert and fix decisions), one issue each. A quarantined
+   * test blocks again after `release_after_passes` passes in a row, or when an owner clears it. A re-run not done in
+   * `rerun_timeout_min` counts as a real failure. Never changes what the updater requires: every check green.
+   */
+  flaky: z
+    .strictObject({
+      rerun: z.boolean().default(true),
+      release_after_passes: z.number().int().min(1).max(1000).default(10),
+      rerun_timeout_min: z.number().int().min(5).max(720).default(90),
+    })
+    .prefault({}),
+  /**
    * Files two tasks running at once would both change and then conflict on (globs). Two tasks that would
    * touch the same one never run together; the second waits while other ready work takes the slot.
    * Absent: lockfiles, registries and changelogs, shared test helpers. An empty list turns holds off.
