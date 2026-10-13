@@ -768,13 +768,22 @@ test('the pre-deploy gate on the Machine page: the deployed sha, the last held s
   const a = 'a'.repeat(40);
   const b = 'b'.repeat(40);
   const now = new Date().toISOString();
-  const moving = r.renderDeployGate({ branch: 'deploy', deployed: { sha: a, url: `https://github.com/o/r/commit/${a}`, at: now, by: 'gate', override: false }, held: null, refused: null });
+  const moving = r.renderDeployGate({ branch: 'deploy', enabled: true, tiers: ['suite'], postDeploy: false, deployed: { sha: a, url: `https://github.com/o/r/commit/${a}`, at: now, by: 'gate', override: false }, held: null, refused: null });
   assert.match(moving, /Pre-deploy gate[\s\S]*Moving/);
   assert.match(moving, /data-testid="deploy-gate-deployed"[\s\S]*deploy[\s\S]*aaaaaaaa/);
   assert.doesNotMatch(moving, /deploy-gate-held/);
-  const held = r.renderDeployGate({ branch: 'deploy', deployed: { sha: a, url: '', at: null, by: null, override: false }, held: { sha: b, url: `https://github.com/o/r/commit/${b}`, at: now, reason: 'failed: suite' }, refused: null });
+  const held = r.renderDeployGate({ branch: 'deploy', enabled: true, tiers: ['suite'], postDeploy: false, deployed: { sha: a, url: '', at: null, by: null, override: false }, held: { sha: b, url: `https://github.com/o/r/commit/${b}`, at: now, reason: 'failed: suite' }, refused: null });
   assert.match(held, /Held<[\s\S]*data-testid="deploy-gate-held"[\s\S]*bbbbbbbb[\s\S]*failed: suite/);
-  assert.match(r.renderDeployGate({ branch: 'deploy', deployed: null, held: null, refused: { at: now, reason: 'deploy is off main' } }), /Refused[\s\S]*not moved by the gate yet[\s\S]*deploy is off main/);
+  assert.match(r.renderDeployGate({ branch: 'deploy', enabled: true, tiers: ['suite'], postDeploy: false, deployed: null, held: null, refused: { at: now, reason: 'deploy is off main' } }), /Refused[\s\S]*not moved by the gate yet[\s\S]*deploy is off main/);
+});
+
+test('the pre-deploy gate, configured but off (deploy_gate.enabled not true): says so, and what turning it on would do', () => {
+  const off = r.renderDeployGate({ branch: 'deploy', enabled: false, tiers: ['chain', 'suite'], postDeploy: true, deployed: null, held: null, refused: null });
+  assert.match(off, /Pre-deploy gate[\s\S]*Configured, off/);
+  assert.match(off, /data-testid="deploy-gate-off"/);
+  assert.match(off, /deploy_gate.enabled: true[\s\S]*reviewed PR[\s\S]*would run chain, suite on each new default-branch commit[\s\S]*roll it back on a failed check/);
+  assert.doesNotMatch(off, /Moving|deploy-gate-deployed/, 'nothing claims it moves');
+  assert.doesNotMatch(r.renderDeployGate({ branch: 'deploy', enabled: false, tiers: ['suite'], postDeploy: false, deployed: null, held: null, refused: null }), /roll it back/, 'no post-deploy check configured: none promised');
 });
 
 test('bootstrap merges on the Machine page: an admin gets the accept field, a writer the list read-only, a viewer neither', () => {

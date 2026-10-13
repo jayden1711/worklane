@@ -255,6 +255,12 @@ export interface State {
 /** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
 export interface DeployGate {
   branch: string;
+  /** tests.yaml deploy_gate.enabled: false (the default) means configured, off: nothing runs or moves. */
+  enabled: boolean;
+  /** The test_run tiers that must pass before the branch moves. */
+  tiers: string[];
+  /** Whether a post-deploy check is configured. */
+  postDeploy: boolean;
   deployed: { sha: string; url: string; at: string | null; by: string | null; override: boolean } | null;
   held: { sha: string; url: string; at: string; reason: string } | null;
   refused: { at: string; reason: string } | null;
