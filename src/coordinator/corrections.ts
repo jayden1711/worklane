@@ -44,7 +44,7 @@ export abstract class Corrections extends MergeFlow {
       recorded.add(c.key);
       this.emit('correction.recorded', { key: c.key, kind: c.kind, issue: c.issue, pr: c.pr, by: c.by, text: c.text });
     }
-    if (!this.correctionsBusy && !this.halt.signal.aborted && !this.stopped) {
+    if (!this.correctionsBusy && !this.halt.signal.aborted && !this.stopped && !this.usagePause()) {
       this.correctionsBusy = true;
       this.correctionsRun = this.nextCorrection()
         .catch((e: Error) => void this.emit('coordinator.error', { instance: this.d.instance, where: 'corrections', kind: 'error', message: e.message.slice(0, 500) }))

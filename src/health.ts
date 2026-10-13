@@ -135,6 +135,11 @@ export function usageByDay(events: StoredEvent[], days = 14): UsageDay[] {
         u.turns += Number(p.turns) || 0;
         break;
       }
+      // A run that hits the limit now ends in usage.limit_hit (the caller requeues; no run.finished); older logs
+      // have run.finished rate_limited instead. Never both for one run.
+      case 'usage.limit_hit':
+        day(e.ts).rateLimited++;
+        break;
       case 'run.finished':
         if (p.reason === 'rate_limited') day(e.ts).rateLimited++;
         if (p.reason === 'auth_mismatch') day(e.ts).authProblems++;

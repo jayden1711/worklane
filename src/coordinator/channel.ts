@@ -20,7 +20,7 @@ import type { Ask } from '../console/asks.js';
 import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { alreadyText, approvedText, askBack, askPost, asksForLink, commentText, decidedText, decisionPost, dmText, highRiskAskBack, mainWatchPost, mergePost, notOwnerText, parseChoice, parseHighRisk, readConfirm, SETUP_NOT_OWNER_TEXT, SETUP_THREAD_TEXT, wrongNumberText, type ChannelPost } from '../intake/channel.js';
+import { alreadyText, approvedText, askBack, askPost, asksForLink, commentText, decidedText, decisionPost, dmText, highRiskAskBack, mainWatchPost, mergePost, usagePausePost, notOwnerText, parseChoice, parseHighRisk, readConfirm, SETUP_NOT_OWNER_TEXT, SETUP_THREAD_TEXT, wrongNumberText, type ChannelPost } from '../intake/channel.js';
 import { REPLY_CHARS } from '../intake/discord.js';
 import { acceptThread, checkSummary, confirmText, fallbackSummary, noAnswerText, notYourConfirmText, summaryRun, threadRun, threadRunDir, type ThreadRecord } from '../intake/explain.js';
 import { redactString } from '../events/redact.js';
@@ -662,6 +662,9 @@ export abstract class Channel extends ResearchOnDemand {
       const u = e.payload as EventPayload<'main_watch.unaccounted'>;
       if (!posted.has(`main-watch:${u.sha}`)) await this.channelSend(src, `main-watch:${u.sha}`, { channel }, mainWatchPost(u, o));
     }
+    // The usage-limit pause in force: one notice for it, with its reset time.
+    const pause = this.usagePause();
+    if (pause && !posted.has(`usage-limit:${pause.id}`)) await this.channelSend(src, `usage-limit:${pause.id}`, { channel }, usagePausePost(pause, { dashboardUrl: o.dashboardUrl, instance: this.d.instance, now: this.nowMs() }));
     // Each new thread explained in plain language, once.
     await this.explainThreads(cfg, src);
     // Decided elsewhere (the dashboard, GitHub, the CLI): the thread says so, once.
