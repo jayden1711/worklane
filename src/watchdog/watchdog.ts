@@ -52,6 +52,9 @@ export class Watchdog {
   private auth: { at: number; value: ReturnType<NonNullable<WatchdogDeps['auth']>> } | null = null;
   private running = false;
 
+  /** Stopped (its coordinator is shutting down): it never takes a role again, even from a pass already under way. */
+  private stopped = false;
+
   constructor(private d: WatchdogDeps) {}
 
   private get dir() {
@@ -65,6 +68,8 @@ export class Watchdog {
 
   /** Take `which` if it's free (or its holder is dead); keep it once held. */
   private take(which: 'machine' | 'post'): boolean {
+    // A coordinator that is shutting down takes no part in the election: a running one takes over.
+    if (this.stopped) return false;
     const held = which === 'machine' ? this.machineLock : this.postLock;
     if (held) return true;
     const r = tryLock(join(this.dir, which === 'machine' ? 'watchdog.lock' : 'watchdog-post.lock'), `watchdog ${this.d.instance} ${process.pid}`);
@@ -77,7 +82,7 @@ export class Watchdog {
 
   /** One pass: this instance's checks; the machine's, if elected; the posts, if elected to post. */
   async pass(): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     this.running = true;
     try {
       const now = (this.d.now ?? (() => new Date()))();
@@ -135,6 +140,7 @@ export class Watchdog {
   }
 
   stop() {
+    this.stopped = true;
     this.machineLock?.release();
     this.postLock?.release();
     this.machineLock = this.postLock = null;
