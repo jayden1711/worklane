@@ -130,7 +130,7 @@ console.log(JSON.stringify(ws2));
 assert.equal(ws2.bundleRefs, 0, 'the store has the commit and main: nothing sent');
 const store = `/var/lib/worklane-test/${instance}/store`;
 const probe = await host.exec(id2, [
-  's="$(cat .git/objects/info/alternates)"; s="${s%/objects}"; echo "store $s"',
+  's="$(dirname "$(cat .git/objects/info/alternates)")"; echo "store $s"',
   'git cat-file -e HEAD:b.txt && echo read-ok',
   'test ! -e art && echo art-left-out',
   'echo "art in the commit: $(git ls-tree -r --name-only HEAD | grep -c "^art/")"',

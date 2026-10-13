@@ -532,6 +532,11 @@ test('the sandbox helper clones exactly as the engine does', () => {
   assert.deepEqual([...exec.matchAll(/ReadWritePaths=("?)([^"\s]+)/g)].map((m) => m[2]), ['$d', '-$root/cache']);
   assert.ok(exec.includes('"ReadWritePaths=-$root/cache -$root/shared"'));
   assert.doesNotMatch(exec, /store/);
+  // The check's sandbox probe: systemd-run expands ${...} in its command itself (as ExecStart= does), so the probe has
+  // none, and it checks the store it found is the instance's own (an empty path would make the write test vacuous).
+  const probe = helper.slice(helper.indexOf('out="$(exec_run "$id" 60 --'), helper.indexOf('\n', helper.indexOf('out="$(exec_run "$id" 60 --')));
+  assert.doesNotMatch(probe, /\$\{/);
+  assert.ok(probe.includes(`[ "$s" = "'"$store"'" ] || { echo "not the store: $s"; n=1; }`));
 });
 
 /** A host that records how many bytes each run's bundle had, passing the bundle on unchanged. */
