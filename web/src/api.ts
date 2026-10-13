@@ -164,6 +164,8 @@ export interface PrsView {
   holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
+  /** The latest stale-PR pass: its counts and their line; null before the first (absent from an older server). */
+  hygiene?: { at: string; merged_in: number; conflicting: number; closed: number; held: number; skipped: number; line: string } | null;
 }
 
 export interface ServiceLog {
@@ -255,6 +257,12 @@ export interface State {
 /** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
 export interface DeployGate {
   branch: string;
+  /** tests.yaml deploy_gate.enabled: false (the default) means configured, off: nothing runs or moves. */
+  enabled: boolean;
+  /** The test_run tiers that must pass before the branch moves. */
+  tiers: string[];
+  /** Whether a post-deploy check is configured. */
+  postDeploy: boolean;
   deployed: { sha: string; url: string; at: string | null; by: string | null; override: boolean } | null;
   held: { sha: string; url: string; at: string; reason: string } | null;
   refused: { at: string; reason: string } | null;
@@ -980,6 +988,37 @@ export interface Trust {
   definitions: string[];
   note: string;
   hidden: string[];
+}
+
+/**
+ * Metrics (GET /api/metrics, src/merge-metrics.ts deliveryMetrics): over 7 and 30 days, the owner's and writers'. A
+ * figure whose source has recorded nothing yet is `{ measured: false, why }`: "not measured yet", never a 0.
+ */
+export type Measure<T> = ({ measured: true } & T) | { measured: false; why: string };
+export interface MetricsWindow {
+  days: number;
+  since: string;
+  merges: Measure<{ total: number; perDay: number }>;
+  mainRed: Measure<{ count: number; stillRed: boolean }>;
+  timeToGreen: Measure<{ minutes: number[]; medianMinutes: number | null }>;
+  reverts: Measure<{ opened: number; onRed: number; merged: number; redTimes: number; rate: number | null }>;
+  fixForward: Measure<{ attempts: number; fixed: number; reverted: number; successRate: number | null }>;
+  prCi: Measure<{ prs: number; medianMinutes: number | null; p90Minutes: number | null; slowest: { number: number; minutes: number }[] }>;
+  startup: Measure<{ runs: number; medianSeconds: number | null; p90Seconds: number | null }>;
+  flake: Measure<{ reruns: number; flaky: number; rate: number | null; quarantined: number }>;
+}
+export interface SlowTest {
+  name: string;
+  medianMs: number;
+  maxMs: number;
+  runs: number;
+}
+export interface Metrics {
+  until: string;
+  windows: MetricsWindow[];
+  perDay: { day: string; merged: number }[] | null;
+  slowTests: Measure<{ days: number; budgetS: number; runs: number; slowest: SlowTest[]; overBudget: SlowTest[]; overBudgetTotal: number }>;
+  definitions: string[];
 }
 
 /**

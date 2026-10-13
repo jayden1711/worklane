@@ -6,7 +6,7 @@
 // it is given and returns numbers and text. Nothing here changes slots, caps or merges; raising the agent count
 // stays a machine owner's action. test/trust.test.ts holds it to that: neither this module nor anything it
 // imports may write, run a command or reach the network.
-import { RISK_AREAS, trustMetrics, type AreaTrust, type MetricEvent, type RiskArea, type TrustFailure, type TrustWindow } from './merge-metrics.js';
+import { RISK_AREAS, trustMetrics, type AreaTrust, type DeliveryMetrics, type DeliveryWindow, type Measure, type MetricEvent, type RiskArea, type TrustFailure, type TrustWindow } from './merge-metrics.js';
 
 /** The recommendation's rules. Fixed here, never a model's. */
 export const TRUST_RULES = {
@@ -250,4 +250,82 @@ export function trustDigest(v: TrustView, o: { instance: string; dashboardUrl?: 
   if (o.dashboardUrl) lines.push(`${o.dashboardUrl.replace(/\/+$/, '')}/reports`);
   const text = lines.join('\n');
   return text.length <= 1990 ? text : `${text.slice(0, 1985)}…`;
+}
+
+// --- Delivery metrics: the Metrics panel and its weekly digest ----------------------------------------------------
+
+/** What each delivery figure means, as the Metrics panel's footnotes. */
+export const METRICS_DEFINITIONS = [
+  'Merges per day: merged PRs and direct lands the event log records, over the window\'s days.',
+  'Main red: times the default branch went red in the check after a merge (red again while still red is the same time).',
+  'Time to green: the median minutes from the default branch going red to its next green check.',
+  'Reverts: revert PRs opened after a red default branch or for a commit the main watch could not account for, and how many merged; the revert rate is reverts opened on a red default branch over the times it went red.',
+  "Fix-forward: a red default branch fixed by a fix PR instead of a revert. Not built yet: its figure fills from fix-forward's own events once it is.",
+  'PR CI wall-clock: on a merged PR\'s head, from the first check run starting to the last required check (config.yaml required_checks; every check when none) completing, read from GitHub once per PR.',
+  'Agent startup: seconds from a task being claimed to its agent\'s process starting.',
+  'Flake rate: of the re-runs of a red default branch\'s failing checks, how many found a flaky check (passed on the re-run).',
+  'Slow tests: per-test durations printed by test runs and by the default branch\'s CI jobs over 7 days (node:test, pytest --durations, go test -v, jest or vitest verbose); each test\'s figure is the median of its runs. Over budget: over config.yaml metrics.slow_test_budget_s.',
+];
+
+export const NOT_MEASURED = 'not measured yet';
+
+const ms = (n: number) => (n >= 60_000 ? `${Math.round(n / 6000) / 10} min` : n >= 1000 ? `${Math.round(n / 100) / 10} s` : `${Math.round(n)} ms`);
+const mins = (n: number | null) => (n === null ? '–' : n < 1 ? `${Math.round(n * 60)} s` : `${n} min`);
+const secs = (n: number | null) => (n === null ? '–' : n >= 120 ? `${Math.round(n / 6) / 10} min` : `${n} s`);
+const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/** One delivery figure over the 7 and 30 days, in words: "not measured yet" when its source has nothing yet. */
+export function deliveryLines(m: DeliveryMetrics): string[] {
+  const [w7, w30] = [m.windows.find((w) => w.days === 7)!, m.windows.find((w) => w.days === 30)!];
+  const both = <K extends keyof DeliveryWindow>(k: K, f: (x: Extract<DeliveryWindow[K], { measured: true }>) => string) => {
+    const a = w7[k] as Measure<object>;
+    const b = w30[k] as Measure<object>;
+    if (!a.measured || !b.measured) return `${NOT_MEASURED} (${((a.measured ? b : a) as { why: string }).why})`;
+    return `${f(a as Extract<DeliveryWindow[K], { measured: true }>)} / ${f(b as Extract<DeliveryWindow[K], { measured: true }>)}`;
+  };
+  return [
+    `- Merges per day: ${both('merges', (x) => `${x.perDay} (${x.total})`)}`,
+    `- Main red: ${both('mainRed', (x) => String(x.count))}${w7.mainRed.measured && w7.mainRed.stillRed ? ' (red now)' : ''}`,
+    `- Time to green (median): ${both('timeToGreen', (x) => mins(x.medianMinutes))}`,
+    `- Reverts opened, merged: ${both('reverts', (x) => `${x.opened}, ${x.merged}`)}; revert rate ${both('reverts', (x) => pct(x.rate))}`,
+    `- Fix-forward success: ${both('fixForward', (x) => `${pct(x.successRate)} of ${x.attempts}`)}`,
+    `- PR CI wall-clock (median, p90): ${both('prCi', (x) => `${mins(x.medianMinutes)}, ${mins(x.p90Minutes)}`)}`,
+    `- Agent startup (median, p90): ${both('startup', (x) => `${secs(x.medianSeconds)}, ${secs(x.p90Seconds)}`)}`,
+    `- Flake rate: ${both('flake', (x) => `${pct(x.rate)} of ${x.reruns}`)}`,
+  ];
+}
+
+/**
+ * The weekly metrics digest for the Discord ops channel, beside the trust digest: the delivery figures, then the 20
+ * slowest tests and every test over the time budget (what the weekly optimization pass can target). Each message
+ * is under 2000 characters; a long list continues in the next.
+ */
+export function metricsDigest(m: DeliveryMetrics, o: { instance: string; dashboardUrl?: string | null }): string[] {
+  const head = [`**Metrics, week of ${trustWeek(new Date(m.until))}: ${o.instance}** (last 7 / 30 days)`, ...deliveryLines(m)];
+  if (o.dashboardUrl) head.push(`${o.dashboardUrl.replace(/\/+$/, '')}/reports`);
+  const out = [head.join('\n')];
+  const s = m.slowTests;
+  const tests: string[] = [];
+  if (!s.measured) tests.push(`**Slow tests:** ${NOT_MEASURED} (${s.why}).`);
+  else {
+    tests.push(`**The ${s.slowest.length} slowest tests**, last ${s.days} days (median of ${s.runs} run${s.runs === 1 ? '' : 's'}; budget ${s.budgetS} s):`);
+    s.slowest.forEach((t, i) => tests.push(`${i + 1}. ${ms(t.medianMs)} \`${cut(t.name, 70).replace(/`/g, "'")}\``));
+    if (!s.overBudgetTotal) tests.push(`Over the ${s.budgetS} s budget: none.`);
+    else {
+      tests.push(`**Over the ${s.budgetS} s budget: ${s.overBudgetTotal}**`);
+      for (const t of s.overBudget) tests.push(`- ${ms(t.medianMs)} \`${cut(t.name, 70).replace(/`/g, "'")}\``);
+      if (s.overBudgetTotal > s.overBudget.length) tests.push(`- and ${s.overBudgetTotal - s.overBudget.length} more`);
+    }
+  }
+  // Split into messages under 2000 characters, at line breaks.
+  let cur = '';
+  for (const line of tests) {
+    if (cur && cur.length + line.length + 1 > 1990) {
+      out.push(cur);
+      cur = '';
+    }
+    cur = cur ? `${cur}\n${line}` : line.slice(0, 1990);
+  }
+  if (cur) out.push(cur);
+  return out;
 }

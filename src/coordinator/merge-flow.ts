@@ -16,9 +16,11 @@ import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
+import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { MainWatch, repoGit } from '../main-watch.js';
+import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
 import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
@@ -217,8 +219,11 @@ export abstract class MergeFlow extends FixRuns {
     if (conflict.act === 'recheck') this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + MERGEABLE_RECHECK_MS);
     if (conflict.act === 'fix') return this.maybeFixConflict(w, pr);
     // Batching: ready on the fast checks (the full check comes from the batch); a head returned from a batch is not.
-    const batching = this.prBatching();
-    const r = this.prReadiness(n, pr.headSha, await this.d.backlog.checks(pr.headSha), batching ? this.d.cfg.tests.land.pr_batch.full_checks : []);
+    // A docs-only PR with light checks configured: ready on those alone, and never batched (src/pr-rules.ts).
+    const plan = this.checksPlan(n, pr.headSha);
+    const batching = this.prBatching() && !plan.fast;
+    const except = plan.fast ? this.d.cfg.project.required_checks.filter((c) => !plan.checks.includes(c)) : batching ? this.d.cfg.tests.land.pr_batch.full_checks : [];
+    const r = this.prReadiness(n, pr.headSha, await this.d.backlog.checks(pr.headSha), except);
     const returned = batching && r.ready ? this.prBatch.returnedFor(number, pr.headSha) : null;
     if (returned) {
       r.ready = false;
@@ -359,13 +364,17 @@ export abstract class MergeFlow extends FixRuns {
   /** The policy's call on a ready PR at its current head. */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-    const base = (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
+    // A stale-PR merge-in head: the PR's own change is measured from the default branch it merged (src/pr-hygiene.ts).
+    const mergeIns = this.mergeInsOf();
+    const base = mergeInBase(mergeIns, number, pr.headSha) ?? (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
     const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
     const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
-    const v = this.events(n).filter((e) => e.type === 'eval.verdict' && (e.payload as { head: string }).head === pr.headSha).at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
+    // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
+    const judged = carriedHead(mergeIns, number, pr.headSha);
+    const v = this.events(n).filter((e) => e.type === 'eval.verdict' && (e.payload as { head: string }).head === judged).at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
     const plan = (this.events(n).filter((e) => e.type === 'plan.posted').at(-1)?.payload as EventPayload<'plan.posted'> | undefined)?.plan as { files?: string[] } | undefined;
     let policyOn = false;
     try {
@@ -395,6 +404,7 @@ export abstract class MergeFlow extends FixRuns {
       ),
       // A planned task: high-risk or design-level files its approved plan didn't list hold the merge: the repo's
       // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
+      claimedProtected: this.claimedClass(n) === 'protected',
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).
@@ -411,6 +421,9 @@ export abstract class MergeFlow extends FixRuns {
     // Safety floor: nothing auto-merges under an emergency stop; the next poll after it's lifted decides.
     if (this.emergencyInForce()) return;
     const { issue: n, number } = w;
+    // A docs-only PR on the fast path is never batched: it merges like any PR outside a batch.
+    const fast = this.checksPlan(n, pr.headSha).fast;
+    const batching = this.prBatching() && !fast;
     const prior = this.d.log
       .read(0, ['merge.decided'])
       .map((e) => e.payload as EventPayload<'merge.decided'>)
@@ -421,7 +434,7 @@ export abstract class MergeFlow extends FixRuns {
       const approved = mergeApproval(this.d.log, number, pr.headSha);
       if (approved) return this.mergeApproved(w, pr, approved.by);
       // Batching: the owner's approval (a review) merges it, on exactly the main its batch tested.
-      if (this.prBatching() && !this.emergencyInForce() && (await this.ownerApproved(w, pr))) await this.mergeTested(w, pr, 'approved');
+      if (batching && !this.emergencyInForce() && (await this.ownerApproved(w, pr))) await this.mergeTested(w, pr, 'approved');
       return; // otherwise already waiting for the owner
     }
     const d = this.mergeDecisionFor(n, number, pr);
@@ -432,7 +445,11 @@ export abstract class MergeFlow extends FixRuns {
       if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
       if (pr.mergeableState === 'draft') return;
-      if (pr.mergeable === null || pr.mergeableState === 'unknown') {
+      // Decided on the light checks, but GitHub's ruleset still requires every required check: blocked until they pass.
+      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.d.cfg.project.required_checks, await this.d.backlog.checks(pr.headSha))) : { act: 'none' as const };
+      if (hold.act === 'wait') return;
+      if (hold.act === 'hold') d.reasons.push(hold.why);
+      else if (pr.mergeable === null || pr.mergeableState === 'unknown') {
         const polls = this.waitPolls.bump(`mergeable:${number}:${pr.headSha}`);
         if (polls < MERGEABLE_CAP) return;
         const why = `GitHub was still computing whether it can merge after ${polls} polls`;
@@ -446,7 +463,7 @@ export abstract class MergeFlow extends FixRuns {
       // off the PR) before merging. Not decided until that check has a result.
       if (d.auto) {
         // Batching: the combination is what the batch tested; mergeTested checks main is still exactly that.
-        const gate = this.prBatching() ? 'merge' : await this.combinedGate(w, pr);
+        const gate = batching ? 'merge' : await this.combinedGate(w, pr);
         if (gate === 'pending') return;
         // The combined check found a conflict GitHub doesn't report: wait for GitHub to catch up, up to a cap.
         if (gate === 'conflict') {
@@ -466,7 +483,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
-    if (this.prBatching()) return this.mergeTested(w, pr, 'auto');
+    if (batching) return this.mergeTested(w, pr, 'auto');
     const m = await this.trainMerge(w, pr);
     if (!m) return;
     if (!m.ok) {
@@ -859,9 +876,41 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
-  /** The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue; `except`: required checks left out. */
+  /** The worker's own risk class for the issue's change (worker.claims), if it gave one. */
+  private claimedClass(n: number) {
+    return (this.events(n).filter((e) => e.type === 'worker.claims').at(-1)?.payload as EventPayload<'worker.claims'> | undefined)?.risk_class;
+  }
+
+  /**
+   * The required checks the harness's own merge call waits on at this head: every one, or for a docs-only change
+   * (its paths, raised by the worker's claim) the light ones, review.yaml docs_only_checks (src/pr-rules.ts).
+   */
+  protected checksPlan(n: number, head: string): { checks: string[]; fast: boolean } {
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    const required = this.d.cfg.project.required_checks;
+    if (!review.docs_only_checks.length) return { checks: required, fast: false };
+    const claimed = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)?.payload as EventPayload<'issue.claimed'> | undefined;
+    if (!claimed) return { checks: required, fast: false };
+    const files = this.changeFiles(this.d.repo, claimed.base, head);
+    const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
+    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+    const cls = effectiveClass(riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) }).cls, this.claimedClass(n));
+    return checksFor({ cls, required, docsOnlyChecks: review.docs_only_checks });
+  }
+
+  /**
+   * The readiness of an issue's PR at `head`, against the latest evaluator verdict for the issue; `except`: required
+   * checks left out. A verdict on the head the harness merged the default branch into (a clean stale-PR merge-in,
+   * src/pr-hygiene.ts) holds for the merge-in; its required checks still have to pass on it.
+   */
   prReadiness(n: number, head: string, checks: CommitCheck[], except: string[] = []): Readiness {
     const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
-    return readiness({ required: this.d.cfg.project.required_checks.filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: v.head, approved: v.patch_correct } : null });
+    const judged = v && carriedHead(this.mergeInsOf(), null, head) === v.head ? head : v?.head;
+    return readiness({ required: this.d.cfg.project.required_checks.filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: judged!, approved: v.patch_correct } : null });
+  }
+
+  /** The stale-PR merge-ins this instance pushed (pr_hygiene.merged_in), oldest first. */
+  protected mergeInsOf(): MergeIn[] {
+    return this.d.log.read(0, ['pr_hygiene.merged_in']).map((e) => e.payload as EventPayload<'pr_hygiene.merged_in'>);
   }
 }

@@ -154,6 +154,21 @@ export const ProjectConfig = z.strictObject({
       strategy: z.literal('merge').default('merge'),
     })
     .prefault({}),
+  /**
+   * Stale PR hygiene (src/pr-hygiene.ts), PR mode only: every `every_hours`, each open PR the harness opened whose merge
+   * base with the default branch is older than `stale_after_days` gets the default branch merged in (and so re-tested),
+   * or goes to the conflict fix when it conflicts; one whose task is closed or superseded, with no commit or comment for
+   * `abandon_after_days`, is closed (its branch kept). A PR with one of `hold_labels`, or left to an owner, is never touched.
+   */
+  pr_hygiene: z
+    .strictObject({
+      enabled: z.boolean().default(true),
+      every_hours: z.number().positive().max(24 * 30).default(6),
+      stale_after_days: z.number().positive().max(365).default(3),
+      abandon_after_days: z.number().positive().max(365).default(14),
+      hold_labels: z.array(z.string().min(1)).default(['needs-owner', 'hold']),
+    })
+    .prefault({}),
   /** Machine-wide limits checked before each new agent starts. */
   governor: z
     .strictObject({
@@ -163,6 +178,11 @@ export const ProjectConfig = z.strictObject({
       min_free_disk_pct: z.number().min(1).max(90).default(15),
     })
     .prefault({}),
+  /**
+   * The Metrics panel and the weekly digest (src/merge-metrics.ts deliveryMetrics): a test whose duration (the median
+   * of its runs over the week) is over `slow_test_budget_s` seconds is listed as over budget, beside the 20 slowest.
+   */
+  metrics: z.strictObject({ slow_test_budget_s: z.number().positive().max(86_400).default(30) }).prefault({}),
   os: z.enum(['auto', 'macos', 'linux', 'windows-wsl']).default('auto'),
   owners: z.strictObject({
     default: handle,
@@ -528,6 +548,9 @@ export const TestsConfig = z.strictObject({
 
 // ---------- review.yaml ----------
 
+/** Generated files not counted toward review.yaml max_pr_lines, unless a repo lists its own. */
+export const DEFAULT_GENERATED = ['**/*.min.js', '**/*.min.css', '**/*.map', '**/dist/**', '**/__generated__/**', '**/*.generated.*', '**/*.snap'];
+
 export const ReviewConfig = z.strictObject({
   version: z.literal(1),
   money_path_source: z.strictObject({ file: z.string().min(1), pattern: regex.optional() }).optional(),
@@ -563,6 +586,20 @@ export const ReviewConfig = z.strictObject({
       loosened: z.array(z.string()).default([]),
     })
     .prefault({}),
+  /**
+   * The size limit for an agent's change (src/pr-rules.ts): over this many changed lines, lockfiles and `generated`
+   * files not counted, it is sent back to the worker with "split it", unless it is mechanical (only renames,
+   * moves and formatting: whitespace ignored, the added lines are exactly the removed ones).
+   */
+  max_pr_lines: z.number().int().positive().default(600),
+  /** Generated files (globs): not counted toward max_pr_lines. */
+  generated: z.array(z.string().min(1)).default(DEFAULT_GENERATED),
+  /**
+   * The light checks: for a docs-only PR (only *.md and docs/**), the harness's own merge call waits on just these
+   * of the required_checks. Empty (the default): no fast path, every required check. GitHub's ruleset still
+   * requires every required check before it lets a merge through.
+   */
+  docs_only_checks: z.array(z.string().min(1)).default([]),
   /**
    * Gradual delegation, suggest-only: a waiting category whose last `min_clean` PRs were approved unchanged, with
    * no revert, red main or later fix, is put to the owner for loosening, with the evidence. Never automatic.

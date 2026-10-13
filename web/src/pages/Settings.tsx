@@ -45,9 +45,10 @@ export function SettingsPage() {
       </div>
       <div className="px-6 pt-6 text-[12.5px] text-ink-2">
         The machine-wide settings (the agent slot cap, engine updates) and their history are on the{' '}
-        <button className="text-blue-ink hover:underline" onClick={() => navigate('/machine')} data-testid="settings-machine-link">
+        {/* A link in the sentence (it stays inline on a phone, where every other control is a 44 px target). */}
+        <a href="/machine" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/machine'))} data-testid="settings-machine-link">
           Machine page
-        </button>
+        </a>
         .
       </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">

@@ -347,6 +347,9 @@ function coordinator(ops: string | undefined, now: () => Date) {
   git(repo, '-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
   const log = new EventLog(join(base, 'events.db'));
   seed(log);
+  // A test run's per-test durations a day ago: the slow tests the metrics digest lists.
+  const durations = { id: 'r1', tier: 'full', tests: [{ name: 'db > migrates', ms: 45_000 }, { name: 'ui > renders', ms: 1200 }], parsed: 2 };
+  log.db.prepare('INSERT INTO events (ts, type, actor, source, payload) VALUES (?, ?, ?, ?, ?)').run(new Date(NOW.getTime() - 24 * HOUR).toISOString(), 'testrun.durations', 'coordinator', 'coordinator', JSON.stringify(durations));
   const stateDir = join(base, 'state');
   const slotsDir = join(base, 'slots');
   mkdirSync(stateDir);
@@ -381,10 +384,12 @@ test('the weekly digest goes to the ops channel once a week, only when one is se
   await c.checkIntake();
   await none.c.checkIntake();
   await none.c.checkIntake();
-  assert.equal(posts.length, 1, 'once this week');
-  assert.equal(posts[0]!.where, OPS);
+  assert.equal(posts.length, 3, 'once this week: the trust digest, then the metrics and the slow tests');
+  assert.ok(posts.every((p) => p.where === OPS));
   assert.match(posts[0]!.text, /^\*\*Trust, week of 2026-10-12: example\*\*/);
   assert.match(posts[0]!.text, /Change failure rate: 40% \/ 50%/);
+  assert.match(posts[1]!.text, /^\*\*Metrics, week of 2026-10-12: example\*\*/);
+  assert.match(posts[2]!.text, /^\*\*The 2 slowest tests\*\*, last 7 days \(median of 1 run; budget 30 s\):\n1\. 45 s `db > migrates`\n2\. 1\.2 s `ui > renders`\n\*\*Over the 30 s budget: 1\*\*\n- 45 s `db > migrates`$/);
   assert.equal(none.posts.length, 0, 'no ops channel: no digest');
   // What the digest added to the same passes: its post (before and after it is sent), nothing else.
   const added = log.read(0).slice(before);
@@ -395,9 +400,13 @@ test('the weekly digest goes to the ops channel once a week, only when one is se
     [
       ['discord.posting', 'trust-digest:2026-10-12'],
       ['discord.posted', 'trust-digest:2026-10-12'],
+      ['discord.posting', 'metrics-digest:2026-10-12:0'],
+      ['discord.posted', 'metrics-digest:2026-10-12:0'],
+      ['discord.posting', 'metrics-digest:2026-10-12:1'],
+      ['discord.posted', 'metrics-digest:2026-10-12:1'],
     ],
   );
   now = new Date(NOW.getTime() + 7 * 24 * HOUR);
   await c.checkIntake();
-  assert.equal(posts.length, 2, 'and again the next week');
+  assert.equal(posts.length, 6, 'and again the next week');
 });

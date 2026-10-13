@@ -238,6 +238,19 @@ test('the worker stops once done_when passes, with a case that checks it', () =>
   assert.ok(parseCases(engineRoleCases('worker')!).some((c) => /stop/i.test(c.title)), 'a worker case about stopping when done');
 });
 
+test('no defenses for hypothetical concerns: the worker adds none, the evaluator requests their removal, each with a case', () => {
+  const real = /a failing test, (?:a failure you observed|an observed failure) \(?[^)]*?evidence[^)]*\)?,? or a protected path \(money path, auth, secrets, rulesets, CI, scripts\/setup\)/;
+  const worker = defaultRolePrompt('worker');
+  assert.match(worker, /Add no validation, defense or complexity for a hypothetical concern\./);
+  assert.match(worker, real);
+  const verdict = defaultRolePrompt('evaluator-verdict');
+  assert.match(verdict, /Added validation, defense or complexity .* with none of these behind it/);
+  assert.match(verdict, real);
+  assert.match(verdict, /Request the change: patch_correct false, and advice names what to remove and cites the rule/);
+  assert.ok(parseCases(engineRoleCases('worker')!).some((c) => /guard/i.test(c.title)), 'a worker case tempted to add a guard');
+  assert.ok(parseCases(engineRoleCases('evaluator-verdict')!).some((c) => /hypothetical/i.test(c.title)), 'a verdict case facing one');
+});
+
 test('runnerAsk: through the runner like any run, with no tools, its cost reported', async () => {
   const runner = new FakeRunner(() => ({ structured: { plan: 'p' }, costUsd: 0.4 }));
   const costs: number[] = [];
