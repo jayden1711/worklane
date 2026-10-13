@@ -193,7 +193,7 @@ claude_login_ok() {
 # The engine repo's checks that run on a push to main, one name per element (names hold commas, so never a
 # joined string). Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the
 # updater refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("add-project (real systemd)" "agentshield" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
+UPDATE_DEFAULT_CHECKS=("add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {
