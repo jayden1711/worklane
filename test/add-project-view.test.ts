@@ -44,8 +44,12 @@ test("the server refuses an Add project submit from an instance owner who isn't 
     assert.equal(r.status, 403, JSON.stringify(r.body));
     assert.match(r.body.error!, /machine owners: @ada\); @example-owner isn't one/);
     // A stale sign-in and a device off the list are refused the same way (a machine owner this time).
-    const owner = await dashboard(['example-owner']);
+    const owner = await dashboard(['example-owner', 'example-collaborator']);
     try {
+      // A machine owner who only writes on this instance's repo isn't an owner here: refused too.
+      const writer = await owner.post({ name: 'shop', repo: 'acme/shop' }, asFreshPerson('example-collaborator'));
+      assert.equal(writer.status, 403);
+      assert.match(writer.body.error!, /only an owner of this instance who is one of the machine's owners/);
       assert.equal((await owner.get(asFreshPerson('example-owner'))).allowed, true, 'a machine owner, fresh, on an allowed device');
       const stale = await owner.post({ name: 'shop', repo: 'acme/shop' }, asFreshPerson('example-owner', Date.now() - 6 * 60_000));
       assert.equal(stale.status, 403);
