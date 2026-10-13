@@ -81,8 +81,6 @@ export interface MainWatchApi {
 export interface Facts {
   harness: { number: number; head: string; at: string } | null;
   pulls?: MergedPull[];
-  /** A merge commit's own subject names this PR ("Merge #N: …", "Merge pull request #N …"): asked directly when the pulls link is empty. */
-  subjectPr?: number | null;
   pr?: MergedPull;
   role?: Role | null;
   runs?: CheckRunAt[];
@@ -167,14 +165,7 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   } else {
     if (!f.pulls) return { done: false, need: { call: 'pulls' } };
     const merged = f.pulls.filter((p) => p.mergedAt && p.base === o.branch);
-    let cand = merged.find((p) => p.mergeCommit === sha) ?? merged.find((p) => p.mergeCommit && o.inMerge?.(p.mergeCommit));
-    // GitHub links a merge commit to its PR a few seconds after the merge, so the pulls call can be empty for a normal
-    // merge (main 09f60340, judged 6 s after #307 landed). A merge commit whose subject names a PR: ask that PR, and
-    // take it only when its own merge commit is this one (a made-up subject still counts as a direct push).
-    if (!cand && f.subjectPr) {
-      if (!f.pr || f.pr.number !== f.subjectPr) return { done: false, need: { call: 'pull', number: f.subjectPr } };
-      if (f.pr.mergedAt && f.pr.base === o.branch && f.pr.mergeCommit === sha) cand = f.pr;
-    }
+    const cand = merged.find((p) => p.mergeCommit === sha) ?? merged.find((p) => p.mergeCommit && o.inMerge?.(p.mergeCommit));
     if (!cand) {
       const other = f.pulls.find((p) => !p.mergedAt);
       // GitHub's own commit-to-PR link (the pulls call) says no merged PR has it: a direct push.
@@ -262,8 +253,6 @@ export interface WatchGit {
   firstParents(from: string, to: string): string[];
   /** The content of `path` (from the repo root) as committed at `rev`, or null when git can't read it. */
   show(rev: string, path: string): string | null;
-  /** For a merge commit (two parents), the PR number its subject names, or null. */
-  mergeSubjectPr?(sha: string): number | null;
 }
 
 /** The config file whose required_checks judge a commit, from the repo root. */
@@ -301,12 +290,6 @@ export function directPushAlertAt(git: WatchGit, rev: string): boolean {
 }
 
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
-/** The PR number a merge subject names: "Merge #N: …" (this repo's merges) or GitHub's "Merge pull request #N from …". */
-export function subjectPrNumber(subject: string): number | null {
-  const m = /^Merge (?:pull request )?#(\d{1,7})\b/.exec(subject);
-  return m ? Number(m[1]) : null;
-}
-
 export function repoGit(repo: string, remote: string, branch: string): WatchGit {
   const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
   return {
@@ -320,12 +303,6 @@ export function repoGit(repo: string, remote: string, branch: string): WatchGit 
     show: (rev, path) => {
       const r = git('show', `${rev}:${path}`);
       return r.status === 0 ? r.stdout : null;
-    },
-    mergeSubjectPr: (sha) => {
-      const r = git('log', '-1', '--format=%P%n%s', sha);
-      if (r.status !== 0) return null;
-      const [parents = '', subject = ''] = r.stdout.split('\n');
-      return parents.trim().split(' ').length === 2 ? subjectPrNumber(subject) : null;
     },
   };
 }
@@ -432,7 +409,7 @@ export class MainWatch {
       }
       const next = this.d.git.firstParents(s.last, tip)[0];
       if (!next) return;
-      s.pending = { sha: next, facts: { harness: this.d.harnessMerge(next), subjectPr: this.d.git.mergeSubjectPr?.(next) ?? null } };
+      s.pending = { sha: next, facts: { harness: this.d.harnessMerge(next) } };
       writeWatchState(this.d.stateFile, s);
     }
     const p = s.pending;
