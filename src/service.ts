@@ -247,7 +247,8 @@ async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; 
   const offsiteConfig = opts.offsiteConfig ?? process.env[`${BRAND.envPrefix}_OFFSITE_BACKUP`];
   // An emergency stop takes effect within seconds, not at the next tick.
   // The console's requests (message, stop), chat questions and intake (which pulls its sources on its own, slower
-  // clock) are taken on the same short timer.
+  // clock) are taken on the same short timer. Discord chat and decision-thread messages don't wait for it: each wakes
+  // the coordinator as it arrives (src/coordinator/quick-replies.ts); this timer is their fallback.
   const watch = setInterval(() => {
     coordinator.checkEmergency();
     coordinator.checkConsole();
