@@ -130,6 +130,25 @@ jobs:
             sudo chmod 0750 "$(getent passwd "$u" | cut -d: -f6)"
           done
           sudo install -o root -g root -m 0644 /dev/null /run/lock/worklane-full-run.lock
+      - name: a coordinator checkout's pre-push hook refuses the default branch (checkout.sh's hook step)
+        run: |
+          # A remote with a main, cloned as checkout.sh clones (origin/HEAD set), then the hook step checkout.sh runs.
+          t="$(mktemp -d)"
+          id=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+          git init -q --bare -b main "$t/remote.git"
+          git init -q -b main "$t/seed" && git -C "$t/seed" "${id[@]}" commit -q --allow-empty -m init && git -C "$t/seed" push -q "$t/remote.git" main
+          git clone -q "$t/remote.git" "$t/checkout"
+          git -C "$t/checkout" "${id[@]}" commit -q --allow-empty -m change
+          (cd "$t/checkout" && node "$GITHUB_WORKSPACE/dist/src/cli.js" install --root . --git-hooks-only)
+          sudo chown -R root:root "$t/checkout/.git/hooks" && sudo chmod 0755 "$t/checkout/.git/hooks"
+          if [ -w "$t/checkout/.git/hooks/pre-push" ]; then echo "the hook is writable by the checkout's user" >&2; exit 1; fi
+          for spec in HEAD:main HEAD:refs/heads/main +HEAD:main; do
+            if git -C "$t/checkout" push origin "$spec" 2> "$RUNNER_TEMP/push.log"; then echo "pushed $spec through the hook" >&2; exit 1; fi
+            grep -q 'refusing to push refs/heads/main, the default branch' "$RUNNER_TEMP/push.log"
+          done
+          [ "$(git -C "$t/remote.git" rev-parse main)" = "$(git -C "$t/seed" rev-parse HEAD)" ] || { echo "main moved" >&2; exit 1; }
+          git -C "$t/checkout" push -q origin HEAD:refs/heads/worklane/issue-1
+          echo "main refused, a task branch pushed"
       - name: test-user.sh install, in full
         run: |
           n="$(nproc)"

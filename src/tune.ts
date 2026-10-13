@@ -97,6 +97,8 @@ export interface TuneOptions {
   /** Memory available for test workers, in MB (default: what the machine reports now). */
   memAvailableMb?: number;
   run?: SuiteRunner;
+  /** Record a refused push to the default branch (a push.blocked event). */
+  onBlocked?: (ref: string, head: string) => void;
 }
 
 export interface TuneResult {
@@ -132,7 +134,7 @@ export async function tune(o: TuneOptions): Promise<TuneResult> {
     git('-c', `user.name=${o.identity.name}`, '-c', `user.email=${o.identity.email}`, 'commit', '-q', '-m', `Test workers: at most ${rec.workers}, from a profile on this machine`, '-m', rec.why);
     const head = git('rev-parse', 'HEAD');
     if (o.dryRun || !o.backlog) return { profile, recommendation: rec, changed: true };
-    const push = checkedPush({ cwd: path, remote: o.remote ?? 'origin', base: o.base, head, ref: `refs/heads/${branch}`, limits: o.limits });
+    const push = checkedPush({ cwd: path, remote: o.remote ?? 'origin', base: o.base, head, ref: `refs/heads/${branch}`, limits: o.limits, guard: { defaultBranch: o.mainBranch, blocked: o.onBlocked ?? (() => undefined) } });
     if (!push.ok) return { profile, recommendation: rec, changed: true, ...('refused' in push && push.refused ? { refused: push.refused } : {}) };
     const body = [
       `Profiled on this machine (${cores} cores${profile.memAvailableMb ? `, ${Math.round(profile.memAvailableMb)} MB available` : ''}): \`${command}\``,

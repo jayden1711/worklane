@@ -23,6 +23,16 @@ function fit(head: string, free: string, tail: string): string {
   return `${head}${clip(free, Math.max(0, room))}${tail}`.slice(0, REPLY_CHARS);
 }
 
+/**
+ * The main watch's alert: a notice, no thread (nothing in chat resumes auto-merge; an admin does on the dashboard).
+ * The commit's link, why it is unaccounted (redacted), and the revert PR's link: no secrets, nobody's credentials.
+ */
+export function mainWatchPost(u: Pick<EventPayload<'main_watch.unaccounted'>, 'sha' | 'url' | 'reason' | 'revert'>, o: { dashboardUrl: string }): ChannelPost {
+  const head = `Main watch: an unaccounted commit on the default branch, ${u.url}: `;
+  const tail = `\nAuto-merge is stopped until an admin clears it on the dashboard: ${base(o.dashboardUrl)}/prs${u.revert ? `\nRevert PR, for a human to approve: ${u.revert}` : '\nNo revert PR was opened.'}`;
+  return { kind: 'notice', text: fit(head, oneLine(redactString(u.reason)), tail) };
+}
+
 /** What a decision posts. A high-risk merge posts only a notice with links, never its options. */
 export function decisionPost(q: Pick<EventPayload<'decision.asked'>, 'id' | 'kind' | 'issue' | 'question' | 'options' | 'recommendation'>, o: { dashboardUrl: string; repo: string }): ChannelPost {
   const on = q.issue !== null ? ` on #${q.issue}` : '';

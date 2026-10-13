@@ -9,6 +9,12 @@ import { repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
+/** The default-branch guard every push carries: main, with each refusal recorded in `blocked`. */
+function guard(o: { directLand?: boolean } = {}) {
+  const blocked: { ref: string; head: string }[] = [];
+  return Object.assign({ defaultBranch: 'main', ...o, blocked: (ref: string, head: string) => void blocked.push({ ref, head }) }, { refusals: blocked });
+}
+
 function repo() {
   const base = mkdtempSync(join(tmpdir(), 'push-check-'));
   const remote = join(base, 'remote.git');
@@ -119,11 +125,11 @@ test('every problem is reported at once, not just the first', () => {
 test('checkedPush: a refused range is never pushed; a clean one is', () => {
   const r = repo();
   const bad = r.commit({ 'data/x': 'b\n' });
-  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: bad, ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), force: true });
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: bad, ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), guard: guard(), force: true });
   assert.equal(res.ok, false);
   assert.ok(!res.ok && 'refused' in res && res.refused.length === 1);
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task'), '', 'nothing pushed');
-  const ok = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: bad, ref: 'refs/heads/task', limits: limits(), force: true });
+  const ok = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: bad, ref: 'refs/heads/task', limits: limits(), guard: guard(), force: true });
   assert.deepEqual(ok, { ok: true });
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task').split('\t')[0], bad);
 });
@@ -134,7 +140,7 @@ test('checkedPush without force is compare-and-swap: a moved remote branch is an
   git(r.work, 'push', '-q', 'origin', `${a}:refs/heads/main`);
   git(r.work, 'reset', '-q', '--hard', r.baseSha);
   const b = r.commit({ 'b': '1\n' });
-  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: b, ref: 'refs/heads/main', limits: limits() });
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: b, ref: 'refs/heads/main', limits: limits(), guard: guard({ directLand: true }) });
   assert.ok(!res.ok && 'error' in res);
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], a);
 });
@@ -144,12 +150,40 @@ test('checkedPush with expect: updates the branch only while it is still at that
   const a = r.commit({ 'a': '1\n' });
   git(r.work, 'push', '-q', 'origin', `${a}:refs/heads/task`);
   const b = r.commit({ 'b': '1\n' });
-  assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: b, ref: 'refs/heads/task', limits: limits(), expect: a }), { ok: true });
+  assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: b, ref: 'refs/heads/task', limits: limits(), guard: guard(), expect: a }), { ok: true });
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task').split('\t')[0], b);
   const c = r.commit({ 'c': '1\n' });
-  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: c, ref: 'refs/heads/task', limits: limits(), expect: a });
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: c, ref: 'refs/heads/task', limits: limits(), guard: guard(), expect: a });
   assert.ok(!res.ok && 'error' in res, 'the branch is at b, not a: refused');
   assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/task').split('\t')[0], b);
+});
+
+test('checkedPush refuses the default branch, however the ref is spelled, records it, and pushes nothing', () => {
+  const r = repo();
+  const head = r.commit({ 'a.js': '1\n' });
+  for (const ref of ['refs/heads/main', 'main', 'heads/main', `${head}:refs/heads/main`]) {
+    for (const force of [false, true]) {
+      const g = guard();
+      const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref, limits: limits(), guard: g, force });
+      assert.ok(!res.ok && 'refused' in res, `${ref}${force ? ' (force)' : ''} is refused`);
+      assert.match((res as { refused: string[] }).refused[0]!, /refs\/heads\/main, the default branch: .* never pushes it/);
+      assert.deepEqual(g.refusals, [{ ref: 'refs/heads/main', head }], 'the refusal is recorded');
+    }
+  }
+  assert.equal(git(r.work, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0], r.baseSha, 'main is untouched');
+  // A task branch whose name merely contains it goes through; so does the direct land, the one push of main by design.
+  assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/feature/main', limits: limits(), guard: guard(), force: true }), { ok: true });
+  assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/main', limits: limits(), guard: guard({ directLand: true }) }), { ok: true });
+});
+
+test('the coordinator passes the default branch guard on every push, and only the direct land may push main', () => {
+  for (const f of ['src/coordinator/landing.ts', 'src/coordinator/merge-flow.ts', 'src/coordinator/fix-runs.ts', 'src/coordinator/decisions.ts', 'src/tune.ts']) {
+    const text = readFileSync(join(repoRoot, f), 'utf8');
+    for (const call of text.match(/checkedPush\(\{[^\n]*\}\)/g) ?? []) assert.match(call, /guard: /, `${f}: ${call.slice(0, 80)}`);
+  }
+  const landing = readFileSync(join(repoRoot, 'src/coordinator/landing.ts'), 'utf8');
+  assert.equal((landing.match(/pushGuard\(this\.d\.cfg\.project\.land_mode === 'direct'\)/g) ?? []).length, 1, 'one direct land push');
+  assert.equal([...readdirSync(join(repoRoot, 'src', 'coordinator'))].map((f) => readFileSync(join(repoRoot, 'src', 'coordinator', f), 'utf8')).join('').match(/pushGuard\(true\)/g), null);
 });
 
 test('the engine pushes code only through checkedPush (lease refs and the demo seed are the only other pushes)', () => {

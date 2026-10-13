@@ -27,7 +27,10 @@ import {
   STATE_COOKIE,
 } from '../src/dashboard-auth.js';
 import { EventLog } from '../src/events/log.js';
-import { exampleProject } from './helpers.js';
+import { BRAND } from '../src/brand.js';
+import { fullRunLock, tryAgentSlot } from '../src/slots.js';
+import { tryTestSlot } from '../src/testrun/slots.js';
+import { exampleProject, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
 
 const CLIENT_ID = 'Iv1.testclient01';
 const CLIENT_SECRET = 'client-secret-for-tests';
@@ -87,22 +90,42 @@ async function fakeGitHub() {
 const seenIssue = (issue: number, title: string) => ({ issue, title, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' });
 const ask = (id: string, kind: 'question' | 'plan' | 'land') => ({ id, kind, issue: 1, owner: 'example-owner', question: `${kind}?`, options: ['approve', 'reject'], recommendation: 'approve', receipts: [] });
 
-/** The whole set-up: a fake GitHub, two instances (each its own server, repo and log), the hub with sign-in, a mockable clock. */
-async function setup() {
+/** Each instance's items when the set-up seeds them (src/dashboard.ts ownHolders tells holders apart by project and actor). */
+const MARKS: Record<'a' | 'b', InstanceMarks> = {
+  a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 8101, pr: 8170, run: 'tr-alpha-1', title: 'Alpha-only' },
+  b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 9201, pr: 9270, run: 'tr-beta-1', title: 'Beta-only' },
+};
+
+/**
+ * The whole set-up: a fake GitHub, two instances (each its own server, repo and log), the hub with sign-in, a mockable clock.
+ * `machine`: as on a real machine, both instances share one slots dir, and each is seeded with items on every page
+ * (MARKS), its coordinator holding an agent slot and a test slot there (b also the full-run lock).
+ */
+async function setup(o: { machine?: boolean } = {}) {
   const gh = await fakeGitHub();
   const clock = { t: Date.parse('2026-10-12T12:00:00Z') };
   const now = () => clock.t;
-  const instance = async (name: string) => {
+  const shared = o.machine ? mkdtempSync(join(tmpdir(), 'auth-slots-')) : null;
+  const instance = async (name: 'a' | 'b') => {
     const dir = mkdtempSync(join(tmpdir(), `auth-${name}-`));
     const { dir: root } = exampleProject();
     const db = join(dir, 'events.db');
     const log = new EventLog(db);
+    const cfg = loadConfig(root);
+    const m = MARKS[name];
+    if (o.machine) {
+      cfg.project.project.name = m.project;
+      seedInstanceItems(log, m);
+      tryAgentSlot(`${BRAND.cli} ${m.project} #${m.issue}`, shared!);
+      tryTestSlot(`${m.actor} test run ${m.run}`, shared!);
+      if (name === 'b') await fullRunLock(`${BRAND.cli} ${m.project} land gate full`, 1000, shared!);
+    }
     log.append('issue.seen', seenIssue(1, `In ${name}`), 'c');
     log.append('decision.asked', ask(`${name}-q`, 'question'), 'c');
     log.append('decision.asked', ask(`${name}-p`, 'plan'), 'c');
     log.append('decision.asked', ask(`${name}-l`, 'land'), 'c');
     const roleOf = cachedRoles(repoPermission({ repo: `example/${name}`, token: async () => INSTANCE_TOKEN, api: gh.url }), now);
-    const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: dir, user: 'example-owner', roleOf, instance: name, slotsDir: join(dir, 'slots'), pollMs: 50 });
+    const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf, instance: name, slotsDir: shared ?? join(dir, 'slots'), actor: m.actor, pollMs: 50 });
     return { d, log, dir, port: Number(new URL(d.url).port) };
   };
   const a = await instance('a');
@@ -274,6 +297,98 @@ test('a person sees only the instances they have a role on; any other instance i
     assert.equal(await status(p.post('/api/i/b/decide', { id: 'b-q', answer: 'approve' })), 403);
     assert.equal(await status(p.get('/api/i/nope/state')), 403, 'an instance not in this hub: refused as well');
     assert.equal(s.b.log.read(0, ['decision.answered']).length, 0);
+  } finally {
+    await s.close();
+  }
+});
+
+/** An SSE response read in the background: all that came in so far, whether it ended, and a wait for some text. */
+function streamOf(res: Response) {
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  const st = { got: '', ended: false };
+  void (async () => {
+    try {
+      for (;;) {
+        const r = await reader.read();
+        if (r.done) break;
+        st.got += dec.decode(r.value);
+      }
+    } catch {
+      // cancelled
+    }
+    st.ended = true;
+  })();
+  /** Wait until `until` matches what came in after `from` (or the stream ends, or `ms` pass); what came in after `from`. */
+  const wait = async (until: RegExp, ms: number, from = 0) => {
+    const deadline = Date.now() + ms;
+    while (!until.test(st.got.slice(from)) && !st.ended && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    return st.got.slice(from);
+  };
+  return { st, wait, cancel: () => reader.cancel().catch(() => undefined) };
+}
+
+test("someone with a role on one instance and none on the other never receives the other's items: from any endpoint, the hub's views, the slots both share, or the stream", async () => {
+  const s = await setup({ machine: true });
+  const leak = marksOf(MARKS.b);
+  const mine = marksOf(MARKS.a);
+  try {
+    for (const [login, perm] of [['wes', 'write'], ['vic', 'read'], ['ola', 'admin']] as const) {
+      s.gh.perms.set(`example/a:${login}`, perm);
+      const p = await s.signIn(login);
+      const hub = (await (await p.get('/api/hub')).json()) as { instances: { name: string }[] };
+      assert.deepEqual(hub.instances.map((i) => i.name), ['a'], `${login}: the hub lists a only`);
+      const paths = ['/api/hub', '/api/me'];
+      for (const inst of ['a', 'b']) {
+        for (const path of ['state', 'board', 'test-runs', 'events', 'prs', 'waiting', 'live', 'runs', `runs?issue=${MARKS.b.issue}`, `checks?issue=${MARKS.b.issue}`, 'health', 'machine', 'report', 'throughput', 'intake', 'settings', 'instance-settings', 'audit', 'logs', 'views', 'asks', `runs/${MARKS.b.run}`]) paths.push(`/api/i/${inst}/${path}`);
+      }
+      let sawMine = false;
+      for (const path of paths) {
+        const r = await p.get(path);
+        const body = await r.text();
+        assert.doesNotMatch(body, leak, `${login} (${perm} on a, none on b): ${path} (${r.status}) carries b's items`);
+        if (path.startsWith('/api/i/b/')) assert.equal(r.status, 403, `${login}: ${path} is refused`);
+        if (mine.test(body)) sawMine = true;
+      }
+      assert.ok(sawMine, `${login}: a's own items are there (the check isn't vacuous)`);
+      // a's own slot holders keep their names for its owners and writers; b's are counted, never named.
+      const state = (await (await p.get('/api/i/a/state')).json()) as { slots: { running: number; agents?: { owner: string }[]; fullRun?: { owner: string } | null } };
+      assert.equal(state.slots.running, 2, `${login}: both instances' agents count against the machine's slots`);
+      if (perm !== 'read') {
+        assert.deepEqual(state.slots.agents!.map((a) => a.owner).sort(), [`${BRAND.cli} ${MARKS.a.project} #${MARKS.a.issue}`, 'another instance or job on this machine'].sort());
+        assert.equal(state.slots.fullRun!.owner, 'another instance or job on this machine');
+        const runs = (await (await p.get('/api/i/a/test-runs')).json()) as { inUse: number; slots: { owner: string }[] };
+        assert.equal(runs.inUse, 2);
+        assert.deepEqual(runs.slots.map((x) => x.owner).sort(), [`${MARKS.a.actor} test run ${MARKS.a.run}`, 'another instance or job on this machine'].sort());
+      }
+    }
+
+    // The live stream: a's changes reach the person; b's stream is refused, and b's events never reach them.
+    const p = await s.signIn('wes');
+    assert.equal((await p.get('/api/i/b/stream')).status, 403, "b's stream: refused");
+    const res = await p.get('/api/i/a/stream');
+    assert.equal(res.status, 200);
+    const stream = streamOf(res);
+    await stream.wait(/event: hello/, 2000);
+    s.b.log.append('issue.seen', { issue: MARKS.b.issue + 50, title: `${MARKS.b.title} late`, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, MARKS.b.actor);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.doesNotMatch(stream.st.got, /event: change/, "b's event: nothing on a's stream");
+    s.a.log.append('issue.seen', { issue: MARKS.a.issue + 50, title: `${MARKS.a.title} late`, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, MARKS.a.actor);
+    const got = await stream.wait(/event: change/, 5000);
+    assert.match(got, /event: change/, "a's change arrives");
+    assert.doesNotMatch(got, leak, "nothing of b's on a's stream");
+    const after = (await (await p.get('/api/i/a/state')).json()) as { tasks: { title: string }[] };
+    assert.ok(!after.tasks.some((t) => leak.test(t.title)), "b's event, pushed after sign-in, isn't in a's state either");
+
+    // Removed from a's repo while the stream is open: once the role cache says so, the stream ends; nothing more of a reaches them.
+    s.gh.perms.delete('example/a:wes');
+    s.clock.t += ROLE_CACHE_MS + 1000;
+    const from = stream.st.got.length;
+    s.a.log.append('issue.seen', { issue: MARKS.a.issue + 60, title: `${MARKS.a.title} after removal`, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, MARKS.a.actor);
+    const rest = await stream.wait(/event: change/, 3000, from);
+    assert.doesNotMatch(rest, /event: change/, 'no change after their role is gone');
+    assert.ok(stream.st.ended, 'the stream ends');
+    await stream.cancel();
   } finally {
     await s.close();
   }

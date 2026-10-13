@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, State, Throughput, Waiting } from './api';
+import type { AsksView, ChatAnswerFile, CheckRun, HealthView, HubInfo, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Waiting } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { ChatAnswerView } from './components/ChatPanel';
 import { InstanceList, SignInPage, StopBanner, WhoAmI } from './App';
@@ -28,8 +28,9 @@ import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
 import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
-import { BoardPage, BoardView, type InstanceBoard } from './pages/Board';
+import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
+import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { SetupConsoleView } from './pages/Setup';
 
 export const pages = {
@@ -57,7 +58,7 @@ export function renderPage(name: keyof typeof pages, state: State): string {
 export const renderIssue = (state: State, issue: number) => renderToStaticMarkup(<IssueDetail state={state} issue={issue} />);
 export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks runs={runs} />);
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);
-export const renderInstances = (hub: HubInfo, current: string) => renderToStaticMarkup(<InstanceList hub={hub} current={current} onSelect={() => {}} />);
+export const renderInstances = (hub: HubInfo, current: string, all = false) => renderToStaticMarkup(<InstanceList hub={hub} current={current} all={all} onSelect={() => {}} />);
 export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsView view={view} />);
 export { probeHub } from './api';
 export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => renderToStaticMarkup(<HealthPanelView view={view} {...(instances ? { instances } : {})} />);
@@ -68,6 +69,8 @@ export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToSta
 export const renderConsole = (data: ConsoleData) => renderToStaticMarkup(<ConsolePanel data={data} run="r" />);
 export const renderAgents = (state: State, live: LiveList | null) => renderToStaticMarkup(<Agents state={state} live={live} />);
 export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBanner state={state} />);
+export const renderProtection = (protection: Protection, brand: string) => renderToStaticMarkup(<ProtectionStatus protection={protection} brand={brand} />);
+export const renderMainWatchAlert = (protection: Protection) => renderToStaticMarkup(<MainWatchAlert protection={protection} />);
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';
@@ -87,7 +90,10 @@ export const renderSignIn = () => renderToStaticMarkup(<SignInPage />);
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';
-export const renderBoard = (boards: InstanceBoard[], filter: string | null = null, now?: number) => renderToStaticMarkup(<BoardView boards={boards} filter={filter} {...(now !== undefined ? { now } : {})} />);
+export const renderBoard = (boards: InstanceBoard[], now?: number) => renderToStaticMarkup(<BoardView boards={boards} {...(now !== undefined ? { now } : {})} />);
+export const renderBoardTestRuns = (boards: InstanceBoard[]) => renderToStaticMarkup(<BoardTestRuns boards={boards} />);
+export { loadBoards } from './pages/Board';
+export { onInstance, scopeOf } from './api';
 export const renderMachineSlots = (slots: State['slots']) => renderToStaticMarkup(<MachineSlots slots={slots} />);
 export const renderTestRuns = (data: TestRunsData, compact = false) => renderToStaticMarkup(<TestRunsView data={data} compact={compact} />);
 export { elapsed } from './pages/Board';

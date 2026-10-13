@@ -3,6 +3,7 @@
 // big or in doubt waits for a human; so does everything while the instance's
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
+import { BRAND } from './brand.js';
 import { AGENT_INSTRUCTIONS, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
@@ -14,7 +15,26 @@ export interface MergeVerdict {
   design_reason?: string | undefined;
 }
 
+/** The branches the harness's revert PRs come from (a red main after an auto-merge, the main watch). */
+export const REVERT_BRANCH_PREFIX = `${BRAND.cli}/revert-`;
+export const isRevertBranch = (branch: string) => branch.startsWith(REVERT_BRANCH_PREFIX);
+
+/**
+ * Why the harness may never merge this PR itself, whatever else holds: one it didn't open (a person's, a bot's: a
+ * person merges it), and its own revert PRs (a human approves a revert). Empty: it may, if the rest allows.
+ */
+export function neverAutoMerge(o: { branch: string; openedByHarness: boolean }): string[] {
+  const out: string[] = [];
+  if (!o.openedByHarness) out.push('never auto-merged: the harness did not open this PR; a person merges it');
+  if (isRevertBranch(o.branch)) out.push('never auto-merged: a revert the harness opened; a human approves and merges it');
+  return out;
+}
+
 export interface MergeInput {
+  /** The PR's branch (its head ref): a revert's never auto-merges. */
+  branch: string;
+  /** Whether this instance opened the PR (pr.opened): anyone else's never auto-merges. */
+  openedByHarness: boolean;
   /** The instance policy's auto_merge (the kill switch). */
   policyOn: boolean;
   /** review.yaml merge.auto. */
@@ -134,7 +154,7 @@ export function outsidePlanReasons(o: { planFiles: string[]; level: LevelResult;
 }
 
 export function mergeDecision(i: MergeInput): MergeDecision {
-  const reasons: string[] = [];
+  const reasons: string[] = [...neverAutoMerge({ branch: i.branch, openedByHarness: i.openedByHarness })];
   if (!i.policyOn) reasons.push('auto-merge is off for this instance (policy.yaml auto_merge)');
   if (!i.repoOn) reasons.push("auto-merge is off for this repo (review.yaml merge.auto)");
   if (i.stopped) reasons.push(`auto-merge is stopped: ${i.stopped}`);

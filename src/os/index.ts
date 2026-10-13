@@ -127,6 +127,14 @@ export function writeOwnerOnly(file: string, data: string): void {
   renameSync(tmp, file);
 }
 
+/** Write an executable file (a git hook) atomically, with exactly `mode` (0700: this user's only; or 0755). */
+export function writeExecutable(file: string, data: string, mode: 0o700 | 0o755): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, data, { mode });
+  if (process.platform !== 'win32') chmodSync(tmp, mode);
+  renameSync(tmp, file);
+}
+
 /**
  * Install a secret for this user only, as the setup scripts do (credentials.sh): `dir` 0700, the file 0400,
  * written to a fresh temp name (O_EXCL) and renamed over any old one. Refuses a symlinked directory or file, a

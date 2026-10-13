@@ -89,7 +89,7 @@ export abstract class Landing extends Decisions {
       const { command, exclusive } = this.tierCommand(tier);
       let lock: { release(): void } | null = null;
       if (exclusive) {
-        const got = await fullRunLock(`${BRAND.cli} land gate ${tier}`, 5_000, this.d.slotsDir);
+        const got = await fullRunLock(`${BRAND.cli} ${this.d.cfg.project.project.name} land gate ${tier}`, 5_000, this.d.slotsDir);
         if (!('lock' in got)) return { ok: false, deferred: true, note: `tier ${tier} needs the machine-wide full-run slot (held by ${got.holder?.owner ?? 'another run'}); deferred` };
         lock = got.lock;
       }
@@ -219,7 +219,7 @@ export abstract class Landing extends Decisions {
         return;
       }
       // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
-      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push });
+      const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(this.d.cfg.project.land_mode === 'direct') });
       if (!push.ok && 'refused' in push) {
         for (const q of applied) {
           this.emit('push.refused', { issue: q.issue, head, stage: 'push', reasons: push.refused });
@@ -258,7 +258,7 @@ export abstract class Landing extends Decisions {
     const branch = this.paths(n).branch;
     if (branch === this.branch) throw new Error(`refusing to push the default branch ${this.branch} in pr mode`);
     const claimedBase = (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
-    const push = checkedPush({ cwd: this.d.repo, remote: this.remote, base: claimedBase, head: q.head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, force: true });
+    const push = checkedPush({ cwd: this.d.repo, remote: this.remote, base: claimedBase, head: q.head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), force: true });
     if (!push.ok && 'refused' in push) {
       this.emit('push.refused', { issue: n, head: q.head, stage: 'push', reasons: push.refused });
       this.emit('land.result', { issue: n, outcome: 'rejected', landed: null, detail: `push refused: ${push.refused.join('; ')}`.slice(0, 2000) });

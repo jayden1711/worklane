@@ -1,11 +1,12 @@
-// The Board, the dashboard's home: every task in flight, one column per stage, across every instance this
-// person can see on a hub (filtered to one on an instance's own dashboard). Each card is built by the
+// The Board, the dashboard's home: every task in flight, one column per stage, for the instance selected in the
+// switcher; on a hub, every instance this person has a role on only when they chose "All instances" there (each
+// card then says whose it is). Each card is built by the
 // instance's own server (GET /api/board, src/board.ts) from what it already recorded; nothing is fetched
 // from GitHub per card. The actions on a card are the ones the server says this person's role allows there,
 // and each goes to that instance's existing routes (decide, the console), which check the role again.
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
-import { hub, instanceStream, onInstance, type BoardBatch, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
+import { instanceScope, instanceStream, onInstance, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
@@ -133,9 +134,13 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
   const decide = (id: string, answer: string) => call('/api/decide', { id, answer }, `answered ${answer}`);
   const usage = card.run?.usage;
   return (
-    <article className="rounded-card bg-surface p-3 shadow-card" data-testid="board-card" data-instance={card.instance} data-issue={card.issue} data-column={card.column}>
+    <article className="rounded-card bg-surface p-3 shadow-card" data-testid="board-card" data-instance={instance ?? card.instance} data-issue={card.issue} data-column={card.column}>
       <div className="flex items-center gap-1.5 text-[11.5px] text-ink-3" data-testid="board-card-ref">
-        {showInstance && <span className="truncate font-medium text-ink-2">{card.instance}</span>}
+        {showInstance && (
+          <span className="truncate font-medium text-ink-2" data-testid="board-card-instance">
+            {instance ?? card.instance}
+          </span>
+        )}
         <button className="font-mono text-blue-ink hover:underline" onClick={() => navigate(`/issues/${card.issue}`)}>
           #{card.issue}
         </button>
@@ -306,36 +311,30 @@ function BatchStrip({ batches }: { batches: BoardBatch[] }) {
   );
 }
 
-/** The board from its data (also what the render checks render): the instance filter, then a column per stage. */
-export function BoardView({ boards, filter, onFilter = () => {}, now = Date.now(), onChanged = () => {} }: { boards: InstanceBoard[]; filter: string | null; onFilter?: (name: string | null) => void; now?: number; onChanged?: () => void }) {
-  const hubbed = boards.some((b) => b.name !== null);
-  const shown = boards.filter((b) => !filter || b.name === filter);
-  const cards = shown.flatMap((b) => (b.data ? b.data.cards.map((c) => ({ card: c, instance: b.name })) : []));
-  const batches = shown.flatMap((b) => b.data?.batches ?? []);
-  const failed = shown.filter((b) => b.error);
+/** The board from its data (also what the render checks render): the boards in scope, then a column per stage. Several boards: "All instances", each card labelled. */
+export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { boards: InstanceBoard[]; now?: number; onChanged?: () => void }) {
+  const several = boards.length > 1;
+  const cards = boards.flatMap((b) => (b.data ? b.data.cards.map((c) => ({ card: c, instance: b.name })) : []));
+  const batches = boards.flatMap((b) => b.data?.batches ?? []);
+  const failed = boards.filter((b) => b.error);
+  const slots = boards.find((b) => b.data)?.data?.slots;
   return (
     <div className="space-y-4 p-6" data-testid="board">
       <div className="flex flex-wrap items-center gap-3">
-        {hubbed ? (
-          <label className="flex items-center gap-2 text-[12.5px] text-ink-2">
-            Instance
-            <select value={filter ?? ''} onChange={(e) => onFilter(e.target.value || null)} className="h-8 rounded-control bg-surface px-2 text-[12.5px] text-ink shadow-btn" data-testid="board-filter">
-              <option value="">All instances ({boards.length})</option>
-              {boards.map((b) => (
-                <option key={b.name!} value={b.name!}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : (
-          <span className="text-[12.5px] text-ink-2" data-testid="board-filter">
-            Instance: <span className="font-medium text-ink">{boards[0]?.data?.instance ?? '…'}</span>
-          </span>
-        )}
+        <span className="text-[12.5px] text-ink-2" data-testid="board-scope" data-scope={several ? 'all' : (boards[0]?.name ?? boards[0]?.data?.instance ?? '')}>
+          {several ? (
+            <>
+              <span className="font-medium text-ink">All instances</span> ({boards.length}): {boards.map((b) => b.name).join(', ')}
+            </>
+          ) : (
+            <>
+              Instance: <span className="font-medium text-ink">{boards[0]?.name ?? boards[0]?.data?.instance ?? '…'}</span>
+            </>
+          )}
+        </span>
         <span className="text-[12px] text-ink-3">
           {cards.length} in flight
-          {shown[0]?.data ? ` · ${shown[0].data.slots.running} of ${shown[0].data.slots.cap} agent slots in use on this machine` : ''}
+          {slots ? ` · ${slots.running} of ${slots.cap} agent slots in use on this machine` : ''}
         </span>
       </div>
       {failed.map((b) => (
@@ -354,7 +353,7 @@ export function BoardView({ boards, filter, onFilter = () => {}, now = Date.now(
               </div>
               {col.id === 'landing' && <BatchStrip batches={batches} />}
               {these.length ? (
-                these.map((x) => <BoardCardView key={`${x.card.instance}:${x.card.issue}`} card={x.card} instance={x.instance} showInstance={hubbed} now={now} onChanged={onChanged} />)
+                these.map((x) => <BoardCardView key={`${x.card.instance}:${x.card.issue}`} card={x.card} instance={x.instance} showInstance={several} now={now} onChanged={onChanged} />)
               ) : (
                 <div className="px-1 pb-1 text-[11.5px] text-ink-3">Nothing here.</div>
               )}
@@ -367,48 +366,45 @@ export function BoardView({ boards, filter, onFilter = () => {}, now = Date.now(
   );
 }
 
-/** Every instance's board this person can see (one on an instance's own dashboard), refreshed live. */
+/** The boards in a scope: the selected instance's only, or each instance's when "All instances" is chosen; never any other. */
+export function loadBoards(scope: InstanceScope, get: <T>(instance: string | null, path: string) => Promise<T> = onInstance): Promise<InstanceBoard[]> {
+  return Promise.all(scope.instances.map((n) => get<BoardData>(n, '/api/board').then((data) => ({ name: n, data, error: null }), (e: Error) => ({ name: n, data: null, error: e.message }))));
+}
+
+/** The selected instance's board (every instance's this person can see, labelled, when they chose All instances), refreshed live. */
 export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
   const [boards, setBoards] = useState<InstanceBoard[] | null>(null);
-  const [filter, setFilter] = useState<string | null>(() => {
-    try {
-      return sessionStorage.getItem('dash-board-filter') || null;
-    } catch {
-      return null;
-    }
-  });
   const [tick, setTick] = useState(0);
   const [now, setNow] = useState(Date.now());
-  const names = useRef<string[] | null>(null);
+  const scope = useRef<InstanceScope | null>(null);
 
-  // The instances: a hub's (those this person has a role on), or none (this page's own server).
+  // The scope: the switcher's choice (the selected instance, or All instances), or this page's own server.
   useEffect(() => {
-    void hub.then((h) => {
-      names.current = h ? h.instances.map((i) => i.name) : [];
+    void instanceScope.then((s) => {
+      scope.current = s;
       setTick((t) => t + 1);
     });
   }, []);
 
   useEffect(() => {
-    if (names.current === null) return;
+    if (scope.current === null) return;
     let live = true;
-    const list = names.current.length ? names.current : [null];
-    void Promise.all(list.map((n) => onInstance<BoardData>(n, '/api/board').then((data) => ({ name: n, data, error: null }), (e: Error) => ({ name: n, data: null, error: e.message })))).then((b) => live && setBoards(b));
+    void loadBoards(scope.current).then((b) => live && setBoards(b));
     return () => {
       live = false;
     };
   }, [tick, pulse]);
 
-  // Live: the page's own stream (pulse) covers this instance; every other instance on a hub gets its own stream.
+  // Live: the page's own stream (pulse) covers the selected instance; with All instances, each other one gets its own stream.
   // Elapsed times and resource use are refreshed every 15 s besides.
   useEffect(() => {
     const streams: EventSource[] = [];
     let closed = false;
     let timer: number | undefined;
-    void hub.then(async (h) => {
-      for (const i of h?.instances ?? []) {
-        if (closed || !i.up) continue;
-        const es = new EventSource(await instanceStream(i.name, '/api/stream'));
+    void instanceScope.then(async (s) => {
+      for (const name of s.instances) {
+        if (closed || name === null || name === s.current) continue;
+        const es = new EventSource(await instanceStream(name, '/api/stream'));
         es.addEventListener('change', () => {
           window.clearTimeout(timer);
           timer = window.setTimeout(() => setTick((t) => t + 1), 200);
@@ -428,31 +424,25 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
     };
   }, []);
 
-  const pick = (n: string | null) => {
-    setFilter(n);
-    try {
-      sessionStorage.setItem('dash-board-filter', n ?? '');
-    } catch {
-      // per-tab preference only
-    }
-  };
   return (
     <div data-testid="page-board">
       <Header title="Board" sub={`every task in flight, by stage · ${state.project.repo}`} />
-      {boards ? <BoardView boards={boards} filter={filter} onFilter={pick} now={now} onChanged={() => setTick((t) => t + 1)} /> : <Loading />}
-      {/* Each instance's test runs: the queue, the slots running and each run's tiers. */}
-      {boards ? (
-        <div className="space-y-4 px-6 pb-6" data-testid="board-test-runs">
-          {boards
-            .filter((b) => !filter || b.name === filter)
-            .map((b) => (
-              <div key={b.name ?? ''} className="space-y-1">
-                {b.name && boards.length > 1 ? <div className="text-[12px] text-ink-3">{b.name}</div> : null}
-                <TestRunsPanel instance={b.name} pulse={tick + pulse} compact />
-              </div>
-            ))}
+      {boards ? <BoardView boards={boards} now={now} onChanged={() => setTick((t) => t + 1)} /> : <Loading />}
+      {boards ? <BoardTestRuns boards={boards} pulse={tick + pulse} /> : null}
+    </div>
+  );
+}
+
+/** The test runs of the boards in scope (the queue, the slots running and each run's tiers); labelled when there are several. */
+export function BoardTestRuns({ boards, pulse = 0 }: { boards: InstanceBoard[]; pulse?: number }) {
+  return (
+    <div className="space-y-4 px-6 pb-6" data-testid="board-test-runs">
+      {boards.map((b) => (
+        <div key={b.name ?? ''} className="space-y-1" data-testid="board-test-runs-instance" data-instance={b.name ?? ''}>
+          {b.name && boards.length > 1 ? <div className="text-[12px] text-ink-3">{b.name}</div> : null}
+          <TestRunsPanel instance={b.name} pulse={pulse} compact />
         </div>
-      ) : null}
+      ))}
     </div>
   );
 }
