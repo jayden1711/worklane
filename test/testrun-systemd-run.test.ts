@@ -149,7 +149,7 @@ test('the sandbox host reads what the helper prints for it from stdout, whatever
     assert.equal(await host.cache('npm', 'a'.repeat(16)), '/runs/x/work');
     assert.equal(await host.shared('ports'), '/runs/x/work');
     assert.equal(await host.changedFiles('fast-abc-1', ['a.ts']), '/runs/x/work');
-    const db = await host.startDb('fast-abc-1', { image: `postgres:16@sha256:${'a'.repeat(64)}`, name: 'test', readyS: 5 });
+    const db = await host.startDb('fast-abc-1', { image: `postgres:16@sha256:${'a'.repeat(64)}`, name: 'test', readyS: 5, maxConnections: 200 });
     assert.equal(db.port, 45678);
   } finally {
     rmSync(dir, { recursive: true, force: true });

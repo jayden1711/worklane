@@ -10,6 +10,7 @@ import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { hostOf, RESEARCH_ROOT_ENV, researchCallRefusal, researchModeRefusal } from './research.js';
 import { INTAKE_ROLE, INTAKE_TOOLS } from './intake/run.js';
+import { CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal } from './intake/chat.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
 import { TaskFile } from './contract.js';
@@ -80,6 +81,13 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   if (isAgent(env) && (role === 'researcher' || role === INTAKE_ROLE) && researchRoot) {
     const why = intakeRefusal(input.tool_name ?? '') ?? researchModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, researchRoot);
     return why ? { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${why}` } }), exitCode: 0 } : { exitCode: 0 };
+  }
+  // A chat-channel run: its three read tools inside the checkout only, never a credential, key or .env file, and
+  // nothing at all without its lane's root (fail closed). The project's guardrails below still apply on top.
+  if (isAgent(env) && role === CHAT_ROLE) {
+    const chatRoot = env[CHAT_ROOT_ENV];
+    const why = chatRoot ? chatModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, chatRoot) : `chat runs need their lane's root (${CHAT_ROOT_ENV}); refusing every call`;
+    if (why) return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${why}` } }), exitCode: 0 };
   }
   const root = env.CLAUDE_PROJECT_DIR && existsSync(join(env.CLAUDE_PROJECT_DIR, BRAND.configDir)) ? env.CLAUDE_PROJECT_DIR : findProjectRoot(cwd);
   const decide = (permissionDecision: 'deny' | 'ask', reason: string): HookOutput => ({

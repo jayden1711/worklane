@@ -90,6 +90,9 @@ discord:
     "100000000000000013": example-teammate
   asks_channel: "100000000000000003"   # decisions and asks, one thread each
   dashboard_url: https://dashboard.example.test
+  chat_channels: ["100000000000000004"]  # optional: the chat assistant (2.1.3)
+  chat_model: haiku                      # its model (default haiku)
+  chat_max_usd_per_day: 2                # its own daily cap (default 2, at most 20)
 ```
 
 A mapped person's role is their login's permission on the instance's repo, read as the dashboard reads it
@@ -103,12 +106,39 @@ decisions, held plans; an admin or writer the rest), the same options, the same 
 the same audit entry with `via: discord`. Who may answer from a thread is one function,
 `mayAnswerFromChat` in `src/intake/people.ts`.
 
-- A reply chooses an option only when its first word is that option and it names no other. Anything else
-  ("approve or reject?", "yes", "sounds good") answers nothing, and the bot asks back with the exact options.
+- A reply chooses an option only when its first word is that option and it names no other ("approve",
+  "Reject."). That answers at once, as before.
+- **Plain-language picks.** A reply from an admin or writer that clearly means one option ("yeah approve it",
+  "go with a") is read by the `intake-thread` role, and the bot asks back "Confirm: approve?". Only that same
+  person's following "yes" records it (through the same decide path, role check and audit); another person's yes
+  records nothing and says so, and anything else from them drops the pick. A bare "yes" or "ok" with nothing to
+  confirm, or a reply naming two options, answers nothing and is asked back with the exact options.
+- **Questions.** An admin or writer may ask about it in the thread ("what does option a change?", "why money
+  path?"). The `intake-thread` role answers from the same record as the summary (below); the answer is checked like
+  a summary (no secret, mention, link but the issue's and the dashboard's, issue number or review level the record
+  doesn't give, or claim that anything is decided) and posted in up to three messages. A question never answers
+  the decision: nothing the role returns is ever passed to the decide path; a pick only asks for a confirmation.
 - A reply from someone who may not answer it (a writer on an owner decision, a viewer) is recorded as a comment
   (`discord.reply` with the redacted excerpt, and on the issue when there is one), never as an answer.
 - The first recorded answer stands, wherever it came from. A later one is refused: "already decided by @login".
   When something is decided elsewhere, its thread says who decided, once.
+
+**Explained on open.** When a decision's or question ask's thread is opened, the bot posts a plain-language
+summary in it, in as many 500-character messages as it needs (at most six): what the issue is (its number, title
+and the problem in a sentence or two), what the agent found or proposes, what each option does and what happens
+next, why one is recommended, and the risk level (the issue's review level from `review.level_set` or its
+`review:L*` label, and what makes it risky: a money path, a high-risk label, a large change). The `intake-summary`
+role writes it from the record the coordinator already holds (the decision, the issue, the latest plan, the risk),
+with no tools. Code checks it before it is posted (`checkSummary` in `src/intake/explain.ts`): every option of
+the record named once and no other, the record's recommendation and risk level, no other issue number or level,
+no sentence recommending another option, no claim that it is decided, no secret, mention or link (the engine
+adds the issue's and the dashboard's links itself). Anything else, a run that ends without a summary, or intake's
+spend cap reached, posts the fixed template and the dashboard's link instead; which was used and why is recorded
+(`discord.explained`), once per thread.
+
+Summaries and thread runs are short runs on the routed models (`model_routing.intake_summary`, haiku, and
+`intake_thread`, sonnet: on haiku its held-out eval score dropped), each counted against `intake.max_usd_per_day` and the daily budget. Over the cap, a summary is
+the template, and a reply that isn't an exact option is asked back without a run.
 
 **Never on Discord.**
 
@@ -149,6 +179,38 @@ admin or writer opens a conversation instead of being triaged and filed at once 
 
 A viewer or an unmapped person can't open a conversation; nothing of theirs is stored. Each turn is one triage
 run within intake's caps (`drafts_per_day`, `max_usd_per_day`) and the daily budget.
+
+### 2.1.3 Chat channels
+
+`discord.chat_channels` (a list of channel ids, empty by default) makes the bot a conversational assistant in
+those channels, for mapped admins and writers only. It replies to every message of theirs (no mention or prefix),
+with the channel's recent conversation (the last ten turns, redacted, in the coordinator's private store), the
+instance's state the coordinator already has (open issues, pull requests, open decisions, recent runs) and the
+code: read-only Read, Glob and Grep of the instance's checkout. Replies can be longer than 500 characters and are
+split across messages (at most eight).
+
+It can never file an issue, answer a decision or ask, change a setting, start or stop anything, or show secrets,
+credentials or config files. That is structural, not a prompt rule:
+
+- A chat-channel message is never a report (never triaged or filed) and never a thread reply (never answered);
+  the only thing the coordinator does with a chat run's result is post its one reply string, checked in code
+  (no secret-shaped string, no ping, no link but the repo's issue and pull request pages and the dashboard).
+- The run is the `channel-chat` role in its own lane (`chat-repo`): the instance's agent user, sandboxed like
+  every agent run, never the coordinator. Its tools are exactly Read, Glob and Grep, every other tool disallowed.
+  The lane denies the instance home (`intake.yaml`, `credentials.yaml`, `policy.yaml`, the token), every
+  credential store and the instance's other directories to the sandbox and to Read, Glob and Grep, and key-like
+  files to Read; on top of the instance's guardrail hooks and deny lists (the project's `secret_paths`), the
+  hook's chat mode refuses any other tool, any path outside the checkout (a symlink out included), `.git`, and
+  any credential, key, config or `.env*` file but `.env.example`, and a Grep over a directory that holds one
+  unless its glob can't reach it. A chat run without its lane's root is refused every call.
+
+Asked to do one of those, it says it can't and points to the ideas channel, the decision's thread or the
+dashboard. Unmapped people, viewers and channels not listed are ignored as everywhere else: nothing stored.
+
+Its model is `discord.chat_model` (`haiku`, `sonnet` or `opus`; default `haiku`), capped by the instance's
+`model_cap`. It has its own daily cap, `discord.chat_max_usd_per_day` (default 2, at most 20), and every run
+counts against the instance's daily budget. Over either, it says so once that day and is quiet until the next
+(`discord.chat`, outcome `capped`). A chat channel can't also be an ideas channel or the asks channel.
 
 ### 2.2 In-product bug reports
 
@@ -250,6 +312,7 @@ test with an injection-style report.
 | `intake.reports_per_sender_per_day` | 10 | 100 |
 | `intake.drafts_per_day` | 20 | 200 |
 | `intake.max_usd_per_day` | 2 | 20 |
+| `discord.chat_max_usd_per_day` (intake.yaml) | 2 | 20 |
 
 ## 8. Dashboard and health
 
@@ -278,6 +341,8 @@ test with an injection-style report.
    senders (`discord.allowed_senders`) and, among them, the trusted ones, by Discord user id.
 4. **Discord as a channel** (2.1.1): map each person's Discord user id to their GitHub login
    (`discord.people`), and set `discord.asks_channel` and `discord.dashboard_url`.
+5. **Chat channels** (2.1.3): list them in `discord.chat_channels`, and give the bot read and send permissions
+   there; restart the instance.
 
 ## 11. Build order
 

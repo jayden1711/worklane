@@ -62,7 +62,7 @@ export interface RunRequest {
    * resolves it to the provider, or to `fallback` (the role's normal model) when the provider may not or can't run
    * it. A provider model without a route is never sent anywhere but the fallback.
    */
-  route?: { kind: 'build' | 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'stage_judge' | 'eval_answer' | 'evaluator' | 'other'; highRisk?: boolean; fallback: string };
+  route?: { kind: 'build' | 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer' | 'evaluator' | 'other'; highRisk?: boolean; fallback: string };
   /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
   lane?: string;
   /** The project's own variables (tests.yaml env); never one the harness sets. */
