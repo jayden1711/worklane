@@ -687,6 +687,32 @@ export interface FirstRun {
   updatedAt: string | null;
   finishedAt: string | null;
   command: string;
+  /** Auto-config (src/auto-config.ts): its open questions with their choices, each command's run on the default branch, the setup PR. */
+  autoConfig: FirstRunAutoConfig | null;
+}
+export interface FirstRunQuestion {
+  id: string;
+  ask: string;
+  choices: { id: string; label: string; command?: string }[];
+  custom: boolean;
+  about?: string;
+}
+export interface FirstRunVerification {
+  slot: 'setup' | 'full' | 'changed' | 'one';
+  command: string;
+  base: string;
+  code: number | null;
+  passed: boolean;
+  ms: number;
+  tail: string;
+  at: string;
+}
+export interface FirstRunAutoConfig {
+  questions: FirstRunQuestion[];
+  verified: FirstRunVerification[];
+  pr: { number: number | null; url: string } | null;
+  /** The command that answers a question. */
+  answer: string;
 }
 export const getFirstRun = () => api<FirstRun>('/api/first-run');
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
