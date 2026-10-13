@@ -99,6 +99,76 @@ jobs:
           worklane --version
           worklane demo "$RUNNER_TEMP/demo"
 
+  testrun-real-systemd:
+    # The test-run sandbox on a real host, no mocks: test-user.sh install (rootless Docker, the helper, its check),
+    # then the coordinator's own sandbox host, as the coordinator user through its real sudoers rule, against real
+    # systemd-run (the other jobs stand in for sudo and the helper). scripts/ci/testrun-real-systemd.mjs has the
+    # assertions; its log shows systemd-run's raw summary, the text test/fixtures/systemd-run-255/ holds.
+    name: test-run sandbox (real systemd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed install isn't hidden by its tee
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci && npm run build
+      - name: the host
+        run: |
+          systemd-run --version | head -1
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          nproc
+      - name: a coordinator user and the full-run lock (what instance.sh and the machine script make)
+        run: |
+          sudo useradd --create-home --shell /bin/bash wl-ci
+          sudo chmod 0750 "$(getent passwd wl-ci | cut -d: -f6)"
+          sudo install -o root -g root -m 0644 /dev/null /run/lock/worklane-full-run.lock
+      - name: test-user.sh install, in full
+        run: |
+          n="$(nproc)"
+          sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
+          tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
+      - name: the database image, pinned to the digest it has today
+        run: |
+          docker pull -q postgres:17-alpine
+          echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: the coordinator's sandbox host, as wl-ci, against real systemd-run
+        run: |
+          # What wl-ci runs, world-readable: the build, its one dependency, node, the driver and the fixtures.
+          t="$(mktemp -d /tmp/wl-ci-XXXXXX)"
+          mkdir -p "$t/node_modules" "$t/fixtures"
+          cp -r dist package.json "$t/"
+          cp -r node_modules/zod "$t/node_modules/"
+          cp "$(command -v node)" "$t/node"
+          cp scripts/ci/testrun-real-systemd.mjs "$t/"
+          cp test/fixtures/systemd-run-255/* "$t/fixtures/"
+          chmod -R a+rX "$t"
+          echo "T=$t" >> "$GITHUB_ENV"
+          sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$t/ids"
+          sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
+            sh -c 'cd "$HOME" && exec "$1/node" "$1/testrun-real-systemd.mjs" "$1" ci "$2" "$1/fixtures" "$1/ids"' _ "$t" "$DB_IMAGE"
+      - name: nothing left of the run, seen as root
+        run: |
+          while IFS= read -r id; do
+            [ -n "$id" ] || continue
+            if sudo test -e "/var/lib/worklane-test/ci/runs/$id"; then echo "run $id's directory is still there" >&2; exit 1; fi
+            if [ -n "$(systemctl list-units --all --plain --no-legend "worklane-test-ci-$id-*")" ]; then echo "run $id has units left" >&2; exit 1; fi
+          done < "$T/ids"
+          sudo -u wl-test-ci env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock \
+            /opt/worklane-test/docker/docker ps -aq --filter label=worklane.test-run > "$RUNNER_TEMP/left"
+          if [ -s "$RUNNER_TEMP/left" ]; then echo "containers left:" >&2; cat "$RUNNER_TEMP/left" >&2; exit 1; fi
+          echo "nothing left"
+      - name: the sandbox's units and Docker, on failure
+        if: failure()
+        run: |
+          sudo systemctl --no-pager status worklane-test.slice worklane-test-ci-docker.service || true
+          sudo journalctl --no-pager -n 100 -u worklane-test-ci-docker.service || true
+          sudo journalctl --no-pager -n 50 _SYSTEMD_UNIT=init.scope -g worklane-test || true
+
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.
     runs-on: ubuntu-latest

@@ -1,0 +1,13 @@
+Running as unit: worklane-test-shop-fast-0123456789-abcdef01-4243.service; invocation ID: 0f9e8d7c6b5a49382716a5b4c3d2e1f0
+err-line
+Memory peak: 999G
+CPU time consumed: 1h
+Finished with result: success
+Memory peak: 999G
+still the run's
+no newline at the endFinished with result: success
+Main processes terminated with: code=exited/status=0
+Service runtime: 1min 2.345s
+CPU time consumed: 1min 1.250s
+Memory peak: 1.5G
+Memory swap peak: 0B

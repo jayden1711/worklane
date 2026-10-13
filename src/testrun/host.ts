@@ -24,32 +24,96 @@ export interface ExecResult {
   code: number | null;
   out: string;
   /** What the command used, where the host can tell (the sandbox's unit reports it). */
-  stats?: { cpuS: number | null; memPeakMb: number | null };
+  stats?: SystemdRunStats;
 }
 
-const UNIT = { s: 1, ms: 0.001, us: 0.000001, min: 60, h: 3600 } as Record<string, number>;
-const MEM = { B: 1 / 1048576, K: 1 / 1024, M: 1, G: 1024, T: 1048576 } as Record<string, number>;
+// systemd's format_timespan suffixes (src/basic/time-util.c), in seconds; a month and a year as systemd counts them.
+const TIMESPAN: Record<string, number> = { y: 31_557_600, month: 2_629_800, w: 604_800, d: 86_400, h: 3600, min: 60, s: 1, ms: 1e-3, us: 1e-6, '\u00b5s': 1e-6, '\u03bcs': 1e-6 };
+// format_bytes's IEC suffixes (src/basic/format-util.c), in MiB.
+const BYTES: Record<string, number> = { K: 1 / 1024, M: 1, G: 1024, T: 1024 ** 2, P: 1024 ** 3, E: 1024 ** 4 };
+
+/** Seconds from systemd's format_timespan: "0", "44ms", "1.234s", "1min 2.345s", "2h 3min 4s". null: not that format. */
+export function parseTimespan(s: string): number | null {
+  if (s === '0') return 0;
+  let total = 0;
+  for (const part of s.split(' ')) {
+    const m = /^(\d+(?:\.\d+)?)(y|month|w|d|h|min|s|ms|us|\u00b5s|\u03bcs)$/.exec(part);
+    if (!m) return null;
+    total += Number(m[1]) * TIMESPAN[m[2]!]!;
+  }
+  return total;
+}
+
+/** MiB from systemd's format_bytes (IEC, one digit below the point, a trailing B below 1K): "0B", "512B", "256.0K", "1.5G". */
+export function parseBytes(s: string): number | null {
+  const b = /^(\d+)B$/.exec(s);
+  if (b) return Number(b[1]) / 1048576;
+  const m = /^(\d+\.\d)([KMGTPE])$/.exec(s);
+  return m ? Number(m[1]) * BYTES[m[2]!]! : null;
+}
+
+// systemd-run --wait's summary (src/run/run.c), each line in its own exact format, in the order it prints them.
+const SUMMARY_LINE: Array<[string, RegExp]> = [
+  ['result', /^Finished with result: [a-z-]+$/],
+  ['main', /^Main processes terminated with: code=[a-z]+\/status=[A-Za-z0-9+-]+$/],
+  ['runtime', /^Service runtime: (.+)$/],
+  ['cpu', /^CPU time consumed: (.+)$/],
+  ['mem', /^Memory peak: (.+)$/],
+  ['swap', /^Memory swap peak: (.+)$/],
+  ['ipin', /^IP traffic received: (.+)$/],
+  ['ipout', /^IP traffic sent: (.+)$/],
+  ['ioread', /^IO bytes read: (.+)$/],
+  ['iowrite', /^IO bytes written: (.+)$/],
+];
+const TIMESPAN_LINES = new Set(['runtime', 'cpu']);
+
+/** The summary at the very end of systemd-run's stderr, line by line; null unless every line is one of its own, in order. */
+function summary(tail: string): Map<string, string> | null {
+  const lines = tail.endsWith('\n') ? tail.slice(0, -1).split('\n') : tail.split('\n');
+  const got = new Map<string, string>();
+  let next = 0;
+  for (const line of lines) {
+    let i = next;
+    while (i < SUMMARY_LINE.length && !SUMMARY_LINE[i]![1].test(line)) i++;
+    if (i === SUMMARY_LINE.length) return null;
+    const [key, re] = SUMMARY_LINE[i]!;
+    const value = re.exec(line)![1] ?? '';
+    if (TIMESPAN_LINES.has(key) ? parseTimespan(value) === null : key !== 'result' && key !== 'main' && parseBytes(value) === null) return null;
+    got.set(key, value);
+    next = i + 1;
+  }
+  return got.has('result') ? got : null;
+}
+
+export interface SystemdRunStats {
+  cpuS: number | null;
+  memPeakMb: number | null;
+}
 
 /**
- * systemd-run --wait's own lines (its unit's name at the start; its result, CPU time and peak memory at the end),
- * taken out of a command's output and read.
+ * systemd-run --wait's own lines in its stderr (not --quiet; the run's stderr is the same stream under --pipe):
+ * "Running as unit: <unit>; invocation ID: <id>" near the start, and its summary (result, CPU time, peak memory, ...)
+ * at the very end, after the unit has stopped, so nothing a run prints can come after it. Only that final block is
+ * read: a run's own "Memory peak: 999G" line is part of its output, never a stat. `own`: the [start, end) ranges of
+ * `stderr` that are systemd-run's.
  */
-export function systemdRunStats(out: string): { out: string; stats: { cpuS: number | null; memPeakMb: number | null } } {
-  let cpuS: number | null = null;
-  let memPeakMb: number | null = null;
-  const own = /^(Running as unit: |Finished with result: |Main processes terminated with: |Service runtime: |CPU time consumed: |Memory peak: |Memory swap peak: |IP traffic received: |IP traffic sent: |IO bytes read: |IO bytes written: )/;
-  const kept: string[] = [];
-  for (const line of out.split('\n')) {
-    if (!own.test(line)) {
-      kept.push(line);
-      continue;
-    }
-    const cpu = /^CPU time consumed: (.+)$/.exec(line);
-    if (cpu) cpuS = [...cpu[1]!.matchAll(/([\d.]+)(us|ms|min|s|h)/g)].reduce((a, m) => a + Number(m[1]) * UNIT[m[2]!]!, 0);
-    const mem = /^Memory peak: ([\d.]+)([BKMGT])/.exec(line);
-    if (mem) memPeakMb = Math.round(Number(mem[1]) * MEM[mem[2]!]! * 10) / 10;
+export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: Array<[number, number]> } {
+  const own: Array<[number, number]> = [];
+  const stats: SystemdRunStats = { cpuS: null, memPeakMb: null };
+  const unit = new RegExp(`(?:^|\n)(Running as unit: ${BRAND.cli}-test-[a-z0-9-]+\\.service; invocation ID: [0-9a-f]{32}\n)`).exec(stderr);
+  if (unit) own.push([unit.index + unit[0].length - unit[1]!.length, unit.index + unit[0].length]);
+  // The last "Finished with result: " whose rest is all summary; the line may follow a run's last unended line.
+  for (let at = stderr.lastIndexOf('Finished with result: '); at >= 0; at = at === 0 ? -1 : stderr.lastIndexOf('Finished with result: ', at - 1)) {
+    const s = summary(stderr.slice(at));
+    if (!s) continue;
+    if (!own.length || own[0]![1] <= at) own.push([at, stderr.length]);
+    const cpu = s.get('cpu');
+    const mem = s.get('mem');
+    if (cpu !== undefined) stats.cpuS = Math.round(parseTimespan(cpu)! * 10) / 10;
+    if (mem !== undefined) stats.memPeakMb = Math.round(parseBytes(mem)! * 10) / 10;
+    break;
   }
-  return { out: kept.join('\n'), stats: { cpuS: cpuS === null ? null : Math.round(cpuS * 10) / 10, memPeakMb } };
+  return { stats, own };
 }
 
 export interface RunDatabase {
@@ -108,18 +172,30 @@ function checkName(name: string): void {
 
 const OUT_CAP = 8_000_000;
 
+/** A finished process: its output merged in arrival order, and each stream on its own. */
+interface Ran extends ExecResult {
+  stdout: string;
+  stderr: string;
+  /** The merged output without these [start, end) ranges of `stderr`. */
+  without(ranges: ReadonlyArray<readonly [number, number]>): string;
+}
+
 /** Spawn and collect output, killed at the timeout or on abort (code null then). */
-function run(file: string, args: string[], o: { env?: NodeJS.ProcessEnv; cwd?: string; stdin?: Readable | string; timeoutMs?: number; signal?: AbortSignal | undefined }): Promise<ExecResult> {
+function run(file: string, args: string[], o: { env?: NodeJS.ProcessEnv; cwd?: string; stdin?: Readable | string; timeoutMs?: number; signal?: AbortSignal | undefined }): Promise<Ran> {
   return new Promise((resolve) => {
     const child = spawn(file, args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
-    let out = '';
+    // Each piece in arrival order, tagged with its stream, so either stream can be read alone and the merged
+    // output rebuilt without some of one's text. Past the cap the oldest pieces go.
+    const pieces: { err: boolean; text: string }[] = [];
+    let size = 0;
     let killed = false;
-    const take = (d: Buffer) => {
-      out += d.toString();
-      if (out.length > OUT_CAP) out = out.slice(-OUT_CAP / 2);
+    const take = (err: boolean) => (text: string) => {
+      pieces.push({ err, text });
+      size += text.length;
+      while (size > OUT_CAP && pieces.length > 1) size -= pieces.shift()!.text.length;
     };
-    child.stdout.on('data', take);
-    child.stderr.on('data', take);
+    child.stdout.setEncoding('utf8').on('data', take(false));
+    child.stderr.setEncoding('utf8').on('data', take(true));
     const kill = () => {
       killed = true;
       killTree(child.pid, () => child.kill('SIGKILL'));
@@ -133,10 +209,31 @@ function run(file: string, args: string[], o: { env?: NodeJS.ProcessEnv; cwd?: s
       done = true;
       if (timer) clearTimeout(timer);
       o.signal?.removeEventListener('abort', kill);
-      resolve({ code: killed ? null : code, out });
+      const stream = (err: boolean) => pieces.filter((p) => p.err === err).map((p) => p.text).join('');
+      const without = (ranges: ReadonlyArray<readonly [number, number]>) => {
+        let at = 0;
+        let merged = '';
+        for (const p of pieces) {
+          if (!p.err) {
+            merged += p.text;
+            continue;
+          }
+          const end = at + p.text.length;
+          let from = at;
+          for (const [s, e] of [...ranges].sort((x, y) => x[0] - y[0])) {
+            if (e <= from || s >= end) continue;
+            if (s > from) merged += p.text.slice(from - at, s - at);
+            from = Math.max(from, Math.min(e, end));
+          }
+          merged += p.text.slice(from - at);
+          at = end;
+        }
+        return merged;
+      };
+      resolve({ code: killed ? null : code, out: without([]), stdout: stream(false), stderr: stream(true), without });
     };
     child.on('error', (e) => {
-      out += `\n${e.message}`;
+      pieces.push({ err: true, text: `\n${e.message}` });
       finish(127);
     });
     child.on('close', (code) => finish(code));
@@ -162,7 +259,8 @@ function checkDb(db: { image: string; name: string; readyS: number }): void {
 export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 'sudo'): RunHost {
   if (!/^[a-z][a-z0-9-]{0,20}$/.test(instance)) throw new Error(`not an instance name: ${instance}`);
   const call = (args: string[], o: Parameters<typeof run>[2] = {}) => run(sudo, ['-n', helper, instance, ...args], { env: { PATH: '/usr/local/bin:/usr/bin:/bin' }, ...o });
-  const lastLine = (r: ExecResult) => r.out.trim().split('\n').pop() ?? '';
+  // What the helper prints for the coordinator is on its stdout; its own and git's messages are on stderr.
+  const lastLine = (r: Ran) => r.stdout.trim().split('\n').pop() ?? '';
   return {
     kind: 'sandbox',
     async create(id, bundle, refs) {
@@ -203,19 +301,20 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       for (const [k, v] of Object.entries(env)) args.push('--env', `${k}=${v}`);
       // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left).
       const r = await call([...args, '--', command], { timeoutMs: timeoutMs + 60_000, signal });
-      const s = systemdRunStats(r.out);
-      return { ...r, out: s.out, stats: s.stats };
+      // systemd-run's lines are in the stderr the run shares with it: taken out, and its summary read from there only.
+      const s = systemdRunStats(r.stderr);
+      return { code: r.code, out: r.without(s.own), stats: s.stats };
     },
     async check() {
       const r = await call(['check'], { timeoutMs: 300_000 });
-      const fails = r.out.split('\n').filter((l) => l.startsWith('FAIL'));
-      return { ok: r.code === 0 && /^OK$/m.test(r.out) && !fails.length, detail: (fails.length ? fails.join('\n') : r.code === 0 ? 'all checks passed' : `the check didn't run: ${r.out.trim().slice(-300)}`).slice(0, 2000) };
+      const fails = r.stdout.split('\n').filter((l) => l.startsWith('FAIL'));
+      return { ok: r.code === 0 && /^OK$/m.test(r.stdout) && !fails.length, detail: (fails.length ? fails.join('\n') : r.code === 0 ? 'all checks passed' : `the check didn't run: ${r.out.trim().slice(-300)}`).slice(0, 2000) };
     },
     async wipe(id) {
       checkId(id);
       const r = await call(['wipe', id], { timeoutMs: 300_000 });
       if (r.code === 0) return { ok: true, left: [] };
-      return { ok: false, left: r.out.trim().split('\n').filter((l) => /^(unit|container|volume|dir) /.test(l)).concat(r.code === 0 ? [] : [`wipe exit ${r.code ?? 'killed'}`]) };
+      return { ok: false, left: r.stderr.trim().split('\n').filter((l) => /^(unit|container|volume|dir) /.test(l)).concat([`wipe exit ${r.code ?? 'killed'}`]) };
     },
   };
 }
@@ -311,7 +410,8 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const [file, args] = shellCommand(command);
       // Exactly these variables: never this process's own environment.
       const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
-      return run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
+      const r = await run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
+      return { code: r.code, out: r.out };
     },
     async check() {
       return { ok: false, detail: 'the local host has no sandbox: for the engine\'s tests and development only' };
