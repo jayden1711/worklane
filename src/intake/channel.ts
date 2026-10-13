@@ -41,7 +41,7 @@ export function decisionPost(q: Pick<EventPayload<'decision.asked'>, 'id' | 'kin
     return { kind: 'notice', text: `A high-risk merge${on} waits for an admin. It is approved only on GitHub or the dashboard, never here:${gh} ${base(o.dashboardUrl)}/land` };
   }
   const head = `Decision needed (${q.kind}${on}): `;
-  const tail = `\nOptions: ${q.options.join(' / ')}.${q.options.includes(q.recommendation) ? ` Recommended: ${q.recommendation}.` : ''}\nReply in this thread with exactly one option.`;
+  const tail = `\nOptions: ${q.options.join(' / ')}. Recommended: ${q.recommendation}.\nReply in this thread with exactly one option.`;
   return { kind: 'thread', name: clip(oneLine(`${q.kind}${on}: ${q.question}`), 90), text: fit(head, oneLine(redactString(q.question)), tail) };
 }
 

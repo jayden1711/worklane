@@ -103,7 +103,7 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   const open = p.decisions.filter((d) => !d.answer);
   lines.push('', `**Decisions needed** (${open.length})`);
   if (!open.length) lines.push('- none');
-  for (const d of open) lines.push(`- @${d.owner}: ${d.issue !== null ? `#${d.issue} ` : ''}${d.question} (waiting ${fmtH((now.getTime() - Date.parse(d.askedAt)) / 3_600_000)}${d.options.includes(d.recommendation) ? `; recommended: ${d.recommendation}` : ''})`);
+  for (const d of open) lines.push(`- @${d.owner}: ${d.issue !== null ? `#${d.issue} ` : ''}${d.question} (waiting ${fmtH((now.getTime() - Date.parse(d.askedAt)) / 3_600_000)}; recommended: ${d.recommendation})`);
 
   const blocked = p.tasks.filter((t) => t.status === 'blocked');
   lines.push('', `**Blocked** (${blocked.length})`);

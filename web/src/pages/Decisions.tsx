@@ -1,48 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { decide, type Decision, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
 import { ValuePill } from '../components/patterns';
 import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
 import { Header } from './Overview';
-
-/** The detail line that carries a recommendation's reasoning: src/decision-ask.ts writes it (a test keeps the two equal). */
-export const RECOMMENDATION_PREFIX = 'Recommendation: ';
-
-/** Past about this many characters a recommendation fills four lines of a card: it starts clamped (then measured). */
-const CLAMP_FROM = 280;
-
-/**
- * A recommendation that is prose, not an option: wrapped, whole, clamped to four lines by CSS (never cut in the
- * string, so never mid-word), with Show more / Show less once it runs past them.
- */
-export function RecommendationText({ label, text }: { label: string; text: string }) {
-  const ref = useRef<HTMLParagraphElement>(null);
-  const [open, setOpen] = useState(false);
-  // Before the page measures it (or where it can't), a long text is taken to run past four lines.
-  const [overflows, setOverflows] = useState(text.length > CLAMP_FROM);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el || open) return;
-    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
-    measure();
-    if (typeof ResizeObserver !== 'function') return;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [text, open]);
-  return (
-    <div className="mt-1.5" data-testid="decision-recommendation">
-      <p ref={ref} className={cx('whitespace-pre-line break-words text-[13px] leading-relaxed text-ink-2', !open && 'line-clamp-4')} data-testid="decision-recommendation-text">
-        <span className="font-medium text-ink">{label}</span> {text}
-      </p>
-      {(overflows || open) && (
-        <button type="button" className="mt-0.5 text-[12px] font-medium text-blue-ink hover:underline" aria-expanded={open} data-testid="decision-recommendation-toggle" onClick={() => setOpen((v) => !v)}>
-          {open ? 'Show less' : 'Show more'}
-        </button>
-      )}
-    </div>
-  );
-}
 
 /**
  * A decision as an approval card (Beautiful UI's approval and recommendation cards):
@@ -65,13 +26,9 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
       setBusy(null);
     }
   };
-  // Only the option the recommendation names; a free-text recommendation (shown as prose above) marks none.
+  // Only the option the recommendation names; a free-text recommendation (in its pill above) marks none.
   const recommended = (o: string) => o === d.recommendation;
-  const isOption = d.options.includes(d.recommendation);
-  const detail = (d.receipts ?? []).filter(Boolean);
-  // Prose: an older event's free-text recommendation, and the reasoning the detail carries (src/decision-ask.ts).
-  const prose = [...(!isOption && d.recommendation.trim() ? [d.recommendation.trim()] : []), ...detail.filter((r) => r.startsWith(RECOMMENDATION_PREFIX)).map((r) => r.slice(RECOMMENDATION_PREFIX.length))];
-  const receipts = detail.filter((r) => !r.startsWith(RECOMMENDATION_PREFIX));
+  const receipts = (d.receipts ?? []).filter(Boolean);
   return (
     <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
       <div className="primitive-card-pad">
@@ -87,14 +44,9 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
           <span>· asked {ago(d.askedAt)}</span>
         </div>
         <div className="mt-2 text-[14px] font-medium text-ink">{d.question}</div>
-        {isOption && (
-          <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2" data-testid="decision-recommended">
-            Recommended: <ValuePill>{d.recommendation}</ValuePill>
-          </p>
-        )}
-        {prose.map((t, i) => (
-          <RecommendationText key={i} label={isOption ? 'Why:' : 'Recommended:'} text={t} />
-        ))}
+        <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2">
+          Recommended: <ValuePill>{d.recommendation}</ValuePill>
+        </p>
         {!!receipts.length && (
           <ul className="mt-2.5 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12px] text-ink-2 shadow-hairline">
             {receipts.map((r, i) => (
