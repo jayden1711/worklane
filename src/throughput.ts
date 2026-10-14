@@ -26,7 +26,7 @@ export function stageOf(role: string, attempt = 1): Stage {
   if (role === 'intake') return 'intake';
   if (role === 'gardener') return 'gardener';
   if (role === 'chat') return 'chat';
-  if (role === 'ci-fix' || role === 'conflict-fix') return 'retries';
+  if (role === 'ci-fix' || role === 'conflict-fix' || role === 'reflection') return 'retries';
   return 'other';
 }
 

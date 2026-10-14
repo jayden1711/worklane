@@ -216,3 +216,14 @@ test('regression: an agent may not pick its own commit identity; reading one, or
   for (const c of ['git commit -m "Shorten five descriptions"', 'git add -A && git commit -q -m fix', 'git log --author=ada -1', 'git config --get user.name', 'git config --list']) assert.equal(bash(c), 'none', c);
   assert.equal(bash('git -c user.email=ada@example.com commit -m fix', '/p', false), 'none', 'a human session commits as the human');
 });
+
+test('agents never write AGENTS.md, at the root or below it, by tool or shell; a person still may', () => {
+  const write = (file_path: string, agent = true) => evaluate({ tool: 'Write', input: { file_path, content: 'x' }, cwd: '/p' }, cfg, ctx(agent));
+  assert.deepEqual([write('/p/AGENTS.md').decision, write('/p/AGENTS.md').rule], ['deny', 'agents-md']);
+  assert.equal(write('/p/packages/web/AGENTS.md').decision, 'deny');
+  assert.equal(evaluate({ tool: 'Edit', input: { file_path: 'AGENTS.md', old_string: 'a', new_string: 'b' }, cwd: '/p' }, cfg, ctx()).rule, 'agents-md');
+  assert.equal(bash("echo '- rule' >> AGENTS.md"), 'deny');
+  assert.equal(bash('cat AGENTS.md'), 'none', 'reading it is fine');
+  assert.equal(write('/p/AGENTS.md', false).decision, 'none', "a person's own session");
+  assert.equal(write('/p/docs/agents.md').decision, 'none');
+});

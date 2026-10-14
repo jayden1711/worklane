@@ -18,15 +18,19 @@ export interface MergeVerdict {
 /** The branches the harness's revert PRs come from (a red main after an auto-merge, the main watch). */
 export const REVERT_BRANCH_PREFIX = `${BRAND.cli}/revert-`;
 export const isRevertBranch = (branch: string) => branch.startsWith(REVERT_BRANCH_PREFIX);
+/** The branches of checks proposed from repeated feedback (src/checks-from-feedback.ts): a person merges each. */
+export const FEEDBACK_CHECK_BRANCH_PREFIX = `${BRAND.cli}/check-from-feedback-`;
 
 /**
  * Why the harness may never merge this PR itself, whatever else holds: one it didn't open (a person's, a bot's: a
- * person merges it), and its own revert PRs (a human approves a revert). Empty: it may, if the rest allows.
+ * person merges it), its own revert PRs (a human approves a revert), and checks proposed from feedback. Empty: it
+ * may, if the rest allows.
  */
 export function neverAutoMerge(o: { branch: string; openedByHarness: boolean }): string[] {
   const out: string[] = [];
   if (!o.openedByHarness) out.push('never auto-merged: the harness did not open this PR; a person merges it');
   if (isRevertBranch(o.branch)) out.push('never auto-merged: a revert the harness opened; a human approves and merges it');
+  if (o.branch.startsWith(FEEDBACK_CHECK_BRANCH_PREFIX)) out.push('never auto-merged: a check proposed from repeated feedback; a human reviews and merges it');
   return out;
 }
 

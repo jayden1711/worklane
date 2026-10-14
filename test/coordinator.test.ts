@@ -2236,21 +2236,29 @@ const evalOnly = (reasons: string[]) => reasons.filter((r) => !r.startsWith('hig
 
 const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the ledger.\n\n**Correct**\n- Reads the alert row first.\n\n**Wrong**\n- Edits the ledger by hand.\n';
 
+/** A config-folder skill that passes the skill lint (the push check refuses one that doesn't), `steps` its Steps. */
+const SKILL = (steps: string) => ['When to use', 'Inputs and access', 'Steps', 'Validate', 'Return', 'Approval'].map((s) => `## ${s}\n${s === 'Steps' ? steps : 'As usual.'}\n`).join('\n');
+const SKILL_FILE = `${BRAND.configDir}/skills/triage/SKILL.md`;
+const SKILL_TARGET = `skill triage (${BRAND.configDir})`;
+
 /**
- * PR mode with auto-merge on, where the change also rewrites AGENTS.md. `base` is AGENTS.md on main
- * before the task (with its eval cases unless `cases` is false). The scripted model under test plans
- * badly when its instructions say BAD; the judge passes only a good plan.
+ * PR mode with auto-merge on, where the change also rewrites a skill (AGENTS.md is the owner's alone, item 33).
+ * `base` is the file on main before the task (with its eval cases unless `cases` is false). The scripted model
+ * under test plans badly when its instructions say BAD; the judge passes only a good plan.
  */
 async function instructionsPr(o: { base: string | null; head: string; cases?: boolean; enabled?: boolean; cap?: number; file?: string; casesFile?: string }) {
   const f = fixture();
-  const file = o.file ?? 'AGENTS.md';
-  const casesFile = o.casesFile ?? join(BRAND.configDir, 'evals', 'AGENTS.md');
+  const file = o.file ?? SKILL_FILE;
+  const casesFile = o.casesFile ?? `${BRAND.configDir}/skills/triage/evals/cases.md`;
+  if (!o.file) {
+    o = { ...o, base: o.base === null ? null : SKILL(o.base), head: SKILL(o.head) };
+  }
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   if (o.enabled === false) f.cfg.agents.instruction_evals.enabled = false;
   if (o.cap) f.cfg.agents.instruction_evals.cap_usd = o.cap;
   // A project that lets its role prompts change through tasks (the example protects its whole config folder).
-  if (o.file?.startsWith(BRAND.configDir)) {
+  if (file.startsWith(BRAND.configDir)) {
     f.cfg.guardrails.protected_paths = f.cfg.guardrails.protected_paths.filter((g) => !g.startsWith(BRAND.configDir));
     if (f.cfg.review) f.cfg.review.levels.L3_human.when = f.cfg.review.levels.L3_human.when.filter((c) => c !== 'harness-config');
   }
@@ -2295,17 +2303,17 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
   return { f, n, runner, opened, pr, decided: lastOf(f.log, 'merge.decided') as { auto: boolean; reasons: string[] } };
 }
 
-test('instruction evals: a change that makes AGENTS.md score lower waits for the owner, with the per-case diff and the cost', { skip }, async () => {
+test('instruction evals: a change that makes a skill score lower waits for the owner, with the per-case diff and the cost', { skip }, async () => {
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'BAD: act first.\n' });
   const e = lastOf(t.f.log, 'instructions.eval') as { target: string; base: object; result: object; dropped: boolean; changes: object[]; cost_usd: number };
-  assert.deepEqual([e.target, e.base, e.result, e.dropped], ['AGENTS.md', { passed: 2, total: 2 }, { passed: 0, total: 2 }, true], 'rubric items met');
+  assert.deepEqual([e.target, e.base, e.result, e.dropped], [SKILL_TARGET, { passed: 2, total: 2 }, { passed: 0, total: 2 }, true], 'rubric items met');
   assert.deepEqual(e.changes, [{ id: '1', title: 'Ledger alert', base: 'pass', head: 'fail' }]);
   assert.ok(e.cost_usd > 0);
   assert.equal(t.decided.auto, false);
-  assert.deepEqual(evalOnly(t.decided.reasons), [`eval: AGENTS.md scored lower, 2/2 → 0/2 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
+  assert.deepEqual(evalOnly(t.decided.reasons), [`eval: ${SKILL_TARGET} scored lower, 2/2 → 0/2 (~$${e.cost_usd.toFixed(2)}):\n  - case 1 "Ledger alert": pass → fail`]);
   assert.ok(!t.pr.merged);
   assert.ok(t.pr.comments.some((x) => /waits for you[\s\S]*case 1 "Ledger alert": pass → fail/.test(x.body)), 'the waiting comment carries the diff');
-  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- AGENTS\.md: visible 2\/2 → 0\/2, \*\*lower\*\*; case 1 pass → fail, 3 sample\(s\) per case/);
+  assert.match(t.pr.body, /\*\*Instruction evals\*\* \(base → head; ~\$[\d.]+, the CLI's cost estimate\):\n- skill triage \([^)]+\): visible 2\/2 → 0\/2, \*\*lower\*\*; case 1 pass → fail, 3 sample\(s\) per case/);
   assert.equal(t.f.log.read(0, ['run.cost']).filter((x) => (x.payload as { role: string }).role === 'instruction-eval').length, 12, 'base and head, 3 samples each, each a plan and a judgement');
   // The agent under test never saw the rubric, and was a different model from the judge.
   const evalRuns = t.runner.calls.filter((r) => r.role === 'instruction-eval');
@@ -2339,7 +2347,7 @@ test("instruction evals: no drop, no eval reason; the change still waits, becaus
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'Read the alert, then act.\n' });
   assert.equal((lastOf(t.f.log, 'instructions.eval') as { dropped: boolean }).dropped, false);
   assert.equal(t.decided.auto, false);
-  assert.deepEqual(t.decided.reasons, ['high-risk: agent-instructions (AGENTS.md)']);
+  assert.deepEqual(t.decided.reasons, [`high-risk: agent-instructions (${SKILL_FILE})`]);
   assert.ok(!t.pr.merged);
 });
 
@@ -2357,10 +2365,26 @@ test('instruction evals: a skill in the config folder is evaluated from its case
 
 test('instruction evals: instructions without eval cases, or evals turned off, wait for the owner (fail closed)', { skip }, async () => {
   const none = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', cases: false });
-  assert.deepEqual(evalOnly(none.decided.reasons), [`eval: AGENTS.md was not evaluated: no eval cases (${BRAND.configDir}/evals/AGENTS.md)`]);
+  assert.deepEqual(evalOnly(none.decided.reasons), [`eval: ${SKILL_TARGET} was not evaluated: no eval cases (${BRAND.configDir}/skills/triage/evals/cases.md)`]);
   assert.ok(!none.runner.calls.some((r) => r.role === 'instruction-eval'), 'nothing to run');
   const off = await instructionsPr({ base: 'Read before you act.\n', head: 'Changed.\n', enabled: false });
-  assert.deepEqual(evalOnly(off.decided.reasons), ['eval: AGENTS.md was not evaluated: instruction evals are off (agents.yaml instruction_evals)']);
+  assert.deepEqual(evalOnly(off.decided.reasons), [`eval: ${SKILL_TARGET} was not evaluated: instruction evals are off (agents.yaml instruction_evals)`]);
+});
+
+test("a worker's change to AGENTS.md is refused before any PR: only an owner's promoted learning adds to it", { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.land_mode = 'pr';
+  f.backlog.open({ title: 'Teach the agents', body: 'Add a rule.\n\n```done_when\n- command: node --test\n```\n', author: 'example-owner', labels: ['ready'] });
+  const worker = (req: RunRequest) => {
+    writeFileSync(join(req.cwd, 'AGENTS.md'), '- always read the alert row first\n');
+    commitAll(req.cwd, 'Add a rule');
+    return { summary: 'added a rule' };
+  };
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents({ worker, 'evaluator-verdict': approve() }), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, autoMerge: () => true });
+  await c.tick();
+  await c.idle();
+  assert.ok(f.log.read(0, ['change.rejected']).some((e) => (e.payload as { why: string }).why === 'changes protected harness files: AGENTS.md'));
+  assert.equal(f.log.read(0, ['pr.opened']).length, 0);
 });
 
 test('instruction evals: the spend cap bounds an eval; cut short, the PR waits', { skip }, async () => {
@@ -2646,7 +2670,7 @@ test('push limits on the change: refused before any check runs, the worker is to
       return { summary: 'fixed' };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 3 });
   await c.tick();
   await c.idle();
   await c.tick();

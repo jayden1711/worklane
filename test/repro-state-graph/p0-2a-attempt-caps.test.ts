@@ -1,4 +1,4 @@
-// P0 item 2a: the attempt cap (maxAttempts, default 3) survives a coordinator restart and an emergency stop's requeue.
+// P0 item 2a: the attempt cap (maxAttempts, 3 here) survives a coordinator restart and an emergency stop's requeue.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
@@ -30,11 +30,11 @@ test('attempt cap: a coordinator restart mid-task does not reset the attempt cou
       }
       return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
     });
-  const c1 = coordinator(f, script(2));
+  const c1 = coordinator(f, script(2), { maxAttempts: 3 });
   await c1.tick();
   await c1.idle();
   assert.deepEqual(workerAttempts(f), [1, 2], 'two attempts used before the crash');
-  const c2 = coordinator(f, script(null));
+  const c2 = coordinator(f, script(null), { maxAttempts: 3 });
   await c2.recover();
   await c2.tick();
   await c2.idle();
@@ -59,7 +59,7 @@ test('attempt cap: an emergency stop and resume requeue does not reset the attem
     }
     return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
   });
-  const c = coordinator(f, runner);
+  const c = coordinator(f, runner, { maxAttempts: 3 });
   await c.tick();
   for (let i = 0; i < 200 && workerAttempts(f).length < 2; i++) await new Promise((r) => setTimeout(r, 50));
   assert.deepEqual(workerAttempts(f), [1, 2], 'attempt 2 is running');
