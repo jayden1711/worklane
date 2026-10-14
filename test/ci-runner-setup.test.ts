@@ -33,13 +33,20 @@ test('ci-runner.sh --print: the slice caps, the firewall, a sandboxed one-job ru
   assert.ok(lo > 0 && ts > lo && v4 > ts && v6 > v4, fw);
   for (const l of rules.slice(0, lo)) if (/accept/.test(l) && !/^type /.test(l)) assert.match(l, /th dport 53 accept/, `only DNS goes through before the refusals: ${l}`);
   const runner = part('# /etc/systemd/system/worklane-ci-shop@.service', '# /usr/local/libexec/worklane-ci/job-started.sh');
-  const docker = part('# /etc/systemd/system/worklane-ci-shop-docker@.service', '# /etc/systemd/system/worklane-ci-shop@.service');
+  const docker = part('# /etc/systemd/system/worklane-ci-shop-docker@.service', '# /etc/systemd/system/worklane-ci-shop-reset@.service');
+  const reset = part('# /etc/systemd/system/worklane-ci-shop-reset@.service', '# /etc/systemd/system/worklane-ci-shop@.service');
+  // The reset: as root, with no sandbox (so it sees the real directories, not the runner's binds), before every start.
+  for (const line of ['Type=oneshot', 'ExecStart=/usr/local/libexec/worklane-ci/reset shop %i', 'Requires=worklane-ci-shop-docker@%i.service', 'After=worklane-ci-shop-docker@%i.service']) assert.ok(reset.split('\n').includes(line), `reset unit: ${line}`);
+  assert.doesNotMatch(reset, /^(User|Protect|Private|ReadWritePaths|Bind|Inaccessible|RemainAfterExit)/m, 'no sandbox, and inactive again once done, so the next start runs it again');
+  assert.doesNotMatch(runner, /^ExecStartPre=/m, 'no reset inside the runner\'s own namespace');
   for (const line of [
     'User=wl-ci-shop', 'Group=wl-ci-shop', 'Slice=worklane-ci.slice',
     // Never without the firewall, never without its own Docker.
-    'BindsTo=worklane-ci-shop-firewall.service', 'Requires=worklane-ci-shop-docker@%i.service',
+    'BindsTo=worklane-ci-shop-firewall.service',
     // One job per start, then a reset (as root) before the next: what an ephemeral runner gets.
-    'ExecStartPre=+/usr/local/libexec/worklane-ci/reset shop %i', 'ExecStart=/bin/bash /var/lib/worklane-ci/shop/%i/runner/run.sh --once', 'Restart=always', 'KillMode=control-group',
+    'Requires=worklane-ci-shop-docker@%i.service worklane-ci-shop-reset@%i.service',
+    'After=network-online.target worklane-ci-shop-firewall.service worklane-ci-shop-docker@%i.service worklane-ci-shop-reset@%i.service',
+    'ExecStart=/bin/bash /var/lib/worklane-ci/shop/%i/runner/run.sh --once', 'Restart=always', 'KillMode=control-group',
     'Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/libexec/worklane-ci/job-started.sh',
     'Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/libexec/worklane-ci/job-completed.sh',
     'Environment=WORKLANE_CI_REPO=example-org/example-shop', 'Environment=WORKLANE_CI_BRANCH=main',

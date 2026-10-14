@@ -1,7 +1,7 @@
 #!/bin/bash
-# Before every start of a CI runner, as root (its unit's ExecStartPre=+), installed root:root 0755 by
-# scripts/setup/ci-runner.sh as /usr/local/libexec/worklane-ci/reset. The runner takes one job per start
-# (run.sh --once), so this gives every job what an ephemeral runner gets:
+# Before every start of a CI runner, as root (worklane-ci-<name>-reset@<i>.service, which the runner's unit
+# requires), installed root:root 0755 by scripts/setup/ci-runner.sh as /usr/local/libexec/worklane-ci/reset. The
+# runner takes one job per start (run.sh --once), so this gives every job what an ephemeral runner gets:
 #   1. no container, image build cache, volume or network the last job left (removed through the runner's own
 #      rootless daemon, first, so nothing still running can write into what is made next);
 #   2. a new runner directory: the pinned release's scripts and this runner's registration, with bin/ and
