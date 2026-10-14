@@ -566,8 +566,12 @@ test with an injection-style report.
   what needs it runs in a child process (`<cli> discord channels`), as the coordinator user.
 - Where the listing sends the token: Discord's REST API, and nowhere else. Its base URL is a constant in the code
   (`src/intake/discord.ts`): no argument, environment variable, request, signed-in user or `intake.yaml` key can
-  name another host, and a test holds that. The dashboard runs the listing as the `<cli>` on its unit's PATH (which
-  root sets), as it finds `claude` and `gh`.
+  name another host, and a test holds that.
+- Which program lists: always the installed engine's own `cli.js`, by absolute path, run by the dashboard's own node
+  binary. No PATH lookup, and no option, environment variable, config key or request can change it (`NODE_OPTIONS`
+  and `NODE_PATH` are dropped from the child's environment, so nothing else is loaded into it). Tests and CI replace
+  the listing only in code, with a stand-in that answers in-process (`discordListingStandIn`); anything else handed to
+  the dashboard in its place is refused.
 - A project's production read credentials stay on the production service, as with `prod-read` today.
 
 ## 7. Caps (instance settings)

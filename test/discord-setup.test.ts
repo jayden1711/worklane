@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
@@ -21,7 +21,7 @@ import { INTAKE_FILE, loadIntakeConfig } from '../src/intake/config.js';
 import { spawnSync } from 'node:child_process';
 import { discordChannelsCommand, listDiscordChannelRows, type ChannelRow } from '../src/intake/discord-channels.js';
 import { API } from '../src/intake/discord.js';
-import { applyIntake, botView, DiscordSetupError, discordSetupView, INVITE_PERMISSION_INTEGER, INVITE_PERMISSIONS, inviteUrl, lineDiff, planIntake, systemRunCli, tokenState, type RunCli } from '../src/intake/discord-setup.js';
+import { applyIntake, botView, DiscordSetupError, discordSetupView, INVITE_PERMISSION_INTEGER, INVITE_PERMISSIONS, inviteUrl, lineDiff, listingRunner, discordListingStandIn, engineRunCli, ENGINE_CLI, listingEnv, planIntake, tokenState, type RunCli } from '../src/intake/discord-setup.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -144,22 +144,80 @@ test('discord channels --json: the application and each channel with its server 
   }
 });
 
+/** Set these environment variables (undefined: unset) while `fn` runs, then put them back. */
+async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) if (v === undefined) delete process.env[k];
+  else process.env[k] = v;
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+}
+
 test('the bot view through the real child process: a failure is the command\'s own line, and bad output is refused', async () => {
   const i = instance();
   // The engine's own CLI, as the dashboard runs it; this instance has no token, so nothing reaches Discord.
-  const env = { ...process.env, [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir };
-  const run = systemRunCli({ which: () => null, env });
-  await assert.rejects(botView('shop', run), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && /instance shop has no bot token/.test(e.message));
+  await withEnv({ [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir }, () =>
+    assert.rejects(botView('shop', engineRunCli()), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && /instance shop has no bot token/.test(e.message)),
+  );
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: '{"application":{"id":"x"},"channels":[]}', stderr: '' })), /could not be read/);
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: 'not json', stderr: '' })), /could not be read/);
-  // The command on PATH is the one run (as claude and gh are found), with exactly the listing's arguments.
-  if (posix) {
-    const bin = mkdtempSync(join(tmpdir(), 'dsetup-bin-'));
-    const tool = join(bin, BRAND.cli);
-    writeFileSync(tool, `#!/bin/sh\n[ "$*" = "discord channels --instance shop --json" ] || { echo "asked: $*" >&2; exit 64; }\nprintf '%s\\n' '{"application":{"id":"700000000000000001","name":"on PATH","message_content":true},"channels":[]}'\n`, { mode: 0o755 });
-    const b = await botView('shop', systemRunCli({ which: (c) => (c === BRAND.cli ? tool : null), env }));
-    assert.equal(b.application.name, 'on PATH');
+});
+
+test("the listing runs this engine's own cli.js by absolute path: PATH, environment variables and options can't change the binary", { skip: !posix && 'POSIX executables' }, async () => {
+  assert.ok(isAbsolute(ENGINE_CLI) && ENGINE_CLI === engineCli, ENGINE_CLI);
+  const i = instance();
+  // Decoys: a CLI and a node first on PATH, a file NODE_OPTIONS would load, and variables naming another binary. Each
+  // leaves a mark if it ever runs.
+  const decoy = mkdtempSync(join(tmpdir(), 'dsetup-decoy-'));
+  const marks = join(decoy, 'ran');
+  const canned = '{"application":{"id":"700000000000000001","name":"decoy","message_content":true},"channels":[]}';
+  for (const name of [BRAND.cli, 'node', 'nodejs']) writeFileSync(join(decoy, name), `#!/bin/sh\necho "${name} $*" >> "${marks}"\necho '${canned}'\n`, { mode: 0o755 });
+  writeFileSync(join(decoy, 'preload.cjs'), `require('node:fs').appendFileSync(${JSON.stringify(marks)}, 'NODE_OPTIONS preload\\n');`);
+  const naming = join(decoy, BRAND.cli);
+  const vars = {
+    [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir,
+    PATH: `${decoy}:${process.env.PATH ?? ''}`,
+    NODE_OPTIONS: `--require ${join(decoy, 'preload.cjs')}`,
+    NODE_PATH: decoy,
+    [`${BRAND.envPrefix}_CLI`]: naming,
+    [`${BRAND.envPrefix}_DISCORD_CLI`]: naming,
+    [`${BRAND.envPrefix}_ENGINE`]: decoy,
+    [`${BRAND.envPrefix}_DISCORD_API`]: 'http://discord.example',
+  };
+  await withEnv(vars, async () => {
+    // The engine's own CLI answered (its own line for an instance without a token); no decoy ran.
+    await assert.rejects(botView('shop', engineRunCli()), /instance shop has no bot token/);
+    await assert.rejects(botView('shop', listingRunner()), /instance shop has no bot token/);
+  });
+  assert.equal(existsSync(marks) ? readFileSync(marks, 'utf8') : '', '', 'a decoy ran');
+  assert.deepEqual(Object.keys(listingEnv({ PATH: '/x', NODE_OPTIONS: '--require /y', NODE_PATH: '/z', HOME: '/h' })), ['PATH', 'HOME']);
+  // An option naming another program is refused: only a stand-in made in code by discordListingStandIn is taken.
+  const fn: RunCli = async () => ({ status: 0, stdout: canned, stderr: '' });
+  for (const bad of [fn, naming, { path: naming }, { cli: naming }, { run: fn }, { [Symbol('a Discord listing stand-in')]: fn }, null, 0, Object.freeze({ ...discordListingStandIn(fn) })]) {
+    assert.throws(() => listingRunner(bad), /only a stand-in made in code by discordListingStandIn may replace it/, String(bad));
   }
+  assert.equal(listingRunner(discordListingStandIn(fn)), fn);
+  assert.throws(() => discordListingStandIn(naming as unknown as RunCli), /a stand-in is a function/);
+  const { dir: root } = exampleProject();
+  const state = mkdtempSync(join(tmpdir(), 'dsetup-opt-'));
+  for (const bad of [fn, naming, { path: naming }]) {
+    await assert.rejects(
+      async () => startDashboard({ root, cfg: loadConfig(root), eventsDb: join(state, 'events.db'), stateDir: join(state, 'state'), user: 'example-owner', instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), webDir: join(state, 'web'), discordListing: bad as never }),
+      /only a stand-in made in code by discordListingStandIn may replace it/,
+    );
+  }
+  // In the source: one spawn, of this node and ENGINE_CLI; no PATH lookup; the dashboard takes the listing only from listingRunner.
+  const setup = readFileSync(join(repoRoot, 'src', 'intake', 'discord-setup.ts'), 'utf8').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.deepEqual(setup.match(/\bspawn\([^,]*, \[[^\]]*\]/g), ['spawn(process.execPath, [ENGINE_CLI, ...args]']);
+  assert.doesNotMatch(setup, /findTool|\bwhich\b|process\.env\.PATH|execFile|\bexec\(/);
+  assert.match(setup, /env: listingEnv\(\)/);
+  const dash = readFileSync(join(repoRoot, 'src', 'dashboard.ts'), 'utf8');
+  assert.match(dash, /const discordCli = listingRunner\(opts\.discordListing\);/);
+  assert.doesNotMatch(dash, /engineRunCli|discordCli\s*\?\?|systemRunCli/);
 });
 
 test("the listing has no way to change its host: Discord's REST base is a constant, whatever the options, the arguments or the environment say", { skip: !posix && 'POSIX modes' }, async () => {
@@ -395,7 +453,7 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
   const secretsHome = join(state, 'home');
   let listings = 0;
   const cli = cliAgainst(d.api, i.dir);
-  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordCli: (args) => (listings++, cli(args)) });
+  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (listings++, cli(args))) });
   const base = dash.url.split('/?')[0]!;
   const bodies: string[] = [];
   const call = async (path: string, login: string, body?: unknown) => {
@@ -527,7 +585,7 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
 test("a checkout's dashboard has no Discord step: it says why and refuses the rest", async () => {
   const { dir: root } = exampleProject();
   const state = mkdtempSync(join(tmpdir(), 'dsetup-local-'));
-  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(state, 'events.db'), stateDir: join(state, 'state'), user: 'example-owner', slotsDir: join(state, 'slots'), webDir: join(state, 'web'), discordCli: async () => assert.fail('never run') });
+  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(state, 'events.db'), stateDir: join(state, 'state'), user: 'example-owner', slotsDir: join(state, 'slots'), webDir: join(state, 'web'), discordListing: discordListingStandIn(async () => assert.fail('never run')) });
   const base = dash.url.split('/?')[0]!;
   const h = { authorization: `Bearer ${dash.token}`, 'content-type': 'application/json' };
   try {
