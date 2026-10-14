@@ -24,7 +24,6 @@ import type { EventLog } from '../events/log.js';
 import { CredentialsFile, setDiscordToken } from '../instance.js';
 import { currentUser, replaceFileAtomically } from '../os/index.js';
 import { instanceUnit } from '../service.js';
-import { findTool } from '../tool-path.js';
 import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import type { BotApplication, ChannelRow } from './discord-channels.js';
 import { IntakeConfig, intakeWarnings } from './report.js';
@@ -69,18 +68,29 @@ export type RunCli = (args: string[]) => Promise<{ status: number | null; stdout
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
+/** This engine's own CLI, by absolute path: the one binary the listing ever runs. */
+export const ENGINE_CLI = fileURLToPath(new URL('../cli.js', import.meta.url));
+
 /**
- * The engine's CLI as a child process, run as this process's user (an instance's dashboard runs as its coordinator
- * user): the command on this process's PATH (as `claude` and `gh` are found; on a server, the unit's PATH, which root
- * sets, names the installed engine), else this engine's own cli.js. It is given no setting that says where to ask.
+ * The environment the child gets: this process's, less what would make node load other code (NODE_OPTIONS can
+ * --require or --import a file; NODE_PATH adds module directories). Nothing in it chooses the binary: that is
+ * process.execPath and ENGINE_CLI, both absolute.
  */
-export function systemRunCli(o: { which?: (cmd: string) => string | null; env?: NodeJS.ProcessEnv } = {}): RunCli {
-  const own = fileURLToPath(new URL('../cli.js', import.meta.url));
-  const which = o.which ?? ((cmd: string) => findTool(cmd));
+export function listingEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const { NODE_OPTIONS: _o, NODE_PATH: _p, ...rest } = env;
+  return rest;
+}
+
+/**
+ * The listing as a child process, run as this process's user (an instance's dashboard runs as its coordinator user):
+ * always this node binary (process.execPath) running this engine's own cli.js (ENGINE_CLI), both absolute paths.
+ * INVARIANT: no PATH lookup, and no option, environment variable, config key or request can change which binary runs;
+ * the only other way the dashboard gets the listing is an in-process stand-in (discordListingStandIn), set in code.
+ */
+export function engineRunCli(): RunCli {
   return (args) =>
     new Promise((resolve) => {
-      const onPath = which(BRAND.cli);
-      const p = onPath ? spawn(onPath, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000, env: o.env ?? process.env }) : spawn(process.execPath, [own, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000, env: o.env ?? process.env });
+      const p = spawn(process.execPath, [ENGINE_CLI, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000, env: listingEnv() });
       let stdout = '';
       let stderr = '';
       p.stdout.on('data', (c: Buffer) => {
@@ -92,6 +102,36 @@ export function systemRunCli(o: { which?: (cmd: string) => string | null; env?: 
       p.on('error', (e) => resolve({ status: null, stdout: '', stderr: e.message }));
       p.on('close', (status) => resolve({ status, stdout, stderr }));
     });
+}
+
+const STAND_IN = Symbol('a Discord listing stand-in');
+/** The stand-ins discordListingStandIn made: a copy or a look-alike is not one. */
+const MINTED = new WeakSet<object>();
+/** An in-process answer in place of the listing's child process: for tests and CI, made only by discordListingStandIn. */
+export interface DiscordListingStandIn {
+  readonly [STAND_IN]: RunCli;
+}
+/**
+ * The one seam: code (a test, a CI helper) hands the dashboard an answer to give instead of running the listing. It
+ * is set in code only: it is a value no configuration, environment, PATH or request can produce, and it starts no
+ * binary of its own choosing; it answers in-process.
+ */
+export function discordListingStandIn(answer: RunCli): DiscordListingStandIn {
+  if (typeof answer !== 'function') throw new DiscordSetupError('a stand-in is a function that answers the listing');
+  const standIn = Object.freeze({ [STAND_IN]: answer });
+  MINTED.add(standIn);
+  return standIn;
+}
+
+/**
+ * The listing the dashboard uses: the engine's own CLI, or a stand-in made by discordListingStandIn. Anything else (a
+ * function, a path, an object naming a binary) is refused, so no option can point it at another program.
+ */
+export function listingRunner(standIn?: unknown): RunCli {
+  if (standIn === undefined) return engineRunCli();
+  const answer = standIn !== null && typeof standIn === 'object' && MINTED.has(standIn) ? (standIn as DiscordListingStandIn)[STAND_IN] : undefined;
+  if (typeof answer !== 'function') throw new DiscordSetupError("the Discord listing runs this engine's own CLI; only a stand-in made in code by discordListingStandIn may replace it");
+  return answer;
 }
 
 const snowflake = z.string().regex(/^\d{5,25}$/);
