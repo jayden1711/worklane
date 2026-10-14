@@ -181,6 +181,9 @@ do_claude_token() {
   printf '%s' "$token" | install_claude_token "$agent"
   token=""
   claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token"; return 1; }
+  # What the first-run step reads (claude-account's status.json): this instance's agent users, as claude auth status
+  # finds each now. Never the token: its id (a hash prefix) and whether it is signed in. A later switch rewrites it.
+  bash "$here/claude-account.sh" status "$name" >/dev/null 2>&1 || true
 }
 detail_claude_token() { echo "stored for $agent only"; }
 
