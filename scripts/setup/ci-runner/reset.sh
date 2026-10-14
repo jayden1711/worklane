@@ -50,9 +50,11 @@ done
 printf 'LANG=C.UTF-8\n' > "$base/runner/.env"
 find "$base/runner" -mindepth 1 -maxdepth 1 ! -name bin ! -name externals -exec chown -R "$user:$user" {} +
 
-# 3. The machine's pinned Node (node.sh) as actions/setup-node's tool-cache entry, in the new workspace.
+# 3. The machine's pinned Node (node.sh) as actions/setup-node's tool-cache entry, in the new workspace: only a
+#    release node.sh unpacked (/opt/node-v<version>-linux-<arch>, linked from /usr/local/bin), never whatever else
+#    /usr/local/bin/node is (its prefix could be all of /usr/local).
 node="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
-if [ -n "$node" ] && [ -x "$node" ]; then
+if [[ "$node" =~ ^/opt/node-v[0-9]+\.[0-9]+\.[0-9]+-linux-(x64|arm64)/bin/node$ ]] && [ -x "$node" ]; then
   v="$("$node" --version)"; v="${v#v}"
   case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) arch="" ;; esac
   if [ -n "$arch" ] && [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

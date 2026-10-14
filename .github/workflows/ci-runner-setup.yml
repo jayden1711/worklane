@@ -155,7 +155,8 @@ jobs:
         if: failure()
         run: |
           docker_unit="worklane-ci-${NAME}-docker"
-          units=("worklane-ci-${NAME}@1.service" "${docker_unit}@1.service" "worklane-ci-${NAME}-firewall.service")
+          reset_unit="worklane-ci-${NAME}-reset"
+          units=("worklane-ci-${NAME}@1.service" "${reset_unit}@1.service" "${docker_unit}@1.service" "worklane-ci-${NAME}-firewall.service")
           sudo systemctl --no-pager status "${units[@]}" worklane-ci.slice || true
           sudo journalctl --no-pager -n 200 "${units[@]/#/--unit=}" || true
           sudo nft list ruleset || true

@@ -275,4 +275,7 @@ test('the reset removes the last job\'s containers before it remakes the runner,
   assert.match(sh, /bin \| externals\) install -d -o root -g root -m 0755/, 'binaries come only from the read-only binds of the pinned release');
   assert.match(sh, /install -o "\$user" -g "\$user" -m 0600 "\$reg\/\$f"/);
   assert.match(sh, /_tool\/node\/\$v/);
+  // Only node.sh's own release is seeded: on a machine whose /usr/local/bin/node is a plain file, its prefix would be
+  // all of /usr/local (a reset that never ended, on a real runner).
+  assert.match(sh, /\[\[ "\$node" =~ \^\/opt\/node-v/);
 });
