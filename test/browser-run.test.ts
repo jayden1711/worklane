@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REAL_CHROME_TIMEOUT, realChromeTests, unscaled } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, unscaled } from './browser-helpers.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -60,7 +60,8 @@ createServer((req, res) => {
 const chrome = findChrome(process.env.CHROME);
 realChromeTests();
 
-test('a flow against a real app: errors, a failed, a slow and a blocked request, a trace and a screenshot; then the app and its children are stopped', { skip: !chrome && 'no Chrome or Chromium on this machine (set CHROME); the run itself says so and skips', timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('a flow against a real app: errors, a failed, a slow and a blocked request, a trace and a screenshot; then the app and its children are stopped', { skip: !chrome && 'no Chrome or Chromium on this machine (set CHROME); the run itself says so and skips', timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   fixtureApp(dir);
   const port = await freePort();
@@ -110,7 +111,8 @@ test('a flow against a real app: errors, a failed, a slow and a blocked request,
   assert.equal(await portInUse(port), false);
 });
 
-test('an app that never becomes ready: the run fails with its output, and the app is stopped', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('an app that never becomes ready: the run fails with its output, and the app is stopped', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   writeFileSync(join(dir, 'never.mjs'), `import { writeFileSync } from 'node:fs'; writeFileSync('app.pid', String(process.pid)); console.log('starting, but never listening'); setInterval(() => {}, 1000);`);
   const port = await freePort();
@@ -167,7 +169,8 @@ test("a browser that can't start fails the run at once, and the app (already run
 // does Windows' chmod.
 const cannotLock = process.platform === 'win32' || process.getuid?.() === 0;
 
-test('a Chrome whose DevTools port never appears is stopped and started once more, and that is noted; the stuck one is gone', { skip: (!chrome && 'no Chrome or Chromium on this machine') || (process.platform === 'win32' && 'the stand-in browser is a shell script'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('a Chrome whose DevTools port never appears is stopped and started once more, and that is noted; the stuck one is gone', { skip: (!chrome && 'no Chrome or Chromium on this machine') || (process.platform === 'win32' && 'the stand-in browser is a shell script'), timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   // A stand-in that hangs the first time (as Chrome can on a loaded machine), then is the real Chrome.
   const stub = join(dir, 'chrome');
@@ -184,7 +187,8 @@ test('a Chrome whose DevTools port never appears is stopped and started once mor
   await assert.rejects(launchChrome(join(dir, 'no-such-browser')), /couldn't be started/, 'a browser that fails to start is not retried');
 });
 
-test("a teardown that goes wrong (the profile can't be removed) is a note, never a failed run; Chrome and the app's whole tree are still stopped", { skip: (!chrome && 'no Chrome or Chromium on this machine') || (cannotLock && 'needs a directory permission that holds (not Windows, not root)'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+test("a teardown that goes wrong (the profile can't be removed) is a note, never a failed run; Chrome and the app's whole tree are still stopped", { skip: (!chrome && 'no Chrome or Chromium on this machine') || (cannotLock && 'needs a directory permission that holds (not Windows, not root)'), timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   fixtureApp(dir);
   const root = join(dir, 'profiles');
@@ -220,7 +224,8 @@ test('a flow against a deployed preview may only reach that origin (and in-page 
   for (const u of ['http://pr-7.example.test/', 'https://pr-7.example.test:8443/', 'https://pr-8.example.test/', 'https://evil.pr-7.example.test/', 'http://127.0.0.1:5173/', 'not a url']) assert.equal(isOnOrigin(u, origin), false, u);
 });
 
-test('runFlowAt: a flow against an app running elsewhere starts nothing, reaches only its origin, and leaves the app running', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('runFlowAt: a flow against an app running elsewhere starts nothing, reaches only its origin, and leaves the app running', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
   fixtureApp(dir);
   const port = await freePort();

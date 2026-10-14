@@ -6,7 +6,7 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +16,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { TailscaleStatus } from '../src/tailscale-setup.js';
 import { ALLOWED_SIGNERS } from '../src/updater-setup.js';
-import { REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests } from './browser-helpers.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
 
 test('the machine settings are never keyed on their data: new data is new props, and each input follows what is set until the owner types', () => {
@@ -73,6 +73,7 @@ test('the live panels (Tailscale, Claude account, Discord) take every failed loo
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
+const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
 
 async function js<T>(cdp: Cdp, expression: string): Promise<T> {
   const r = await cdp.send<{ result: { value: T }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
@@ -97,8 +98,9 @@ async function type(cdp: Cdp, element: string, text: string) {
 
 test(
   'in a real Chrome: a signer half typed, a slot cap typed and the request message all survive a machine change landing',
-  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
-  async () => {
+  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  async (ctx) => {
+    await oneChromeAtATime(ctx);
     const dir = mkdtempSync(join(tmpdir(), 'machine-cards-'));
     const updatesConfigPath = join(dir, 'updates.json');
     writeFileSync(updatesConfigPath, JSON.stringify({ enabled: false, channel: 'release', allowed_signers: ALLOWED_SIGNERS, repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'] }));
@@ -153,8 +155,9 @@ test(
 
 test(
   "in a real Chrome: Tailscale's looks failing mid-confirm keep the step's confirmation open, with a note; a 403 then hides the panel",
-  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
-  async () => {
+  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  async (ctx) => {
+    await oneChromeAtATime(ctx);
     const dir = mkdtempSync(join(tmpdir(), 'tailscale-refresh-'));
     const eventsDb = join(dir, 'events.db');
     new EventLog(eventsDb).close();
