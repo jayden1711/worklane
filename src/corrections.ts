@@ -107,6 +107,36 @@ export function chatCorrections(history: { at: string; by: string; question: str
   return out;
 }
 
+/**
+ * Only what the person said in a correction, without the line the harness writes around it (who did what on which
+ * PR): the review's body, the plan note, the comments on a closed PR, the chat correction. '' when they said nothing
+ * (a rejected landing, a review with no body). Reads the texts the functions above write, so it lives beside them.
+ */
+export function correctionWords(c: Pick<Correction, 'kind' | 'text'>): string {
+  const t = c.text.replace(/ … \[\d+ more chars\]$/, '');
+  const after = (marker: string) => {
+    const i = t.indexOf(marker);
+    return i < 0 ? '' : t.slice(i + marker.length);
+  };
+  switch (c.kind) {
+    case 'review_changes':
+      return after('\nTheir review: ').trim();
+    case 'plan_revised':
+    case 'plan_rejected':
+      return after('\nTheir note: ').trim();
+    case 'pr_rejected':
+      return after('\nWhat they said on it:\n')
+        .split('\n')
+        .map((l) => l.replace(/^@[\w-]+: /, ''))
+        .join('\n')
+        .trim();
+    case 'chat':
+      return after(' corrected the chat: ').split('\nThe answer they corrected')[0]!.trim();
+    case 'land_rejected':
+      return '';
+  }
+}
+
 /** The owner's own words, normalized: two corrections with the same words are the same correction. */
 export function fingerprint(c: Pick<Correction, 'text'>): string {
   const words = c.text

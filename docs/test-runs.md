@@ -44,12 +44,15 @@ test_run:
 | `/usr/local/libexec/worklane-testrun` | The helper, root-owned. sudoers lets `wl-<name>` run it for `<name>` only; it checks every other argument itself. |
 | `worklane-test.slice` | A top-level slice for all test runs: `AllowedCPUs` and a matching `CPUQuota`, `MemoryMax` with no swap, and CPU and IO weights below `worklane.slice`'s. `check` fails if its memory cap isn't below every instance's. |
 | `worklane-test-<name>-docker.service` | Rootless Docker as the test user, for the runs' databases. There is no root daemon and no `docker` group. Published ports bind `127.0.0.1`. It uses the `cgroupfs` driver (the default systemd driver needs a user session the test user doesn't have). The daemon runs in the unit's subgroup `daemon` (`DelegateSubgroup=`), with `cpu io memory pids` delegated, so each container gets a cgroup of its own in the unit's, under the slice's caps. `check` fails otherwise. |
-| `/var/lib/worklane-test/<name>` | Per instance: `runs/<id>` (one per run), `cache/`, Docker's data. |
+| `/var/lib/worklane-test/<name>` | Per instance: `runs/<id>` (one per run), `store/` (the object store), `cache/`, Docker's data. |
 
-**One run.** A run's workspace is a git clone of its own, owned by the test user, so suites that call git (`git log main`, a diff against `origin/main`, LFS paths) work as on CI.
-- The coordinator writes a `git bundle` of the commit and the default branch, under temporary refs it removes at once. The bundle is a copy of the objects, never shared alternates or the coordinator's `.git`, and it is piped to the helper.
-- As the test user, the helper clones it into `runs/<id>/work`: the commit checked out, and the default branch as `main` and `origin/main` (and `origin/HEAD`).
-- The clone has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config.
+**One run.** A run's workspace is a git repo of its own, owned by the test user, so suites that call git (`git log main`, a diff against `origin/main`, LFS paths) work as on CI.
+- Its objects come from the instance's **object store**, `/var/lib/worklane-test/<name>/store`: a bare repo of the test user's (0700), which every run's workspace reads through `objects/info/alternates`. It is never the coordinator's `.git`, which the test user can't read.
+- The coordinator asks the helper the store's tips (`store-tips`: the commits it keeps, the newest 50), and writes a `git bundle` of only what the store lacks: the commit and the default branch, minus everything those tips reach. The first run of an instance sends the history; a run of a commit the store already has sends nothing at all; a new PR head sends its own commits. The bundle is made under temporary refs the coordinator removes at once, and is piped to the helper.
+- As the test user, before anything of the run's runs, the helper fetches the bundle into the store (git checks every object it takes; objects are named by their hashes, so one run's objects never change what another reads), keeps the two commits under `refs/keep/`, and makes `runs/<id>/work`: the commit checked out, and the default branch as `main` and `origin/main` (and `origin/HEAD`).
+- A run's own commands read the store and never write it: in the sandbox (below) everything outside the run's directory, the caches and the shared directories is read-only. `check` proves it on the host: its probe run reads its commit through the store and fails to write the store's objects, refs or files.
+- `tests.yaml` `checkout.sparse_exclude` (directories no test reads, such as design files and art) is left out of the checkout (sparse; the commit still has them). A tier that needs them sets `full_checkout: true`, and then its whole run checks everything out (a run's tiers share one workspace).
+- The workspace has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config. Neither has the store.
 - The test user never reads the coordinator's checkout, and has no path back to it to write. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
 
 - a read-only system (`ProtectSystem=strict`), no `/home`, `/root` or `/run/user` (`ProtectHome=tmpfs`);
@@ -57,6 +60,7 @@ test_run:
 - no other run's workspace: `runs/` is an empty read-only tmpfs with only this run's directory bound in;
 - a private `/tmp`, `TMPDIR` and `HOME` inside the run's directory, no devices, no new privileges;
 - an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment.
+- the command exactly as written, for bash alone. Otherwise systemd-run expands `${...}` in it itself (as `ExecStart=` does), which blanks a shell-only `${x}`. On systemd 254 and later the helper passes `--expand-environment=no`. On an older one it writes each `$` as `$$`, systemd's escape for a literal `$`.
 
 **The wipe.** After every run, pass or fail: the run's units are killed and stopped, its containers and volumes removed, and its directory deleted. The wipe then looks again and fails if anything is left.
 

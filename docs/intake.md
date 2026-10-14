@@ -121,7 +121,8 @@ discord:
   merged it (their GitHub login, never an email), the merge commit's short sha, and the first line of the PR body's
   first paragraph (redacted, at most 200 characters; the PR title when the body is empty). Nothing else from the body
   is posted. Each new first-parent commit is matched to its PR through GitHub's API
-  (`GET /repos/{o}/{r}/commits/{sha}/pulls`); a commit no merged PR has (a direct push) gets no post here, since the
+  (`GET /repos/{o}/{r}/commits/{sha}/pulls`), asked again for up to 2 minutes while it has no merged PR (GitHub links a
+  merge a few seconds after it lands); a commit no merged PR has (a direct push) gets no post here, since the
   main watch alerts on those. Within the same machine-wide limit as the incidents; where it is in the branch is kept in
   the instance's state dir, so a restart neither posts a merge twice nor skips one.
 
@@ -443,6 +444,26 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   (`deploy.yaml` `prod_read`, the owner's platform login and the read-only role on the production service); with
   either missing, nothing is read.
 
+### 2.4 GitHub issues
+
+- Open issues on the instance's repo carrying the intake label (`<cli>:intake`, the product's CLI name from
+  `src/brand.ts`; `labels` creates it) are reports (`src/intake/github.ts`). An issue template may set the label,
+  so anyone can file one. The author's login is the sender; ready issues, bot authors and issues already seen
+  (the seen ledger) are never taken.
+- Each goes through the same pipeline as a chat report: redaction, caps, the read-only triage run, dedupe
+  (never against its own issue), the money-path (L3) rule and the trust policy (`src/intake/decide.ts`). The issue
+  already exists, so filing it labels that issue (`ready` and the kind label) and puts the drafted five-part issue
+  on it as one comment; no second issue is opened.
+- A login in `trusted.github` is filed `ready` at once; anyone else's draft is an Inbox decision, approved,
+  edited or rejected exactly as for Discord. Until then, and when it is rejected, asked for details or dropped,
+  the issue stays in triage and a comment on it says why (the engine's reason code only, never agent text).
+- Pulled on the intake timer, but listed at most once every `github.poll_minutes` (default 5, at least 1), one
+  listing per pull, and not again before a rate limit's retry-after. The backlog keeps no ETags, so there are
+  none to reuse.
+- Off by default: `github.enabled: true` in `intake.yaml`. The App's `issues: write` permission already covers
+  listing, commenting and labelling. With an App token, the `ready` the App adds doesn't make the issue
+  actionable on its own (`actionable` wants a writer to add it), as for every issue intake files.
+
 ## 3. Pipeline
 
 1. **Receive.** The adapter yields a report. Unaddressed channel messages never get this far.
@@ -574,7 +595,9 @@ test with an injection-style report.
    messages from the server's members (for the links). Restart the instance.
 8. **One bot for several instances** (2.1.6): invite it to each server, install the same token for each
    instance, and give each instance its own server and channels in its own `intake.yaml`.
-9. **Superfans** (2.1.7): a channel per instance and one for the engine, their ids in each instance's
+9. **GitHub issues** (2.4): set `github.enabled: true` (and any `trusted.github` logins) in `intake.yaml`, run
+   `labels` once to create the intake label, and add it to an issue template if outsiders should reach intake.
+10. **Superfans** (2.1.7): a channel per instance and one for the engine, their ids in each instance's
    `intake.yaml` under `superfan`.
 
 ## 11. Build order

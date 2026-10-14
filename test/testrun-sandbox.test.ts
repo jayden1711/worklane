@@ -2,12 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TestsConfig } from '../src/config/schema.js';
 import { checkName, MAX_CONNECTIONS, TestRunConfig } from '../src/testrun/config.js';
-import { localHost, newRunId, RUN_ID, sandboxHost } from '../src/testrun/host.js';
+import { Readable } from 'node:stream';
+import { sparseDirProblem } from '../src/checkout.js';
+import { localHost, newRunId, RUN_ID, sandboxHost, type RunHost } from '../src/testrun/host.js';
+import { workspaceExclude } from '../src/testrun/run.js';
 import { cloneScript, createWorkspace, runEnv, wipeWorkspace } from '../src/testrun/workspace.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
@@ -218,7 +222,7 @@ test('isolation: the test user\'s access checks fail closed; a path it can reach
   // that printed nothing (didn't run) is a FAIL too.
   const helper = readFileSync(helperSrc, 'utf8');
   assert.match(helper, /if \[ "\$out" = denied \]; then echo "PASS/);
-  assert.match(helper, /if probe_passed "\$rc" "\$out"; then echo "PASS a sandboxed run reaches none of them"/);
+  assert.match(helper, /if probe_passed "\$rc" "\$out"; then echo "PASS a sandboxed run reaches none of them, and reads the object store without writing it"/);
   assert.match(helper, /2>"\$err"\)" \|\| rc=\$\?/, 'the probe\'s stdout apart from systemd-run\'s stderr');
 });
 
@@ -317,7 +321,7 @@ test('isolation: a wipe leaves nothing behind (workspace, temp files, home, cont
   assert.match(id, RUN_ID);
   const ws = await createWorkspace(host, p.dir, p.sha, id);
   assert.ok(existsSync(join(ws.workdir, '.worklane', 'config.yaml')), 'the commit\'s tree');
-  assert.ok(!existsSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates')), 'its own objects, never the coordinator\'s');
+  assert.equal(readFileSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates'), 'utf8'), `${join(base, 'store', 'objects')}\n`, 'objects from the host\'s own store, never the coordinator\'s');
   const db = await host.startDb(id, { image: pin, name: 'test', readyS: 5, maxConnections: 300 });
   const started = Object.values(JSON.parse(readFileSync(join(base, 'docker-home', 'state.json'), 'utf8')).containers as Record<string, { args: string[] }>)[0]!.args;
   assert.deepEqual(started.slice(started.indexOf(pin)), [pin, '-c', 'max_connections=300'], 'Postgres starts with the run\'s max_connections');
@@ -392,7 +396,7 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
   const dir = mkdtempSync(join(tmpdir(), 'tr-helper-'));
   const log = join(dir, 'calls');
   const helper = join(dir, 'helper');
-  writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "$2" in db-start) echo "45678 ${'b'.repeat(32)}" ;; wipe) echo wiped ;; *) echo /runs/x/work ;; esac\n`);
+  writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "$2" in db-start) echo "45678 ${'b'.repeat(32)}" ;; wipe) echo wiped ;; store-tips) printf '%s\\nnot-a-sha\\n%s\\n' ${'c'.repeat(40)} ${'d'.repeat(64)} ;; create) cat > /dev/null; echo /runs/x/work ;; *) echo /runs/x/work ;; esac\n`);
   chmodSync(helper, 0o755);
   const sudo = join(dir, 'sudo');
   writeFileSync(sudo, '#!/bin/sh\n[ "$1" = -n ] || exit 9\nshift\nexec "$@"\n');
@@ -405,10 +409,19 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
   assert.deepEqual(await host.wipe('fast-abc-1'), { ok: true, left: [] });
   await assert.rejects(host.startDb('fast-abc-1', { image: 'postgres:16', name: 'test', readyS: 5, maxConnections: 200 }), /pinned to its digest/);
   await assert.rejects(host.exec('../x', 'id', {}, 1000), /not a run id/);
+  // create: the two commits in full, then each directory left out; the store's tips, only full commit ids taken.
+  const refs = { branch: 'main', head: 'refs/worklane/test-run/fast-abc-1/head', base: 'refs/worklane/test-run/fast-abc-1/base', headSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) };
+  assert.deepEqual(await host.create('fast-abc-1', Readable.from([]), { ...refs, exclude: ['docs/design', 'art'] }), { workdir: '/runs/x/work' });
+  assert.deepEqual(await host.storeTips(), ['c'.repeat(40), 'd'.repeat(64)]);
+  for (const [bad, why] of [[{ exclude: ['../x'] }, /a directory inside the repo/], [{ exclude: ['-rf'] }, /a directory inside the repo/], [{ headSha: 'HEAD' }, /not full commit ids/], [{ baseSha: 'a'.repeat(39) }, /not full commit ids/], [{ exclude: Array.from({ length: 33 }, (_, i) => `d${i}`) }, /at most 32/]] as const) {
+    await assert.rejects(host.create('fast-abc-1', Readable.from([]), { ...refs, exclude: [] as readonly string[], ...(bad as object) }), why);
+  }
   assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [
     `shop db-start fast-abc-1 ${pin} test 5 250`,
     `shop exec fast-abc-1 60 --env DATABASE_URL=${db.url} -- npm test`,
     'shop wipe fast-abc-1',
+    `shop create fast-abc-1 main refs/worklane/test-run/fast-abc-1/head refs/worklane/test-run/fast-abc-1/base ${'a'.repeat(40)} ${'b'.repeat(40)} docs/design art`,
+    'shop store-tips',
   ]);
   rmSync(dir, { recursive: true, force: true });
 });
@@ -461,7 +474,8 @@ test('isolation: the workspace\'s git has no remote, no credential helper, no ho
   p.git('config', 'credential.helper', '!/usr/local/bin/harness git-credential');
   p.git('config', 'core.hooksPath', '.githooks');
   p.git('update-ref', 'refs/remotes/origin/main', p.main);
-  const host = localHost(mkdtempSync(join(tmpdir(), 'tr-git-')), { docker: '/nonexistent/docker' });
+  const hostBase = mkdtempSync(join(tmpdir(), 'tr-git-'));
+  const host = localHost(hostBase, { docker: '/nonexistent/docker' });
   const id = newRunId('fast', p.head);
   const ws = await createWorkspace(host, p.dir, p.head, id);
   const git = (...a: string[]) => execFileSync('git', a, { cwd: ws.workdir, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
@@ -470,7 +484,10 @@ test('isolation: the workspace\'s git has no remote, no credential helper, no ho
   assert.doesNotMatch(config, /\[remote|url\s*=|github\.com|git-credential|\.githooks/);
   assert.equal(git('config', '--get', 'credential.helper'), '', 'the credential helper is set empty');
   assert.equal(git('config', '--get', 'core.hooksPath'), '/dev/null');
-  assert.ok(!existsSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates')), 'a copy of the objects, never shared alternates');
+  const alternates = readFileSync(join(ws.workdir, '.git', 'objects', 'info', 'alternates'), 'utf8');
+  assert.equal(alternates, `${join(hostBase, 'store', 'objects')}\n`, 'the one alternate is the host\'s own object store');
+  assert.ok(!alternates.includes(p.dir), 'never the coordinator\'s objects');
+  assert.equal(spawnSync('git', ['-C', join(hostBase, 'store'), 'remote'], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).stdout, '', 'the store has no remote either');
   assert.ok(statSync(join(ws.workdir, '.git')).isDirectory(), 'its own .git, not a worktree link into the coordinator\'s');
   assert.equal(git('rev-parse', 'origin/main'), p.main);
   await wipeWorkspace(host, id);
@@ -506,7 +523,195 @@ test('the sandbox helper clones exactly as the engine does', () => {
   const clone = /^CLONE='([\s\S]*?)'$/m.exec(helper)?.[1];
   assert.equal(clone, cloneScript());
   assert.match(helper, /\[ "\$head" = "refs\/worklane\/test-run\/\$id\/head" \] && \[ "\$base" = "refs\/worklane\/test-run\/\$id\/base" \]/);
-  assert.match(helper, /runuser -u "\$user" -- env -i PATH=[^ ]+ HOME="\$d\/home" LANG=C\.UTF-8 bash -c "\$CLONE"/, 'as the test user, with nothing of the caller\'s environment');
+  assert.match(helper, /runuser -u "\$user" -- env -i PATH=[^ ]+ HOME="\$d\/home" LANG=C\.UTF-8 bash -c "\$CLONE" _ "\$d\/tree\.bundle" "\$d\/work" "\$branch" "\$head" "\$base" "\$hsha" "\$bsha" "\$store" "\$@"/, 'as the test user, with nothing of the caller\'s environment');
+  // The store is the test user's own, 0700, under the instance's state; a run's exec can write only its own directory,
+  // the caches and the shared directories, so never the store.
+  assert.match(helper, /install -d -o "\$user" -g "\$user" -m 0700 "\$store"/);
+  const exec = helper.slice(helper.indexOf('exec_run() {'), helper.indexOf('\n}\n', helper.indexOf('exec_run() {')));
+  assert.match(exec, /-p ProtectSystem=strict/);
+  assert.deepEqual([...exec.matchAll(/ReadWritePaths=("?)([^"\s]+)/g)].map((m) => m[2]), ['$d', '-$root/cache']);
+  assert.ok(exec.includes('"ReadWritePaths=-$root/cache -$root/shared"'));
+  assert.doesNotMatch(exec, /store/);
+  // The check's sandbox probe: systemd-run expands ${...} in its command itself (as ExecStart= does), so the probe has
+  // none, and it checks the store it found is the instance's own (an empty path would make the write test vacuous).
+  const probe = helper.slice(helper.indexOf('out="$(exec_run "$id" 60 --'), helper.indexOf('\n', helper.indexOf('out="$(exec_run "$id" 60 --')));
+  assert.doesNotMatch(probe, /\$\{/);
+  assert.ok(probe.includes(`[ "$s" = "'"$store"'" ] || { echo "not the store: $s"; n=1; }`));
+});
+
+/** A host that records how many bytes each run's bundle had, passing the bundle on unchanged. */
+function measured(host: RunHost) {
+  const bytes: number[] = [];
+  const wrapped: RunHost = {
+    ...host,
+    async create(id, bundle, refs) {
+      const chunks: Buffer[] = [];
+      for await (const c of bundle) chunks.push(Buffer.from(c as Buffer));
+      const all = Buffer.concat(chunks);
+      bytes.push(all.length);
+      return host.create(id, Readable.from(all.length ? [all] : []), refs);
+    },
+  };
+  return { host: wrapped, bytes };
+}
+
+test('the object store: the first run takes every object, a run of a commit the store has takes none, a new commit takes only its own', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  // Some history worth not sending twice: a large file on main.
+  writeFileSync(join(p.dir, 'big.bin'), randomBytes(400_000));
+  p.git('add', 'big.bin');
+  p.git('commit', '-q', '-m', 'big');
+  const main = p.git('rev-parse', 'HEAD');
+  p.git('checkout', '-q', 'feature');
+  p.git('merge', '-q', '--no-edit', 'main');
+  const head = p.git('rev-parse', 'HEAD');
+  p.git('checkout', '-q', 'main');
+  const base = mkdtempSync(join(tmpdir(), 'tr-store-'));
+  const m = measured(localHost(base, { docker: '/nonexistent/docker' }));
+  const look = async (id: string, want: string) => {
+    const g = (...a: string[]) => execFileSync('git', a, { cwd: join(base, 'runs', id, 'work'), encoding: 'utf8' }).trim();
+    assert.equal(g('rev-parse', 'HEAD'), want);
+    assert.equal(g('rev-parse', 'main'), main);
+    assert.equal(g('rev-parse', 'origin/main'), main);
+    assert.equal(g('status', '--porcelain'), '', 'a clean checkout');
+    assert.match(g('log', '--format=%s', 'main'), /big[\s\S]*init/, 'the whole history');
+    assert.equal(g('merge-base', 'HEAD', 'origin/main'), main);
+    assert.equal(readFileSync(join(base, 'runs', id, 'work', 'big.bin')).length, 400_000);
+  };
+  const ids = [newRunId('fast', head), newRunId('fast', head)];
+  const first = await createWorkspace(m.host, p.dir, head, ids[0]!);
+  assert.equal(first.bundleRefs, 2);
+  assert.ok(m.bytes[0]! > 300_000, `the first bundle carries the history (${m.bytes[0]} bytes)`);
+  await look(ids[0]!, head);
+  await wipeWorkspace(m.host, ids[0]!);
+  // The same commit again, after the first run is wiped: the store kept everything, so nothing is sent.
+  const again = await createWorkspace(m.host, p.dir, head, ids[1]!);
+  assert.deepEqual([again.bundleRefs, m.bytes[1]], [0, 0]);
+  await look(ids[1]!, head);
+  // A new commit on the PR: only its own objects.
+  p.git('checkout', '-q', 'feature');
+  writeFileSync(join(p.dir, 'feature.txt'), 'the change, again\n');
+  p.git('commit', '-q', '-am', 'again');
+  const next = p.git('rev-parse', 'HEAD');
+  p.git('checkout', '-q', 'main');
+  const id3 = newRunId('fast', next);
+  const third = await createWorkspace(m.host, p.dir, next, id3);
+  assert.equal(third.bundleRefs, 1, 'main is in the store already');
+  assert.ok(m.bytes[2]! < 5_000, `only the new commit's objects (${m.bytes[2]} bytes)`);
+  await look(id3, next);
+  const r = await m.host.exec(id3, 'git diff --name-only origin/main...HEAD && git log --oneline -3 | wc -l', {}, 30_000);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /^feature\.txt$/m);
+  // Both runs read one store at once; wiping one leaves the other's checkout whole.
+  await wipeWorkspace(m.host, ids[1]!);
+  await look(id3, next);
+  assert.deepEqual(new Set(await m.host.storeTips()), new Set([head, main, next]));
+  await wipeWorkspace(m.host, id3);
+  assert.deepEqual(readdirSync(join(base, 'runs')), []);
+  assert.ok(existsSync(join(base, 'store', 'HEAD')), 'the store outlives the runs');
+  rmSync(base, { recursive: true, force: true });
+});
+
+test('the object store: runs that start at once on a new instance all get their workspace (one makes the store, the others wait for it)', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  const base = mkdtempSync(join(tmpdir(), 'tr-store-'));
+  const host = localHost(base, { docker: '/nonexistent/docker' });
+  const ids = Array.from({ length: 4 }, () => newRunId('fast', p.head));
+  const made = await Promise.all(ids.map((id) => createWorkspace(host, p.dir, p.head, id)));
+  for (const ws of made) assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ws.workdir, encoding: 'utf8' }).trim(), p.head);
+  for (const id of ids) await wipeWorkspace(host, id);
+  rmSync(base, { recursive: true, force: true });
+});
+
+test('the object store: a run still gets its commit when the store\'s tips are unknown here or the store can\'t be read', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  const base = mkdtempSync(join(tmpdir(), 'tr-store-'));
+  const host = localHost(base, { docker: '/nonexistent/docker' });
+  // Tips this repo never had (another project's, a rewritten history): ignored, a full bundle sent.
+  const strange: RunHost = { ...host, storeTips: async () => ['f'.repeat(40), 'not a sha'] };
+  const a = await createWorkspace(strange, p.dir, p.head, newRunId('fast', p.head));
+  assert.equal(a.bundleRefs, 2);
+  const broken: RunHost = { ...host, storeTips: async () => Promise.reject(new Error('store unreadable')) };
+  const b = await createWorkspace(broken, p.dir, p.head, newRunId('fast', p.head));
+  assert.equal(b.bundleRefs, 2);
+  assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: b.workdir, encoding: 'utf8' }).trim(), p.head);
+  // A store that says it has the commits but doesn't: the run fails, saying so, and is wiped like any other.
+  const emptyBase = mkdtempSync(join(tmpdir(), 'tr-store-'));
+  const empty = localHost(emptyBase, { docker: '/nonexistent/docker' });
+  const lying: RunHost = { ...empty, storeTips: async () => [p.head, p.main] };
+  const id = newRunId('fast', p.head);
+  await assert.rejects(createWorkspace(lying, p.dir, p.head, id), /the object store has no commit/);
+  await wipeWorkspace(empty, id);
+  assert.equal(execFileSync('git', ['-C', p.dir, 'for-each-ref', 'refs/worklane/'], { encoding: 'utf8' }), '', 'no temporary refs left in the coordinator\'s clone');
+  rmSync(base, { recursive: true, force: true });
+  rmSync(emptyBase, { recursive: true, force: true });
+});
+
+test('sparse_exclude in a run: the workspace leaves those directories out, unless a tier of the run sets full_checkout', { skip: !posix && 'POSIX shell' }, async () => {
+  const p = projectWithHead();
+  for (const f of ['docs/design/shot.png', 'art/games.json', 'web/public/assets/logo.png', 'assets/big.zip']) {
+    mkdirSync(join(p.dir, f, '..'), { recursive: true });
+    writeFileSync(join(p.dir, f), 'x\n');
+  }
+  p.git('add', '-A');
+  p.git('commit', '-q', '-m', 'binaries');
+  const sha = p.git('rev-parse', 'HEAD');
+  const host = localHost(mkdtempSync(join(tmpdir(), 'tr-sparse-')), { docker: '/nonexistent/docker' });
+  const id = newRunId('fast', sha);
+  const ws = await createWorkspace(host, p.dir, sha, id, ['docs/design', 'assets']);
+  assert.ok(!existsSync(join(ws.workdir, 'docs', 'design')) && !existsSync(join(ws.workdir, 'assets')));
+  assert.ok(existsSync(join(ws.workdir, 'art', 'games.json')) && existsSync(join(ws.workdir, 'web', 'public', 'assets', 'logo.png')));
+  const r = await host.exec(id, 'git status --porcelain && git ls-tree -r --name-only HEAD | grep -c "^docs/design/"', {}, 30_000);
+  assert.equal(r.code, 0, r.out);
+  assert.equal(r.out.trim(), '1', 'nothing shows as deleted, and the commit still has them');
+  await wipeWorkspace(host, id);
+  // The run's tiers decide: one that needs everything gets everything, for the whole run.
+  const tier = (o: object) => TestRunConfig.parse({ tiers: [{ name: 't', command: 'x', kind: 'fast', ...o }] }).tiers[0]!;
+  assert.equal(tier({}).full_checkout, false);
+  assert.deepEqual(workspaceExclude([tier({}), tier({ name: 'u' })], ['art']), ['art']);
+  assert.deepEqual(workspaceExclude([tier({}), tier({ name: 'u', full_checkout: true })], ['art']), []);
+  assert.deepEqual(workspaceExclude([tier({})]), []);
+  const full = newRunId('fast', sha);
+  const ws2 = await createWorkspace(host, p.dir, sha, full, workspaceExclude([tier({ full_checkout: true })], ['docs/design']));
+  assert.ok(existsSync(join(ws2.workdir, 'docs', 'design', 'shot.png')));
+  await wipeWorkspace(host, full);
+  // The host refuses a directory the config would have refused, before anything runs.
+  await assert.rejects(createWorkspace(host, p.dir, sha, newRunId('fast', sha), ['../up']), /a directory inside the repo/);
+});
+
+test('regression: a run\'s ${...} is bash\'s, never systemd-run\'s (--expand-environment=no on 254+, each $ as $$ before)', { skip: !posix && 'bash' }, () => {
+  const cmd = 'x=hello; echo "got ${x} ${x%lo} $x"';
+  // What systemd does with the command line when it expands: $$ is a literal $, ${NAME} and $NAME (a word of its own)
+  // its environment's (none of these is set there).
+  const systemdExpands = (s: string) => s.replace(/\$\$|\$\{[^}]*\}/g, (m) => (m === '$$' ? '$' : ''));
+  const lines = (r: ReturnType<typeof helperFn>) => r.stdout.replace(/accepted\n$/, '').split('\n');
+  const bash = (c: string) => spawnSync('bash', ['-c', c], { encoding: 'utf8' }).stdout.trim();
+  assert.equal(bash(systemdExpands(cmd)), 'got   hello', 'the bug: systemd blanks the shell-only ${x} forms');
+  for (const v of ['254', '255', '258']) {
+    const [flag, ...rest] = lines(helperFn('systemd_command', v, cmd));
+    assert.equal(flag, '--expand-environment=no', v);
+    assert.equal(rest.join('\n'), cmd, `${v}: the command as written`);
+  }
+  for (const v of ['253', '249', '0']) {
+    const [flag, ...rest] = lines(helperFn('systemd_command', v, cmd));
+    assert.equal(flag, '', `${v}: no flag (older systemd-run has none)`);
+    assert.equal(bash(systemdExpands(rest.join('\n'))), 'got hello hel hello', `${v}: after systemd's own expansion, bash gets the command as written`);
+  }
+  assert.equal(helperFn('systemd_command', '25x', cmd).status, 2);
+  const src = readFileSync(helperSrc, 'utf8');
+  const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
+  assert.ok(exec.includes('cmd="$(systemd_command "$(systemd_version)" "$2")"'));
+  assert.ok(exec.includes('exec systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
+  assert.ok(exec.endsWith('/bin/bash -o pipefail -c "$cmd"'), 'the command goes as systemd_command made it');
+});
+
+test('a directory left out: the helper takes exactly what the engine\'s config takes', { skip: !posix && 'bash' }, () => {
+  const cases = ['docs/design', 'art', 'assets', 'a.b/c_d@e+f-g', 'x'.repeat(200), 'x'.repeat(201), '../up', '/abs', 'a/../b', 'a//b', '.', './a', 'a/.', 'docs/*', 'my dir', '-x', '.git', '.git/hooks', '.github', "it's", 'a\\b', 'a;b', '$(id)', ''];
+  for (const c of cases) {
+    const engine = sparseDirProblem(c) === null;
+    const r = helperFn('valid_dir', c);
+    assert.equal(r.status === 0 && /accepted/.test(r.stdout), engine, `${JSON.stringify(c)}: engine ${engine ? 'takes' : 'refuses'} it, the helper ${r.status === 0 ? 'takes' : 'refuses'} it`);
+  }
 });
 
 /** The PATH the helper exports for itself (its first `export PATH=` line). */

@@ -1,5 +1,12 @@
 # Roster. Workers build; the evaluator independently reproduces and judges. Models are aliases or full IDs.
 daily_budget_usd: 40        # usage guard on estimated cost, whichever runtime is used
+# Worker attempts at one issue before it is blocked (default 8). Before each retry a short read-only reflection run
+# (model_routing.reflection, haiku by default) says what failed and what to change; the same failure 3 times in a
+# row starts the task again in a fresh worktree on the escalated model, and 3 more blocks it.
+# max_attempts: 8
+# One issue's budget, all its runs together: agent run time and tokens in and out. An incident at 85% of either;
+# the task is stopped at 100%. Unset: no such cap.
+# budget: { task_minutes: 240, task_tokens: 50000000 }
 roles:
   workers:   { enabled: true, count: 1, max: 4, model: sonnet, hard_issues_model: opus }
   evaluator: { enabled: true, model: opus }
@@ -23,7 +30,7 @@ instruction_evals: { enabled: true, cap_usd: 10, samples: 3 }
 # settings.model_cap caps every model at a tier.
 # model_routing: { build: sonnet, build_high_risk: opus, escalate_after: 2, planner: sonnet, research: sonnet,
 #                  intake_triage: sonnet, intake_replier: haiku, intake_summary: haiku, intake_thread: sonnet,
-#                  stage_judge: sonnet, eval_answer: sonnet }
+#                  stage_judge: sonnet, eval_answer: sonnet, reflection: haiku }
 # Tiered evaluation, decided in code: changes at cheap_levels (L0: docs-only, tests-only, comment-only) are
 # judged by cheap_model, the rest by the evaluator's model; a failed or uncertain cheap verdict is judged once
 # more by the evaluator's model. An instance can override it in policy.yaml settings.eval_routing.

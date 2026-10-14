@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
 import { killTree, shellCommand, spawnDetached } from '../os/index.js';
+import { SPARSE_MAX, sparseDirProblem } from '../checkout.js';
 import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { HELPER_PROTOCOL } from './helper.js';
 import { cloneScript } from './workspace.js';
@@ -153,20 +154,42 @@ export interface BundleRefs {
   branch: string;
   head: string;
   base: string;
+  /** The commit to check out and the default branch's tip, in full (the bundle may carry neither: the store has them). */
+  headSha: string;
+  baseSha: string;
+  /** Directories left out of the checkout (tests.yaml checkout.sparse_exclude); none for a full one. */
+  exclude: readonly string[];
 }
+
+const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 function checkRefs(id: string, r: BundleRefs): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(r.branch) || r.branch.includes('..')) throw new Error(`not a branch name: ${r.branch}`);
   if (r.head !== `refs/${BRAND.cli}/test-run/${id}/head` || r.base !== `refs/${BRAND.cli}/test-run/${id}/base`) throw new Error(`not run ${id}'s bundle refs`);
+  if (!FULL_SHA.test(r.headSha) || !FULL_SHA.test(r.baseSha)) throw new Error(`not full commit ids: ${r.headSha} ${r.baseSha}`);
+  if (r.exclude.length > SPARSE_MAX) throw new Error(`at most ${SPARSE_MAX} directories left out`);
+  for (const d of r.exclude) {
+    const why = sparseDirProblem(d);
+    if (why) throw new Error(`${d}: ${why}`);
+  }
+}
+
+/** The store's tips as the helper prints them: one full commit id a line, nothing else. */
+function parseTips(out: string): string[] {
+  return out.split('\n').map((l) => l.trim()).filter((l) => FULL_SHA.test(l));
 }
 
 export interface RunHost {
   readonly kind: 'sandbox' | 'local';
   /**
-   * A new run's workspace: a git clone of its own, from a bundle stream of the commit (`refs.head`) and the default
-   * branch (`refs.base`, checked out as `refs.branch` and origin/`refs.branch`).
+   * A new run's workspace (./workspace.ts): the store takes what the bundle stream carries (the commit as `refs.head`,
+   * the default branch as `refs.base`, either or both left out when the store has it), then a repo of the run's own
+   * reads the store, with `refs.headSha` checked out (leaving `refs.exclude` out) and `refs.baseSha` as `refs.branch`
+   * and origin/`refs.branch`.
    */
   create(id: string, bundle: Readable, refs: BundleRefs): Promise<{ workdir: string }>;
+  /** The commits the instance's object store keeps (its tips), so a bundle can leave out what they reach. */
+  storeTips(): Promise<string[]>;
   /** The change's paths, one per line, in a file of the run's (for {changed_files}). */
   changedFiles(id: string, files: readonly string[]): Promise<string>;
   /** A cache's directory for this key (made if new). */
@@ -314,9 +337,14 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
     async create(id, bundle, refs) {
       checkId(id);
       checkRefs(id, refs);
-      const r = await call(['create', id, refs.branch, refs.head, refs.base], { stdin: bundle, timeoutMs: 600_000 });
+      const r = await call(['create', id, refs.branch, refs.head, refs.base, refs.headSha, refs.baseSha, ...refs.exclude], { stdin: bundle, timeoutMs: 600_000 });
       if (r.code !== 0) throw fail('create', `creating run ${id}'s workspace`, r);
       return { workdir: lastLine(r) };
+    },
+    async storeTips() {
+      const r = await call(['store-tips'], { timeoutMs: 60_000 });
+      if (r.code !== 0) throw fail('store-tips', 'reading the object store', r);
+      return parseTips(r.stdout);
     },
     async changedFiles(id, files) {
       checkId(id);
@@ -403,9 +431,16 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       if (w.code !== 0) throw fail('create', `receiving run ${id}'s bundle`, w);
       const [bash, args] = shellCommand(cloneScript());
       const env = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), LANG: 'C.UTF-8' };
-      const r = await run(bash, [...args, '_', file, join(dir, 'work'), refs.branch, refs.head, refs.base], { env, cwd: dir, timeoutMs: 600_000 });
+      mkdirSync(join(base, 'store'), { recursive: true, mode: 0o700 });
+      const r = await run(bash, [...args, '_', file, join(dir, 'work'), refs.branch, refs.head, refs.base, refs.headSha, refs.baseSha, join(base, 'store'), ...refs.exclude], { env, cwd: dir, timeoutMs: 600_000 });
       if (r.code !== 0) throw fail('create', `creating run ${id}'s workspace`, r);
       return { workdir: join(dir, 'work') };
+    },
+    async storeTips() {
+      if (!existsSync(join(base, 'store', 'HEAD'))) return [];
+      const r = await run('git', [`--git-dir=${join(base, 'store')}`, 'for-each-ref', '--format=%(objectname)', 'refs/keep/'], { env: { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, timeoutMs: 60_000 });
+      if (r.code !== 0) throw fail('store-tips', 'reading the object store', r);
+      return parseTips(r.stdout);
     },
     async changedFiles(id, files) {
       checkId(id);

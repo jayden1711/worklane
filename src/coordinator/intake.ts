@@ -28,6 +28,11 @@ const INTAKE_KIND_LABEL: Record<string, string> = { bug: 'bug', feature: 'enhanc
 const INTAKE_OUTCOMES = ['intake.filed', 'intake.awaiting', 'intake.commented', 'intake.grouped', 'intake.asked', 'intake.dropped'] as const;
 /** What a sender is told when a restart cut off their report. */
 const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Could you send it again?";
+// WHY: a github report is never taken twice (the seen ledger), so asking for it again would go nowhere.
+const GITHUB_INTERRUPTED_REPLY = "Sorry, we couldn't finish triaging this issue; it stays here for a maintainer.";
+const GITHUB_AWAITING_REPLY = 'Thanks. A maintainer approves this before it is taken on as work; until then it stays in triage.';
+const GITHUB_REJECTED_REPLY = 'A maintainer decided not to take this on as work for now; it stays in triage.';
+const ownIssue = (r: Pick<IncomingReport, 'source' | 'sourceId'> | null): number | null => (r?.source === 'github' && /^\d+$/.test(r.sourceId) ? Number(r.sourceId) : null);
 
 export abstract class Intake extends QuickReplies {
   // ---------------------------------------------------------------- intake
@@ -96,7 +101,8 @@ export abstract class Intake extends QuickReplies {
     for (const id of received) {
       if (ended.has(id)) continue;
       const raw = readRaw(this.d.stateDir, id);
-      const issue = await this.intakeIssueFor(id, ['ready', ...Object.values(INTAKE_KIND_LABEL)]).catch(() => null);
+      const own = ownIssue(raw);
+      const issue = own !== null ? ((await this.intakeLabelled(own, id).catch(() => false)) ? own : null) : await this.intakeIssueFor(id, ['ready', ...Object.values(INTAKE_KIND_LABEL)]).catch(() => null);
       if (issue !== null) {
         const ready = (await this.d.backlog.get(issue)).labels.includes('ready');
         this.emit('intake.filed', { id, issue, ready });
@@ -104,7 +110,7 @@ export abstract class Intake extends QuickReplies {
         continue;
       }
       this.emit('intake.dropped', { id, reason: 'interrupted' });
-      await this.intakeReply(id, raw, 'interrupted', INTERRUPTED_REPLY);
+      await this.intakeReply(id, raw, 'interrupted', own !== null ? GITHUB_INTERRUPTED_REPLY : INTERRUPTED_REPLY);
     }
   }
 
@@ -164,7 +170,7 @@ export abstract class Intake extends QuickReplies {
     const sender = createHash('sha256').update(`${r.sender.source}\0${r.sender.id}`).digest('hex').slice(0, 12);
     const redacted = redactPii(r.text, { names: [...(r.sender.name ? [r.sender.name] : []), ...cfg.redact.names], patterns: cfg.redact.patterns });
     this.emit('intake.received', { id, source: r.source, sender, excerpt: excerpt(redacted) });
-    const drop = (reason: string) => void this.emit('intake.dropped', { id, reason: reason.slice(0, 500) });
+    const drop = (reason: string) => this.intakeDrop(r, id, reason);
     const settings = this.d.settings?.().settings ?? {};
     const caps = intakeCaps(settings, cfg.caps);
     const meter = new IntakeMeter(this.d.stateDir, caps, () => (this.d.now?.() ?? new Date()).getTime());
@@ -175,7 +181,9 @@ export abstract class Intake extends QuickReplies {
     const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
     if (left <= 0) return drop('budget');
     const recent = this.intakeRecent(id);
-    const shown = intakeCandidates(redacted, await this.intakeOpenIssues(), recent);
+    // INVARIANT: a github report's own issue is never a candidate, so it can't be judged a duplicate of itself.
+    const own = ownIssue(r);
+    const shown = intakeCandidates(redacted, (await this.intakeOpenIssues()).filter((i) => i.number !== own), recent);
     const bundleDir = writeIntakeBundle({ instanceRoot: dirname(this.d.repo), gid: this.d.agentTasks?.gid ?? statSync(this.d.repo).gid, id, redacted, source: r.source, candidates: shown, recent: recent.map(({ id: rid, text }) => ({ id: rid, text })) });
     const spec = intakeRun({ bundleDir, repoAccess: researchRepoAccess(settings), repo: this.d.repo });
     const role = this.d.cfg.agents.roles.researcher ?? this.d.cfg.agents.roles.workers!;
@@ -216,7 +224,8 @@ export abstract class Intake extends QuickReplies {
     const owner = this.d.cfg.project.owners.default;
     switch (a.action) {
       case 'file': {
-        const n = await this.intakeFileOnce(id, a.title, a.body, a.labels);
+        const own = ownIssue(r);
+        const n = own !== null ? await this.intakeLabelOnce(own, id, a.body, a.labels) : await this.intakeFileOnce(id, a.title, a.body, a.labels);
         this.emit('intake.filed', { id, issue: n, ready: a.labels.includes('ready') });
         return this.intakeReply(id, r, 'filed', statusReply('filed', trusted));
       }
@@ -224,9 +233,12 @@ export abstract class Intake extends QuickReplies {
         // The draft waits in the coordinator's private state; the decision names only its report.
         ownerOnlyDir(join(this.d.stateDir, 'intake'));
         ownerOnlyDir(join(this.d.stateDir, 'intake', 'drafts'));
-        writeOwnerOnly(join(this.d.stateDir, 'intake', 'drafts', `${id}.json`), JSON.stringify({ title: a.title, body: a.body, labels: a.labels }));
+        // WHY: the issue number is kept with the draft: the raw report may be purged before anyone answers.
+        const own = ownIssue(r);
+        writeOwnerOnly(join(this.d.stateDir, 'intake', 'drafts', `${id}.json`), JSON.stringify({ title: a.title, body: a.body, labels: a.labels, ...(own !== null ? { issue: own } : {}) }));
         const decision = await this.ask('intake', null, owner, `File this report (via ${r.source}) as an issue: "${a.title.slice(0, 150)}"?`, a.options, 'approve', [`intake:${id}`, 'sender not trusted: approve files it ready, edit files it without ready, reject drops it']);
         this.emit('intake.awaiting', { id, decision });
+        if (own !== null) await this.intakeReply(id, r, 'awaiting', GITHUB_AWAITING_REPLY);
         return;
       }
       case 'comment':
@@ -244,8 +256,7 @@ export abstract class Intake extends QuickReplies {
         return this.intakeReply(id, r, 'question', a.reply);
       }
       case 'drop':
-        this.emit('intake.dropped', { id, reason: a.reason.slice(0, 500) });
-        return;
+        return this.intakeDrop(r, id, a.reason);
     }
   }
 
@@ -354,14 +365,25 @@ export abstract class Intake extends QuickReplies {
       const file = join(this.d.stateDir, 'intake', 'drafts', `${rid}.json`);
       let issue: number | null = null;
       if (existsSync(file) && (a.answer === 'approve' || a.answer === 'edit')) {
-        const d = JSON.parse(readFileSync(file, 'utf8')) as { title: string; body: string; labels: string[] };
-        issue = await this.intakeFileOnce(rid, d.title, d.body, a.answer === 'approve' ? ['ready', ...d.labels] : d.labels);
+        const d = JSON.parse(readFileSync(file, 'utf8')) as { title: string; body: string; labels: string[]; issue?: number };
+        const labels = a.answer === 'approve' ? ['ready', ...d.labels] : d.labels;
+        issue = typeof d.issue === 'number' ? await this.intakeLabelOnce(d.issue, rid, d.body, labels) : await this.intakeFileOnce(rid, d.title, d.body, labels);
       }
       this.emit('intake.decided', { id: rid, decision: q.id, answer: a.answer, by: a.by, issue });
       rmSync(file, { force: true });
       const raw = readRaw(this.d.stateDir, rid);
       if (issue !== null) await this.intakeReply(rid, raw, 'filed', statusReply('filed', raw ? isTrusted(raw.sender, cfg) : false));
+      else if (ownIssue(raw) !== null && a.answer === 'reject') await this.intakeReply(rid, raw, 'rejected', GITHUB_REJECTED_REPLY);
     }
+  }
+
+  // WHY: a github report left in triage says why on its issue; other sources' drops stay silent as before.
+  private async intakeDrop(r: IncomingReport, id: string, reason: string): Promise<void> {
+    this.emit('intake.dropped', { id, reason: reason.slice(0, 500) });
+    if (ownIssue(r) === null) return;
+    // INVARIANT: only the engine's reason code is posted, never text after it (a run's or a refusal's detail).
+    const code = reason.split(':')[0]!.replace(/[^a-z_ ]/gi, '').trim().slice(0, 60) || 'not taken';
+    await this.intakeReply(id, r, 'dropped', `Not taken on as work automatically (${code}); it stays in triage for a maintainer.`);
   }
 
   /** "Fixed" and "live" replies: once the report's issue merges, and once a verified deploy includes that merge. */

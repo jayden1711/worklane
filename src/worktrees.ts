@@ -5,6 +5,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { checkoutSparse } from './checkout.js';
 import { groupOnlyDir, projectCommand, writeGroupOnly } from './os/index.js';
 
 export interface WorktreeOptions {
@@ -18,6 +19,8 @@ export interface WorktreeOptions {
   env?: Record<string, string>;
   /** The instance's dependency-cache variables (dep-cache.ts), set for setup steps after the project's own. */
   cacheEnv?: Record<string, string>;
+  /** Directories left out of the worktree (tests.yaml checkout.sparse_exclude, src/checkout.ts). */
+  sparseExclude?: readonly string[];
 }
 
 const ownedFile = (o: WorktreeOptions) => join(o.stateDir, 'worktrees.json');
@@ -126,7 +129,9 @@ function addWorktree(o: WorktreeOptions, name: string, branch: string, base: str
   if (existsSync(path)) removeWorktree(o, name);
   setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
   excludeSandboxPlaceholders(o.repo);
-  git(o.repo, 'worktree', 'add', '-q', '-B', branch, path, base);
+  const sparse = o.sparseExclude ?? [];
+  git(o.repo, 'worktree', 'add', '-q', ...(sparse.length ? ['--no-checkout'] : []), '-B', branch, path, base);
+  if (sparse.length) checkoutSparse(o.repo, path, sparse);
   return path;
 }
 

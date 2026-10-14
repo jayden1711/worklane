@@ -165,6 +165,8 @@ function helperCheck(execRun: string) {
   const body = (name: string) => src.slice(src.indexOf(`${name}() {`), src.indexOf('\n}\n', src.indexOf(`${name}() {`)) + 3);
   const stubs = [
     'user=wl-test-shop',
+    'store=/nonexistent/store',
+    'runuser() { shift 3; "$@"; }',
     'die() { echo "$*" >&2; exit 2; }',
     'id() { echo wl-test-shop; }',
     'sudo() { echo "User wl-test-shop is not allowed to run sudo on this host."; }',
@@ -181,7 +183,7 @@ test('the helper\'s sandbox probe passes on the probe\'s own stdout, with system
   const real = 'cat "$0/probe.stdout"; cat "$0/probe.stderr" >&2; return 0';
   let r = helperCheck(real);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^PASS a sandboxed run reaches none of them$/m);
+  assert.match(r.stdout, /^PASS a sandboxed run reaches none of them, and reads the object store without writing it$/m);
   assert.match(r.stdout, /^OK$/m);
   // A path the run reached, a probe that failed, or one that never printed "probed": each a FAIL, showing stderr.
   for (const bad of [

@@ -19,6 +19,7 @@ import { slotsDir } from '../os/index.js';
 import { USAGE_INCIDENT } from '../usage-limit.js';
 import { CONFIG_INCIDENT } from '../config/live.js';
 import { DEPLOY_GATE_INCIDENT, POST_DEPLOY_INCIDENT, POST_DEPLOY_WAIT_INCIDENT } from '../deploy-gate/config.js';
+import { TASK_BUDGET_INCIDENT } from '../coordinator/loop-control.js';
 
 export const INCIDENTS_FILE = 'incidents.json';
 const LOCK_FILE = 'incidents.lock';
@@ -53,6 +54,8 @@ export const KINDS = {
   [POST_DEPLOY_INCIDENT]: { title: 'Production failed its post-deploy check', severity: 'red' },
   // Raised by the coordinator (src/deploy-gate/post-deploy.ts): the host didn't deploy the deploy branch's commit in time.
   [POST_DEPLOY_WAIT_INCIDENT]: { title: "Production didn't deploy the deploy branch's commit", severity: 'amber' },
+  // Raised by the coordinator (src/coordinator/loop-control.ts): an issue's runs reached 85% of its agents.yaml budget.
+  [TASK_BUDGET_INCIDENT]: { title: 'A task is near its budget', severity: 'amber' },
 } as const satisfies Record<string, { title: string; severity: Severity }>;
 export type WatchdogKind = keyof typeof KINDS;
 

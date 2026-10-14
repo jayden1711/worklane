@@ -27,6 +27,11 @@ required_checks: []
 # revert), one issue each. Blocks again after release_after_passes passes in a row, or an owner's clear. A re-run not
 # done in rerun_timeout_min is a real failure. The updater still requires every check green.
 # flaky: { rerun: true, release_after_passes: 10, rerun_timeout_min: 90 }
+# Fix-forward: a real red after an auto-merge first names the culprit (several PRs since the last green: each
+# first-parent commit tested on its own), then a fix task gets the failing logs, the culprit's diff and the merged
+# PRs; its PR goes through the normal gates. The culprit's revert PR is opened only if no fix is green within
+# max_attempts (0: revert at once), or at once when it touches revert_first_paths, the money path, auth or secrets.
+# fix_forward: { max_attempts: 2, revert_first_paths: [] }
 # Files two tasks at once would both change and conflict on: such tasks never run together (the second
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.
@@ -53,6 +58,11 @@ required_checks: []
 # conflicting, slow and flaky checks. Findings go to one "Gardener log" issue; a fix (a small cleanup or a lint
 # rule) is filed only for a pattern seen 3+ times, at most max_prs per run, never in a high-risk path.
 # gardener: { enabled: false, every_days: 7, at: "03:00", max_usd: 5, max_prs: 1 }
+# Repeated "no"s become checks: what writers say when they turn work down (reviews requesting changes, closed
+# PRs, revised or rejected plans, objections, chat corrections), with reverts as evidence, is grouped into
+# constraints. At min_sightings, one proposal each: a draft ast-grep rule plus test cases (repos with sgconfig.yml)
+# or a test, as a draft PR quoting the evidence; an issue instead for a protected area. Never auto-merged.
+# checks_from_feedback: { enabled: false, min_sightings: 2, max_proposals_per_week: 3 }
 os: auto                  # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches

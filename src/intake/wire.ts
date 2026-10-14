@@ -13,6 +13,9 @@ import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import { claimDiscord } from './discord-claims.js';
 import { identifyGate, sessionStartLimit } from './discord-gate.js';
 import { AlertsIntake } from './alerts.js';
+import { GitHubBacklog } from '../backlog/github.js';
+import type { Backlog } from '../backlog/types.js';
+import { GitHubIssuesIntake } from './github.js';
 import type { ReadOnlyQuery } from './bug-store.js';
 import { DiscordIntake, type DiscordOptions } from './discord.js';
 import type { IntakeConfig, IntakeSource } from './report.js';
@@ -94,6 +97,8 @@ export function intakeForInstance(o: {
   prodRead?: ReadOnlyQuery | undefined;
   /** The instance's state directory (where a production source keeps its cursor); required with prodRead. */
   stateDir?: string;
+  // WHY: injectable so tests never reach GitHub; default the instance's repo with its own token.
+  issues?: Pick<Backlog, 'list' | 'comment'>;
 }): IntakeWiring | null {
   const file = join(o.home, INTAKE_FILE);
   const first = loadIntakeConfig(file);
@@ -153,6 +158,13 @@ export function intakeForInstance(o: {
     else {
       const alerts = new AlertsIntake({ stateDir: o.stateDir, config: () => config()?.alerts ?? first.config.alerts, run: o.prodRead });
       sources.push({ name: alerts.name, take: () => alerts.take(), ack: (ids) => alerts.ack(ids), reply: () => alerts.reply() });
+    }
+  }
+  if (first.config.github.enabled) {
+    if (!o.stateDir) say('intake: github is on but the instance has no state directory; issues are not pulled');
+    else {
+      const backlog = o.issues ?? new GitHubBacklog(o.repo, o.githubToken, fetch, o.githubApi);
+      sources.push(new GitHubIssuesIntake({ backlog, stateDir: o.stateDir, config: () => config()?.github ?? first.config.github }).source());
     }
   }
   return { config, sources, name, ...(roleOf ? { roleOf } : {}), start, stop };
