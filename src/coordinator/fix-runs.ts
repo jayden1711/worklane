@@ -20,6 +20,7 @@ import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
 import { buildRoute } from './model-routing.js';
 import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { storageFailure } from '../events/log.js';
 import { SESSION_ID, type RunRequest, type RunResult } from '../runner.js';
 import { resumeFailed, reviewBrief, reviewFeedback, type ReviewFeedback } from '../review-feedback.js';
 
@@ -122,7 +123,7 @@ export abstract class FixRuns extends Landing {
    */
   protected async maybeFix(w: EventPayload<'pr.opened'>, pr: PullRequest, r: Readiness) {
     const { issue: n, number } = w;
-    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.fixGaveUp(number)) return;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.diskHeld() || this.fixGaveUp(number)) return;
     const failed = r.failed.map((c) => c.name);
     const give = (reason: string) => this.giveUpFix(w, pr.headSha, reason, failed);
     const ours = this.ourHead(number);
@@ -192,7 +193,7 @@ export abstract class FixRuns extends Landing {
    */
   async watchReviewFixes(): Promise<void> {
     const role = this.d.cfg.agents.roles.ci_repair;
-    if (!role?.enabled || this.stopped || this.halt.signal.aborted || this.usagePause()) return;
+    if (!role?.enabled || this.stopped || this.halt.signal.aborted || this.usagePause() || this.diskHeld()) return;
     const now = Date.now();
     if (now - this.reviewFixesPolledAt < (this.d.reviewPollMs ?? REVIEW_FIX_POLL_MS)) return;
     this.reviewFixesPolledAt = now;
@@ -284,8 +285,13 @@ export abstract class FixRuns extends Landing {
     let leaseSha = won.sha;
     this.emit('ci_fix.started', { issue: n, number, head: pr.headSha, checks: failed, attempt, lease: leaseSha, ...(trigger.kind === 'review' ? { reviews: trigger.reviews.map((r) => r.id) } : {}) });
     const heartbeat = setInterval(() => {
-      const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
-      if (next) leaseSha = next;
+      try {
+        const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
+        if (next) leaseSha = next;
+      } catch (e) {
+        // WHY: a full disk fails the lease commit; thrown from a timer it would kill the coordinator. The next beat renews.
+        if (!storageFailure(e)) throw e;
+      }
     }, 20 * 60_000);
     heartbeat.unref();
     const { name, branch, taskFile } = this.paths(n);
@@ -408,7 +414,7 @@ export abstract class FixRuns extends Landing {
    */
   protected async maybeFixConflict(w: EventPayload<'pr.opened'>, pr: PullRequest) {
     const { issue: n, number } = w;
-    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause()) return;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.diskHeld()) return;
     const baseRef = pr.base || this.branch;
     this.git(this.d.repo, 'fetch', '-q', this.remote, baseRef);
     const baseSha = this.git(this.d.repo, 'rev-parse', `${this.remote}/${baseRef}`);
@@ -513,8 +519,13 @@ export abstract class FixRuns extends Landing {
     let leaseSha = won.sha;
     this.emit('conflict_fix.started', { issue: n, number, head: pr.headSha, base_sha: baseSha, strategy: 'merge', attempt, lease: leaseSha });
     const heartbeat = setInterval(() => {
-      const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
-      if (next) leaseSha = next;
+      try {
+        const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
+        if (next) leaseSha = next;
+      } catch (e) {
+        // WHY: a full disk fails the lease commit; thrown from a timer it would kill the coordinator. The next beat renews.
+        if (!storageFailure(e)) throw e;
+      }
     }, 20 * 60_000);
     heartbeat.unref();
     const { name, branch, taskFile } = this.paths(n);

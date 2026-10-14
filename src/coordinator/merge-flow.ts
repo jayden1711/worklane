@@ -164,7 +164,8 @@ export abstract class MergeFlow extends FixRuns {
 
   /** Start the next PR batch in the background (one at a time). */
   protected prBatchTick() {
-    if (this.prBatching()) this.prBatch.tick();
+    // WHY: a batch starts full test runs: none while the disk is full or below its floor (src/disk-guard.ts).
+    if (this.prBatching() && !this.diskHeld()) this.prBatch.tick();
   }
 
   /** When each person's PR was last looked at (its fast checks), by number. */

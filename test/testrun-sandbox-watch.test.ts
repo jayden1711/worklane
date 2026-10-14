@@ -230,7 +230,7 @@ test('regression: a sandbox check that fails at coordinator start no longer swit
     units: () => null,
     updates: () => [],
     disks: () => [],
-    config: () => ({ stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null }),
+    config: () => ({ stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null, minFreeGb: 10, minFreePct: 5 }),
     poster: () => ({ poster: async (c: string) => (posts.push(c), true), dashboardUrl: 'https://dash.example.test', secrets: [] }),
     now: () => new Date(now),
   });
