@@ -324,15 +324,23 @@ test('the Board and the trust view pass over the log a fixed number of times, no
     const all = new EventLog(f).read();
     const b = counted(all);
     const board = boardView({ events: b.proxy, instance: 'x', role: 'owner', canReadDigest: true, live: [], slots: { cap: 2, running: 0 }, now });
-    const t = counted(all);
-    trustView(t.proxy, { agents: 2, now });
+    // The trust view copies the log first (the events up to now), so its passes show as times it parses one's time.
+    const parse = Date.parse;
+    let parsed = 0;
+    Date.parse = (x: string) => (parsed++, parse(x));
+    try {
+      trustView(all, { agents: 2, now });
+    } finally {
+      Date.parse = parse;
+    }
     const red = all.filter((e) => e.type === 'merge.main_result' && (e.payload as { outcome: string }).outcome === 'red').length;
-    return { board: b.n.passes, cards: board.cards.length, trust: t.n.passes, red };
+    return { board: b.n.passes, cards: board.cards.length, trustPerEvent: parsed / all.length, red };
   };
   const small = passes(1500);
   const big = passes(6000);
   assert.ok(big.cards > small.cards + 10, `more cards on the bigger log (${small.cards}, ${big.cards})`);
   assert.ok(big.red > small.red, `more main-red failures on the bigger log (${small.red}, ${big.red})`);
   assert.equal(big.board, small.board, `the Board's passes over the log: ${small.board} for ${small.cards} cards, ${big.board} for ${big.cards}`);
-  assert.equal(big.trust, small.trust, `the trust view's passes: ${small.trust} for ${small.red} failures, ${big.trust} for ${big.red}`);
+  // Times parsed per event: the same whatever the failures (a pass per failure would add one per event each).
+  assert.ok(big.trustPerEvent - small.trustPerEvent < 0.5, `the trust view parsed ${small.trustPerEvent.toFixed(2)} times per event with ${small.red} failures, ${big.trustPerEvent.toFixed(2)} with ${big.red}`);
 });
