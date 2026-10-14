@@ -213,6 +213,7 @@
   "test/testrun-pr-batch.test.ts": 2355,
   "test/testrun-predates.test.ts": 13729,
   "test/testrun-runs.test.ts": 9853,
+  "test/testrun-sandbox-watch.test.ts": 1570,
   "test/testrun-sandbox.test.ts": 1950,
   "test/testrun-select.test.ts": 8601,
   "test/testrun-systemd-run.test.ts": 1343,
