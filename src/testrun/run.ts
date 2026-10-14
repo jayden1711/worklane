@@ -59,6 +59,8 @@ export interface TestRunResult {
    * command): what the posted check says, with the end of that step's stderr, redacted. Never its stdout.
    */
   setup?: SetupFailure;
+  /** A line the posted check adds under the result (the coordinator's: its disk is full and the run's events wait). */
+  note?: string;
 }
 
 export interface SetupFailure {

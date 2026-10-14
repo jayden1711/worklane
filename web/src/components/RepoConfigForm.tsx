@@ -1,14 +1,70 @@
 // WHY: the repo's config changes only through a reviewed commit, so this form never writes it: Review asks the
-// server what the values change on the default branch, and Propose opens that change as a PR for a person to merge.
+// server what the values change on the default branch, and Propose opens that change as a PR. Merge (an owner, after
+// seeing the command) merges that PR and fast-forwards this checkout to it, so the next step reads the new config.
 import { useEffect, useState } from 'react';
-import { changeRepoConfig, getChecksSeen, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues } from '../api';
+import { changeRepoConfig, getChecksSeen, mergeRepoConfig, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues } from '../api';
 import { Button, cx } from './ui';
 
 const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
 const show = (v: unknown) => (Array.isArray(v) ? (v.length ? v.join(', ') : 'none') : v === undefined || v === null ? 'not set' : String(v));
 const list = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
 
-export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [] }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[] }) {
+/** The PR number in a GitHub PR URL. */
+const prNumber = (url: string | undefined) => Number(/\/pull\/(\d+)$/.exec(url ?? '')?.[1] ?? 0) || null;
+
+/** Merge the proposed PR from here: the command first, then Confirm; then the checkout is fast-forwarded to it. */
+function MergePanel({ number, initialPlan = null, onDone }: { number: number; initialPlan?: { command: string; then: string } | null; onDone?: () => void }) {
+  const [plan, setPlan] = useState<{ command: string; then: string } | null>(initialPlan);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const go = async (confirm: boolean) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await mergeRepoConfig(number, confirm);
+      if (!confirm) setPlan({ command: r.command ?? '', then: r.then ?? '' });
+      else {
+        setPlan(null);
+        setMsg({ ok: !!r.synced, text: `merged PR #${r.number}; ${r.detail ?? ''}` });
+        onDone?.();
+      }
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2" data-testid="repo-config-merge">
+      {!plan ? (
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void go(false)} data-testid="repo-config-merge-review">
+          Merge PR #{number} here…
+        </Button>
+      ) : (
+        <div className="space-y-2 rounded-lg bg-blue-tint p-3" data-testid="repo-config-merge-confirming">
+          <p className="text-[12.5px] text-ink">It runs:</p>
+          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-surface px-3 py-2 font-mono text-[12px] text-ink shadow-hairline">{plan.command}</code>
+          <p className="text-[12.5px] text-ink-2">{plan.then}.</p>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={busy} onClick={() => void go(true)} data-testid="repo-config-merge-confirm">
+              {busy ? 'Merging…' : 'Confirm merge'}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setPlan(null)} data-testid="repo-config-merge-cancel">
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+      {msg && (
+        <p className={cx('break-words text-[12.5px]', msg.ok ? 'text-green' : 'text-red')} data-testid="repo-config-merge-result">
+          {msg.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialProposed = null, initialMergePlan = null, onMerged }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialProposed?: string | null; initialMergePlan?: { command: string; then: string } | null; onMerged?: () => void }) {
   const [writers, setWriters] = useState(c.values.writers.join(', '));
   const [checks, setChecks] = useState<string[]>(c.values.required_checks);
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
@@ -19,7 +75,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [seenNote, setSeenNote] = useState<string | null>(null);
   const [changes, setChanges] = useState<ConfigChange[] | null>(initialChanges);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(initialProposed ? { ok: true, text: 'proposed: merge the PR to apply it', url: initialProposed } : null);
   useEffect(() => {
     getChecksSeen()
       .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : 'GitHub ran no checks on its tip'))))
@@ -34,7 +90,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
       const r = await changeRepoConfig(values(), confirm);
       if (confirm) {
         setChanges(null);
-        setMsg({ ok: true, text: `proposed on ${r.branch}: merge the PR to apply it`, ...(r.url ? { url: r.url } : {}) });
+        setMsg({ ok: true, text: `proposed on ${r.branch}: merge the PR to apply it (here, or on GitHub)`, ...(r.url ? { url: r.url } : {}) });
       } else setChanges(r.changes);
     } catch (e) {
       setMsg({ ok: false, text: (e as Error).message });
@@ -139,6 +195,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
           )}
         </p>
       )}
+      {canEdit && msg?.ok && prNumber(msg.url) && <MergePanel number={prNumber(msg.url)!} initialPlan={initialMergePlan} {...(onMerged ? { onDone: onMerged } : {})} />}
     </div>
   );
 }

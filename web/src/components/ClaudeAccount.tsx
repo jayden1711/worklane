@@ -255,12 +255,26 @@ export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data:
   );
 }
 
+/**
+ * Whether the panel looks again every few seconds: a switch is running, a request waits for the coordinator, or the
+ * newest request was handed to the switch's own unit and the unit hasn't written its first line yet (switch.jsonl still
+ * shows an earlier switch, or none). Without that last case the panel stopped looking the moment the request finished,
+ * before the switch had started, and never showed it.
+ */
+export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests'>, now = Date.now()): boolean {
+  if (d.switch?.status === 'running') return true;
+  if (d.requests.some((r) => r.status === 'pending' || r.status === 'running')) return true;
+  const last = d.requests[0];
+  if (!last || last.status !== 'done' || last.args[1] !== 'switch' || now - Date.parse(last.finishedAt ?? last.at) > 60_000) return false;
+  return !d.switch || Date.parse(d.switch.startedAt) < Date.parse(last.at) - 1_000;
+}
+
 /** The panel: loaded, and looked at again every few seconds while a switch or a request is under way. Hidden on refusal. */
 export function ClaudeAccountPanel() {
   const [data, setData] = useState<ClaudeAccountData | null>(null);
   const load = () => getClaudeAccount().then(setData, () => setData(null));
   useEffect(() => void load(), []);
-  const active = !!data && (data.switch?.status === 'running' || data.requests.some((r) => r.status === 'pending' || r.status === 'running'));
+  const active = !!data && accountBusy(data);
   useEffect(() => {
     if (!active) return;
     const t = window.setInterval(() => void load(), 3000);

@@ -832,6 +832,9 @@ export interface ConfigChange {
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
+/** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
+export const mergeRepoConfig = (number: number, confirm: boolean) =>
+  api<{ ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string }>('/api/first-run/repo-config/merge', { method: 'POST', body: JSON.stringify({ number, confirm }) });
 export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
   key: string;
@@ -1109,7 +1112,7 @@ export interface ClaudeAccountData {
   canPasteToken: boolean;
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
 }
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
@@ -1160,10 +1163,10 @@ export interface TailscaleData {
   run: { step: TailscaleAction; startedAt: string; status: 'running' | 'waiting' | 'done' | 'failed' | 'stalled'; detail: string; lines: TailscaleStepLine[] } | null;
   /** Tailscale's login page for the waiting `up`: sent to machine owners only, never stored by the page. */
   loginUrl: string | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
   script: { status: string; steps: string[] };
 }
-export const getTailscale = () => api<TailscaleData>('/api/tailscale');
+export const getTailscale = (fresh = false) => api<TailscaleData>(`/api/tailscale${fresh ? '?fresh=1' : ''}`);
 export const tailscaleAction = (action: TailscaleAction) => api<{ ok: boolean }>('/api/machine/tailscale', { method: 'POST', body: JSON.stringify({ action, confirm: true }) });
 
 export interface SavedView { name: string; filters: Filters }

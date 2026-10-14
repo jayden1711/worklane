@@ -6,6 +6,7 @@ import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
 import { SetupScreens } from '../components/SetupScreens';
 import { Header } from './Overview';
+import { VoiceSettings } from '../voice/VoiceSettings';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -85,7 +86,8 @@ function RoutingSection({ routes, configDir }: { routes: Route[]; configDir: str
 
 const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span className="text-muted-foreground">none</span>);
 
-export function SettingsPage() {
+/** `owner`: whether this person is one of the instance's owners (State.role), for the owners-only voice section. */
+export function SettingsPage({ owner = false }: { owner?: boolean }) {
   const { data: s, error } = useFetch(getSettings);
   // A viewer gets the project part only; the rest is the owners' and writers'.
   const full = s && !('forViewer' in s) ? s : null;
@@ -128,6 +130,7 @@ export function SettingsPage() {
       </div>
       )}
       <div className="grid gap-6 p-6 lg:grid-cols-2">
+        <VoiceSettings owner={owner} />
         <Section title="Project">
           <Row k="Name">{s.project.name}</Row>
           <Row k="Repository">{s.project.repo}</Row>

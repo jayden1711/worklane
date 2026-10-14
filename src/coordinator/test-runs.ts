@@ -56,6 +56,8 @@ export interface PrTestRunDeps {
   fetchPr?: (pr: OpenPr) => string;
   /** The files a PR changes against its base (tests inject this). */
   changed?: (pr: OpenPr) => string[];
+  /** Why no new run may start now (the disk is full or below its floor: src/disk-guard.ts), or null; absent: never held. */
+  hold?: () => string | null;
   /** The sandbox's check, held and run again while it fails (src/testrun/sandbox-watch.ts); absent: nothing to wait for. */
   sandbox?: { readonly ok: boolean; stop(): void };
 }
@@ -75,6 +77,9 @@ export function unfinishedRuns(events: readonly StoredEvent[]): string[] {
   }
   return [...started];
 }
+
+/** What a check posted while the event log can't be written says (the run's own events wait in memory). */
+export const EVENTS_KEPT_NOTE = "The instance's disk is full: this run's record waits in memory and is written to its log when there is room. The result above is the run's.";
 
 export class PrTestRuns {
   private inFlight = new Map<number, InFlight>();
@@ -151,6 +156,9 @@ export class PrTestRuns {
       const cur = this.inFlight.get(pr.number);
       if (cur && cur.sha === pr.headSha) continue;
       if (this.finished.get(pr.number)?.has(pr.headSha)) continue;
+      // INVARIANT: nothing starts (not even the fetch, which writes refs) while the disk is full or below its floor;
+      // the heads not started are started from a later listing, once there is room.
+      if (this.d.hold?.()) break;
       // WHY: one "test runs are off" check per head while the sandbox's check fails, not one every listing.
       if (this.refused.get(pr.number) === pr.headSha && !this.ready()) continue;
       let sha: string;
@@ -184,6 +192,8 @@ export class PrTestRuns {
       return;
     }
     if (controller.signal.aborted) return; // superseded: its head is no longer the PR's, so no check on it
+    // WHY: the result is known, and posting it needs no disk: the check goes up, saying its record waits in memory.
+    if (this.d.log.buffered().count) result = { ...result, note: EVENTS_KEPT_NOTE };
     // INVARIANT: a refused head is never "finished": it gets its real run as soon as the sandbox's check passes.
     if (result.setup?.step === SANDBOX_STEP) this.refused.set(pr.number, sha);
     else {
