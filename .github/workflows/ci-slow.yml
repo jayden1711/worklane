@@ -792,7 +792,7 @@ jobs:
           # The stand-in goes; the real hub runs, with the instance and the sign-in App setup mode made.
           sudo rm -f "$dd/stand-in.conf"
           sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-hub.service
-          for _ in $(seq 1 30); do to="$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:4399/auth/login)"; [ -n "$to" ] && break; sleep 1; done
+          for _ in $(seq 1 30); do to="$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:4399/auth/login || true)"; [ -n "$to" ] && break; sleep 1; done
           case "$to" in https://github.com/login/oauth/authorize\?*) ;; *) echo "the hub's sign-in goes to $to" >&2; exit 1 ;; esac
           systemctl show -p ExecStart --value worklane-dashboard-hub.service | grep -q -- '/usr/local/bin/worklane dashboard --hub ci='
       - name: the instance, the token for the agent only, the checkout through the App, the services, the helper
