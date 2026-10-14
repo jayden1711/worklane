@@ -36,8 +36,10 @@ permissions:
 jobs:
   scope:
     # Which slow jobs this run runs (scripts/ci/slow-jobs.sh): on a dispatch, the one asked for or all of them; on a PR,
-    # those whose paths it touches.
-    runs-on: ubuntu-latest
+    # those whose paths it touches. A batch on main runs it on the self-hosted runner when the repository variable
+    # CI_SELF_HOSTED is 'on' (docs/ci-runners.md: the guard; 1409507019 is this repo's id, a fork's differs); every
+    # other run, and every run with the variable unset, on GitHub's.
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && fromJSON('["self-hosted","nuc"]') || 'ubuntu-latest' }}
     outputs:
       run: ${{ steps.scope.outputs.run }}
     steps:
@@ -68,7 +70,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # The Linux leg of a batch on main: on the self-hosted runner when CI_SELF_HOSTED is 'on' (the check keeps its name,
+    # bootstrap (ubuntu-latest), from the matrix value). PRs, bisect steps and macOS: GitHub's runners.
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && matrix.os == 'ubuntu-latest' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && fromJSON('["self-hosted","nuc"]') || matrix.os }}
     defaults:
       run:
         shell: bash
