@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { SETUP_BRANCH } from '../src/auto-config.js';
@@ -313,4 +314,21 @@ test('`dashboard` on a checkout with no config: setup mode at the given address,
   } finally {
     child.kill();
   }
+});
+
+test("the dashboard's close finishes while a browser still holds a connection open (setup mode's hand-over depends on it)", async () => {
+  const p = project();
+  const g = ghStandIn(p.bare);
+  const s = await setupDashboard(p.root, g);
+  const port = Number(new URL(s.d.url).port);
+  // A socket with a request the server is still serving (its body never arrives): as a browser's kept-alive
+  // connection that sent one more request looks to close().
+  const socket = connect(port, '127.0.0.1');
+  await new Promise<void>((r) => socket.once('connect', () => r()));
+  socket.write(`POST /api/first-run/skip HTTP/1.1\r\nhost: 127.0.0.1\r\nauthorization: Bearer ${s.d.token}\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{`);
+  await new Promise((r) => setTimeout(r, 200));
+  socket.on('error', () => undefined);
+  const closed = await Promise.race([s.d.close().then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 3_000))]);
+  socket.destroy();
+  assert.equal(closed, true, 'close() returned within 3 s');
 });

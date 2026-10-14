@@ -1782,6 +1782,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             signin.cancel('the dashboard stopped');
             for (const c of clients.keys()) c.end();
             server.close(() => r());
+            // WHY: a browser's kept-alive socket can carry one more request (its live stream reconnecting) after
+            // close() stopped listening, and close() then never finishes: setup mode's hand-over hung on it.
+            server.closeAllConnections();
           }),
       });
     });
