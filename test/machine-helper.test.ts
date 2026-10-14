@@ -479,3 +479,30 @@ test('the pattern rules (add-project, stage-update-signer, discard-update-signer
   assert.match(sh, /^mv -f "\$\(dirname "\$HELPER_RULES"\)\/\.helper-rules\.json\.tmp" "\$HELPER_RULES"$/m);
   assert.match(readFileSync(join(setup, 'lib.sh'), 'utf8'), /^HELPER_RULES=\/etc\/worklane\/helper-rules\.json$/m);
 });
+
+test('every step that writes system paths runs in a transient unit of its own, started with the same arguments; nothing else does, and --in-unit is root\'s alone', () => {
+  const h = createRequire(import.meta.url)(helperSrc) as { needsUnit: (a: string[]) => boolean; unitCommand: (a: string[], user?: string, self?: string, node?: string, pid?: number) => string[]; IN_UNIT: string };
+  const k = ed25519();
+  // The coordinator's own unit runs with ProtectSystem=full: /usr, /boot and /etc read-only for sudo and this helper.
+  const writes = [['set-slots', '3'], ['set-test-slots', '2'], ['set-updates', 'on'], ['set-updates', 'off'], ['set-update-channel', 'release'], ['install-updater'], ['add-project', 'alpha', 'example/alpha'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['discard-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['claude-account', 'status']];
+  for (const a of writes) assert.equal(h.needsUnit(a), true, JSON.stringify(a));
+  // Already units of their own (systemd-run --no-block), and anything the helper refuses: never wrapped.
+  for (const a of [['tailscale', 'up'], ['claude-account', 'switch'], ['set-slots', '17'], ['install-updater', 'x'], ['rm', '-rf', '/'], []]) assert.equal(h.needsUnit(a), false, JSON.stringify(a));
+  assert.deepEqual(h.unitCommand(['install-updater'], 'wl-alpha', '/usr/local/libexec/worklane-machine', '/usr/bin/node', 42), [
+    '--unit', 'worklane-machine-install-updater-42', '--wait', '--pipe', '--collect', '--quiet', '--service-type=exec', '--description', 'worklane-machine install-updater',
+    '--property', 'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 HOME=/root SUDO_USER=wl-alpha',
+    '/usr/bin/node', '/usr/local/libexec/worklane-machine', '--in-unit', 'install-updater',
+  ]);
+  // Who asked passes to the unit only when it is a user name: nothing of the caller's otherwise.
+  assert.doesNotMatch(h.unitCommand(['set-slots', '3'], 'x y;id').join(' '), /SUDO_USER/);
+  // --in-unit is never on sudo's list, and the helper refuses it from anyone but root.
+  assert.doesNotMatch(sudoers('wl-alpha').stdout, /in-unit/);
+  if (posix && process.getuid?.() !== 0) {
+    const r = helperIn(mkdtempSync(join(tmpdir(), 'machine-'))).run('--in-unit', 'set-slots', '3');
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /--in-unit is the helper's own, as root/);
+  }
+  // As root it goes to systemd-run before anything is written: main checks root and needsUnit first.
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.match(src, /if \(!inner && process\.getuid && process\.getuid\(\) === 0 && needsUnit\(args\)\) return inUnit\(args\);\n  const add = parseAddProject\(args\);/);
+});

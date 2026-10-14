@@ -66,6 +66,11 @@
 // machine's own tailnet name through dashboards.sh. An admin runs tailscale.sh from a terminal instead.
 // None of the four can turn on Tailscale Funnel or reach beyond the tailnet: there is no funnel command here, serve's
 // target is the script's fixed loopback port, `up` takes no flag, and the script does nothing while Funnel is on.
+//
+// Where each step runs: every step that writes outside /var/lib or runs a setup script as root (set-slots,
+// set-test-slots, set-updates, set-update-channel, install-updater, add-project, stage/discard-update-signer,
+// claude-account status) runs in a transient unit of its own, started with systemd-run once its arguments have
+// passed, because the coordinator's own sandbox (ProtectSystem=full) would make those paths read-only. See main().
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -342,7 +347,53 @@ function readJson(file) {
   }
 }
 
-function main(args) {
+// ---------- where a step runs ----------
+//
+// The coordinator calls this helper through sudo from inside its own unit, whose sandbox (ProtectSystem=full) makes
+// /usr, /boot and /etc read-only for everything it starts, sudo and this helper included. So every step here that
+// writes outside /var/lib, or runs a setup script as root, is not done in that process: once its arguments have passed
+// the same checks as always, the helper starts itself again in a transient unit of its own (systemd-run, outside the
+// coordinator's cgroup and sandbox), with the same arguments, waits for it and passes its output and exit status back.
+// The started copy checks the arguments again before it does anything. A step that only reads, or only writes under
+// /var/lib, still runs here; the tailscale steps and the account switch already start units of their own.
+const IN_UNIT = '--in-unit'; // the copy started in its own unit: only root, which sudo's rule never lets a coordinator pass
+const UNIT_PREFIX = 'worklane-machine';
+
+/** Whether these (already valid) arguments are a step that runs in a unit of its own: anything that writes system paths. */
+function needsUnit(args) {
+  if (parse(args) || parseAddProject(args)) return true; // updates.json, slots.json (in /etc); add-project.sh
+  if (args.length === 1 && args[0] === 'install-updater') return true; // /usr/local/libexec, /etc/systemd, /etc/worklane
+  if (parseSigner('stage-update-signer', args) || parseSigner('discard-update-signer', args)) return true; // its pending list, kept with the rest
+  if (parseClaudeAccount(args) === 'status') return true; // claude-account.sh as root
+  return false;
+}
+
+/** systemd-run's arguments for one step: this same helper, the same arguments, waited for, its output piped back. */
+function unitCommand(args, user, self = __filename, node = process.execPath, pid = process.pid) {
+  const env = [`PATH=${PATH_ENV}`, 'LANG=C.UTF-8', 'HOME=/root', ...(user && /^[a-z_][a-z0-9_-]{0,31}$/.test(user) ? [`SUDO_USER=${user}`] : [])];
+  return ['--unit', `${UNIT_PREFIX}-${args[0]}-${pid}`, '--wait', '--pipe', '--collect', '--quiet', '--service-type=exec', '--description', `worklane-machine ${args[0]}`, '--property', `Environment=${env.join(' ')}`, node, self, IN_UNIT, ...args];
+}
+
+function inUnit(args) {
+  const r = spawnSync('systemd-run', unitCommand(args, process.env.SUDO_USER), { cwd: '/', stdio: 'inherit', env: { PATH: PATH_ENV, LANG: 'C.UTF-8' } });
+  if (r.error) {
+    process.stderr.write(`couldn't start ${args[0]} in a unit of its own (systemd-run): ${r.error.message}\n`);
+    return 1;
+  }
+  return r.status === null ? 1 : r.status;
+}
+
+function main(argv) {
+  // The copy started in its own unit (below): root only, and its arguments checked again from the start.
+  const inner = argv[0] === IN_UNIT;
+  const args = inner ? argv.slice(1) : argv;
+  if (inner && !(process.getuid && process.getuid() === 0)) {
+    process.stderr.write(`${IN_UNIT} is the helper's own, as root\n`);
+    return 2;
+  }
+  // As root (through sudo, or an admin), a step that writes system paths goes to a unit of its own; never from a
+  // test's copy (not root), which runs it here against its own paths.
+  if (!inner && process.getuid && process.getuid() === 0 && needsUnit(args)) return inUnit(args);
   const add = parseAddProject(args);
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
@@ -385,4 +436,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseAddProject, parseClaudeAccount, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
