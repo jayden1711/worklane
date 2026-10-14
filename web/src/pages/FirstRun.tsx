@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
 import { navigate } from '../App';
+import { DiscordSetupPanel } from '../components/DiscordSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
 
@@ -188,7 +189,9 @@ function FixPanel({ s }: { s: SetupStepView }) {
 }
 
 function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' ? s.fix.label : 'Fix';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'discord' ? s.fix.label : 'Fix';
+  // WHY: the Discord step runs again on a done step too (another channel, a new token).
+  const again = s.done && s.fix.kind === 'discord';
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
       <div className="flex gap-3">
@@ -203,15 +206,15 @@ function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; 
           </div>
           <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
         </div>
-        {!s.done && (
-          <Button size="sm" variant={open ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
-            {label}
+        {(!s.done || again) && (
+          <Button size="sm" variant={open || again ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+            {again ? 'Change' : label}
           </Button>
         )}
       </div>
-      {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
+      {open && (!s.done || again) && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          {s.fix.kind === 'action' ? action : <FixPanel s={s} />}
+          {s.fix.kind === 'action' || s.fix.kind === 'discord' ? action : <FixPanel s={s} />}
         </div>
       )}
     </li>
@@ -295,7 +298,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, discord }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; discord?: ReactNode }) {
   const [open, setOpen] = useState<string | null>(initialOpen);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
@@ -358,7 +361,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   s={s}
                   open={open === s.id}
                   onFix={() => fix(s)}
-                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : undefined}
+                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : s.fix.kind === 'discord' ? (discord ?? <DiscordSetupPanel onChanged={() => onRecheck?.()} />) : undefined}
                 />
               ))}
             </ol>
@@ -404,6 +407,9 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
 export const firstRunRefusal = (state: Pick<State, 'canReadDigest' | 'user' | 'role'>) =>
   state.canReadDigest === false ? `the first-run checklist is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
+/** The step a link asked to open (Settings links here to run a step again): /first-run?open=<step>. */
+const openFromUrl = () => (typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('open'));
+
 export function FirstRunPage({ state }: { state: State }) {
   const refused = firstRunRefusal(state);
   const [f, setF] = useState<FirstRun | { error: string } | null>(null);
@@ -437,7 +443,7 @@ export function FirstRunPage({ state }: { state: State }) {
         ) : !f ? null : 'error' in f ? (
           <div className="text-[13px] text-red">Can't load the checklist: {f.error}</div>
         ) : (
-          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} />
+          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={openFromUrl()} />
         )}
       </div>
     </div>

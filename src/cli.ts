@@ -35,7 +35,7 @@ import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setGithubApp } from './instance.js';
+import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
@@ -138,14 +138,18 @@ usage: ${BRAND.cli} <command> [options]
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
-  discord channels [--instance name]
+  discord channels [--instance name] [--json]
                                    read-only: the text and announcement channels the instance's bot can see,
-                                   one "<server> / #<channel> <id>" line each (run as the instance's user)
+                                   one "<server> / #<channel> <id>" line each (run as the instance's user);
+                                   --json: one JSON line, with each server's id and the bot's application
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
   instance set-github-app <name> --app-id <n> --installation-id <n> --key <path>
                                    point credentials.yaml at the instance's App (credentials.sh github-app runs it)
+  instance set-discord-token <name> --file <path>
+                                   point credentials.yaml at the chat bot's token file (credentials.sh
+                                   intake-discord runs it); the token is never an argument
   instance auto-config <name> [--answer <id>=<choice>]...
                                    server mode's repo config: detect, check as the agent user, propose the setup PR
                                    through the App; one JSON line says where it stands (checkout.sh runs it)
@@ -940,6 +944,28 @@ async function main(argv: string[]): Promise<number> {
         console.log(`wrote ${file} (github: App ${appId}, installation ${installationId}; the rest kept)`);
         return 0;
       }
+      if (sub === 'set-discord-token' && target) {
+        // credentials.sh intake-discord, after it installed the token file: the entry in credentials.yaml, validated,
+        // the rest kept. Only the file's path is passed: the token is never an argument.
+        const tokenFile = option(rest, '--file');
+        if (!tokenFile?.startsWith('/') || rest.length !== 1) {
+          console.error('usage: instance set-discord-token <name> --file <absolute path to the token file>');
+          return 2;
+        }
+        const file = join(instancesDir(), target, 'credentials.yaml');
+        if (!existsSync(join(instancesDir(), target, 'instance.yaml'))) {
+          console.error(`no instance "${target}" for this user (${join(instancesDir(), target)}): \`${BRAND.cli} instance init\` first`);
+          return 1;
+        }
+        try {
+          setDiscordToken(file, tokenFile);
+        } catch (e) {
+          console.error((e as Error).message);
+          return 1;
+        }
+        console.log(`wrote ${file} (intake.discord_token: ${tokenFile}; the rest kept)`);
+        return 0;
+      }
       if (sub === 'setup-status' && target) {
         // Read-only, from local files: whether the checkout has its config, and auto-config's setup PR and questions.
         try {
@@ -972,7 +998,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance auto-config <name> [--answer <id>=<choice>]...');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance auto-config <name> [--answer <id>=<choice>]...');
       return 2;
     }
 
@@ -1014,11 +1040,12 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'discord': {
+      const json = flag(rest, '--json');
       if (sub !== 'channels' || rest.length) {
         console.error(commandUsage('discord'));
         return 2;
       }
-      return discordChannelsCommand({ instance: instanceOpt });
+      return discordChannelsCommand({ instance: instanceOpt, json });
     }
 
     case 'prod-read': {

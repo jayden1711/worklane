@@ -49,7 +49,8 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; discord?: unknown }): string;
+  renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1786,4 +1787,93 @@ test('learnings: each cause with its sightings and stages; Promote only for an o
   const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
   assert.doesNotMatch(writer, /learning-promote/);
   assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
+});
+
+test("the first-run page's Discord step: the token's place and a paste box, the invite link, pickers from the bot's list, the exact diff before Confirm; the script equivalents; no token anywhere", () => {
+  const keys = ['discord.enabled', 'discord.guild', 'discord.channels', 'discord.asks_channel', 'discord.ops_channel', 'discord.chat_channels', 'discord.dashboard_url', 'superfan.enabled', 'superfan.channel', 'superfan.machine_channel'];
+  const kinds: Record<string, string> = { 'discord.enabled': 'boolean', 'discord.guild': 'guild', 'discord.channels': 'ids', 'discord.chat_channels': 'ids', 'discord.dashboard_url': 'url', 'superfan.enabled': 'boolean' };
+  const v = {
+    available: true,
+    instance: 'shop',
+    canAct: true,
+    portal: 'https://discord.com/developers/applications',
+    token: { configured: false, file: null, present: false, error: null },
+    ask: null,
+    invite: { integer: '309237648384', permissions: [{ name: 'View Channels', bit: 10, why: 'see the channels' }, { name: 'Send Messages', bit: 11, why: 'reply' }, { name: 'Create Public Threads', bit: 35, why: 'open threads' }, { name: 'Send Messages in Threads', bit: 38, why: 'answer in them' }] },
+    intake: { file: '/home/example/.local/state/worklane/instances/shop/intake.yaml', exists: false, error: null, values: { 'discord.enabled': false, 'discord.guild': null, 'discord.channels': [], 'discord.asks_channel': null, 'discord.ops_channel': null, 'discord.chat_channels': [], 'discord.dashboard_url': null, 'superfan.enabled': false, 'superfan.channel': null, 'superfan.machine_channel': null }, warnings: [] },
+    form: keys.map((key) => ({ key, kind: kinds[key] ?? 'id', what: `what ${key} is` })),
+    automation: { token: 'sudo bash /opt/worklane/current/scripts/setup/credentials.sh shop intake-discord', channels: 'sudo -H -u wl-shop worklane discord channels --instance shop', file: '/home/example/.local/state/worklane/instances/shop/intake.yaml', keys, restart: 'sudo systemctl restart worklane-shop.service' },
+  };
+  // Nothing stored yet: the portal link, Paste the token, the permissions, and no picker before the bot's list is loaded.
+  const fresh = r.renderDiscordSetup(v);
+  assert.match(fresh, /data-testid="discord-setup" data-instance="shop"[\s\S]*?Nothing here changes until you confirm it/);
+  assert.match(fresh, /href="https:\/\/discord\.com\/developers\/applications"[^>]*data-testid="discord-portal-link"/);
+  assert.match(fresh, /data-testid="discord-token-state" data-stored="false"[\s\S]*?not stored[\s\S]*?names no bot token yet/);
+  assert.match(fresh, /data-testid="discord-token-button"[^>]*>Paste the token…/);
+  assert.match(fresh, /data-testid="discord-invite-integer">309237648384</);
+  assert.equal((fresh.match(/<li><span[^>]*>(View Channels|Send Messages|Create Public Threads|Send Messages in Threads)<\/span>/g) ?? []).length, 4);
+  assert.match(fresh, /data-testid="discord-invite-waiting"[^>]*>[^<]*store the token first/);
+  assert.doesNotMatch(fresh, /discord-load"|discord-form|discord-invite-link|discord-confirm"/, 'no listing without a token, no form without the list');
+  // The script equivalents, named on the screen.
+  assert.match(fresh, /data-testid="discord-automation"[\s\S]*?credentials\.sh shop intake-discord\nsudo -H -u wl-shop worklane discord channels --instance shop\n# intake\.yaml: discord\.enabled, discord\.guild,[\s\S]*?superfan\.machine_channel\nsudo systemctl restart worklane-shop\.service/);
+  // Paste the token asks first; the paste box is the setup console's own, a password field never prefilled.
+  assert.match(r.renderDiscordSetup(v, { tokenConfirming: true }), /data-testid="discord-token-confirming"[\s\S]*?records an ask[\s\S]*?data-testid="discord-token-confirm"[\s\S]*?data-testid="discord-token-cancel"/);
+  const ask = { id: 'ask-0000000000aa', instance: 'shop', title: 'Paste the Discord bot token', detail: 'From the portal.', createdAt: '2026-10-13T10:00:00Z', createdBy: 'olive', status: 'open', answer: null, cancelled: null, canAnswer: true, kind: 'paste_secret', credential: 'intake-discord', where: 'credentials.yaml intake.discord_token' };
+  const asking = r.renderDiscordSetup({ ...v, ask });
+  const box = asking.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
+  assert.match(box, /type="password"/);
+  assert.doesNotMatch(box, /value=/);
+  assert.doesNotMatch(asking, /discord-token-button/);
+  // Stored, the bot's view loaded: the invite link, the intent, and pickers offering only the bot's own channels.
+  const stored = { ...v, token: { configured: true, file: '/home/example/.config/shop-secrets/intake-discord', present: true, error: null } };
+  assert.match(r.renderDiscordSetup(stored), /data-stored="true"[\s\S]*?stored[\s\S]*?shop-secrets\/intake-discord[\s\S]*?data-testid="discord-token-button"[^>]*>Replace the token…[\s\S]*?data-testid="discord-load"[^>]*>Load the bot(&#x27;|')s view/);
+  const bot = {
+    application: { id: '700000000000000001', name: 'Example Bot', message_content: false },
+    invite: 'https://discord.com/oauth2/authorize?client_id=700000000000000001&scope=bot&permissions=309237648384',
+    channels: [
+      { guild_id: '900000000000000001', guild: 'Alpha Server', id: '100000000000000011', name: 'general', type: 0 },
+      { guild_id: '900000000000000001', guild: 'Alpha Server', id: '100000000000000017', name: 'superfan-shop', type: 0 },
+      { guild_id: '900000000000000002', guild: 'Zeta Server', id: '100000000000000021', name: 'ideas', type: 0 },
+    ],
+    at: new Date().toISOString(),
+  };
+  const values = { ...v.intake.values, 'discord.guild': '900000000000000001', 'discord.channels': ['100000000000000011'] };
+  const loaded = r.renderDiscordSetup(stored, { bot, values });
+  assert.match(loaded, /href="https:\/\/discord\.com\/oauth2\/authorize\?client_id=700000000000000001&amp;scope=bot&amp;permissions=309237648384"[^>]*data-testid="discord-invite-link"[^>]*>Open Discord(&#x27;|')s invite page for Example Bot/);
+  assert.match(loaded, /data-testid="discord-intent" data-on="false"[\s\S]*?off\. Turn it on/);
+  assert.match(loaded, /data-testid="discord-loaded"[^>]*>3 channels the bot can see/);
+  assert.deepEqual([...loaded.matchAll(/data-testid="discord-field" data-key="([a-z_.]+)"/g)].map((m) => m[1]), keys);
+  const fieldOf = (key: string) => {
+    const from = loaded.indexOf(`data-key="${key}"`);
+    const next = loaded.indexOf('data-testid="discord-field"', from);
+    return loaded.slice(from, next < 0 ? undefined : next);
+  };
+  // The channels the bot reads are offered from the chosen server only; a post-only one from any server, named with it.
+  assert.match(fieldOf('discord.channels'), /#general[\s\S]*#superfan-shop/);
+  assert.doesNotMatch(fieldOf('discord.channels'), /ideas/);
+  assert.match(fieldOf('discord.channels'), /<input type="checkbox"[^>]*checked=""[^>]*\/>#general/);
+  assert.match(fieldOf('superfan.channel'), /<option value="100000000000000021">Zeta Server \/ #ideas<\/option>/);
+  assert.match(fieldOf('discord.guild'), /<option value="900000000000000001" selected="">Alpha Server<\/option>/);
+  assert.match(loaded, /data-testid="discord-review"[^>]*>Review the change/);
+  assert.doesNotMatch(loaded, /discord-confirm"/, 'no Confirm before the diff is shown');
+  // Reviewed: the exact diff and the warning, then Confirm and write, or Cancel.
+  const plan = { ok: true, confirmed: false, file: v.intake.file, creates: true, changes: [], hash: 'h', warnings: ['discord is on but discord.allowed_senders is empty: no Discord message will be accepted'], diff: '--- (no intake.yaml yet)\n+++ intake.yaml\n+version: 1\n+discord:\n+  guild: "900000000000000001"' };
+  const reviewed = r.renderDiscordSetup(stored, { bot, values, plan });
+  assert.match(reviewed, /data-testid="discord-plan"[\s\S]*?This creates [^<]*intake\.yaml \(0600\):[\s\S]*?data-testid="discord-diff">--- \(no intake\.yaml yet\)\n\+\+\+ intake\.yaml\n\+version: 1\n\+discord:\n\+  guild: &quot;900000000000000001&quot;<\/pre>[\s\S]*?data-testid="discord-warning"[^>]*>discord is on but[\s\S]*?Write exactly this change\?[\s\S]*?data-testid="discord-confirm"[^>]*>Confirm and write<[\s\S]*?data-testid="discord-cancel"/);
+  assert.doesNotMatch(reviewed, /data-testid="discord-review"/);
+  // A failed listing says why; a writer reads where it stands and gets no button.
+  assert.match(r.renderDiscordSetup(stored, { botError: 'Discord refused the bot token (401 on GET /applications/@me)' }), /data-testid="discord-load-error"[^>]*>Discord refused the bot token/);
+  const writer = r.renderDiscordSetup({ ...stored, canAct: false }, { bot, values });
+  assert.match(writer, /data-testid="discord-setup-refused"/);
+  assert.doesNotMatch(writer, /discord-token-button|discord-load"|discord-review|discord-confirm"/);
+  // A checkout: why there is no step. And on the first-run page, the step opens it, on a done step too.
+  assert.match(r.renderDiscordSetup({ available: false, why: "Discord intake is a server instance's" }), /data-testid="discord-setup-unavailable"[^>]*>Discord intake is a server instance(&#x27;|')s\./);
+  const file = join(mkdtempSync(join(tmpdir(), 'web-render-discord-')), 'init.json');
+  const f = firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: 'shop', start: { kind: 'unsupported', why: 'a stand-in' } });
+  const step = f.setup!.groups.flatMap((g) => g.steps).find((s) => s.id === 'discord')!;
+  assert.deepEqual(step.fix, { kind: 'discord', label: 'Set up' });
+  assert.match(r.renderFirstRun(f), /data-step="discord" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="discord"[^>]*>Set up</);
+  assert.match(r.renderFirstRun(f, { open: 'discord', discord: stored }), /data-step="discord"[\s\S]*?data-testid="first-run-fix-panel"[\s\S]*?data-testid="discord-setup"/);
+  const done = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'discord' ? { ...s, done: true } : s)) })) } };
+  assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
 });

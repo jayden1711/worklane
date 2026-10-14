@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { BRAND } from './brand.js';
@@ -63,10 +63,12 @@ import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
+import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, systemRunCli, tokenAsk, tokenState, type BotView, type RunCli } from './intake/discord-setup.js';
+import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
-import { AskError } from './console/asks.js';
+import { ASK_EVENTS, AskError, asksFrom } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 
@@ -176,6 +178,8 @@ export interface DashboardOptions {
   startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
   /** WHY: tests stand in for what the first-run page's Fix actions do to the machine (src/setup-actions.ts). */
   setupActions?: Partial<ActionDeps>;
+  /** WHY: tests stand in for the child process that lists the bot's channels (src/intake/discord-setup.ts); this engine's CLI when unset. */
+  discordCli?: RunCli;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -820,6 +824,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
   // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
   let actionRunning: string | null = null;
+  // The first-run page's Discord step (src/intake/discord-setup.ts), a server instance's only. The bot's own view
+  // (its application and channels) comes from a child process that reads the token itself: this process never does.
+  // Kept a minute, and one listing at a time, so the page's polls don't spend Discord's rate limit.
+  const instanceHome = opts.instance && opts.policyFile ? dirname(opts.policyFile) : null;
+  const discordCli = opts.discordCli ?? systemRunCli();
+  let bot: { at: number; view: BotView } | null = null;
+  let botLoading: Promise<BotView> | null = null;
+  const botNow = (fresh: boolean): Promise<BotView> => {
+    if (bot && Date.now() - bot.at < (fresh ? 5_000 : 60_000)) return Promise.resolve(bot.view);
+    botLoading ??= botView(opts.instance!, discordCli)
+      .then((view) => ((bot = { at: Date.now(), view }), view))
+      .finally(() => (botLoading = null));
+    return botLoading;
+  };
+  // A pasted bot token (the setup console's paste box): its shape checked, then credentials.yaml pointed at the file.
+  const secretRules = instanceHome
+    ? {
+        [DISCORD_CREDENTIAL]: discordTokenRule({
+          instance: opts.instance!,
+          credentialsFile: join(instanceHome, 'credentials.yaml'),
+          onStored: () => {
+            bot = null;
+            setupCache.delete('discord');
+          },
+        }),
+      }
+    : null;
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -965,7 +996,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
         }
         // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
-        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machineOwnersFile ? { machineOwnersFile: opts.machineOwnersFile } : {}) })) return;
+        if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machineOwnersFile ? { machineOwnersFile: opts.machineOwnersFile } : {}), ...(secretRules ? { secretRules } : {}) })) return;
         // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
@@ -1295,6 +1326,72 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } finally {
             actionRunning = null;
           }
+        }
+        // The Discord step (src/intake/discord-setup.ts). Reading it, loading the bot's channels and reviewing a change
+        // write nothing; the owners only act, each write confirmed, and every write and refusal is audited.
+        if (url.pathname === '/api/first-run/discord' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          if (!instanceHome) return json(res, 200, { available: false, why: "Discord intake is a server instance's: this dashboard serves a checkout, and local mode has no Discord wiring" });
+          const all = asksFrom(readEvents(opts.eventsDb).filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
+          return json(res, 200, discordSetupView({ instance: opts.instance!, home: instanceHome, asks: all, role: who.role, engineRoot: engineRoot() }));
+        }
+        if (url.pathname.startsWith('/api/first-run/discord/')) {
+          const what = url.pathname.slice('/api/first-run/discord/'.length);
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.discord_refused', { what: what.slice(0, 20), why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!instanceHome) return json(res, 400, { error: "Discord intake is a server instance's: this dashboard serves a checkout" });
+          const ownersOnly = `only the instance's owners (admin on ${repo}) may set up its Discord bot; @${who.login} is a ${who.role}`;
+          // The bot's application, invite link and channels, as the bot sees them. Nothing is written.
+          if (what === 'channels' && req.method === 'GET') {
+            if (!isOwnerHere) return json(res, 403, { error: ownersOnly });
+            const t = tokenState(join(instanceHome, 'credentials.yaml'));
+            if (!t.configured || !t.present) return json(res, 409, { error: t.error ?? 'no bot token is stored for this instance yet: paste it first' });
+            try {
+              return json(res, 200, await botNow(url.searchParams.get('fresh') === '1'));
+            } catch (e) {
+              if (e instanceof DiscordSetupError) return json(res, e.status, { error: e.message });
+              throw e;
+            }
+          }
+          // Open the paste box for the token: a paste_secret ask, answered through the setup console's secret route.
+          if (what === 'token-ask' && req.method === 'POST') {
+            const body = ((await readBody(req)) ?? {}) as { confirm?: unknown };
+            if (!isOwnerHere) return refused(403, ownersOnly);
+            if (body.confirm !== true) return refused(400, 'opening the paste box records an ask in this instance\'s log: confirm it ({"confirm": true})');
+            const log = new EventLog(opts.eventsDb);
+            try {
+              const r = tokenAsk(log, opts.instance!, who.login);
+              if (r.created) audit(who, 'first_run.discord_token_ask', { ask: r.ask.id });
+              return json(res, 200, { ok: true, ask: { ...r.ask, canAnswer: true }, created: r.created });
+            } finally {
+              log.close();
+            }
+          }
+          // intake.yaml: without confirm, the exact change these picks make (nothing written); with it, and the hash of
+          // the change that was shown, that change written.
+          if (what === 'intake' && req.method === 'POST') {
+            const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown; expect?: unknown };
+            if (!isOwnerHere) return refused(403, ownersOnly);
+            const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values) ? (body.values as Record<string, unknown>) : {};
+            try {
+              const o = { path: join(instanceHome, INTAKE_FILE), values, channels: (await botNow(false)).channels };
+              if (body.confirm !== true) {
+                const { text: _text, ...plan } = planIntake(o);
+                return json(res, 200, { ok: true, confirmed: false, ...plan });
+              }
+              if (typeof body.expect !== 'string') return refused(400, 'a confirm names the change it confirms (expect: the hash the review returned)');
+              const { text: _text, ...plan } = applyIntake({ ...o, expect: body.expect });
+              setupCache.delete('discord');
+              audit(who, 'first_run.discord_intake', { file: plan.file, creates: plan.creates, changes: plan.changes });
+              return json(res, 200, { ok: true, confirmed: true, ...plan });
+            } catch (e) {
+              if (e instanceof DiscordSetupError) return refused(e.status, e.message);
+              throw e;
+            }
+          }
+          return json(res, 404, { error: 'not found' });
         }
         // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
         // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.
