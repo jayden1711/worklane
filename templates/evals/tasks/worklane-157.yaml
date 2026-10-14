@@ -1,0 +1,18 @@
+id: worklane-157
+base: 2cb86fb36c3746a50df1d65ffa945d2abe1a8ec2
+title: "verify(): an unknown done_when kind fails the attempt instead of being
+  skipped"
+body: "**The problem:** `verify()` (`src/coordinator.ts`) handled done_when
+  items with `if 'command'` / `else if 'suite'` / `else if 'test'` and no final
+  `else`. `manual` and `repro` were skipped on purpose, but any new DoneWhen
+  kind would be skipped silently too, such as Track B's coming `browser:`. A
+  check that never runs never fails, so the change would land as if it had
+  passed."
+done_when:
+  - test: test/coordinator.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 157
+  merge: 0c35e71868fbd7e4f26e76bcea8982a89325170d

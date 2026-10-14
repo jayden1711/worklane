@@ -97,6 +97,15 @@ usage: ${BRAND.cli} <command> [options]
   skill status                     each project skill: evaluated, failing, stale or draft
   skill lint                       every SKILL.md has When to use, Inputs and access, Steps, Validate,
                                    Return and Approval, none empty; exits 1 otherwise (for CI)
+  harness-eval run [--task id]... [--samples k] [--budget usd] [--work dir] [--keep] [--record]
+                                   replay the harness eval suite's past tasks (templates/evals/tasks and the
+                                   held-out store) through the real coordinator in scratch instances, with
+                                   real agents, within the budget (default harness_evals.budget_usd); prints
+                                   success, cost, wall-clock and human interventions. --record: into the log
+  harness-eval add-task <owner/repo> <pr> [--id id] [--public]
+                                   a merged PR as a past task (read-only gh calls); kept in the held-out
+                                   store, or with --public in templates/evals/tasks (the engine's own
+                                   public repository only)
   queue full-run [--max-load n] [-- <command>]
                                    queue the full test run; starts by itself when the machine-wide
                                    full-run slot is free and tests.yaml idle_probe passes
@@ -525,6 +534,11 @@ async function main(argv: string[]): Promise<number> {
       for (const c of r.cases) console.log(`${c.pass ? 'pass' : 'FAIL'}  ${c.id}. ${c.title}  (${c.samples} samples passed${c.pass ? '' : `; e.g. correct ${c.correct}${c.wrongDone.length ? `, WRONG: ${c.wrongDone.join(' | ')}` : ''}`})`);
       console.log(`${r.passed}/${r.total} passed (model ${model}, judge ${judge})`);
       return r.passed === r.total ? 0 : 1;
+    }
+
+    case 'harness-eval': {
+      const he = await import('./harness-evals/cli.js');
+      return he.harnessEvalCommand(root, sub, rest, { instance: instanceOpt, option, flag, usage: commandUsage('harness-eval') });
     }
 
     case 'baseline': {
