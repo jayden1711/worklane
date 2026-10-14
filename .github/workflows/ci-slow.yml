@@ -826,7 +826,7 @@ jobs:
           if jq -e '(.detail + " " + .retry) | test("by hand|credentials.sh")' <<<"$last"; then echo "the App step still names the manual way" >&2; exit 1; fi
           id wl-ci && id wl-ci-agent
           if [ -e /etc/systemd/system/worklane-dashboard-hub.service ] || systemctl is-active -q worklane-dashboard-hub.service; then echo "a hub was started with no sign-in App" >&2; exit 1; fi
-      - name: "the one command on a machine with no hub (bootstrap --hardened): it starts the hub's setup mode and prints its URL only once it answers 200; before that, no URL, the reason and the fix (#393)"
+      - name: "the one command on a machine with no hub (bootstrap --hardened): with no origin, setup mode on loopback and its URL; with one, setup mode there, its URL only once it answers 200; before that, no URL, the reason and the fix (#393)"
         run: |
           pub=https://hub.example.test u=worklane-dashboard-hub-setup.service
           # The install command from a root-owned copy of this checkout whose pinned engine is this commit, its origin
@@ -839,19 +839,23 @@ jobs:
           [ "$(sudo git -C "$b" diff --name-only)" = scripts/bootstrap.sh ]
           boot() { set +e; sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner "$@" ci example/alpha > "$F/$log" 2>&1; rc=$?; set -e; tail -n 12 "$F/$log"; echo "rc=$rc"; }
           last_is_url() { tail -n 1 "$F/$1" | grep -qE '^https?://'; }
-          # No https origin (no Tailscale here, no --public-url): no URL at all, the reason and the fix; nothing started.
+          # No https origin (no Tailscale here, no --public-url). Until 2026-10-14 no URL and exit 4; the owner changed the
+          # product: setup mode on loopback only, its URL last once it answers 200, the ssh -L line above it.
           log=boot-a.log
           boot
-          [ "$rc" = 4 ]
-          grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/$log"
-          if last_is_url "$log"; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
-          if systemctl is-active -q "$u"; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
+          [ "$rc" = 0 ]
+          [ "$(tail -n 1 "$F/$log")" = http://127.0.0.1:4399/ ]
+          grep -qxF "   From your own computer, first: ssh -L 4399:127.0.0.1:4399 $USER@$(hostname)" "$F/$log"
+          systemctl is-active "$u"
+          systemctl show -p ExecStart --value "$u" | grep -qF ' --loopback '
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/)" = 200 ]
           [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
-          # The origin given, but nothing serves it yet (tailscale serve): setup mode starts, and still no URL: it doesn't answer.
+          # The origin given, but nothing serves it yet (tailscale serve): setup mode moves to it, and no URL: it doesn't answer.
           log=boot-b.log
           boot --public-url "$pub"
           [ "$rc" = 4 ]
           systemctl is-active "$u"
+          systemctl show -p ExecStart --value "$u" | grep -qF " --public-url $pub "
           grep -qF "no URL to open yet: the hub's setup mode runs on this machine (port 4399), but $pub doesn't reach it" "$F/$log"
           grep -qF "fix: sudo tailscale serve --bg --https=443 http://127.0.0.1:4399, then run this again" "$F/$log"
           if last_is_url "$log"; then echo "a URL that answers nothing was printed" >&2; exit 1; fi
