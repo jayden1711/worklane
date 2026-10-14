@@ -369,6 +369,8 @@ export const EventSchemas = {
   'gardener.filed': z.strictObject({ pattern: z.string(), issue }),
   /** One gardener run (started_at: by the coordinator's clock): what it found and filed, what it cost, its log issue; outcome: done, or why it stopped. */
   'gardener.run': z.strictObject({ started_at: z.string(), findings: z.number().int().nonnegative(), filed: z.array(issue), cost_usd: z.number().nonnegative(), log_issue: issue.nullable(), outcome: z.string() }),
+  /** One superfan pass (src/superfan/): the instance's or the machine's; what it read, what it did, what it cost, today's spend. Notes: what it couldn't read. */
+  'superfan.pass': z.strictObject({ scope: z.enum(['instance', 'machine']), outcome: z.enum(['quiet', 'nothing', 'posted', 'duplicate', 'budget', 'instance_budget', 'failed']), items: z.number().int().nonnegative(), cost_usd: z.number().nonnegative(), spent_usd: z.number().nonnegative(), filed: issue.nullable(), notes: z.array(z.string()) }),
   /** `role`: answered on the dashboard by someone it read as an owner or writer of the instance's repo. */
   'decision.answered': z.strictObject({ id: z.string(), by: z.string(), answer: z.string(), role: z.enum(['owner', 'writer']).optional() }),
   // the setup console's asks (src/console/asks.ts): what the harness needs from the owner and can't do itself
