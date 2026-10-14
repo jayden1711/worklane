@@ -4,6 +4,7 @@
 // nothing here: the server refuses them, and the view renders nothing for them.
 import { useEffect, useRef, useState } from 'react';
 import { claudeAccountAction, getClaudeAccount, pasteClaudeToken, type ClaudeAccountData, type SwitchLine, type SwitchView } from '../api';
+import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
 import { ago, Badge, Button, Card, cx } from './ui';
 
 type Phase = 'pending' | 'running' | 'done' | 'failed';
@@ -269,11 +270,20 @@ export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests'>, n
   return !d.switch || Date.parse(d.switch.startedAt) < Date.parse(last.at) - 1_000;
 }
 
-/** The panel: loaded, and looked at again every few seconds while a switch or a request is under way. Hidden on refusal. */
+/**
+ * The panel: loaded, and looked at again every few seconds while a switch or a request is under way. Hidden on
+ * refusal; a look that fails otherwise keeps the last good data, and a token being pasted, on screen (web/src/refresh.tsx).
+ */
 export function ClaudeAccountPanel() {
-  const [data, setData] = useState<ClaudeAccountData | null>(null);
-  const load = () => getClaudeAccount().then(setData, () => setData(null));
+  const [loaded, setLoaded] = useState<Loaded<ClaudeAccountData>>(NOTHING_YET);
+  const data = loaded.data;
+  const load = () =>
+    getClaudeAccount().then(
+      (d) => setLoaded({ data: d, stale: null }),
+      (error: unknown) => setLoaded((p) => afterLoad(p, { error })),
+    );
   useEffect(() => void load(), []);
+  useRetry(loaded, () => void load());
   const active = !!data && accountBusy(data);
   useEffect(() => {
     if (!active) return;
@@ -281,5 +291,10 @@ export function ClaudeAccountPanel() {
     return () => window.clearInterval(t);
   }, [active]);
   if (!data) return null;
-  return <ClaudeAccountView data={data} onChanged={() => void load()} />;
+  return (
+    <div className="space-y-1">
+      <StaleNote stale={loaded.stale} />
+      <ClaudeAccountView data={data} onChanged={() => void load()} />
+    </div>
+  );
 }

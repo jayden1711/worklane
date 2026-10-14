@@ -619,16 +619,35 @@ export async function apiPath(path: string): Promise<string> {
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
 export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
-  const body = (await res.json()) as T & { error?: string };
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  return body;
+  return answer<T>(res);
+}
+
+/** A server's answer that wasn't a success, with its HTTP status: a refusal (isRefusal) or something to retry. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** Not signed in, not allowed, or no such view on this server: an answer, not a hiccup. Anything else is transient. */
+export const isRefusal = (e: unknown): boolean => e instanceof ApiError && (e.status === 401 || e.status === 403 || e.status === 404);
+
+async function answer<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    // A proxy's 502 page is no JSON: its status still says what it was.
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status);
+  }
+  return (await res.json()) as T;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
-  const body = (await res.json()) as T & { error?: string };
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  return body;
+  return answer<T>(res);
 }
 
 /** State from the server, refetched whenever the event log changes (one SSE stream). */

@@ -197,3 +197,7 @@ export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.tes
 
 export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean } = {}) =>
   renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialMergePlan={o.mergePlan ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} />);
+
+// What a live panel keeps when a look fails (web/src/refresh.tsx), for the tests to call.
+export { afterLoad, NOTHING_YET } from './refresh';
+export { ApiError, isRefusal } from './api';
