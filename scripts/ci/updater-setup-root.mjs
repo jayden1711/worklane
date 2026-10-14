@@ -52,6 +52,14 @@ const sha = (f) => (existsSync(f) ? createHash('sha256').update(readFileSync(f))
 const changes = () => readFileSync(CHANGES, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
 const pending = () => JSON.parse(readFileSync(PENDING, 'utf8')).pending;
 const sh = (file, args, cwd = '/') => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+/** One run of the updater's unit, as its timer starts it; when it fails, its own journal says why. */
+const updaterRun = () => {
+  const r = spawnSync('systemctl', ['start', 'worklane-update.service'], { encoding: 'utf8', cwd: '/' });
+  if (r.status !== 0) {
+    const journal = spawnSync('journalctl', ['-u', 'worklane-update.service', '-n', '80', '--no-pager', '-o', 'cat'], { encoding: 'utf8' }).stdout;
+    assert.fail(`worklane-update.service failed (${r.stderr.trim()}); its journal:\n${journal}`);
+  }
+};
 
 // ---- before: no updater on this machine
 for (const f of [UPDATER, CONFIG, SIGNERS, PENDING]) assert.ok(!existsSync(f), `${f} is already there`);
@@ -75,7 +83,7 @@ assert.equal(sh('systemctl', ['is-enabled', 'worklane-update.timer']), 'enabled'
 assert.ok(!existsSync(SIGNERS), 'installing lists no signer');
 assert.deepEqual(changes().filter((c) => c.what === 'install-updater').map((c) => [c.by, c.to]), [[coordinator, 'updates.sh']]);
 // The updater as installed runs, as its unit runs it, and does nothing while off.
-sh('systemctl', ['start', 'worklane-update.service']);
+updaterRun();
 assert.equal(sh('systemctl', ['show', '-p', 'Result', '--value', 'worklane-update.service']), 'success');
 assert.equal(sh(UPDATER, []), 'disabled');
 // A second install changes nothing it had.
@@ -188,7 +196,7 @@ assert.equal(owner(STATE), '0:0 644');
 assert.deepEqual([signersState().hash, signersState().hold, reported(), signersIncidents()], ['absent', null, [], []]);
 // A signers file written by hand (root, here), not by updates.sh: the next run of the unit reports it, once.
 writeFileSync(SIGNERS, first, { mode: 0o644 });
-sh('systemctl', ['start', 'worklane-update.service']);
+updaterRun();
 assert.equal(reported().length, 1);
 assert.deepEqual([reported()[0].signers.from, reported()[0].signers.linesBefore, reported()[0].signers.linesAfter, reported()[0].signers.added, reported()[0].signers.removed], ['absent', 0, 1, [mine.fingerprint], []]);
 assert.match(reported()[0].signers.to, /^sha256:[0-9a-f]{64}$/);
@@ -210,14 +218,14 @@ assert.equal(probe.status, 0, `the coordinator can still write the incident stor
 assert.equal(signersIncidents().length, 1, 'and the updater\'s incident is still in it');
 assert.equal(signersState().hold.to, reported()[0].signers.to, 'held');
 // Not again on the next runs.
-for (let i = 0; i < 2; i++) sh('systemctl', ['start', 'worklane-update.service']);
+for (let i = 0; i < 2; i++) updaterRun();
 assert.equal(reported().length, 1);
 // Acknowledged at a root shell: it prints what is trusted now, lifts the hold, and the next run closes the incident.
 const acked = sh('bash', ['/opt/worklane/current/scripts/setup/updates.sh', '--acknowledge-signers']);
 assert.ok(acked.includes(mine.fingerprint) && acked.includes('release installs are no longer held'), acked);
 assert.equal(signersState().hold, null);
 assert.equal(owner(STATE), '0:0 644');
-sh('systemctl', ['start', 'worklane-update.service']);
+updaterRun();
 for (let i = 0; i < 20 && signersIncidents().length; i++) await new Promise((r) => setTimeout(r, 250));
 assert.deepEqual(signersIncidents(), []);
 assert.deepEqual(verify('v1.0.1'), { ok: true, base: main });
@@ -302,13 +310,13 @@ assert.ok(added.every((c) => c.by !== coordinator));
 const { signerFindings } = await import(pathToFileURL(`${engine}/dist/src/watchdog/probes.js`).href);
 const { machineChanges } = await import(pathToFileURL(`${engine}/dist/src/machine.js`).href);
 // Neither append (--confirm-signer, --signer) was a change the updater reports: it was told of each as it was made.
-sh('systemctl', ['start', 'worklane-update.service']);
+updaterRun();
 assert.equal(reported().length, 1, 'no signers_changed for a signer added through updates.sh');
 assert.equal(signersState().hold, null);
 // A line appended by hand afterwards is.
 const intruder = key('intruder');
 writeFileSync(SIGNERS, `${readFileSync(SIGNERS, 'utf8')}intruder@example.com ssh-ed25519 ${intruder.pub}\n`);
-sh('systemctl', ['start', 'worklane-update.service']);
+updaterRun();
 assert.equal(reported().length, 2);
 assert.deepEqual([reported()[1].signers.linesBefore, reported()[1].signers.linesAfter, reported()[1].signers.added, reported()[1].signers.removed], [3, 4, [intruder.fingerprint], []]);
 assert.equal(signersState().hold.added[0], intruder.fingerprint, 'release installs are held again');
