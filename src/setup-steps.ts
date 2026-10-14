@@ -138,7 +138,9 @@ export type Fix =
   /** The Start button: the coordinator's service. */
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
+  | { kind: 'signin'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -397,7 +399,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'all',
     today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here).`,
-    fix: { kind: 'outside', url: null, label: "Anthropic's sign-in", why: "Anthropic's own login and consent page", command: 'claude auth login' },
+    fix: { kind: 'signin', label: 'Sign in' },
     detect: (k) => detectClaudeLogin(k.p),
   },
   {
@@ -409,8 +411,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: 'add-project asks you to run `claude setup-token` on a machine signed in to Anthropic and paste the token it prints (or credentials.sh <name> claude).',
-    fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (its paste box)" },
+    today: "Run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints: in Add project's paste box, or at credentials.sh <name> claude's hidden prompt (as root).",
+    fix: { kind: 'signin', label: 'Paste the token' },
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return recorded(k, 'claude-token', "the agents' Claude login") ?? no(i.error);

@@ -32,6 +32,7 @@
   "test/claims.test.ts": 489,
   "test/claude-account-script.test.ts": 14256,
   "test/claude-account.test.ts": 169,
+  "test/claude-signin.test.ts": 3500,
   "test/claude-transient.test.ts": 1490,
   "test/closed-issue-unblocks.test.ts": 316,
   "test/compare-screenshots.test.ts": 627,

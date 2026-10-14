@@ -6,7 +6,7 @@ You need:
 - macOS or Linux (on Windows, use WSL or the Docker image);
 - git;
 - a GitHub repo you can push to;
-- a Claude login (`claude`, then `/login`). See [auth.md](auth.md).
+- a Claude login: the dashboard's first-run page has Sign in to Claude (it runs `claude auth login` for you), or run `claude auth login` yourself. See [auth.md](auth.md).
 
 ## Local or server
 
