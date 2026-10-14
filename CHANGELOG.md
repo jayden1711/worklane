@@ -260,6 +260,7 @@ One command, one URL: `bash scripts/bootstrap.sh <repo>` (or `--hardened` on a s
 - Real-Chrome lock: appear whole with its owner; take over a dead owner's only under a guard (main red on 729b51e) (#426)
 - docs: getting started around the one install command and the first-run wizard (#423)
 - docs: a short, current README; voice intake and approvals in getting started (#427)
+- cli: drop the npx hint from --help until the package is on npm (#428)
 
 ### Fixes
 
