@@ -594,8 +594,9 @@ jobs:
   add-project-real-systemd:
     # scripts/setup/add-project.sh end to end on a real host, as root, against a fake GitHub (test/fake-github.ts, the
     # manifest flow's, served by scripts/ci/fake-github.mjs): the dashboard's sign-in App made through the hub's setup
-    # mode (dashboards.sh --setup; its one-time token, and it turning itself off); a first run stops at the App step (no hub yet) naming its
-    # retry; the App by hand (credentials.sh github-app), then the rerun goes on from there with a stand-in Claude
+    # mode (dashboards.sh --setup; its one-time token, and it turning itself off); before that, a first run stops at the
+    # App step naming dashboards.sh --setup; after it, the machine's first project goes all the way with nothing by hand:
+    # add-project starts the hub alone before its App step, the App comes through the manifest flow, a stand-in Claude
     # token: the checkout cloned through the App's credential helper, the coordinator's service active, the machine
     # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step. Last,
     # another instance gets its App through the manifest flow itself (wizard screen 5), with GitHub's conversion faked
@@ -661,6 +662,23 @@ jobs:
             sudo install -d "/etc/systemd/system/$u.service.d"
             printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE" "$GH_FAKE" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
+      - name: "a first project before the sign-in App exists: stops at the App step, naming dashboards.sh --setup and its retry; starts nothing"
+        run: |
+          # The stand-in token: in a file of the runner's only, masked in case anything prints it; never in the env.
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token"); unset t
+          set +e
+          sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha < /dev/null > "$F/run1.jsonl" 2> "$F/run1.err"
+          rc=$?
+          set -e
+          cat "$F/run1.jsonl"; tail -n 20 "$F/run1.err"
+          [ "$rc" = 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
+          jq -e 'select(.step=="instance" and .state=="done")' "$F/run1.jsonl" >/dev/null
+          last="$(tail -n 1 "$F/run1.jsonl")"
+          jq -e '.step=="app" and .state=="failed" and (.detail|test("no dashboard hub on this machine yet, and no sign-in App for one")) and (.detail|test("manifest flow")) and (.detail|test("dashboards.sh --setup --public-url")) and (.retry|test("add-project.sh ci example/alpha .*worklane app-manifest ci example/alpha$"))' <<<"$last"
+          # Manifest only: the App step never sends anyone off to make an App by hand.
+          if jq -e '(.detail + " " + .retry) | test("by hand|credentials.sh")' <<<"$last"; then echo "the App step still names the manual way" >&2; exit 1; fi
+          id wl-ci && id wl-ci-agent
+          if [ -e /etc/systemd/system/worklane-dashboard-hub.service ] || systemctl is-active -q worklane-dashboard-hub.service; then echo "a hub was started with no sign-in App" >&2; exit 1; fi
       - name: "the sign-in App through the hub's setup mode (B8): wl-dash's one-time token from a 0600 file, never printed or in a URL; it turns itself off once the secret exists"
         run: |
           u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h=http://127.0.0.1:4399
@@ -708,34 +726,77 @@ jobs:
           # Setup mode is off for good: a rerun is refused.
           if sudo bash scripts/setup/dashboards.sh --setup --public-url "$pub" 2> "$F/setup2.err"; then echo "setup mode started again" >&2; exit 1; fi
           grep -q 'setup mode is off' "$F/setup2.err"
-      - name: first run, no hub yet; stops at the App step and names the retry
+      # The first-project gap: the agents' App needs a running hub with sign-in, and add-project starts the hub in its
+      # last step. So on a machine with no hub, the App step starts the hub alone first (dashboards.sh --no-instances,
+      # with what setup mode stored). First the real hub with no instance, under systemd; then it is taken down again,
+      # so the machine has no hub when its first project is added.
+      - name: "dashboards.sh --no-instances: the real hub alone, as wl-dash, signing in at github.com only; never with names"
         run: |
-          # The stand-in token: in a file of the runner's only, masked in case anything prints it; never in the env.
-          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token"); unset t
-          set +e
-          sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test < /dev/null > "$F/run1.jsonl" 2> "$F/run1.err"
-          rc=$?
-          set -e
-          cat "$F/run1.jsonl"; tail -n 20 "$F/run1.err"
-          [ "$rc" = 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
-          jq -e 'select(.step=="instance" and .state=="done")' "$F/run1.jsonl" >/dev/null
-          last="$(tail -n 1 "$F/run1.jsonl")"
-          jq -e '.step=="app" and .state=="failed" and (.detail|test("no dashboard hub")) and (.detail|test("manifest flow")) and (.retry|test("add-project.sh ci example/alpha .*worklane app-manifest ci example/alpha$"))' <<<"$last"
-          # Manifest only: the App step never sends anyone off to make an App by hand.
-          if jq -e '(.detail + " " + .retry) | test("by hand|credentials.sh")' <<<"$last"; then echo "the App step still names the manual way" >&2; exit 1; fi
-          id wl-ci && id wl-ci-agent
-      - name: the App by hand (the manual way), then the rerun goes on from the App step to the end
+          u=worklane-dashboard-hub.service
+          sudo bash scripts/setup/dashboards.sh --no-instances | tee "$F/hub0.log"
+          systemctl is-active "$u"
+          [ "$(systemctl show -p User --value "$u")" = wl-dash ]
+          sudo grep -q -- '^ExecStart=/usr/local/bin/worklane dashboard --hub - --service --client-id Iv1.madeapp00001 --public-url https://hub.example.test --signin-dir ' "/etc/systemd/system/$u"
+          if [ -e /etc/systemd/system/worklane-dashboard-hub-setup.service ]; then echo "the setup-mode unit is still installed" >&2; exit 1; fi
+          to="$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:4399/auth/login)"
+          case "$to" in https://github.com/login/oauth/authorize\?*) ;; *) echo "the hub's sign-in goes to $to" >&2; exit 1 ;; esac
+          # Its break-glass, with the hub's token from a file of the runner's only: no instance yet.
+          ht="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; printf 'Authorization: Bearer %s\n' "$(sudo cat "$ht")" > "$F/hub-auth")
+          [ "$(curl -s -H @"$F/hub-auth" http://127.0.0.1:4398/api/hub)" = '{"instances":[]}' ]
+          rm -f "$F/hub-auth"
+          if sudo bash scripts/setup/dashboards.sh --no-instances ci 2> "$F/hub0.err"; then echo "--no-instances took a name" >&2; exit 1; fi
+          # Back to a machine with no hub, for its first project.
+          sudo systemctl disable --now "$u"
+          sudo rm -f "/etc/systemd/system/$u" "$ht"
+          sudo systemctl daemon-reload
+          if curl -s -o /dev/null http://127.0.0.1:4399/; then echo "something still answers on 4399" >&2; exit 1; fi
+      # The machine owner's browser is scripts/ci/manifest-browser.mjs. The hub's unit runs a stand-in for this step
+      # (scripts/ci/hub-stand-in.mjs, the hub's own code with its sign-in given the fake GitHub in process), through a
+      # drop-in that replaces ExecStart: the real hub signs people in at github.com only, with no host override, so
+      # nobody could sign in to it on this runner. Everything else is real: add-project.sh as root writes and starts the
+      # unit itself, before its App step. The drop-in goes afterwards, and the real hub runs with the instance.
+      - name: "a machine's first project, no hub and no instance: add-project starts the hub before the App step, the App through the manifest flow, to the end; nothing by hand"
         run: |
-          echo n | sudo env WORKLANE_GITHUB_API="$GH_FAKE" bash scripts/setup/credentials.sh ci github-app 91 4242 "$F/app.pem" example/alpha
-          # No --client-id or --public-url: the dashboards step takes what the hub's setup mode stored.
-          cat "$F/claude-token" | sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha > "$F/run2.jsonl" 2> "$F/run2.err" || { cat "$F/run2.jsonl"; tail -n 60 "$F/run2.err"; exit 1; }
+          sudo bash scripts/setup/machine-owners.sh --first ci-owner
+          dd=/etc/systemd/system/worklane-dashboard-hub.service.d
+          printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist %s https://hub.example.test\n' "$GH_FAKE" | sudo tee "$dd/stand-in.conf" >/dev/null
+          if [ -e /etc/systemd/system/worklane-dashboard-hub.service ]; then echo "there is a hub already" >&2; exit 1; fi
+          sudo test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-app/private-key.pem"
+          # No --client-id or --public-url: the hub takes what its setup mode stored.
+          ( set +e; sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --timeout 3 < "$F/claude-token" > "$F/run2.jsonl" 2> "$F/run2.err"; echo "$?" > "$F/run2.rc" ) &
+          for _ in $(seq 1 90); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/auth/login)" = 302 ] && break; sleep 1; done
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/auth/login)" = 302 ] || { cat "$F/run2.jsonl"; tail -n 40 "$F/run2.err"; exit 1; }
+          node scripts/ci/manifest-browser.mjs "$GITHUB_WORKSPACE/dist" http://127.0.0.1:4399 https://hub.example.test "$GH_FAKE" ci-owner "$F/run2.jsonl" "$F/manifest-code-ci" || { cat "$F/run2.jsonl"; tail -n 40 "$F/run2.err"; exit 1; }
+          wait
           cat "$F/run2.jsonl"
+          [ "$(cat "$F/run2.rc")" = 0 ] || { tail -n 60 "$F/run2.err"; exit 1; }
+          grep -q 'no dashboard hub on this machine yet: starting it, with no instance' "$F/run2.err"
           for s in instance app; do jq -se --arg s "$s" 'map(select(.step==$s and .state=="done")) | length == 1' "$F/run2.jsonl"; done
           [ "$(jq -sc 'map(select(.state=="started") | .step)' "$F/run2.jsonl")" = '["instance","app","claude-token","checkout","policy","service","test-user","machine-helper","dashboards"]' ]
           jq -se 'map(select(.state=="failed")) | length == 0' "$F/run2.jsonl"
+          jq -se 'map(select(.step=="app" and .state=="ask" and .ask.kind=="approve_link")) | length == 2' "$F/run2.jsonl"
+          jq -se 'map(select(.step=="app" and .state=="done" and (.detail|test("made through the manifest flow$")))) | length == 1' "$F/run2.jsonl"
           jq -se 'map(select(.step=="claude-token" and .state=="ask" and .ask.kind=="paste_secret")) | length == 1' "$F/run2.jsonl"
           jq -se 'map(select(.step=="policy" and .state=="done" and (.detail|startswith("auto_merge off, $20/day, 2 workers")))) | length == 1' "$F/run2.jsonl"
           if grep -qFf "$F/claude-token" "$F/run1.jsonl" "$F/run1.err" "$F/run2.jsonl" "$F/run2.err"; then echo "the token was echoed" >&2; exit 1; fi
+          # The App came through the manifest flow: its key and secrets the coordinator's own 0400 files, nothing by hand.
+          a="$(getent passwd wl-ci | cut -d: -f6)/.config/ci-app"
+          [ "$(sudo cat "$a/made-by")" = manifest ]
+          [ "$(sudo stat -c '%U %a' "$a")" = "wl-ci 700" ]
+          for f in private-key.pem client-secret webhook-secret; do [ "$(sudo stat -c '%U %a' "$a/$f")" = "wl-ci 400" ] || { sudo stat -c '%n %U %a' "$a/$f"; exit 1; }; done
+          if sudo -u wl-dash test -r "$a/private-key.pem"; then echo "wl-dash can read the App's key" >&2; exit 1; fi
+          # Nothing echoed: the App's secrets, a line of its key, the one-time code, the sign-in secret.
+          node --input-type=module -e 'const f = await import(process.argv[1]); process.stdout.write(f.APP_SECRET + "\n" + f.WEBHOOK_SECRET + "\n");' "file://$GITHUB_WORKSPACE/dist/test/fake-github.js" > "$F/never-ci"
+          { sed -n 2p "$F/app.pem"; cat "$F/manifest-code-ci"; } >> "$F/never-ci"
+          [ "$(grep -c . "$F/never-ci")" = 4 ]
+          if grep -qFf "$F/never-ci" "$F/run2.jsonl" "$F/run2.err" "$F/hub0.log" || sudo journalctl --no-pager | grep -qFf "$F/never-ci"; then echo "a secret or the code was echoed" >&2; exit 1; fi
+          # The stand-in goes; the real hub runs, with the instance and the sign-in App setup mode made.
+          sudo rm -f "$dd/stand-in.conf"
+          sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-hub.service
+          for _ in $(seq 1 30); do to="$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:4399/auth/login || true)"; [ -n "$to" ] && break; sleep 1; done
+          case "$to" in https://github.com/login/oauth/authorize\?*) ;; *) echo "the hub's sign-in goes to $to" >&2; exit 1 ;; esac
+          systemctl show -p ExecStart --value worklane-dashboard-hub.service | grep -q -- '/usr/local/bin/worklane dashboard --hub ci='
       - name: the instance, the token for the agent only, the checkout through the App, the services, the helper
         run: |
           sudo test -f "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/instance.yaml"
@@ -755,6 +816,10 @@ jobs:
           systemctl show -p ExecStart --value worklane-dashboard-hub.service | grep -q -- '--client-id Iv1.madeapp00001 --public-url https://hub.example.test '
           if [ -e /etc/systemd/system/worklane-dashboard-hub-setup.service ]; then echo "the setup-mode unit is still installed" >&2; exit 1; fi
           sleep 15 && systemctl is-active worklane-ci.service
+          # The hub serves an instance now: starting it alone would drop it, and is refused.
+          if sudo bash scripts/setup/dashboards.sh --no-instances 2> "$F/hub1.err"; then echo "--no-instances ran over a hub with instances" >&2; exit 1; fi
+          grep -q -- "--no-instances: the hub serves ci already" "$F/hub1.err"
+          systemctl show -p ExecStart --value worklane-dashboard-hub.service | grep -q -- "--hub ci="
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
           if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
