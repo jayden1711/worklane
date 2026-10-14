@@ -4,8 +4,9 @@
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
+import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State, type ClaudeSigninData } from '../api';
 import { navigate } from '../App';
+import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
 
@@ -188,7 +189,7 @@ function FixPanel({ s }: { s: SetupStepView }) {
 }
 
 function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' ? s.fix.label : 'Fix';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'signin' ? s.fix.label : 'Fix';
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
       <div className="flex gap-3">
@@ -203,15 +204,16 @@ function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; 
           </div>
           <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
         </div>
-        {!s.done && (
-          <Button size="sm" variant={open ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
-            {label}
+        {(!s.done || s.fix.kind === 'signin') && (
+          <Button size="sm" variant={open || s.done ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+            {s.done ? 'Again' : label}
           </Button>
         )}
       </div>
-      {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
+      {/* WHY: a sign-in is rerunnable (another account, an expired login), so its panel opens on a done step too. */}
+      {open && (!s.done || s.fix.kind === 'signin') && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          {s.fix.kind === 'action' ? action : <FixPanel s={s} />}
+          {s.fix.kind === 'action' || s.fix.kind === 'signin' ? action : <FixPanel s={s} />}
         </div>
       )}
     </li>
@@ -295,8 +297,9 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, signin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; signin?: ClaudeSigninData | null }) {
   const [open, setOpen] = useState<string | null>(initialOpen);
+  const recheck = useCallback(() => onRecheck?.(), [onRecheck]);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
   const pct = setup?.total ? Math.round((setup.done / setup.total) * 100) : 0;
@@ -358,7 +361,13 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   s={s}
                   open={open === s.id}
                   onFix={() => fix(s)}
-                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : undefined}
+                  action={
+                    s.fix.kind === 'action' ? (
+                      <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'signin' ? (
+                      signin ? <ClaudeSigninView v={signin} onChanged={() => onRecheck?.()} /> : <ClaudeSigninPanel onDone={recheck} />
+                    ) : undefined
+                  }
                 />
               ))}
             </ol>

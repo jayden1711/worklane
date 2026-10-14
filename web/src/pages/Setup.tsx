@@ -16,7 +16,7 @@ function Status({ a }: { a: Ask }) {
  * The secret's input is uncontrolled: its value lives only in the field, goes straight to the server, and the
  * field is cleared after sending. It is never put in state, shown, or logged.
  */
-function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; onDone: (err: string | null) => void }) {
+export function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; onDone: (err: string | null) => void }) {
   const field = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const send = async () => {

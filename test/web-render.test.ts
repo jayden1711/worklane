@@ -50,7 +50,8 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; signin?: unknown }): string;
+  renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1207,7 +1208,7 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   assert.match(html, /data-testid="first-run-recheck"[^>]*>Re-check/);
   assert.match(html, /data-testid="first-run-checked"/);
   // Each not-done step has a Fix of its kind; a done one has none.
-  assert.match(html, /data-step="claude-login" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="outside"/);
+  assert.match(html, /data-step="claude-login" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="signin"[^>]*>Sign in</);
   assert.match(html, /data-step="service" data-status="todo"[\s\S]*?data-fix="start"[^>]*>Start</);
   const tools = html.slice(html.indexOf('data-step="tools"'), html.indexOf('</li>', html.indexOf('data-step="tools"')));
   assert.doesNotMatch(tools, /first-run-fix/);
@@ -1216,10 +1217,13 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   assert.match(html, /data-testid="first-run-resume"[\s\S]*?init last stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
   assert.match(html, /data-testid="first-run-unavailable"[\s\S]*?Not available in local mode[\s\S]*?separate OS users[\s\S]*?root-run add-project[\s\S]*?test sandbox[\s\S]*?needs Docker/);
   assert.doesNotMatch(html, /first-run-none/);
-  // Fix, a provider's login: the command, and that the page notices when it's done.
-  const claude = r.renderFirstRun(f, { open: 'claude-login' });
-  assert.match(claude, /data-testid="first-run-outside"[\s\S]*?Anthropic(&#x27;|')s own login and consent page[\s\S]*?checks again every 15 s and marks it done[\s\S]*?<code[^>]*>claude auth login<\/code>/);
-  // ... and with a direct link where the provider has one (GitHub's device login).
+  // Fix, Sign in to Claude: its panel opens in the step (rendered from its data; the page loads it).
+  const claude = r.renderFirstRun(f, { open: 'claude-login', signin: { mode: 'local', canAct: true, state: 'idle', url: null, detail: 'not started', startedAt: null, endedAt: null, status: null } });
+  assert.match(claude, /data-testid="first-run-fix-panel"[\s\S]*?data-testid="claude-signin" data-mode="local" data-state="idle"[\s\S]*?data-testid="claude-signin-button"/);
+  // ... and it runs again once done (another account, an expired login).
+  const signedIn = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((x) => (x.id === 'claude-login' ? { ...x, done: true } : x)) })) } };
+  assert.match(r.renderFirstRun(signedIn), /data-step="claude-login" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="signin"[^>]*>Again</);
+  // Fix, a provider's login: a direct link, and that the page notices when it's done (GitHub's device login).
   assert.match(r.renderFirstRun(f, { open: 'gh-login' }), /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="first-run-outside-link"[^>]*>Open GitHub(&#x27;|')s device login/);
   // Fix with no screen yet: what a person does today, and that a screen is coming.
   const coming = f.setup!.groups.flatMap((g) => g.steps).find((s) => !s.done && s.fix.kind === 'coming')!;
@@ -1271,6 +1275,35 @@ test("the first-run page, a Fix the dashboard does itself: its plan shown first,
   const unavailable = r.renderFirstRun({ ...withPlans, actions: { 'git-hooks': { ...plans['git-hooks'], available: false, why: 'nothing is missing', changes: [], commands: [] } } }, { open: 'pre-commit' });
   assert.match(unavailable, /data-testid="first-run-action-unavailable"[^>]*>Not from here: nothing is missing\./);
   assert.doesNotMatch(unavailable, /first-run-action-button/);
+});
+
+test("the first-run page, Sign in to Claude: local relays claude auth login (the link for owners, nothing pasted); a server pastes a setup token; a cached account is labelled cached", () => {
+  const local = { mode: 'local', canAct: true, state: 'idle', url: null, detail: 'not started', startedAt: null, endedAt: null, status: null };
+  const idle = r.renderClaudeSignin(local);
+  assert.match(idle, /data-testid="claude-signin" data-mode="local" data-state="idle"[\s\S]*?claude auth login[\s\S]*?Nothing is pasted[\s\S]*?never sees, logs or stores a token/);
+  assert.match(idle, /data-testid="claude-signin-button"[^>]*>Sign in…/);
+  assert.doesNotMatch(idle, /claude-signin-confirm"/, 'no confirmation until Sign in is pressed');
+  assert.match(r.renderClaudeSignin(local, { confirming: true }), /data-testid="claude-signin-confirming"[\s\S]*?Run claude auth login now\?[\s\S]*?data-testid="claude-signin-confirm"/);
+  assert.match(r.renderClaudeSignin({ ...local, canAct: false }), /data-testid="claude-signin-refused"[^>]*>Only the instance(&#x27;|')s owners can start it/);
+  const url = 'https://claude.com/cai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback&state=s';
+  const waiting = r.renderClaudeSignin({ ...local, state: 'waiting', url, detail: 'open it', startedAt: '2026-10-13T10:00:00.000Z' });
+  assert.ok(waiting.includes(`href="${url.replace('&', '&amp;')}"`), waiting);
+  assert.match(waiting, /data-testid="claude-signin-link"[^>]*>Open Anthropic(&#x27;|')s sign-in/);
+  assert.match(waiting, /data-testid="claude-signin-cancel"/);
+  assert.doesNotMatch(waiting, /claude-signin-button/);
+  assert.match(r.renderClaudeSignin({ ...local, canAct: false, state: 'waiting', detail: 'open it' }), /shown to the instance(&#x27;|')s owners only/);
+  const done = r.renderClaudeSignin({ ...local, state: 'done', detail: 'signed in (claude.ai)', status: { loggedIn: true, method: 'claude.ai', cachedAccount: 'someone@example.com' } });
+  assert.match(done, /data-testid="claude-signin-cached-account"[^>]*>Account: someone@example\.com \(cached by Claude Code; it may predate a later token change\)/);
+
+  const server = { mode: 'server', canAct: true, agentUser: 'wl-example-agent', ask: null, status: null, command: 'claude setup-token\nsudo bash /opt/engine/scripts/setup/credentials.sh example claude', script: 'sudo bash /opt/engine/scripts/setup/credentials.sh example claude' };
+  const none = r.renderClaudeSignin(server);
+  assert.match(none, /data-testid="claude-signin" data-mode="server"[\s\S]*?wl-example-agent only \(0600\), never shown or logged[\s\S]*?data-testid="claude-signin-no-ask"[\s\S]*?data-testid="claude-signin-setup"[\s\S]*?data-testid="claude-signin-command"[^>]*>claude setup-token\nsudo bash \/opt\/engine\/scripts\/setup\/credentials\.sh example claude/);
+  assert.doesNotMatch(none, /\/login/, 'no /login session any more');
+  const ask = { id: 'a1', instance: 'example', title: "The Claude login for example's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-13T10:00:00.000Z', createdBy: 'add-project', status: 'open', answer: null, cancelled: null, kind: 'paste_secret', credential: 'claude-token', where: 'x' };
+  const box = r.renderClaudeSignin({ ...server, ask: { ...ask, canAnswer: true }, status: { at: '2026-10-13T10:00:00.000Z', loggedIn: true, method: 'claude.ai', cachedAccount: 'previous@example.com', installedAt: '2026-10-13T11:00:00.000Z' } });
+  assert.match(box, /data-testid="claude-signin-ask"[\s\S]*?type="password"[^>]*data-testid="ask-secret"/);
+  assert.match(box, /data-testid="claude-signin-status"[\s\S]*?signed in \(claude\.ai\)[\s\S]*?data-testid="claude-signin-cached-account"[^>]*>Account: previous@example\.com \(cached/);
+  assert.match(r.renderClaudeSignin({ ...server, ask: { ...ask, canAnswer: false } }), /data-testid="claude-signin-refused"[^>]*>Only the instance(&#x27;|')s owners can paste it/);
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

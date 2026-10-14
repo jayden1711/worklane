@@ -13,7 +13,11 @@
 #   bash scripts/setup/credentials.sh <name> verify-app
 #       Read-only: the same check with the key already installed (after changing the App's permissions).
 #   bash scripts/setup/credentials.sh <name> claude
-#       The agent user's Claude login (interactive).
+#       The agent user's Claude login: the token `claude setup-token` prints (run it on a machine signed in to the
+#       Claude account the agents should use), pasted at a hidden prompt, or on stdin when there is no terminal
+#       (automation). Installed as wl-<name>-agent's own Claude login (~/.claude/.credentials.json, 0600), never
+#       echoed, never an argument; then checked with `claude auth status` as that user. The dashboard's equivalent is
+#       Add project's paste box (the first-run page's Sign in to Claude).
 #   bash scripts/setup/credentials.sh <name> github
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
@@ -141,9 +145,21 @@ JS
     ;;
   claude)
     # Only the agent user signs in. An eval user needs a Claude login only once evals are on.
-    say "Claude: sign in as $agent. In the session, run /login and follow the link; then /exit."
-    sudo -iu "$agent" claude
-    sudo -iu "$agent" claude auth status --json
+    id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    say "Claude: the token from claude setup-token, for $agent only ($(home_of "$agent")/.claude/.credentials.json, 0600)"
+    token=""
+    if [ -t 0 ]; then
+      read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
+      echo
+    else
+      IFS= read -r token || true
+    fi
+    token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    claude_token_ok "$token" || { token=""; echo "that is not a token from claude setup-token (sk-ant-oat01-...); nothing installed" >&2; exit 1; }
+    printf '%s' "$token" | install_claude_token "$agent"
+    token=""
+    claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token" >&2; exit 1; }
+    echo "$agent is signed in to Claude, per claude auth status"
     ;;
   eval-key)
     # Evals are off unless you turn them on: no key, no eval lane, and the eval user needs no Claude login.

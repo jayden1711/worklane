@@ -107,6 +107,10 @@ export function SettingsPage() {
         <a href="/machine" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/machine'))} data-testid="settings-machine-link">
           Machine page
         </a>
+        . Setup steps, such as Sign in to Claude, run again from the{' '}
+        <a href="/first-run" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/first-run'))} data-testid="settings-first-run-link">
+          First run page
+        </a>
         .
       </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">

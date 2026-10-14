@@ -64,10 +64,11 @@ import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
+import { ClaudeSignin, claudeServerView, systemSigninDeps, type SigninDeps } from './claude-signin.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
-import { AskError } from './console/asks.js';
+import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 
@@ -177,6 +178,8 @@ export interface DashboardOptions {
   startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
   /** WHY: tests stand in for what the first-run page's Fix actions do to the machine (src/setup-actions.ts). */
   setupActions?: Partial<ActionDeps>;
+  /** WHY: tests stand in for claude auth login and claude auth status (src/claude-signin.ts). */
+  claudeSignin?: Partial<SigninDeps>;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -823,6 +826,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
   // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
   let actionRunning: string | null = null;
+  // The first-run page's Sign in to Claude (local mode): one claude auth login at a time, audited when it ends.
+  let signinBy: Who | null = null;
+  const signin = new ClaudeSignin({ ...systemSigninDeps(), ...opts.claudeSignin }, (state, detail) => {
+    setupCache.delete('claude-login');
+    if (signinBy) audit(signinBy, 'first_run.claude_signin_ended', { state, detail: detail.slice(0, 300) });
+  });
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -1305,6 +1314,38 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             actionRunning = null;
           }
         }
+        // Sign in to Claude (src/claude-signin.ts). Local: the relayed `claude auth login`, its link for the owners only.
+        // Server: the agents' token goes into add-project's paste box (the existing paste_secret ask) or credentials.sh.
+        if (url.pathname === '/api/first-run/claude-signin' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          if (opts.instance) {
+            const asks = asksFrom(readEvents(opts.eventsDb).filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
+            return json(res, 200, { mode: 'server', canAct: isOwnerHere, ...claudeServerView({ instance: opts.instance, asks, role: who.role, engineRoot: engineRoot(), ...(opts.claudeAccountDir ? { accountDir: opts.claudeAccountDir } : {}) }) });
+          }
+          return json(res, 200, { mode: 'local', canAct: isOwnerHere, ...signin.view(isOwnerHere) });
+        }
+        if ((url.pathname === '/api/first-run/claude-signin' || url.pathname === '/api/first-run/claude-signin/cancel') && req.method === 'POST') {
+          const cancel = url.pathname.endsWith('/cancel');
+          const body = ((await readBody(req)) ?? {}) as { confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.claude_signin_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may sign this machine in to Claude; @${who.login} is a ${who.role}`);
+          // INVARIANT: a server's agents never sign in through the dashboard's own claude: their login is a pasted setup token.
+          if (opts.instance) return refused(409, "a server instance's agents sign in with a token from claude setup-token, pasted into Add project's paste box or credentials.sh's hidden prompt; the dashboard never runs claude auth login there");
+          if (cancel) {
+            if (!signin.cancel(`cancelled by @${who.login}`)) return refused(409, 'no Claude sign-in is running');
+            audit(who, 'first_run.claude_signin_cancelled', {});
+            return json(res, 200, { ok: true });
+          }
+          if (body.confirm !== true) return refused(400, "Sign in runs claude auth login as this machine's user: review what it shows, then confirm it ({\"confirm\": true})");
+          if (signin.running) return refused(409, 'a Claude sign-in is running already: one at a time');
+          signinBy = who;
+          signin.start();
+          audit(who, 'first_run.claude_signin', { state: signin.view(false).state });
+          return json(res, 200, { ok: true, ...signin.view(true) });
+        }
         // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
         // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.
         if (url.pathname === '/api/first-run/start' && req.method === 'POST') {
@@ -1543,6 +1584,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           new Promise<void>((r) => {
             clearInterval(poll);
             clearInterval(ping);
+            signin.cancel('the dashboard stopped');
             for (const c of clients.keys()) c.end();
             server.close(() => r());
           }),
