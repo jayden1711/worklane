@@ -5,9 +5,10 @@
 #
 # The steps (each skipped, as "done", when it is done already, so a rerun picks up where an earlier one stopped):
 #   instance        instance.sh <name>, and the instance home as engine.sh makes it
-#   app             the agent's GitHub App, through the manifest flow (`worklane app-manifest`, through the dashboard
-#                   hub: two clicks on GitHub, as a machine owner). credentials.sh <name> github-app stays the
-#                   manual way; once it has run, this step is done.
+#   app             the agent's GitHub App, through GitHub's manifest flow only (`worklane app-manifest`, through the
+#                   dashboard hub: two clicks on GitHub, as a machine owner): its key, client secret and webhook
+#                   secret go straight to wl-<name>'s own 0400 files, never to a URL, a log, an argument or an event.
+#                   It never asks for an App made by hand; one already set up (credentials.sh) counts as done.
 #   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted (or on stdin), stored for
 #                   wl-<name>-agent only. Never echoed or logged.
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
@@ -126,7 +127,7 @@ done_app() {
 do_app() {
   local hub_token line rc
   hub_token="$(home_of wl-dash 2>/dev/null || true)/.local/state/worklane/dashboard-hub/dashboard-token"
-  [ -s "$hub_token" ] || { echo "no dashboard hub on this machine yet (no $hub_token): set it up with dashboards.sh, or make the App by hand: credentials.sh $name github-app <app-id> <installation-id> <key.pem> $repo"; return 1; }
+  [ -s "$hub_token" ] || { echo "no dashboard hub on this machine yet (no $hub_token): the App is made through GitHub's manifest flow, which comes back to the hub; set the hub up with dashboards.sh first, then add the project again"; return 1; }
   # The CLI prints each GitHub click as "ask: {json}": passed on as this step's asks; the rest is its log.
   set +e
   "$ENGINE_CLI" app-manifest "$name" "$repo" --ask-lines --timeout "$timeout" ${public_url:+--public-url "$public_url"} 2>&1 | while IFS= read -r line; do
@@ -140,7 +141,7 @@ do_app() {
   return "$rc"
 }
 detail_app() { done_app; }
-alone_app() { echo "sudo $ENGINE_CLI app-manifest $name $repo; or by hand: sudo bash $here/credentials.sh $name github-app <app-id> <installation-id> <key.pem> $repo"; }
+alone_app() { echo "sudo $ENGINE_CLI app-manifest $name $repo"; }
 
 # --- claude-token
 done_claude_token() {

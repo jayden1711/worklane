@@ -173,6 +173,7 @@
   "test/release-workflow.test.ts": 1410,
   "test/release.test.ts": 1750,
   "test/repo-config.test.ts": 2680,
+  "test/repo-picker.test.ts": 531,
   "test/report-access.test.ts": 302,
   "test/reports.test.ts": 87,
   "test/repro-state-graph/p0-1-emergency-stop-landing.test.ts": 5330,

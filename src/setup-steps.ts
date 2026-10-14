@@ -498,9 +498,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: 'Create the App on github.com by hand, download its .pem to the server, then `credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>`.',
-    fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (the App through GitHub's manifest flow)" },
-    automation: 'scripts/setup/add-project.sh <name> <owner/repo> (its app step), or scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>',
+    today: "The Setup console's Add project, or at a root shell `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`: the App is made through GitHub's manifest flow (two clicks on GitHub, nothing copied by hand) and installed on the one repo picked.",
+    fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (pick the repo; the App through GitHub's manifest flow)" },
+    automation: 'sudo bash scripts/setup/add-project.sh <name> <owner/repo> (its app step: the App through the manifest flow, installed on that one repo)',
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return recorded(k, 'app', "the agents' GitHub App") ?? no(i.error);

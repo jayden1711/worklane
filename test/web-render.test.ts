@@ -55,7 +55,7 @@ interface Render {
   renderFirstRunPage(state: unknown): string;
   renderSetupScreens(steps: unknown[]): string;
   renderSetup(data: unknown): string;
-  renderAddProject(data: unknown): string;
+  renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
@@ -1594,6 +1594,50 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
     assert.equal((said.match(/[Mm]achine owners: @ada, @olu/g) ?? []).length, 1, `${who}: names the machine owners, once: ${said}`);
   }
   assert.match(view(ownerRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
+});
+
+test("Add project's repo picker: the account's repos to pick from, the ones the App can't work on shown disabled with why; the script it stands for; hidden when adding isn't allowed", () => {
+  const ownersFile = machineOwnersFile('ada');
+  const data = addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile });
+  const picker = {
+    owner: 'ada',
+    ownerType: 'User',
+    accounts: ['ada', 'example-org'],
+    repos: [
+      { fullName: 'ada/shop', private: false, installable: true, why: null, pushedAt: null },
+      { fullName: 'ada/old-site', private: false, installable: false, why: 'archived: read-only, so the agents could never push to it', pushedAt: null },
+    ],
+    note: 'GitHub lists only public repos here: type a private repo as owner/name.',
+    error: null,
+  };
+  const html = r.renderAddProject(data, picker);
+  assert.match(html, /data-testid="add-project-picker" data-owner="ada"/);
+  const account = html.match(/<input[^>]*data-testid="add-project-account"[^>]*>/)![0];
+  assert.match(account, /value="ada"/, 'the account listed');
+  assert.doesNotMatch(account, /disabled=""/, 'and editable: an organization GitHub does not show publicly is typed');
+  const accounts = html.match(/<datalist id="add-project-accounts">[\s\S]*?<\/datalist>/)![0];
+  assert.deepEqual([...accounts.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]), ['ada', 'example-org']);
+  assert.match(html, /data-testid="add-project-account-list"/);
+  const options = [...html.matchAll(/<option value="([^"]*)"( disabled="")? data-testid="add-project-repo-option" data-installable="(yes|no)">([^<]*)</g)].map((m) => [m[1], m[3], !!m[2]]);
+  assert.deepEqual(options, [
+    ['ada/shop', 'yes', false],
+    ['ada/old-site', 'no', true],
+  ]);
+  assert.match(html, /ada\/old-site \(archived: read-only/);
+  assert.match(html, /data-testid="add-project-picker-note"[^>]*>GitHub lists only public repos here/);
+  // The script the screen stands for, and where the App's secrets go.
+  const script = html.match(/data-testid="add-project-script"[\s\S]*?<\/p>/)![0];
+  assert.match(script, /sudo bash scripts\/setup\/add-project\.sh &lt;name&gt; &lt;owner\/repo&gt;/);
+  assert.match(script, /0400 files: never shown, logged or sent anywhere/);
+  // GitHub's refusal: the message instead of the note; the typed field still there.
+  const failed = r.renderAddProject(data, { ...picker, repos: [], error: "GitHub's limit is reached: type owner/name" });
+  assert.match(failed, /data-testid="add-project-picker-error"[^>]*>GitHub(&#x27;|')s limit is reached/);
+  assert.doesNotMatch(failed, /data-testid="add-project-picker-note"/);
+  assert.match(failed, /data-testid="add-project-repo"/);
+  // Not yet listed, and not allowed.
+  assert.match(r.renderAddProject(data), /data-testid="add-project-picker-loading"/);
+  const refused = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ivy') }, { ownersFile }), picker);
+  assert.doesNotMatch(refused, /data-testid="add-project-picker/, 'no picker for someone who may not add a project');
 });
 
 test('Add project: the steps show in the script order as they arrive, and its asks (GitHub links, the Claude token) appear in the same view', () => {

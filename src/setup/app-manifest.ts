@@ -147,13 +147,15 @@ export function installUrl(slug: string, ids: { ownerId: number; repoId: number 
   return `${base}/permissions?suggested_target_id=${ids.ownerId}${ids.repoId ? `&repository_ids[]=${ids.repoId}` : ''}`;
 }
 
-/** What GitHub's conversion returns that the runner needs. pem and clientSecret are secrets. */
+/** What GitHub's conversion returns that the runner needs. pem, clientSecret and webhookSecret are secrets. */
 export interface ConvertedApp {
   id: number;
   slug: string;
   clientId: string;
   clientSecret: string;
   pem: string;
+  /** GitHub's webhook secret for the App, when it made one (the manifest's webhook is inactive, so it may not). */
+  webhookSecret: string | null;
   owner: string;
   htmlUrl: string;
 }
@@ -163,7 +165,7 @@ export async function convertManifest(code: string, o: { api?: string; fetch?: F
   const api = (o.api ?? defaultApi()).replace(/\/+$/, '');
   const r = await (o.fetch ?? fetch)(`${api}/app-manifests/${encodeURIComponent(code)}/conversions`, { method: 'POST', headers: HEADERS });
   if (r.status !== 201 && r.status !== 200) throw new Error(`GitHub ${r.status} converting the manifest code`);
-  let j: { id?: unknown; slug?: unknown; client_id?: unknown; client_secret?: unknown; pem?: unknown; owner?: { login?: unknown }; html_url?: unknown };
+  let j: { id?: unknown; slug?: unknown; client_id?: unknown; client_secret?: unknown; webhook_secret?: unknown; pem?: unknown; owner?: { login?: unknown }; html_url?: unknown };
   try {
     j = (await r.json()) as typeof j;
   } catch {
@@ -172,7 +174,8 @@ export async function convertManifest(code: string, o: { api?: string; fetch?: F
   if (typeof j.id !== 'number' || typeof j.slug !== 'string' || !/^[a-z0-9-]+$/.test(j.slug) || typeof j.pem !== 'string' || typeof j.client_id !== 'string' || typeof j.client_secret !== 'string') {
     throw new Error('GitHub returned no App id, slug, key or client secret for the manifest');
   }
-  return { id: j.id, slug: j.slug, clientId: j.client_id, clientSecret: j.client_secret, pem: j.pem, owner: typeof j.owner?.login === 'string' ? j.owner.login : '', htmlUrl: typeof j.html_url === 'string' ? j.html_url : '' };
+  const webhookSecret = typeof j.webhook_secret === 'string' && j.webhook_secret ? j.webhook_secret : null;
+  return { id: j.id, slug: j.slug, clientId: j.client_id, clientSecret: j.client_secret, pem: j.pem, webhookSecret, owner: typeof j.owner?.login === 'string' ? j.owner.login : '', htmlUrl: typeof j.html_url === 'string' ? j.html_url : '' };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -493,6 +496,9 @@ export type RunResult =
   | { ok: true; kind: AppKind; appId: number; slug: string; clientId: string; by: string; installationId?: number; keyPath?: string; credentials?: string | null; secretPath?: string }
   | { ok: false; step: string; error: string };
 
+/** The agent App's secret files in its key directory: the key (credentials.sh's name), and the two other secrets. */
+export const AGENT_SECRET_FILES = Object.freeze({ key: 'private-key.pem', clientSecret: 'client-secret', webhookSecret: 'webhook-secret' });
+
 /** credentials.sh's paths, on top of a user's home. */
 export const agentKeyDir = (home: string, instance: string) => join(home, '.config', `${instance}-app`);
 export const signInDir = (home: string) => join(home, '.config', 'dashboard-signin');
@@ -590,13 +596,19 @@ export async function runAppManifest(o: { instance: string; repo: string; kind: 
     log(`then: dashboards.sh --client-id ${app.clientId} --public-url ${new URL(reg.startUrl).origin} <name>...`);
     return { ok: true, kind: 'signin', appId: app.id, slug: app.slug, clientId: app.clientId, by, secretPath };
   }
+  // WHY: everything secret GitHub returned goes straight to the coordinator's own 0400 files, beside the key, the
+  // way credentials.sh stores the key; the coordinator works with the key alone, the other two are kept so nobody
+  // has to regenerate them on GitHub later. Only their paths are ever logged.
   let keyPath: string;
+  const keyDir = agentKeyDir(userHome, o.instance);
   try {
-    keyPath = install(user, agentKeyDir(userHome, o.instance), 'private-key.pem', app.pem);
+    keyPath = install(user, keyDir, AGENT_SECRET_FILES.key, app.pem);
+    install(user, keyDir, AGENT_SECRET_FILES.clientSecret, app.clientSecret);
+    if (app.webhookSecret) install(user, keyDir, AGENT_SECRET_FILES.webhookSecret, app.webhookSecret);
   } catch (e) {
     return fail('store the App key', String((e as Error).message).split('\n')[0]!);
   }
-  log(`installed the App's private key for ${user} only (${keyPath}, 0400)`);
+  log(`installed the App's private key, client secret${app.webhookSecret ? ' and webhook secret' : ''} for ${user} only (${keyDir}, each 0400)`);
 
   // 3. The install, on exactly the instance's repo.
   const [owner] = o.repo.split('/') as [string, string];

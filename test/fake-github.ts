@@ -26,6 +26,16 @@ export interface FakeGitHubOptions {
   port?: number;
   /** Each request, as `<method> <path>` (and the git user), for a log. */
   log?: (line: string) => void;
+  /** Each account's repos, as GitHub lists them (the Add project repo picker); keyed by owner. */
+  accountRepos?: Record<string, { full_name: string; private?: boolean; archived?: boolean; disabled?: boolean; pushed_at?: string }[]>;
+  /** Each user's public organizations. */
+  orgs?: Record<string, string[]>;
+  /**
+   * CI only (scripts/ci/fake-github.mjs): POST /_fake/manifest-code {code, slug} and /_fake/signin-code {code, login}
+   * stand in for GitHub making a manifest code (for the App id FAKE_APP_ID) and a sign-in code, which a test in this
+   * process sets directly instead.
+   */
+  control?: boolean;
 }
 
 /** A pull request the fake holds. */
@@ -41,7 +51,7 @@ export async function fakeGitHub(o: FakeGitHubOptions) {
   const codes = new Map<string, { slug: string; id: number }>(); // manifest codes
   const signins = new Map<string, string>(); // oauth codes -> login
   const takenNames = new Set<string>();
-  const state = { installed: o.installed ?? false, reaches: [o.repo], permissions: { ...o.permissions }, conversions: 0, gitUsers: [] as string[], tokens: 0, pulls: [] as FakePull[] };
+  const state = { installed: o.installed ?? false, reaches: [o.repo], permissions: { ...o.permissions }, webhookSecret: WEBHOOK_SECRET as string | null, conversions: 0, gitUsers: [] as string[], tokens: 0, pulls: [] as FakePull[] };
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     const auth = req.headers.authorization ?? '';
@@ -67,14 +77,26 @@ export async function fakeGitHub(o: FakeGitHubOptions) {
       }
       if (req.method === 'GET' && url.pathname === '/user') return send(200, { login: auth.replace(/^Bearer ghu_/, '') });
       if (req.method === 'DELETE' && /^\/applications\/[^/]+\/token$/.test(url.pathname)) return res.writeHead(204).end();
+      if (o.control && req.method === 'POST' && url.pathname === '/_fake/manifest-code') {
+        const b = JSON.parse(body) as { code: string; slug: string };
+        codes.set(b.code, { slug: b.slug, id: FAKE_APP_ID });
+        return send(201, {});
+      }
+      if (o.control && req.method === 'POST' && url.pathname === '/_fake/signin-code') {
+        const b = JSON.parse(body) as { code: string; login: string };
+        signins.set(b.code, b.login);
+        return send(201, {});
+      }
       if (req.method === 'GET' && (m = url.pathname.match(/^\/users\/([^/]+)$/))) return send(200, { login: m[1], id: 501, type: m[1] === 'example-org' ? 'Organization' : 'User' });
+      if (req.method === 'GET' && (m = url.pathname.match(/^\/(?:users|orgs)\/([^/]+)\/repos$/)) && o.accountRepos) return send(200, o.accountRepos[m[1]!] ?? []);
+      if (req.method === 'GET' && (m = url.pathname.match(/^\/users\/([^/]+)\/orgs$/)) && o.orgs) return send(200, (o.orgs[m[1]!] ?? []).map((login) => ({ login })));
       if (req.method === 'GET' && (m = url.pathname.match(/^\/apps\/([^/]+)$/))) return takenNames.has(m[1]!) ? send(200, { slug: m[1] }) : send(404, { message: 'Not Found' });
       if (req.method === 'POST' && (m = url.pathname.match(/^\/app-manifests\/([^/]+)\/conversions$/))) {
         const c = codes.get(m[1]!);
         codes.delete(m[1]!);
         if (!c) return send(404, { message: 'Not Found' });
         state.conversions++;
-        return send(201, { id: c.id, slug: c.slug, client_id: 'Iv1.madeapp00001', client_secret: APP_SECRET, webhook_secret: null, pem: FAKE_PEM.value, owner: { login: 'example' }, html_url: `https://github.com/apps/${c.slug}` });
+        return send(201, { id: c.id, slug: c.slug, client_id: 'Iv1.madeapp00001', client_secret: APP_SECRET, webhook_secret: state.webhookSecret, pem: FAKE_PEM.value, owner: { login: 'example' }, html_url: `https://github.com/apps/${c.slug}` });
       }
       if (req.method === 'GET' && url.pathname === `/repos/${o.repo}`) return send(200, { id: 777, full_name: o.repo, default_branch: 'main', private: true });
       if (req.method === 'GET' && url.pathname === `/repos/${o.repo}/installation`) {
@@ -165,6 +187,8 @@ export async function fakeGitHub(o: FakeGitHubOptions) {
   return { url, codes, signins, takenNames, state, gitPath: (repo: string) => join(o.gitRoot ?? '', `${repo}.git`), close: () => new Promise<void>((r) => server.close(() => r())) };
 }
 
+/** The App's webhook secret the conversion returns (unless a test sets state.webhookSecret to null). */
+export const WEBHOOK_SECRET = 'appwebhooksecret0123456789abcdefABCDEF';
 /** The App's client secret the conversion returns. */
 export const APP_SECRET = 'appclientsecret0123456789abcdefABCDEF';
 /** The App's private key the conversion returns: set it before a conversion (a test makes one). */
