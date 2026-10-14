@@ -3,17 +3,18 @@
 // resolved ones folded into a history. Each incident is anchored (#incident-<id>): an ops-channel post links
 // straight to it. A viewer sees that something broke and since when, not its detail or fix.
 import { useEffect, useState } from 'react';
-import { hub, loadIncidents, mergeIncidents, statusOf, type HealthStatus, type Incident, type InstanceIncidents } from '../api';
+import { loadIncidents, mergeIncidents, refreshHub, statusOf, type DotStatus, type Incident, type InstanceIncidents } from '../api';
 import { Loading } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from './Overview';
 
-export const STATUS_DOT: Record<HealthStatus, string> = { green: 'bg-green', amber: 'bg-orange', red: 'bg-red' };
-const STATUS_WORD: Record<HealthStatus, string> = { green: 'healthy', amber: 'needs attention', red: 'something is broken' };
+export const STATUS_DOT: Record<DotStatus, string> = { green: 'bg-green', amber: 'bg-orange', red: 'bg-red', unknown: 'bg-ink-3' };
+const STATUS_WORD: Record<DotStatus, string> = { green: 'healthy', amber: 'needs attention', red: 'something is broken', unknown: "status unknown: it couldn't be read" };
 
-/** A status dot: green, amber or red, with its word for screen readers and on hover. */
-export function StatusDot({ status, testId, className }: { status: HealthStatus; testId?: string; className?: string }) {
-  return <span className={cx('inline-block size-2 shrink-0 rounded-full', STATUS_DOT[status], className)} data-status={status} data-testid={testId} title={STATUS_WORD[status]} role="img" aria-label={STATUS_WORD[status]} />;
+/** A status dot: green, amber, red, or grey (unknown), with its word (and why, when given) for screen readers and on hover. */
+export function StatusDot({ status, why, testId, className }: { status: DotStatus; why?: string | null | undefined; testId?: string; className?: string }) {
+  const words = why ? `${STATUS_WORD[status]} (${why})` : STATUS_WORD[status];
+  return <span className={cx('inline-block size-2 shrink-0 rounded-full', STATUS_DOT[status], className)} data-status={status} data-testid={testId} title={words} role="img" aria-label={words} />;
 }
 
 const span = (from: string, to: string) => {
@@ -70,7 +71,7 @@ export function HealthView({ all, target = null }: { all: InstanceIncidents[]; t
       <section aria-label="Instances" className="flex flex-wrap gap-2" data-testid="health-instances">
         {all.map((a) => (
           <span key={a.name ?? ''} className="inline-flex h-7 items-center gap-2 rounded-full bg-surface px-3 text-[12.5px] font-medium text-ink shadow-card" data-testid="health-instance" title={a.error ?? undefined}>
-            <StatusDot status={status[a.name ?? '']!} testId="health-instance-dot" />
+            <StatusDot status={status[a.name ?? '']!} why={a.view ? null : a.error} testId="health-instance-dot" />
             {a.name ?? a.view?.instance ?? 'this instance'}
             {a.error && <span className="font-normal text-ink-3">not readable</span>}
           </span>
@@ -127,7 +128,8 @@ export function HealthPage() {
   const [target, setTarget] = useState<string | null>(targetOf);
   useEffect(() => {
     let live = true;
-    const load = () => void hub.then((h) => loadIncidents(h)).then((a) => live && setAll(a));
+    // The hub's list asked again each time: an instance down at page load is read once it answers.
+    const load = () => void refreshHub().then((h) => loadIncidents(h)).then((a) => live && setAll(a));
     load();
     const t = setInterval(load, 30_000);
     const onHash = () => setTarget(targetOf());

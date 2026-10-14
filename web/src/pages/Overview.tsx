@@ -1,9 +1,9 @@
-import type { State, UsageInfo } from '../api';
+import type { CoordinatorError, State, UsageInfo } from '../api';
 import { MenuButton, navigate } from '../App';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
-import { UsageLines } from '../components/Usage';
+import { resetClock as clock, UsageLines } from '../components/Usage';
 
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
   return (
@@ -43,6 +43,59 @@ export function MachineSummary({ state }: { state: State }) {
         Memory, load, disk, backups and settings on the Machine page
       </button>
     </Card>
+  );
+}
+
+/**
+ * The coordinator's errors that are still current (the server clears one once a later tick ends without it, or the
+ * coordinator restarts: src/projection.ts), each once with how many times and since when, in the viewer's local time;
+ * the earlier ones folded away as history. A viewer gets only how many there are now.
+ */
+export function CoordinatorErrors({ errors, earlier = [], count, now = Date.now() }: { errors?: CoordinatorError[] | undefined; earlier?: CoordinatorError[] | undefined; count?: number | undefined; now?: number }) {
+  const when = (ts: string) => clock(ts, now);
+  const times = (e: CoordinatorError) => {
+    const n = e.count ?? 1;
+    const first = e.first ?? e.at;
+    const last = e.last ?? e.at;
+    return n > 1 ? `${n} times since ${when(first)}, last ${when(last)}` : `since ${when(first)}`;
+  };
+  return (
+    <>
+      {!errors && !!count && (
+        <div className="mt-3 text-xs text-danger" data-testid="coordinator-errors-count">
+          The coordinator is reporting errors now ({count}).
+        </div>
+      )}
+      {!!errors?.length && (
+        <div className="mt-3 space-y-1.5" data-testid="coordinator-errors">
+          {errors.slice(0, 3).map((e) => (
+            <div key={`${e.where}\n${e.message}`} className="text-xs" data-testid="coordinator-error" data-count={e.count ?? 1}>
+              <div className="truncate text-danger" title={e.message}>
+                {e.where}: {e.message}
+                {(e.count ?? 1) > 1 && <span className="tabular-nums"> ×{e.count}</span>}
+              </div>
+              <div className="tabular-nums text-muted-foreground" title={`${new Date(e.first ?? e.at).toLocaleString()} to ${new Date(e.last ?? e.at).toLocaleString()}`} data-testid="coordinator-error-when">
+                {times(e)}
+              </div>
+            </div>
+          ))}
+          {errors.length > 3 && <div className="text-xs text-muted-foreground">and {errors.length - 3} more</div>}
+        </div>
+      )}
+      {!!earlier.length && (
+        <details className="mt-2 text-xs text-muted-foreground" data-testid="coordinator-errors-earlier">
+          <summary className="cursor-pointer">Earlier, since cleared ({earlier.length})</summary>
+          <div className="mt-1 space-y-1">
+            {earlier.slice(0, 10).map((e, i) => (
+              <div key={i} className="truncate" title={e.message}>
+                {e.where}: {e.message}
+                {(e.count ?? 1) > 1 ? ` ×${e.count}` : ''} · last {when(e.last ?? e.at)}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </>
   );
 }
 
@@ -136,20 +189,7 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
             ) : (
               <div className="mt-2 text-xs text-muted-foreground">Not started on this machine.</div>
             )}
-            {!state.errors && !!state.errorCount && (
-              <div className="mt-3 text-xs text-danger" data-testid="coordinator-errors-count">
-                The coordinator reported errors ({state.errorCount}).
-              </div>
-            )}
-            {!!state.errors?.length && (
-              <div className="mt-3 space-y-1">
-                {state.errors.slice(0, 3).map((e, i) => (
-                  <div key={i} className="truncate text-xs text-danger" title={e.message}>
-                    {e.where}: {e.message}
-                  </div>
-                ))}
-              </div>
-            )}
+            <CoordinatorErrors errors={state.errors} earlier={state.earlierErrors} count={state.errorCount} now={now} />
           </Card>
         </div>
 
