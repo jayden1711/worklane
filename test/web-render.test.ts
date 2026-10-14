@@ -152,6 +152,17 @@ interface Render {
   actionHref(a: unknown): string | null;
   citationHref(c: unknown): string;
   proposedSetting(search: string): unknown;
+  renderVoiceBanner(view: unknown): string;
+  renderVoiceButton(show: boolean, support: unknown, listening?: boolean): string;
+  renderVoiceControl(state: unknown, prefs: VoicePrefs): string;
+  approvalFor(state: unknown, issue: number): { ok: boolean; why?: string; decision?: string; title?: string; effect?: string };
+  bannerText(p: unknown): string;
+  CONFIRM_WINDOW_MS: number;
+  mayUseVoice(role: string | undefined, prefs: VoicePrefs): boolean;
+  parseHeard(text: string): { kind: string; issue?: number; text?: string };
+  tabState(doc: unknown): { focused: boolean; visible: boolean };
+  voiceActive(role: string | undefined, prefs: VoicePrefs, tab: { focused: boolean; visible: boolean }): boolean;
+  VoiceCommands: new (o: { find: (issue: number) => unknown; now?: () => number }) => VoiceMachine;
   pages: Record<string, unknown>;
 }
 
@@ -160,7 +171,8 @@ const LONG_PROSE =
   'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
   'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
 
-type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean; wakeWord?: boolean };
+type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean; wakeWord?: boolean; voiceCommands?: boolean };
+type VoiceMachine = { pending: unknown; hear(text: string, active: boolean): { do: string; [k: string]: unknown }; click(active: boolean): { do: string; [k: string]: unknown }; cancel(): { do: string } };
 type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
 type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
@@ -2454,15 +2466,15 @@ test("the mic is the owners' only, from the role the server serves: not a writer
 test('the mic is off until an owner turns it on in Settings, and on-device only until they allow the cloud', () => {
   localStorage.setItem('dash-voice', '{}');
   const prefs = r.readVoicePrefs();
-  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false }, 'all off by default');
+  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false, voiceCommands: false }, 'all off by default');
   assert.equal(r.renderComposerMic(roleOf(asOwner), prefs, READY_LOCAL), '', 'not rendered for the owner until enabled');
   const settings = r.renderVoiceSettings(true);
   assert.match(settings, /data-testid="voice-dictation"/);
   assert.doesNotMatch(settings, /checked=""/, 'both switches start off');
   localStorage.setItem('dash-voice', JSON.stringify({ dictation: 'yes', allowCloud: 1 }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false }, 'only a stored true turns either on');
+  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false, voiceCommands: false }, 'only a stored true turns either on');
   localStorage.setItem('dash-voice', JSON.stringify({ dictation: true }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false });
+  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false, voiceCommands: false });
   assert.match(r.renderVoiceSettings(true), /data-testid="voice-dictation" checked=""/);
   assert.match(r.renderComposerMic(roleOf(asOwner), r.readVoicePrefs(), READY_LOCAL), /data-testid="chat-mic"/, 'there once turned on');
   localStorage.setItem('dash-voice', '{}');
@@ -2841,6 +2853,144 @@ test("no effect in the web app returns a member call's value: React calls it as 
     for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
   }
   assert.deepEqual(bad, []);
+});
+
+// Voice intake and spoken approvals (web/src/voice/commands.ts, VoiceControl.tsx): owners only, off until turned on,
+// only from a focused and visible tab; shown on a 10-second banner and acted on only by "confirm" in that window (or
+// a click), once, on exactly the item shown. The server checks it all again (test/voice.test.ts).
+
+const VOICE_ON = { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, voiceCommands: true };
+const FOCUSED = { focused: true, visible: true };
+/** The state the page has: one open intake approval on #12 (voice may approve it), one excluded plan on #13. */
+const voiceState = {
+  tasks: [{ issue: 12, title: 'Show tax separately', status: 'triage' }, { issue: 13, title: 'Change the payout path', status: 'claimed' }],
+  decisions: [
+    { id: 'd-12', kind: 'intake', issue: 12, question: 'File it?', options: ['approve', 'edit', 'reject'], receipts: ['intake:x'], answer: null, canAnswer: true, voiceRefused: null },
+    { id: 'd-13', kind: 'plan', issue: 13, question: 'Approve this plan?', options: ['approve', 'revise', 'reject'], receipts: ['approve: the build starts with this plan'], answer: null, canAnswer: true, voiceRefused: 'it is high-risk (high-risk: money-path (src/pay.ts)); approve it with a click' },
+  ],
+};
+function machine() {
+  let now = 1_000_000;
+  const m = new r.VoiceCommands({ find: (n) => r.approvalFor(voiceState, n), now: () => now });
+  return { m, tick: (ms: number) => (now += ms) };
+}
+
+test("voice intake and approvals are off by default, the owners' only, and need the switch in Settings", () => {
+  localStorage.setItem('dash-voice', '{}');
+  const prefs = r.readVoicePrefs();
+  assert.equal(prefs.voiceCommands, false, 'off by default');
+  assert.equal(r.mayUseVoice('owner', prefs), false);
+  assert.equal(r.renderVoiceControl(asOwner, prefs), '', 'nothing on the page until turned on');
+  assert.doesNotMatch(r.renderVoiceSettings(true), /data-testid="voice-commands-toggle" checked=""/, 'the switch starts off');
+  assert.match(r.renderVoiceSettings(true), /Voice intake and approvals/);
+  localStorage.setItem('dash-voice', JSON.stringify({ voiceCommands: 'yes' }));
+  assert.equal(r.readVoicePrefs().voiceCommands, false, 'only a stored true turns it on');
+  localStorage.setItem('dash-voice', '{}');
+  assert.equal(r.mayUseVoice('owner', VOICE_ON), true);
+  for (const role of ['writer', 'viewer', undefined]) assert.equal(r.mayUseVoice(role, VOICE_ON), false, `not for a ${role}`);
+  assert.match(r.renderVoiceButton(true, READY_LOCAL), /data-testid="voice-commands"[^>]*data-state="idle"/);
+  assert.equal(r.renderVoiceButton(false, READY_LOCAL), '');
+});
+
+test('an unfocused or hidden tab gets no action: nothing is shown, and a confirm or click does nothing', () => {
+  const tab = (focused: boolean, visibilityState: string) => r.tabState({ hasFocus: () => focused, visibilityState });
+  assert.deepEqual(tab(true, 'visible'), FOCUSED);
+  for (const t of [tab(false, 'visible'), tab(true, 'hidden'), tab(false, 'hidden'), r.tabState(undefined)]) assert.equal(r.voiceActive('owner', VOICE_ON, t), false, JSON.stringify(t));
+  const { m } = machine();
+  assert.equal(m.hear('add a dark mode', false).do, 'nothing', 'unfocused: nothing shown');
+  assert.equal(m.pending, null);
+  assert.equal(m.hear('add a dark mode', true).do, 'show');
+  // The tab loses focus with the banner up: the confirm is not acted on, and nothing stays pending.
+  assert.equal(m.hear('confirm', false).do, 'nothing');
+  assert.equal(m.pending, null);
+  assert.equal(m.hear('approve 12', true).do, 'show');
+  assert.equal(m.click(false).do, 'nothing', 'a click from an unfocused tab does nothing either');
+  assert.equal(m.pending, null);
+});
+
+test('a spoken idea is shown, and sent only on "confirm" within 10 s; a confirm after the window does nothing', () => {
+  const { m, tick } = machine();
+  const shown = m.hear('Add a dark mode to the dashboard.', true);
+  assert.equal(shown.do, 'show');
+  assert.equal((shown.pending as { kind: string; text: string }).text, 'Add a dark mode to the dashboard.');
+  tick(r.CONFIRM_WINDOW_MS - 1);
+  assert.deepEqual(m.hear('Confirm.', true), { do: 'send-intake', text: 'Add a dark mode to the dashboard.' });
+  // Too late: the window closed.
+  m.hear('add a dark mode', true);
+  tick(r.CONFIRM_WINDOW_MS + 1);
+  assert.equal(m.hear('confirm', true).do, 'nothing', 'a confirm after 10 s does nothing');
+  assert.equal(m.click(true).do, 'nothing', 'nor a click');
+  assert.equal(m.pending, null);
+});
+
+test('"cancel", or any other speech in the window, cancels; it is not taken as a new command', () => {
+  const { m } = machine();
+  m.hear('add a dark mode', true);
+  assert.equal(m.hear('cancel', true).do, 'cancelled');
+  assert.equal(m.hear('confirm', true).do, 'nothing', 'nothing left to confirm');
+  m.hear('approve 12', true);
+  const other = m.hear('approve 13', true);
+  assert.equal(other.do, 'cancelled', 'other speech cancels, even another command');
+  assert.equal(m.hear('confirm', true).do, 'nothing');
+  m.hear('add a dark mode', true);
+  assert.equal(m.hear('well actually confirm', true).do, 'cancelled', 'only exactly "confirm" confirms');
+  assert.equal(m.pending, null);
+});
+
+test('"approve <n>" shows the item, its title and what approving does; one confirm approves exactly that one item, once', () => {
+  assert.deepEqual(r.parseHeard('Approve #12.'), { kind: 'approve', issue: 12 });
+  assert.deepEqual(r.parseHeard('approve number 12'), { kind: 'approve', issue: 12 });
+  assert.equal(r.parseHeard('approve it').kind, 'idea');
+  const { m } = machine();
+  const shown = m.hear('approve 12', true);
+  assert.equal(shown.do, 'show');
+  const p = shown.pending as { kind: string; issue: number; decision: string; title: string; effect: string };
+  assert.deepEqual([p.kind, p.issue, p.decision, p.title], ['approve', 12, 'd-12', 'Show tax separately']);
+  assert.match(p.effect, /filed as a ready issue/);
+  assert.match(r.bannerText(shown.pending), /Approve number 12, Show tax separately\. Approving means: /);
+  assert.deepEqual(m.hear('confirm', true), { do: 'approve', issue: 12, decision: 'd-12' });
+  assert.equal(m.hear('confirm', true).do, 'nothing', 'a second confirm approves nothing');
+  assert.equal(m.click(true).do, 'nothing', 'nor a click');
+  // Nothing open on the number: shown as refused, and a confirm does nothing.
+  const none = m.hear('approve 99', true);
+  assert.equal((none.pending as { kind: string }).kind, 'refused');
+  assert.equal(m.hear('confirm', true).do, 'nothing');
+});
+
+test('an excluded item is never approvable by voice on the page either: shown as refused, a confirm does nothing', () => {
+  const { m } = machine();
+  const shown = m.hear('approve 13', true);
+  const p = shown.pending as { kind: string; why: string };
+  assert.equal(p.kind, 'refused');
+  assert.match(p.why, /can't be approved by voice: it is high-risk/);
+  assert.equal(m.hear('confirm', true).do, 'nothing');
+  assert.equal(m.hear('approve 13', true).do, 'show');
+  assert.equal(m.click(true).do, 'nothing', 'nor by a click on the banner');
+  // A server that didn't say voice may approve it (no voiceRefused field): refused too.
+  const older = r.approvalFor({ tasks: [], decisions: [{ ...voiceState.decisions[0], voiceRefused: undefined }] }, 12);
+  assert.equal(older.ok, false);
+});
+
+test('every spoken confirm shows the 10-second banner, with what confirm does, a countdown and the same confirm as a button', () => {
+  const { m } = machine();
+  const idea = m.hear('add a dark mode', true);
+  const html = r.renderVoiceBanner({ pending: idea.pending, left: 10 });
+  assert.match(html, /data-testid="voice-banner"[^>]*data-kind="intake"/);
+  assert.match(html, /data-testid="voice-banner-text"[^>]*>add a dark mode</);
+  assert.match(html, /Say “confirm” within <span class="tabular-nums">10<\/span> s, or click; anything else said cancels\./);
+  assert.match(html, /data-testid="voice-banner-confirm"[^>]*>Send to intake</);
+  m.cancel();
+  const approve = m.hear('approve 12', true);
+  const a = r.renderVoiceBanner({ pending: approve.pending, left: 7 });
+  assert.match(a, /data-kind="approve"/);
+  assert.match(a, /Approve <span class="font-medium">#(<!-- -->)?12<\/span>: (<!-- -->)?Show tax separately/);
+  assert.match(a, /Approving: (<!-- -->)?the report is filed as a ready issue/);
+  assert.match(a, /data-testid="voice-banner-confirm"[^>]*>Approve</);
+  m.cancel();
+  const refused = r.renderVoiceBanner({ pending: m.hear('approve 13', true).pending, left: 10 });
+  assert.match(refused, /data-kind="refused"/);
+  assert.doesNotMatch(refused, /voice-banner-confirm/, 'an exclusion has no confirm button');
+  assert.equal(r.renderVoiceBanner(null), '');
 });
 
 /** The markup with each reserved slot's contents taken out (its own tag, and so its fixed size, kept). */

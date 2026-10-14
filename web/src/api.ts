@@ -47,6 +47,8 @@ export interface Decision {
   answer: { by: string; answer: string; at: string } | null;
   /** Whether the dashboard's user may answer it (its owner or a writer); the server refuses otherwise. */
   canAnswer?: boolean;
+  /** An owner's only: why it can never be approved by voice (src/voice.ts), or null when it can. */
+  voiceRefused?: string | null;
 }
 
 /** One step of an agent run: a shell command or a file write. */
@@ -689,8 +691,17 @@ export function useLiveState() {
   return { state, error, live, pulse, refresh };
 }
 
-export async function decide(id: string, answer: string) {
-  return api<{ ok: boolean }>('/api/decide', { method: 'POST', body: JSON.stringify({ id, answer }) });
+/** The tab's state, sent with everything done by voice: the server refuses it unless both are true. */
+export type VoiceTab = { focused: boolean; visible: boolean };
+
+/** Answer a decision; `voice`: said by voice (an approval only; the server adds its voice checks). */
+export async function decide(id: string, answer: string, voice?: VoiceTab) {
+  return api<{ ok: boolean }>('/api/decide', { method: 'POST', body: JSON.stringify({ id, answer, ...(voice ? { voice } : {}) }) });
+}
+
+/** Send a spoken idea the owner confirmed to the instance's intake (POST /api/voice/intake). */
+export async function voiceIntake(text: string, voice: VoiceTab) {
+  return api<{ ok: boolean; id: string }>('/api/voice/intake', { method: 'POST', body: JSON.stringify({ text, voice }) });
 }
 
 /** A setup-console ask (src/console/asks.ts), as GET /api/asks serves it. */

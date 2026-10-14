@@ -98,6 +98,15 @@ export function VoiceSettingsView({ prefs, status, lang, onChange, onInstall, in
         <div className="px-4 py-2.5 text-[12.5px] text-ink-2" data-testid="voice-voices">
           Voices for reading aloud ({lang}): {voicesLine(voices, prefs.allowNetworkVoices)}
         </div>
+        <label className={TOGGLE}>
+          <input type="checkbox" className="mt-0.5" checked={prefs.voiceCommands} onChange={(e) => onChange({ ...prefs, voiceCommands: e.target.checked })} data-testid="voice-commands-toggle" />
+          <span className="min-w-0">
+            <span className="block text-ink">Voice intake and approvals</span>
+            <span className="block text-[12px] text-ink-3">
+              A voice button: say an idea to send it to intake as yours, or "approve &lt;number&gt;". It shows what it heard for 10 s and acts only on "confirm" (or a click); anything else said cancels. Only while this tab is focused and visible. High-risk items (money path, auth, secrets, deploys, protection, held merges) still take a click. Off by default; the instance's intake.yaml must turn voice on too.
+            </span>
+          </span>
+        </label>
       </div>
     </Card>
   );

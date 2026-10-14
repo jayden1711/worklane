@@ -16,6 +16,7 @@ import { AlertsIntake } from './alerts.js';
 import { GitHubBacklog } from '../backlog/github.js';
 import type { Backlog } from '../backlog/types.js';
 import { GitHubIssuesIntake } from './github.js';
+import { VoiceIntake } from './voice.js';
 import type { ReadOnlyQuery } from './bug-store.js';
 import { DiscordIntake, type DiscordOptions } from './discord.js';
 import type { IntakeConfig, IntakeSource } from './report.js';
@@ -169,6 +170,11 @@ export function intakeForInstance(o: {
       const backlog = o.issues ?? new GitHubBacklog(o.repo, o.githubToken, fetch, o.githubApi);
       sources.push(new GitHubIssuesIntake({ backlog, stateDir: o.stateDir, config: () => config()?.github ?? first.config.github }).source());
     }
+  }
+  // Voice: ideas an owner spoke and confirmed on the dashboard, left in the instance's state (src/intake/voice.ts).
+  if (first.config.voice.enabled) {
+    if (!o.stateDir) say('intake: voice is on but the instance has no state directory; spoken ideas are not taken');
+    else sources.push(new VoiceIntake({ stateDir: o.stateDir }).source());
   }
   return { config, sources, name, ...(roleOf ? { roleOf } : {}), start, stop };
 }

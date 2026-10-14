@@ -489,6 +489,24 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   listing, commenting and labelling. With an App token, the `ready` the App adds doesn't make the issue
   actionable on its own (`actionable` wants a writer to add it), as for every issue intake files.
 
+### 2.5 Voice (the dashboard)
+
+- An owner of the instance speaks an idea on the dashboard (the voice button beside Ask; web/src/voice/). It is
+  heard on their device (on-device recognition unless they allowed the browser's cloud fallback), shown on a
+  10-second banner (and read aloud when talk-back is on), and sent only on "confirm" said within the window or a
+  click on the banner; anything else said cancels it.
+- The dashboard's `POST /api/voice/intake` takes it only from an owner whose tab says it is focused and visible,
+  and only when `intake.yaml` has `voice.enabled: true`. It leaves the words in the instance's state
+  (`src/intake/voice.ts`); the audit names the idea by id and length, "by voice", never its words.
+- The voice source hands it to the same intake pass as a Discord message (`intakeReport`): redaction, caps, the
+  read-only triage run, dedupe and the policy. Its sender (`voice`, the owner's GitHub login) is never trusted:
+  its draft is an Inbox decision, like an untrusted Discord sender's. No reply goes anywhere; its outcome is on
+  the Intake page.
+- Spoken approvals ("approve <issue number>") go through the dashboard's one decide path. By voice, a decision can
+  only be approved, by an owner, from a focused and visible tab, and never one `src/voice.ts` excludes (a held
+  high-risk merge, a plan held for a high-risk reason, a delegation); those take a click.
+- Off by default twice: `voice.enabled` in `intake.yaml`, and each owner's own switch in Settings, Voice.
+
 ## 3. Pipeline
 
 1. **Receive.** The adapter yields a report. Unaddressed channel messages never get this far.

@@ -173,6 +173,15 @@ export function whyHighRisk(o: { level: LevelResult; waitCategories: string[] })
 }
 
 /**
+ * THE mark of a high-risk reason (a category that always waits for a human: money path, auth, secrets, deploy and
+ * release config, the harness's own controls, CI, a worker's protected claim). Every high-risk reason the merge
+ * policy and plan mode give starts with it, and the one test of whether a reason is high-risk is isHighRiskReason:
+ * a held plan with one is never approvable by voice (src/voice.ts).
+ */
+export const HIGH_RISK_REASON = 'high-risk: ';
+export const isHighRiskReason = (reason: string): boolean => reason.startsWith(HIGH_RISK_REASON);
+
+/**
  * Why files (changed, or planned to change) need a human: high-risk categories, and design-level changes,
  * meaning a binding design flag (`design.by`: who raised it), dependency manifests, or a new top-level
  * module. One answer for the merge policy and for plan mode.
@@ -182,7 +191,7 @@ export function riskAndDesignReasons(o: { level: LevelResult; waitCategories: st
   // The locked categories (the agents' own instructions, the harness's own controls) always count, whatever list a caller passes (the floor).
   for (const c of waitingOn(o.waitCategories)) {
     const hit = o.level.categories[c];
-    if (hit?.length) reasons.push(`high-risk: ${c} (${paths(hit)})`);
+    if (hit?.length) reasons.push(`${HIGH_RISK_REASON}${c} (${paths(hit)})`);
   }
   if (o.design?.flag === true) reasons.push(`design: ${o.design.by} flagged a design change${o.design.reason ? `: ${o.design.reason}` : ''}`);
   const deps = o.level.categories.dependency;
@@ -211,7 +220,7 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   // High-risk paths or categories, and design-level: the evaluator's flag is binding; new dependencies and new
   // top-level modules are seen in code too.
   reasons.push(...riskAndDesignReasons({ level: i.level, waitCategories: i.waitCategories, design: { flag: i.verdict?.design_change, reason: i.verdict?.design_reason, by: 'the evaluator' }, newTopLevel: i.newTopLevel }));
-  if (i.claimedProtected) reasons.push('high-risk: the worker marked the change protected (a risk class can be raised, never lowered)');
+  if (i.claimedProtected) reasons.push(`${HIGH_RISK_REASON}the worker marked the change protected (a risk class can be raised, never lowered)`);
 
   // Big.
   if (i.lines > i.limits.max_lines) reasons.push(`big: ${i.lines} changed lines (over ${i.limits.max_lines})`);
