@@ -142,7 +142,7 @@ export type Fix =
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
   | { kind: 'action'; action: string; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
-  | { kind: 'form'; form: 'policy' | 'repo-config'; label: string };
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -455,7 +455,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'few',
     today: 'git remote add origin https://github.com/<owner>/<name>.git',
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'setup-origin', label: 'Pick' },
+    automation: 'git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin',
     detect: (k) => {
       const url = k.p.run('git', ['remote', 'get-url', 'origin'], { cwd: k.c.root });
       const r = url.status === 0 ? githubRepoOf(url.stdout) : null;
@@ -525,7 +526,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'some',
     today: `Answer them in the terminal (\`${BRAND.cli} init\` asks), or \`${BRAND.cli} init --answer <id>=<choice>\`.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'setup-config', label: 'Answer' },
+    automation: `${BRAND.cli} init --answer <id>=<choice> (or answer init's questions in a terminal)`,
     detect: (k) => {
       if (existsSync(join(k.c.root, BRAND.configDir, 'config.yaml'))) return ok(`${BRAND.configDir}/ is here: nothing to ask`);
       return k.c.openQuestions ? no(`${k.c.openQuestions} question${k.c.openQuestions === 1 ? '' : 's'} open (shown below)`) : ok('none open');
@@ -541,7 +543,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Review and merge the setup PR init proposed (local), or edit and merge the ${BRAND.cli}/setup branch's PR by hand (server); then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'setup-config', label: 'Open' },
+    automation: `${BRAND.cli} init (drafts the config and proposes it as a PR), then gh pr merge <number>, then ${BRAND.cli} init again (it fast-forwards)`,
     detect: (k) => {
       // Server mode: add-project leaves the service waiting until its setup PR merges; that wait is this step's.
       if (k.c.handoff?.service === 'waiting') return no(`${k.c.handoffDetail?.service || 'waiting for the setup PR to merge'} (add-project: service)`);
