@@ -12,7 +12,9 @@
 #     which runs the installed engine's add-project.sh as root with exactly those (checked) arguments.
 #     And `claude-account status|switch`, the Claude account switch (claude-account.sh): status runs it; switch starts
 #     it as its own unit, taking the token from the asking instance's dashboard.
-#   - Lets each coordinator user wl-<name> run exactly those 28 commands as root (sudoers,
+#     And `tailscale install|up|serve|public-url`, which start tailscale.sh with that one word as its own unit: the
+#     pinned, signed install; `tailscale up` with no auth key; https 443 to the hub's sign-in port; the hub's URL.
+#   - Lets each coordinator user wl-<name> run exactly those 32 commands as root (sudoers,
 #     listed one by one), and add-project with two arguments of its fixed shapes (a pattern; sudo 1.9.10 or
 #     later). The dashboard viewer wl-dash gets nothing.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
@@ -54,7 +56,7 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 28 commands, and add-project <name> <owner/repo>"
+say "sudoers: ${users[*]} may run exactly the helper's 32 commands, and add-project <name> <owner/repo>"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 
 say "check"
@@ -65,6 +67,13 @@ for u in "${users[@]}"; do
   if sudo -n -l -U "$u" "$MACHINE_HELPER" set-test-slots 9 >/dev/null 2>&1; then echo "FAIL: $u may run set-test-slots 9" >&2; exit 1; fi
   sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account switch >/dev/null || { echo "FAIL: $u can't run claude-account switch" >&2; exit 1; }
   if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account switch --token-from x >/dev/null 2>&1; then echo "FAIL: $u may pass claude-account switch its own arguments" >&2; exit 1; fi
+  for ok in install up serve public-url; do
+    sudo -n -l -U "$u" "$MACHINE_HELPER" tailscale "$ok" >/dev/null || { echo "FAIL: $u can't run tailscale $ok" >&2; exit 1; }
+  done
+  for bad in "tailscale funnel" "tailscale funnel 443" "tailscale serve --funnel" "tailscale serve funnel on" "tailscale serve --bg --https=443 http://127.0.0.1:4399" "tailscale serve --set-path=/x http://127.0.0.1:4398" "tailscale serve http://0.0.0.0:4399" "tailscale serve --tcp=22 tcp://127.0.0.1:22" "tailscale up --advertise-exit-node" "tailscale up --advertise-routes=198.51.100.0/24" "tailscale up --ssh" "tailscale up --accept-routes" "tailscale up --login-server=https://x.example" "tailscale" "tailscale up --auth-key=tskey-auth-x" "tailscale up --authkey tskey-auth-x" "tailscale up x" "tailscale serve 4398" "tailscale serve --https=443 http://127.0.0.1:4398" "tailscale public-url https://x.example" "tailscale install 1.0.0" "tailscale status" "tailscale logout" "tailscale UP"; do
+    # shellcheck disable=SC2086 # each case is its words
+    if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+  done
   for bad in "add-project x" "add-project x o/r extra" "add-project X o/r" "add-project x o" "add-project x o/r/s" "add-project x;id o/r" "add-project -x o/r"; do
     # shellcheck disable=SC2086 # each case is its words
     if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
