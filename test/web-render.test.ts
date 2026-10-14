@@ -41,13 +41,17 @@ interface Render {
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
   renderTrust(t: unknown): string;
+  renderConstraints(c: unknown): string;
+  renderConstraintsPanel(state: unknown): string;
   renderMetrics(m: unknown): string;
   renderMetricsPanel(state: unknown): string;
   renderFlaky(f: unknown): string;
+  renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[] }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string }): string;
   renderFirstRunPage(state: unknown): string;
+  renderSetupScreens(steps: unknown[]): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
@@ -1274,6 +1278,28 @@ test("the first-run page, Repo config form: writers, required checks, budget and
   assert.match(r.renderFirstRun({ ...f, repoConfig: { error: '.worklane/ missing at origin/main' }, canAct: true }, { open: 'required-checks' }), /data-testid="repo-config-error"[^>]*>Not from here yet: \.worklane\/ missing at origin\/main/);
 });
 
+test('the first-run page: Skip on a step not done (owners), skipped shown and Undo; each screen names its command; a done step opened from Settings runs again; Settings lists every screen', () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const owner = { ...f, canAct: true, actions: { 'git-hooks': { id: 'git-hooks', step: 'pre-commit', label: 'Install the git hooks', available: true, changes: ['hooks'], commands: [] } } };
+  const html = r.renderFirstRun(owner);
+  assert.match(html, /data-step="pre-commit" data-status="todo"[\s\S]*?data-testid="first-run-skip" data-skipped="false"[^>]*>Skip</);
+  assert.doesNotMatch(r.renderFirstRun({ ...owner, canAct: false }), /first-run-skip"/, 'writers: no Skip');
+  const skipped = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, skipped: true } : s)) })) } };
+  const sk = r.renderFirstRun(skipped, { open: 'pre-commit' });
+  assert.match(sk, /data-step="pre-commit" data-status="skipped"[\s\S]*?>skipped<[\s\S]*?data-testid="first-run-skip" data-skipped="true"[^>]*>Undo skip</);
+  assert.doesNotMatch(sk.slice(sk.indexOf('data-step="pre-commit"'), sk.indexOf('</li>', sk.indexOf('data-step="pre-commit"'))), /first-run-fix-panel/, 'a skipped step stays closed');
+  const open = r.renderFirstRun(owner, { open: 'pre-commit' });
+  assert.match(open, /data-testid="first-run-automation"[^>]*>Without this page: <code[^>]*>worklane install --git-hooks<\/code>/);
+  const done = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, done: true } : s)) })) } };
+  assert.doesNotMatch(r.renderFirstRun(done).match(/data-step="pre-commit"[\s\S]*?<\/li>/)![0], /first-run-fix"/, 'done: no Fix on the checklist');
+  assert.match(r.renderFirstRun(done, { open: 'pre-commit', rerun: 'pre-commit' }), /data-step="pre-commit" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="action"[^>]*>Run again[\s\S]*?data-testid="first-run-action" data-action="git-hooks"/);
+  const settings = r.renderSetupScreens(done.setup!.groups.flatMap((g) => g.steps));
+  assert.match(settings, /data-testid="setup-screens"[\s\S]*?Setup screens/);
+  assert.match(settings, /data-step="pre-commit"[\s\S]*?>done<[\s\S]*?worklane install --git-hooks[\s\S]*?href="\/first-run\?step=pre-commit"[^>]*>Run again/);
+  assert.match(settings, /data-step="service"[\s\S]*?worklane up[\s\S]*?href="\/first-run\?step=service"[^>]*>Open/);
+  assert.doesNotMatch(settings, /data-step="claude-login"/, 'a provider login has no screen of its own');
+});
+
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {
   const file = join(mkdtempSync(join(tmpdir(), 'web-render-init-')), 'init.json');
   const at = '2026-10-13T10:00:00.000Z';
@@ -1736,6 +1762,28 @@ test('the trust panel: the recommendation and its rules, each figure over 7 and 
   assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
 });
 
+test('the repeated-feedback panel: each constraint with its count, a link per sighting and revert, its proposal or why not; refused for anyone but the owner and writers', () => {
+  const sighting = (n: number) => ({ key: `review:${n}`, source: 'review_changes', by: 'example-owner', at: '2026-10-01T10:00:00Z', ref: `PR #${n}`, url: `https://example.com/acme/app/pull/${n}`, words: 'Never call the payments client from a handler.' });
+  const c = {
+    enabled: true,
+    minSightings: 2,
+    maxPerWeek: 3,
+    usedThisWeek: 1,
+    constraints: [
+      { id: 'c-1', label: 'Never call the payments client from a handler.', terms: ['payment'], count: 2, sightings: [sighting(11), sighting(12)], reverts: [{ url: 'https://example.com/acme/app/pull/30', at: 'x', words: 'checks failed' }], status: 'proposed_pr', proposal: { kind: 'pr', number: 40, url: 'https://example.com/acme/app/pull/40' }, detail: '' },
+      { id: 'c-2', label: 'Feature flags need an owner field.', terms: [], count: 1, sightings: [sighting(15)], reverts: [], status: 'watching', proposal: null, detail: 'seen 1 time(s); a check is proposed from 2' },
+    ],
+  };
+  const html = r.renderConstraints(c);
+  assert.match(html, /data-testid="constraints-panel"[\s\S]*?Repeated feedback[\s\S]*?at 2 sightings it becomes a proposed check \(1 of 3 this week\)/);
+  assert.deepEqual([...html.matchAll(/data-testid="constraint" data-status="([a-z_]+)" data-count="(\d+)"/g)].map((m) => [m[1], m[2]]), [['proposed_pr', '2'], ['watching', '1']]);
+  assert.match(html, /href="https:\/\/example.com\/acme\/app\/pull\/11"[^>]*>PR #11<\/a>[\s\S]*?href="https:\/\/example.com\/acme\/app\/pull\/12"[^>]*>PR #12<\/a>[\s\S]*?href="https:\/\/example.com\/acme\/app\/pull\/30"[^>]*>revert<\/a>/);
+  assert.match(html, /data-testid="constraint-detail"[^>]*><a href="https:\/\/example.com\/acme\/app\/pull\/40"[^>]*>PR #40<\/a>/);
+  assert.match(html, /Check proposed[\s\S]*?Seen once/);
+  assert.match(r.renderConstraints({ ...c, enabled: false, constraints: [] }), /off for this instance[\s\S]*?data-testid="constraints-empty"/);
+  assert.match(r.renderConstraintsPanel(asOther), /data-testid="constraints-refused"[^>]*>Repeated feedback is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
+});
+
 test('the metrics panel: each figure over 7 and 30 days, merges per day, the slowest tests and those over budget; a missing source says "not measured yet", never 0; a viewer is told it is the writers\'', () => {
   const now = new Date('2026-10-13T12:00:00.000Z');
   const ts = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
@@ -1762,7 +1810,7 @@ test('the metrics panel: each figure over 7 and 30 days, merges per day, the slo
   ]);
   assert.match(html, /data-figure="timeToGreen"[\s\S]*?data-testid="metrics-figure-7"[^>]*>144 min/);
   assert.match(html, /data-figure="prCi"[\s\S]*?data-testid="metrics-figure-7"[^>]*>18 min/);
-  assert.match(html, /data-figure="fixForward"[\s\S]*?data-testid="metrics-not-measured"[^>]*>not measured yet<\/div><div[^>]*>fix-forward isn(&#x27;|')t built yet/);
+  assert.match(html, /data-figure="fixForward"[\s\S]*?data-testid="metrics-not-measured"[^>]*>not measured yet<\/div><div[^>]*>fix-forward hasn(&#x27;|')t taken on a red default branch yet/);
   assert.match(html, /data-figure="flake"[\s\S]*?not measured yet/);
   assert.doesNotMatch(html.slice(html.indexOf('data-figure="flake"')).split('data-testid="metrics-per-day"')[0]!, />0%?</, 'no 0 for an unmeasured figure');
   assert.equal((html.match(/data-testid="throughput-day"/g) ?? []).length, 14, 'merges per day as bars');
@@ -1787,4 +1835,17 @@ test('flaky tests: each quarantined check is a row with its sightings, issue and
   assert.match(html, /The updater still needs every check green/);
   const none = r.renderFlaky({ releaseAfter: 10, quarantined: [], released: [], rates: [{ days: 7, redRuns: 0, flakyReruns: 0, rate: null }, { days: 30, redRuns: 0, flakyReruns: 0, rate: null }], canClear: false });
   assert.match(none, /No flaky tests found yet/);
+});
+
+test('learnings: each cause with its sightings and stages; Promote only for an owner on a ready cause not promoted yet', () => {
+  const g = (count: number, fp: string, promotion: unknown = null) => ({ fingerprint: fp, root: `k-${fp}`, outcome: 'failed', cause: `cause ${fp}`, count, issues: [7, 8], stages: [{ stage: 'environment/harness', count }], first: '2026-10-12T00:00:00Z', last: '2026-10-13T00:00:00Z', ready: count >= 3, line: `- Seen ${count} times (failed): cause ${fp}`, promotion });
+  const owner = r.renderLearnings({ minSightings: 3, canPromote: true, groups: [g(3, 'a'), g(1, 'b'), g(4, 'c', { state: 'filed', by: 'example-owner', line: '- x', pr: 'https://github.com/example/repo/pull/9', detail: '' })] });
+  assert.match(owner, /data-testid="learnings-count">3</);
+  assert.match(owner, /data-fingerprint="a"[\s\S]*?learning-sightings"[^>]*>3<[\s\S]*?cause a[\s\S]*?environment\/harness 3 · issues #7, #8[\s\S]*?value="- Seen 3 times \(failed\): cause a"[\s\S]*?Promote to AGENTS\.md/);
+  assert.match(owner, /data-fingerprint="b"[\s\S]*?promotable from 3/);
+  assert.equal(owner.match(/data-testid="learning-promote"/g)?.length, 1, 'not for b (seen once) nor c (promoted)');
+  assert.match(owner, /Promoted by @example-owner:[\s\S]*?pull\/9[\s\S]*?\(L3, waits for the owner\)/);
+  const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
+  assert.doesNotMatch(writer, /learning-promote/);
+  assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
 });

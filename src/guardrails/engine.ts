@@ -21,7 +21,11 @@ export const BUILTIN_PROTECTED = [`${BRAND.configDir}/**`, '.claude/**'];
  */
 export const AGENT_EDITABLE = [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`];
 
+/** WHY: item 33; an AGENTS.md line comes only from an owner promoting a learning (src/learnings.ts), never an agent. */
+export const AGENTS_MD_PATHS = ['AGENTS.md', '**/AGENTS.md'];
+
 const BUILTIN_RES = BUILTIN_PROTECTED.map((g) => globToRegExp(g));
+const AGENTS_MD_RES = AGENTS_MD_PATHS.map((g) => globToRegExp(g));
 const EDITABLE_RES = AGENT_EDITABLE.map((g) => globToRegExp(g));
 /** A path, or a directory that holds it: `.claude` counts as under `.claude/**`. */
 const under = (res: RegExp[], rel: string) => res.some((re) => re.test(rel) || re.test(`${rel}/`));
@@ -34,6 +38,7 @@ const under = (res: RegExp[], rel: string) => res.some((re) => re.test(rel) || r
  */
 export function isProtectedPath(rel: string, g: Pick<GuardrailsConfig, 'protected_paths'>): boolean {
   if (under(BUILTIN_RES, rel) && !under(EDITABLE_RES, rel)) return true;
+  if (AGENTS_MD_RES.some((re) => re.test(rel))) return true;
   const own = g.protected_paths.filter((p) => p.replace(/^\.\//, '') !== `${BRAND.configDir}/**`).map((p) => globToRegExp(p));
   return under(own, rel);
 }
@@ -221,6 +226,9 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     for (const c of commands) targets.push(...c.writes);
     // A target may be a directory (rm -rf .claude, mv x .claude): it matches if anything under it would.
     const hit = targets.find((t) => isProtectedPath(relToRoot(ctx.projectRoot, call.cwd, t), cfg));
+    if (hit && AGENTS_MD_RES.some((re) => re.test(relToRoot(ctx.projectRoot, call.cwd, hit)))) {
+      return { decision: 'deny', rule: 'agents-md', reason: `${hit}: agents never write AGENTS.md; a line reaches it only when an owner promotes a learning on the dashboard` };
+    }
     if (hit) return { decision: 'deny', rule: 'protected-path', reason: `${hit} is harness config; change it through a reviewed proposal` };
   }
 

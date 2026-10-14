@@ -118,6 +118,8 @@ export interface SetupContext {
   machine?: Partial<MachinePaths>;
   /** A server instance's credentials and home; loadInstance when unset. */
   instanceFacts?: () => InstanceFacts | { error: string };
+  /** Steps skipped on the first-run page (src/dashboard.ts). */
+  skipped?: readonly string[];
 }
 
 export interface Detected {
@@ -192,6 +194,8 @@ export interface SetupStep {
   /** What a person does about it today, without a screen. */
   today: string;
   fix: Fix;
+  /** WHY: every screen has a way to do the same without the page (a command or a config key), shown on it and in docs/dashboard.md. */
+  automation?: string;
   /** It asks GitHub (or another service) over the network: checked less often, to spare the API's rate limit. */
   network?: boolean;
   detect: (c: Checking) => Detected | null;
@@ -282,6 +286,9 @@ export function detectTailscale(p: Pick<SetupProbe, 'which' | 'run'>): (Detected
   }
 }
 
+/** WHY: what the Repo config form does, by hand (the owners, required checks and budget steps). */
+const REPO_CONFIG_BY_HAND = `a reviewed commit (PR) to ${BRAND.configDir}/config.yaml (owners.writers, required_checks) and ${BRAND.configDir}/agents.yaml (daily_budget_usd, roles.workers count and model)`;
+
 const placeholderOwners = (cfg: Config) => /your-github-handle|owner\/repo/.test(JSON.stringify(cfg.project.owners)) || /^owner\/repo$/.test(cfg.project.project.repo);
 
 /** Whether a branch exists at origin (the last fetch's view; no network). */
@@ -371,6 +378,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `\`${BRAND.cli} init --yes\` installs a missing gitleaks, gh or claude from pinned, checksummed downloads; or install them yourself. On a server, tools.sh (bootstrap) does it.`,
     fix: { kind: 'action', action: 'install-tools', label: 'Install' },
+    automation: `${BRAND.cli} init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened`,
     detect: (k) => detectTools(k.c.mode, k.p),
   },
   {
@@ -413,6 +421,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'all',
     today: 'add-project asks you to run `claude setup-token` on a machine signed in to Anthropic and paste the token it prints (or credentials.sh <name> claude).',
     fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (its paste box)" },
+    automation: 'scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step), or scripts/setup/credentials.sh <name> claude',
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return recorded(k, 'claude-token', "the agents' Claude login") ?? no(i.error);
@@ -480,6 +489,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'all',
     today: 'Create the App on github.com by hand, download its .pem to the server, then `credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>`.',
     fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (the App through GitHub's manifest flow)" },
+    automation: 'scripts/setup/add-project.sh <name> <owner/repo> (its app step), or scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>',
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return recorded(k, 'app', "the agents' GitHub App") ?? no(i.error);
@@ -499,6 +509,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'few',
     today: `\`git remote set-head origin --auto\`, then \`${BRAND.cli} init\` again.`,
     fix: { kind: 'action', action: 'default-branch', label: 'Set' },
+    automation: 'git fetch origin <branch>, then git remote set-head origin --auto',
     detect: (k) => {
       const b = defaultBranch(k);
       if (!b) return no("can't tell the default branch: origin/HEAD isn't set and there's no config yet");
@@ -555,6 +566,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `\`${BRAND.cli} install\` (init runs it once the config is on the default branch).`,
     fix: { kind: 'action', action: 'local-hooks', label: 'Install' },
+    automation: `${BRAND.cli} install`,
     detect: (k) => {
       const file = join(k.c.root, '.claude', 'settings.json');
       if (!existsSync(file)) return no('the hooks for local runs are not installed (.claude/settings.json)');
@@ -576,6 +588,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `Edit owners in ${BRAND.configDir}/config.yaml (the template's your-github-handle) and merge it through a PR.`,
     fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -592,6 +605,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `List your CI checks in ${BRAND.configDir}/config.yaml required_checks (empty: nothing is ever marked ready).`,
     fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -610,6 +624,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `Review agents.yaml (budget, models), guardrails.yaml and review.yaml in ${BRAND.configDir}/: they start from the templates.`,
     fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -626,6 +641,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `\`${BRAND.cli} install --git-hooks\``,
     fix: { kind: 'action', action: 'git-hooks', label: 'Install' },
+    automation: `${BRAND.cli} install --git-hooks`,
     detect: (k) => {
       const common = k.p.run('git', ['rev-parse', '--git-common-dir'], { cwd: k.c.root });
       if (common.status !== 0) return no('not a git repository');
@@ -644,6 +660,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'some',
     today: `\`${BRAND.cli} guardrails refresh\``,
     fix: { kind: 'action', action: 'fingerprints', label: 'Fetch' },
+    automation: `${BRAND.cli} guardrails refresh`,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -665,6 +682,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: "On github.com, the repo's Settings, Rules (or Branches): protect the default branch and require your checks. Needed for land_mode direct.",
     fix: { kind: 'action', action: 'protection', label: 'Protect' },
+    automation: 'gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)',
     network: true,
     detect: (k) => {
       const b = defaultBranch(k) ?? 'main';
@@ -690,6 +708,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page changes workers and budget.",
     fix: { kind: 'form', form: 'policy', label: 'Review' },
+    automation: "the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch",
     detect: (k) => {
       if (!k.c.policyFile) return no('no policy file for this instance');
       const r = readPolicy(k.c.policyFile);
@@ -844,6 +863,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'all',
     today: `\`sudo ${BRAND.cli} init --mode server <owner/repo> --instance <name> [--timeout <minutes>]\` hands off to add-project.sh, whose last steps (service, test-user, machine-helper, dashboards) install and start ${BRAND.cli}-<name>.service; --timeout is how long it waits for a GitHub click or the setup PR's merge (default 15).`,
     fix: { kind: 'start' },
+    automation: 'sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)',
     detect: (k) => {
       const unit = instanceUnit(k.c.instance ?? '<name>');
       const up = k.p.systemUnitActive(unit);
@@ -865,6 +885,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'all',
     today: `\`${BRAND.cli} up\` installs and starts it as your own service.`,
     fix: { kind: 'start' },
+    automation: `${BRAND.cli} up`,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet: the coordinator needs one');
@@ -905,6 +926,9 @@ export interface StepView {
   detail: string;
   today: string;
   fix: Fix;
+  automation: string | null;
+  /** The person skipped it on the first-run page: shown as skipped, not counted as left; doctor and init still check it. */
+  skipped: boolean;
   network: boolean;
   checkedAt: string;
 }
@@ -990,16 +1014,16 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       o.cache?.set(s.id, { at: t, key, r });
     }
     if (!r) continue;
-    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, network: !!s.network, checkedAt: new Date(at).toISOString() });
+    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
   }
   const groups: GroupView[] = GROUPS.filter((g) => g.modes.includes(c.mode))
     .map((g) => {
       const mine = steps.filter((s) => s.group === g.id);
       const required = mine.filter((s) => !s.optional);
-      return { id: g.id, title: g.title, optional: g.optional || !required.length, done: (required.length ? required : mine).every((s) => s.done), ready: mine.filter((s) => s.walk).every((s) => s.done), steps: mine };
+      return { id: g.id, title: g.title, optional: g.optional || !required.length, done: (required.length ? required : mine).every((s) => s.done || s.skipped), ready: mine.filter((s) => s.walk).every((s) => s.done), steps: mine };
     })
     .filter((g) => g.steps.length);
-  return { mode: c.mode, groups, done: steps.filter((s) => s.done).length, total: steps.length, requiredLeft: steps.filter((s) => !s.optional && !s.done).length };
+  return { mode: c.mode, groups, done: steps.filter((s) => s.done).length, total: steps.length, requiredLeft: steps.filter((s) => !s.optional && !s.done && !s.skipped).length };
 }
 
 /** The level doctor shows a step's own line at: ok when done, as the page shows it; a warning when not. */

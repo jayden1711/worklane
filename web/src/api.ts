@@ -341,6 +341,8 @@ export interface Settings {
   reports: { times: string[]; to: string[] };
   governor: { max_load?: number; min_free_disk_pct: number };
   agents: { budget: number; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
+  /** INVARIANT: `from` null means the engine's default (item 32). */
+  routing: { key: string; task: string; value: string | number | boolean | string[]; from: string | null }[];
   tests: { gates: Record<string, string[]>; batchMax: number; nightlyAt: string | null; tiers: string[]; baselineParser: boolean };
   review: { levels: Record<string, string[]> } | null;
   guardrails: { rules: number; protectedPaths: string[]; secretPaths: number; network: string; preApproved: string[] };
@@ -822,6 +824,10 @@ export interface SetupStepView {
   detail: string;
   today: string;
   fix: SetupFix;
+  /** The command or config key that does the same without the page. */
+  automation: string | null;
+  /** Skipped on the first-run page (not counted as left). */
+  skipped: boolean;
   network: boolean;
   checkedAt: string;
 }
@@ -873,6 +879,8 @@ export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fre
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
 /** Run a first-run Fix action after the person confirmed the plan it showed. */
 export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Skip a setup step on the first-run page, or undo the skip. */
+export const skipStep = (step: string, skip: boolean) => api<{ ok: boolean; skipped: string[] }>('/api/first-run/skip', { method: 'POST', body: JSON.stringify({ step, skip }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
@@ -1017,6 +1025,26 @@ export interface Throughput {
   top: { stage: ThroughputStage; usd: number; share: number; suggestion: string }[];
 }
 
+/** Repeated feedback (GET /api/constraints, src/checks-from-feedback.ts): constraints people's "no"s cluster into. */
+export interface ConstraintItem {
+  id: string;
+  label: string;
+  terms: string[];
+  count: number;
+  sightings: { key: string; source: string; by: string; at: string; ref: string; url: string | null; words: string }[];
+  reverts: { url: string | null; at: string; words: string }[];
+  status: 'proposed_pr' | 'proposed_issue' | 'dropped' | 'due' | 'held' | 'watching';
+  proposal: { kind: 'pr' | 'issue'; number: number | null; url: string | null } | null;
+  detail: string;
+}
+export interface Constraints {
+  enabled: boolean;
+  minSightings: number;
+  maxPerWeek: number;
+  usedThisWeek: number;
+  constraints: ConstraintItem[];
+}
+
 /**
  * Trust (GET /api/trust, src/trust.ts): read-only measurement per instance, over 7 and 30 days, by risk area, with the
  * agent-count and verification recommendations. A figure a viewer may not see is null (cost always is, for them).
@@ -1110,6 +1138,28 @@ export interface Flaky {
   canClear: boolean;
 }
 export const clearFlaky = (test: string) => api<{ ok: boolean }>('/api/flaky/clear', { method: 'POST', body: JSON.stringify({ test }) });
+
+/** WHY: item 33; mirrors LearningsView in src/learnings.ts (GET /api/learnings, owners and writers). */
+export interface LearningGroup {
+  fingerprint: string;
+  root: string;
+  outcome: string;
+  cause: string;
+  count: number;
+  issues: number[];
+  stages: { stage: string; count: number }[];
+  first: string;
+  last: string;
+  ready: boolean;
+  line: string;
+  promotion: { state: 'requested' | 'filed' | 'failed'; by: string; line: string; pr: string | null; detail: string } | null;
+}
+export interface Learnings {
+  minSightings: number;
+  groups: LearningGroup[];
+  canPromote: boolean;
+}
+export const promoteLearning = (fingerprint: string, line: string) => api<{ ok: boolean }>('/api/learnings/promote', { method: 'POST', body: JSON.stringify({ fingerprint, line }) });
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';

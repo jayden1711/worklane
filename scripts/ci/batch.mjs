@@ -19,6 +19,7 @@
 
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { nextStep } from '../../src/bisect.ts';
 
 /** ci-slow.yml's jobs, by the key a dispatch names, with the check runs each creates (test/ci-batch.test.ts). */
 export const SLOW_JOBS = {
@@ -91,29 +92,8 @@ export function verdictOf(checkRuns, dispatched = false) {
   return dispatched ? 'pending' : 'skip';
 }
 
-/**
- * The bisect's next step. `commits`: the candidates and the red batch's commit, oldest first, each { sha, verdict },
- * the last one bad (the red batch); the commit before the first is the last green batch (good). Returns
- *   { state: 'found', culprit, good }  the oldest bad commit whose first parent is good (good: null = the green batch)
- *   { state: 'wait', sha }             a candidate between the two is still running
- *   { state: 'test', sha }             run the job on this commit next
- *   { state: 'range', from, to }       only untestable commits are left between the two: the culprit is one of from..to
- */
-export function nextStep(commits) {
-  const b = commits.findIndex((c) => c.verdict === 'bad');
-  if (b < 0) throw new Error('no bad commit: the red batch is the last one, and bad');
-  let g = -1;
-  for (let i = 0; i < b; i++) if (commits[i].verdict === 'good') g = i;
-  if (b === g + 1) return { state: 'found', culprit: commits[b].sha, good: g >= 0 ? commits[g].sha : null };
-  const between = commits.slice(g + 1, b).map((c, j) => ({ ...c, i: g + 1 + j }));
-  const running = between.find((c) => c.verdict === 'pending');
-  if (running) return { state: 'wait', sha: running.sha };
-  const open = between.filter((c) => c.verdict === 'untested');
-  if (!open.length) return { state: 'range', from: commits[g + 1].sha, to: commits[b].sha };
-  const mid = (g + b) / 2;
-  open.sort((x, y) => Math.abs(x.i - mid) - Math.abs(y.i - mid) || x.i - y.i);
-  return { state: 'test', sha: open[0].sha };
-}
+// The bisect's next step (src/bisect.ts): shared with the harness's fix-forward, which bisects a red default branch.
+export { nextStep };
 
 const short = (sha) => String(sha ?? '').slice(0, 7);
 

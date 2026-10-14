@@ -235,7 +235,8 @@ test('a Claude account switch ends the pause of an instance it put on the new lo
     writeFileSync(join(dir, 'switch.jsonl'), lines.map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
     return dir;
   };
-  const run = async (dir: string | null) => {
+  // The switch is written once the pause has begun (its lines are stamped then), however long the setup took.
+  const run = async (switched: (() => string) | null) => {
     const f = fixture();
     f.backlog.open(easyIssue('Add a.js', 'a.js'));
     const resetAt = Date.now() + 3600_000;
@@ -250,19 +251,19 @@ test('a Claude account switch ends the pause of an instance it put on the new lo
     await c.tick();
     await c.idle();
     assert.ok(pauseOf(f.log.read(0)), 'paused on the limit');
-    limited = dir === null;
-    switchDir = dir; // the switch happens while it is paused, then the coordinator starts again
+    limited = switched === null;
+    switchDir = switched?.() ?? null; // the switch happens while it is paused, then the coordinator starts again
     await c.tick();
     await c.idle();
     return { f, calls };
   };
-  const ok = await run(switchLines('done', 'done'));
+  const ok = await run(() => switchLines('done', 'done'));
   assert.equal(pauseOf(ok.f.log.read(0)), null, 'no pause after a successful switch');
   const resumed = ok.f.log.read(0, ['usage.resumed']).map((e) => e.payload as EventPayload<'usage.resumed'>);
   assert.equal(resumed.length, 1);
   assert.equal(resumed[0]!.reason, 'account switched');
   assert.equal(ok.calls.at(-1), 'resolve claude_usage_limit alice', 'the incident resolved through the same hook');
-  const failed = await run(switchLines('failed', 'failed'));
+  const failed = await run(() => switchLines('failed', 'failed'));
   assert.ok(pauseOf(failed.f.log.read(0)), 'a failed check keeps the pause');
   assert.equal(failed.f.log.read(0, ['usage.resumed']).length, 0);
   assert.ok(!failed.calls.some((x) => x.startsWith('resolve')));

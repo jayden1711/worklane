@@ -141,6 +141,9 @@ the same audit entry with `via: discord`. Who may answer from a thread is one fu
 
 - A reply chooses an option only when its first word is that option and it names no other ("approve",
   "Reject."). That answers at once, as before.
+- **Held plans** (the plan gate, `plan_gate` in config.yaml): the thread shows the plan's acceptance criteria and
+  links the issue with the full plan. "approve plan <n>" (n: the issue's number) is the same as "approve"; one
+  naming another number answers nothing. Only an admin's reply answers it; a writer's is a comment.
 - **Plain-language picks.** A reply from an admin or writer that clearly means one option ("yeah approve it",
   "go with a") is read by the `intake-thread` role, and the bot asks back "Confirm: approve?". Only that same
   person's following "yes" records it (through the same decide path, role check and audit); another person's yes
@@ -169,7 +172,7 @@ adds the issue's and the dashboard's links itself). Anything else, a run that en
 spend cap reached, posts the fixed template and the dashboard's link instead; which was used and why is recorded
 (`discord.explained`), once per thread.
 
-Summaries and thread runs are short runs on the routed models (`model_routing.intake_summary`, haiku, and
+Summaries and thread runs are short runs on the routed models (`routing.intake_summary`, haiku, and
 `intake_thread`, sonnet: on haiku its held-out eval score dropped), each counted against `intake.max_usd_per_day` and the daily budget. Over the cap, a summary is
 the template, and a reply that isn't an exact option is asked back without a run.
 
@@ -289,6 +292,63 @@ How it runs:
   pairs, no ids. Another instance in the same server with a channel in common refuses Discord at start-up,
   naming that instance and the channel.
 
+### 2.1.7 Superfans: a watcher per instance, and one for the engine
+
+A superfan (`src/superfan/`, wired in `src/coordinator/superfan.ts`) watches one instance from its own Discord
+channel. Every `every_minutes` it reads, read-only, what happened since its last pass:
+
+- the instance's event log (only the kinds that say something failed, stopped, was refused or held);
+- the watchdog's incidents about the instance (`src/watchdog/`);
+- its test runs' results (folded from the event log, as the Test runs page does);
+- its health view's suggestions (the Health page's data, test-run problems among them);
+- its own service log, through the dashboard's reader (`readServiceLog`): its unit's journal as the coordinator's
+  own user, else its log file. Never sudo. When the journal can't be read, the pass records why
+  (`superfan.pass` notes) and goes on without it.
+
+Nothing new: no model run, no post. Otherwise the digest (each line redacted with the event log's redaction, the
+Discord-token shape and the instance's `redact` names and patterns, then redacted again as a whole) goes to a
+no-tools run on the research lane (an empty directory; no environment of its own) with one fixed question: is
+anything here new or odd enough for the owner? It posts only when the answer is not "nothing", and never twice
+about the same items or in the same words. It can file one issue a pass through the backlog's ordinary
+`createIssue`: `issue` (labelled `superfan`, for the owner to look at) or `fix` (labelled `ready` and `superfan`,
+so the usual pipeline builds it and its PR goes through every gate). It has no path to merging, approving,
+relabelling, settings or a credential.
+
+**Budget.** `daily_budget_usd` a day (UTC), its own; its runs count against the instance's daily budget too. At
+85% it says so once; at 100% it says so once and neither runs nor posts until the next day.
+
+**The engine and updater channel.** With `machine_channel` set, the instance's coordinator also competes for the
+machine's superfan (one per machine: a lock in the slot directory held while that coordinator lives, like the
+watchdog's machine role; another takes over when it stops). It reads the machine's incidents (a disk, an update
+rolled back) and the updater's log (`/var/lib/<cli>/updates.jsonl`) and only posts. Set it in one instance's
+`intake.yaml`, or the same channel in several (whichever holds the lock posts).
+
+```yaml
+superfan:
+  enabled: true                          # off by default
+  channel: "100000000000000005"          # this instance's superfan channel (its own: not one the bot reads)
+  every_minutes: 30                      # 5..1440 (default 30)
+  daily_budget_usd: 2                    # its own daily cap (default 2, at most 20)
+  # model: haiku                         # default: agents.yaml model_routing.intake_summary (the cheap tier)
+  # machine_channel: "100000000000000006"  # the engine and updater channel (one instance is enough)
+```
+
+`intake.yaml` is read again on every pass: no restart. It needs `discord.enabled`.
+
+**Owner setup.** No developer-portal step beyond the bot invite already done. There is no channel listing in the
+bot or the CLI yet, so the channel ids come from the Discord client:
+
+1. In Discord, User Settings → Advanced → turn on **Developer Mode** (once; it only adds "Copy ID" to menus).
+2. In the instance's server, create a text channel per instance (for example `#superfan-<name>`) and one for the
+   engine (`#superfan-engine`). If the server's default permissions don't let the bot's role post there, add it
+   in the channel's Permissions with **View Channel** and **Send Messages**.
+3. Right-click each channel → **Copy Channel ID**.
+4. Add the lines above to each instance's `intake.yaml`, as its coordinator user, keeping its owner and mode:
+   `sudoedit -u wl-<name> "$(getent passwd wl-<name> | cut -d: -f6)/.local/state/<cli>/instances/<name>/intake.yaml"`
+   (`<cli>` is the engine's command name).
+5. Check: the next pass (within `every_minutes`) records a `superfan.pass` event; a pass with nothing new is
+   `quiet` and posts nothing.
+
 ### 2.1.2 Ideas in conversation
 
 With `discord.conversation: true` (off by default), an addressed message in `discord.channels` from a mapped
@@ -386,6 +446,26 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
 - Off by default. It runs only with `alerts.enabled: true` in `intake.yaml` and the project's production read path
   (`deploy.yaml` `prod_read`, the owner's platform login and the read-only role on the production service); with
   either missing, nothing is read.
+
+### 2.4 GitHub issues
+
+- Open issues on the instance's repo carrying the intake label (`<cli>:intake`, the product's CLI name from
+  `src/brand.ts`; `labels` creates it) are reports (`src/intake/github.ts`). An issue template may set the label,
+  so anyone can file one. The author's login is the sender; ready issues, bot authors and issues already seen
+  (the seen ledger) are never taken.
+- Each goes through the same pipeline as a chat report: redaction, caps, the read-only triage run, dedupe
+  (never against its own issue), the money-path (L3) rule and the trust policy (`src/intake/decide.ts`). The issue
+  already exists, so filing it labels that issue (`ready` and the kind label) and puts the drafted five-part issue
+  on it as one comment; no second issue is opened.
+- A login in `trusted.github` is filed `ready` at once; anyone else's draft is an Inbox decision, approved,
+  edited or rejected exactly as for Discord. Until then, and when it is rejected, asked for details or dropped,
+  the issue stays in triage and a comment on it says why (the engine's reason code only, never agent text).
+- Pulled on the intake timer, but listed at most once every `github.poll_minutes` (default 5, at least 1), one
+  listing per pull, and not again before a rate limit's retry-after. The backlog keeps no ETags, so there are
+  none to reuse.
+- Off by default: `github.enabled: true` in `intake.yaml`. The App's `issues: write` permission already covers
+  listing, commenting and labelling. With an App token, the `ready` the App adds doesn't make the issue
+  actionable on its own (`actionable` wants a writer to add it), as for every issue intake files.
 
 ## 3. Pipeline
 
@@ -518,6 +598,10 @@ test with an injection-style report.
    messages from the server's members (for the links). Restart the instance.
 8. **One bot for several instances** (2.1.6): invite it to each server, install the same token for each
    instance, and give each instance its own server and channels in its own `intake.yaml`.
+9. **GitHub issues** (2.4): set `github.enabled: true` (and any `trusted.github` logins) in `intake.yaml`, run
+   `labels` once to create the intake label, and add it to an issue template if outsiders should reach intake.
+10. **Superfans** (2.1.7): a channel per instance and one for the engine, their ids in each instance's
+   `intake.yaml` under `superfan`.
 
 ## 11. Build order
 
