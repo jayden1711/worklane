@@ -35,16 +35,16 @@ test('with CI_REQUIRE_WEB=1 an unbuilt UI or a missing Chrome throws; without it
   const was = process.env.CI_REQUIRE_WEB;
   try {
     delete process.env.CI_REQUIRE_WEB;
-    assert.equal(webUiBuilt(empty), false);
+    assert.equal(webUiBuilt(join(empty, 'index.html')), false);
     if (process.platform !== 'win32') {
-      assert.equal(webUiSkip('/usr/bin/chrome', empty), 'web UI not built (npm run build:web)');
-      assert.equal(webUiSkip(null, empty), 'no Chrome or Chromium');
+      assert.equal(webUiSkip('/usr/bin/chrome', join(empty, 'index.html')), 'web UI not built (npm run build:web)');
+      assert.equal(webUiSkip(null, join(empty, 'index.html')), 'no Chrome or Chromium');
     }
     process.env.CI_REQUIRE_WEB = '1';
-    assert.throws(() => webUiBuilt(empty), /CI_REQUIRE_WEB=1, but the web UI is not built/);
+    assert.throws(() => webUiBuilt(join(empty, 'index.html')), /CI_REQUIRE_WEB=1, but the web UI is not built/);
     if (process.platform !== 'win32') {
-      assert.throws(() => webUiSkip('/usr/bin/chrome', empty), /the web UI is not built/);
-      assert.throws(() => webUiSkip(null, repoRoot), /no Chrome or Chromium was found/);
+      assert.throws(() => webUiSkip('/usr/bin/chrome', join(empty, 'index.html')), /the web UI is not built/);
+      assert.throws(() => webUiSkip(null), /no Chrome or Chromium was found/);
     }
   } finally {
     if (was === undefined) delete process.env.CI_REQUIRE_WEB;
