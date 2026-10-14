@@ -739,6 +739,19 @@ export interface FirstRun {
   start: FirstRunStart;
   /** Whether this viewer may press Start (the instance's owners). */
   canStart: boolean;
+  /** Each open Fix action's plan, by action id (src/setup-actions.ts), shown before it runs. */
+  actions?: Record<string, FirstRunActionPlan>;
+  /** Whether this viewer may run a Fix action (the instance's owners). */
+  canAct?: boolean;
+}
+export interface FirstRunActionPlan {
+  id: string;
+  step: string;
+  label: string;
+  available: boolean;
+  why?: string;
+  changes: string[];
+  commands: string[];
 }
 /** How the page fixes a step that isn't done (src/setup-steps.ts Fix). */
 export type SetupFix =
@@ -746,7 +759,8 @@ export type SetupFix =
   | { kind: 'coming' }
   | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
   | { kind: 'terminal'; command: string; why: string }
-  | { kind: 'start' };
+  | { kind: 'start' }
+  | { kind: 'action'; action: string; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -809,6 +823,8 @@ export interface FirstRunAutoConfig {
 }
 export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fresh ? '?fresh=1' : ''}`);
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
+/** Run a first-run Fix action after the person confirmed the plan it showed. */
+export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
