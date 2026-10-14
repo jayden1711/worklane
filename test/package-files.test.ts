@@ -152,7 +152,7 @@ test('the packed tarball, installed into an empty folder (no install scripts), r
     for (const cmd of ['init', 'doctor', 'dashboard']) assert.match(run(cmd, '--help'), new RegExp(`^usage: ${BRAND.cli} ${cmd}( |$)`, 'm'), `${cmd} --help prints its usage`);
     // Every path the engine reads from its package root is in the installed package (dist/web when it was built).
     for (const p of RUNTIME_PATHS) {
-      if (p === 'dist/web/' && !existsSync(join(repoRoot, 'dist', 'web'))) continue;
+      if (p === 'dist/web/' && !webUiBuilt()) continue;
       assert.ok(existsSync(join(pkgDir, p)), `${p} is in the installed package`);
     }
     assert.ok(!existsSync(join(pkgDir, 'dist', 'test')), 'no tests in the installed package');
