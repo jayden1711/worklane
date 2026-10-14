@@ -5,13 +5,18 @@
 // (a 0400 file the agent user's claude reads), never an environment variable. What each provider may do is fixed
 // here, in code: local for the intake replier, intake triage and the stage judge; hosted for easy builds and
 // research, never for high-risk, L3, money-path or agent-instructions work, and never for the evaluator at L1+.
+// WHY: item 38. `cli:<agent>` is another vendor's coding CLI (src/cli-agents.ts): builds only, never high-risk, and a change it
+// makes stands only at L1 or below, off protected paths (cliChangeRefusal in src/coordinator/providers.ts).
 // A role uses an open model only if this instance opted in, the role passed its held-out evals on that model, and
 // the provider is up; otherwise it runs on its normal model, and the fallback is recorded.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { MODEL_TIERS, type ModelTier, type RoutedRun } from './model-routing.js';
 
-export type ProviderKind = 'local' | 'hosted';
+export type ProviderKind = 'local' | 'hosted' | 'cli';
+
+export const CLI_AGENTS = ['codex', 'gemini'] as const;
+export type CliAgentName = (typeof CLI_AGENTS)[number];
 
 export interface ProviderConfig {
   /** Anthropic-compatible endpoint: the runner sets ANTHROPIC_BASE_URL to it for the run. */
@@ -31,9 +36,12 @@ export interface ProviderConfig {
   latency_ms?: number | undefined;
 }
 
-/** A model setting that names a provider: `local`, or `hosted:<name>`; null for a plain (Anthropic) model. */
+/** A model setting that names a provider: `local`, `hosted:<name>` or `cli:<agent>`; null for a plain (Anthropic) model. */
 export function providerOf(model: string): { kind: ProviderKind; name: string } | null {
   if (model === 'local') return { kind: 'local', name: 'local' };
+  // WHY: any cli:<x> is a provider, so an unknown agent is refused as unconfigured, never sent to claude as a model.
+  const cli = /^cli:([a-z0-9][a-z0-9_-]{0,40})$/.exec(model);
+  if (cli) return { kind: 'cli', name: cli[1]! };
   const m = /^hosted:([a-z0-9][a-z0-9_-]{0,40})$/.exec(model);
   return m ? { kind: 'hosted', name: m[1]! } : null;
 }
@@ -42,6 +50,7 @@ export function providerOf(model: string): { kind: ProviderKind; name: string } 
 export const PROVIDER_USES: Record<ProviderKind, readonly (RoutedRun | 'build')[]> = {
   local: ['intake_replier', 'intake_triage', 'stage_judge'],
   hosted: ['build', 'research'],
+  cli: ['build'],
 };
 
 /** Why a provider may not run this, or null. Hosted never gets high-risk work (labels, escalation, L3). */
@@ -49,6 +58,7 @@ export function providerRefusal(kind: ProviderKind, use: { route: RoutedRun | 'b
   if (use.route === 'evaluator') return 'the evaluator never runs on an open model at L1+';
   if (!(PROVIDER_USES[kind] as readonly string[]).includes(use.route)) return `${kind} models run only ${PROVIDER_USES[kind].join(', ')}, not ${use.route}`;
   if (kind === 'hosted' && use.highRisk) return 'hosted models never build high-risk, L3, money-path or agent-instructions work';
+  if (kind === 'cli' && use.highRisk) return 'another vendor\'s CLI never builds high-risk work: L1 builds only';
   return null;
 }
 

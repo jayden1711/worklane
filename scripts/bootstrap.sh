@@ -4,10 +4,19 @@
 #
 #   bash scripts/bootstrap.sh [--mode local] <repo-dir>
 #                                                 local mode (as you, no server): install the tools and the
-#                                                 engine, then `worklane init --mode local` in the repo (the
-#                                                 guided checklist: Claude login, GitHub, repo config, ...),
-#                                                 then `worklane doctor` (its exit status is this script's).
+#                                                 engine, start the repo's dashboard in the background, and
+#                                                 print one URL, last: its first-run wizard, where every setup
+#                                                 step happens. Rerun: the same URL, nothing changed. The URL
+#                                                 carries no key: the page asks once for the dashboard key,
+#                                                 kept in a file only you can read (the path is printed).
 #                                                 Without --mode it asks; with no terminal to ask on, local.
+#   bash scripts/bootstrap.sh --config <file> <repo-dir>
+#                                                 the same, unattended: the wizard's steps run here first
+#                                                 (`worklane init --yes`, with the file's answers), then
+#                                                 `worklane doctor`, then the same URL. The file holds
+#                                                 key=value lines: mode=local|server, answer=<id>=<choice>
+#                                                 (repeatable), machine_owner=<login>, public_url=<https url>.
+#                                                 --yes alone: the same with no answers.
 #   bash scripts/bootstrap.sh --no-repo           the tools and the engine only (e.g. in an image)
 #   bash scripts/bootstrap.sh --dry-run <repo>    print what it would do; change nothing
 #   bash scripts/bootstrap.sh --engine <spec> ... install the engine from <spec> (an npm tarball or spec)
@@ -16,8 +25,9 @@
 #                                                 Linux (apt + systemd): the multi-user setup scripts in
 #                                                 scripts/setup/, in order, each printed for review first.
 #                                                 You become the machine's first owner (your GitHub login:
-#                                                 asked, or read from gh and confirmed); at the end it prints
-#                                                 the dashboard's URL, where everything after this happens.
+#                                                 asked, or read from gh and confirmed); it ends with one URL,
+#                                                 the dashboard hub's first-run wizard, where everything after
+#                                                 this happens (no key in it; the page asks for the hub's key).
 #                                                 This is server mode (--mode server alone points here).
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
@@ -45,9 +55,10 @@ ENGINE_COMMIT=9c24a10eb91ffac894e24f0b0a54d8407f23d423
 
 PREFIX="${WORKLANE_PREFIX:-$HOME/.local}"
 DRY=0 NO_REPO=0 HARDENED=0 YES=0 AFTER_CREDENTIALS=0
-REPO="" ENGINE="" NAME="" GITHUB="" OWNER="" PUBLIC_URL="" MODE=""
+REPO="" ENGINE="" NAME="" GITHUB="" OWNER="" PUBLIC_URL="" MODE="" CONFIG=""
+ANSWERS=()
 
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^# Nothing is piped/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 die() { echo "bootstrap: $*" >&2; exit 1; }
 say() { printf '\n== %s\n' "$*"; }
 ok() { printf '   ok: %s\n' "$*"; }
@@ -71,6 +82,7 @@ while [ $# -gt 0 ]; do
     --machine-owner) [ $# -ge 2 ] || die "--machine-owner needs a GitHub login"; OWNER="$2"; shift ;;
     --public-url) [ $# -ge 2 ] || die "--public-url needs a value"; PUBLIC_URL="$2"; shift ;;
     --after-credentials) AFTER_CREDENTIALS=1 ;;
+    --config) [ $# -ge 2 ] || die "--config needs a file"; CONFIG="$2"; YES=1; shift ;;
     -*) echo "bootstrap: unknown option $1" >&2; usage >&2; exit 2 ;;
     *)
       if [ "$HARDENED" = 1 ] && [ -z "$NAME" ]; then NAME="$1"
@@ -81,6 +93,31 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# WHY: the unattended twin of the wizard. key=value lines, read as data (never sourced); what the command line
+# gives wins over the file.
+read_config() {
+  local line key val n=0
+  [ -f "$CONFIG" ] && [ -r "$CONFIG" ] || die "--config: no readable file $CONFIG"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line%$'\r'}"
+    case "$line" in "" | "#"*) continue ;; esac
+    [[ "$line" == *=* ]] || die "$CONFIG:$n: not key=value: $line"
+    key="${line%%=*}" val="${line#*=}"
+    case "$key" in
+      mode)
+        case "$val" in local | server) [ -n "$MODE" ] || MODE="$val" ;; *) die "$CONFIG:$n: mode is local or server, not $val" ;; esac ;;
+      answer)
+        [[ "$val" =~ ^[a-z0-9-]+=.+$ ]] || die "$CONFIG:$n: answer is <question id>=<choice>, not $val"
+        ANSWERS+=(--answer "$val") ;;
+      machine_owner) [ -n "$OWNER" ] || OWNER="$val" ;;
+      public_url) [ -n "$PUBLIC_URL" ] || PUBLIC_URL="$val" ;;
+      *) die "$CONFIG:$n: unknown key $key (mode, answer, machine_owner, public_url)" ;;
+    esac
+  done < "$CONFIG"
+}
+[ -z "$CONFIG" ] || read_config
 
 OS="$(uname -s)"
 case "$(uname -m)" in
@@ -147,32 +184,47 @@ first_owner() {
   ok "first machine owner: @$OWNER"
 }
 
-# The dashboard: its URL (--public-url, else this machine's Tailscale name), the sign-in App (made through
-# GitHub's manifest flow when the hub is up; otherwise how to), and that everything after this happens there.
+# The hub's break-glass port (src/dashboard-hub.ts HUB_BREAK_GLASS_PORT): loopback only, the owner's key.
+HUB_BREAK_GLASS_PORT=4398
+
+# The dashboard hub: everything after this first install happens in its first-run wizard.
+# INVARIANT: the output ends with one URL, the only one in this block, and no key in it. Signed-in people reach the
+# hub's public origin once the sign-in App is set up; until then, the owner's break-glass on this machine (the
+# page asks for the hub's key, which stays in its file).
 dashboard_next() {
-  local url="$PUBLIC_URL" viewer_home="" dns="" later="https://<machine>.<tailnet>.ts.net"
+  local url="$PUBLIC_URL" viewer_home="" dns="" signin=0 hub_key final
   if [ -z "$url" ] && command -v tailscale >/dev/null 2>&1; then
     # The first DNSName in `tailscale status --json` is this machine's (Self comes before the peers).
     dns="$(tailscale status --json 2>/dev/null | sed -n 's/^ *"DNSName": *"\([a-z0-9.-]*[a-z0-9]\)\.\{0,1\}",\{0,1\} *$/\1/p' | head -1 || true)"
     [ -z "$dns" ] || url="https://$dns"
   fi
   if command -v getent >/dev/null 2>&1; then viewer_home="$(getent passwd wl-dash | cut -d: -f6 || true)"; fi
-  say "the dashboard"
+  hub_key="${viewer_home:-~wl-dash}/.local/state/$CLI/dashboard-hub/dashboard-token"
   if [ -n "$viewer_home" ] && [ -f "$viewer_home/.config/dashboard-signin/client-secret" ]; then
-    ok "the sign-in App is set up"
-  elif [ -n "$viewer_home" ] && [ -s "$viewer_home/.local/state/$CLI/dashboard-hub/dashboard-token" ] && [ -n "$url" ]; then
-    echo "   no sign-in App yet: making one through GitHub's manifest flow (open the link it prints, approve on GitHub)"
+    signin=1
+  elif [ -n "$viewer_home" ] && [ -s "$hub_key" ] && [ -n "$url" ]; then
+    say "the sign-in App, through GitHub's manifest flow (open the link it prints, approve on GitHub)"
     run "$CLI" app-manifest "$NAME" "$GITHUB" --signin --public-url "$url" || echo "   that didn't finish: run it again, or make the App by hand (bash scripts/setup/credentials.sh dashboard-signin)"
-  else
-    echo "   no sign-in App yet. People sign in to the dashboard with a GitHub App; make it once, either way:"
-    echo "   - through GitHub's manifest flow, once the hub runs: sudo $CLI app-manifest $NAME $GITHUB --signin --public-url ${url:-$later}"
-    echo "   - by hand: bash scripts/setup/credentials.sh dashboard-signin (docs/dashboard.md)"
   fi
-  echo "   then: sudo bash scripts/setup/dashboards.sh --machine-owner $OWNER --client-id <the App's client id> --public-url ${url:-$later} $NAME"
-  echo
-  echo "dashboard: ${url:-$later (turn on Tailscale with MagicDNS and HTTPS certificates: docs/dashboard.md)}"
-  echo "   sign in with GitHub as @$OWNER. Everything after this first install happens there: Setup console, Add project."
-  echo "   the checklist for a project, from here: sudo $CLI init --mode server <owner/repo> --instance <name>"
+  say "the dashboard: everything after this first install happens in its first-run wizard"
+  if [ "$signin" = 1 ] && [ -n "$url" ]; then
+    ok "the sign-in App is set up: sign in with GitHub as @$OWNER"
+    final="$url/first-run"
+  else
+    if [ "$signin" = 1 ]; then
+      echo "   the sign-in App is set up, but this machine has no public name yet (Tailscale with MagicDNS and HTTPS"
+      echo "   certificates, or --public-url): until then, the owner's way in, on this machine only."
+    else
+      echo "   no sign-in App yet (people sign in with GitHub through it; make it once: sudo $CLI app-manifest $NAME $GITHUB"
+      echo "   --signin --public-url <the hub's https origin>, or by hand: credentials.sh dashboard-signin, then dashboards.sh)."
+      echo "   Until then, the owner's way in, on this machine only."
+    fi
+    echo "   From your laptop, first: ssh -N -L $HUB_BREAK_GLASS_PORT:127.0.0.1:$HUB_BREAK_GLASS_PORT <you>@<this-host>"
+    echo "   The page asks once for the hub's key: it is in $hub_key (root and the hub's user only)."
+    final="http://127.0.0.1:$HUB_BREAK_GLASS_PORT/first-run"
+  fi
+  echo "   The same steps from a terminal: sudo $CLI init --mode server <owner/repo> --instance $NAME"
+  echo "$final"
 }
 
 # The mode: --hardened is server mode; without either, ask (or, with no terminal to ask on, local).
@@ -348,11 +400,40 @@ if [ "$NO_REPO" = 1 ]; then
   exit 0
 fi
 
+path_note() {
+  case ":$ORIG_PATH:" in
+    *":$PREFIX/bin:"*) ;;
+    *) echo "   note: $PREFIX/bin isn't on your PATH: add it in your shell profile (export PATH=\"$PREFIX/bin:\$PATH\")" ;;
+  esac
+}
+
+# WHY: an engine older than the wizard (the pinned release can be) has no `dashboard --detach`: the checklist then
+# runs here, as it always has, and the script says so.
+WIZARD=0
+engine_help="$(command -v "$CLI" >/dev/null 2>&1 && "$CLI" --help 2>/dev/null || true)"
+[[ "$engine_help" != *"dashboard --detach"* ]] || WIZARD=1
+
+# INVARIANT: this is the script's last output, ending with the one URL (`dashboard --detach` prints it last); its
+# exit status is the script's. A browser opens only for a person at a terminal.
+open_wizard() {
+  local args=(dashboard --detach --root "$REPO")
+  [ "$YES" = 0 ] && [ -t 1 ] || args+=(--no-open)
+  say "the first-run wizard: $REPO's dashboard, in the background"
+  run "$CLI" "${args[@]}"
+}
+
+if [ "$WIZARD" = 1 ] && [ "$YES" = 0 ]; then
+  path_note
+  open_wizard
+  exit $?
+fi
+[ "$WIZARD" = 1 ] || [ "$YES" = 1 ] || [ "$DRY" = 1 ] || echo "   note: this engine ($("$CLI" --version 2>/dev/null || echo '?')) has no first-run wizard to open yet: the checklist runs here instead"
+
 say "set up $REPO: the guided checklist ($CLI init, $MODE mode)"
 init_args=(init --mode "$MODE")
 [ "$YES" = 0 ] || init_args+=(--yes)
 status=0
-run "$CLI" "${init_args[@]}" "$REPO" || status=$?
+run "$CLI" "${init_args[@]}" ${ANSWERS[@]+"${ANSWERS[@]}"} "$REPO" || status=$?
 if [ "$status" != 0 ]; then
   echo
   echo "init stopped (exit $status): fix what it says, then run this again; it picks up where it stopped"
@@ -360,20 +441,22 @@ if [ "$status" != 0 ]; then
 fi
 
 say "check it"
-case ":$ORIG_PATH:" in
-  *":$PREFIX/bin:"*) ;;
-  *) echo "   note: $PREFIX/bin isn't on your PATH: add it in your shell profile (export PATH=\"$PREFIX/bin:\$PATH\")" ;;
-esac
+path_note
 if [ "$DRY" = 1 ]; then
   printf '   would run: %s doctor --root %s\n' "$CLI" "$REPO"
+  [ "$WIZARD" = 0 ] || open_wizard
   exit 0
 fi
 "$CLI" doctor --root "$REPO" || status=$?
 if [ "$status" = 0 ]; then
   echo
-  echo "next: $CLI up --root $REPO        (starts the coordinator as a service)"
-  echo "      $CLI dashboard --root $REPO (the dashboard; its First-run page has the checklist)"
+  echo "next: $CLI up --root $REPO        (starts the coordinator as a service; or the wizard's Start)"
+  [ "$WIZARD" = 1 ] || echo "      $CLI dashboard --root $REPO (the dashboard; its First-run page has the checklist)"
   echo "      docs/quickstart.md: look over the owners in .worklane/config.yaml (\"Setting up a project by"
   echo "      hand\"), then your first issue, and where to look"
+  if [ "$WIZARD" = 1 ]; then
+    open_wizard
+    exit $?
+  fi
 fi
 exit "$status"

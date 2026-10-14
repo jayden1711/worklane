@@ -1,0 +1,15 @@
+id: worklane-315
+base: 5d445987320ba3905debebb0fe37e6a7c69d8199
+title: "Main watch: a merge GitHub hasn't linked to its PR yet is judged by the
+  PR its subject names"
+body: "Stop false direct-push verdicts on normal merges: when GitHub's
+  commit-to-PR link is still empty, the main watch asks the PR the merge subject
+  names and accepts it only when that PR's own merge commit is this commit."
+done_when:
+  - test: test/main-watch.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 315
+  merge: c552f16d2ac9274b551649ea1526941d582cd4ca
