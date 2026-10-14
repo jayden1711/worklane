@@ -129,7 +129,28 @@ const run = (args: string[], env: NodeJS.ProcessEnv) =>
     p.on('exit', (status) => res({ status, stderr }));
   });
 
-test('acceptance: two instances keep separate logs, budgets and environments', { skip: process.platform === 'win32' && 'POSIX stand-in gh' }, async () => {
+test('acceptance: a coordinator started with redirecting variables in its own environment hands none to gh (#381 follow-up)', { skip: process.platform === 'win32' && 'POSIX stand-in gh' }, async () => {
+  const { dir, made } = two();
+  const gh = await fakeGitHub({ github_pat_alpha: ['example-org/example-shop'] });
+  writeFileSync(join(made[0]!.home, 'gh', 'token'), 'github_pat_alpha\n');
+  // The stand-in also records the environment the coordinator's own process gave it.
+  writeFileSync(join(gh.bin, 'gh'), '#!/bin/sh\nenv > "$GH_CONFIG_DIR/env.txt"\n[ "$1 $2" = "auth token" ] && cat "$GH_CONFIG_DIR/token"\n');
+  const elsewhere = 'http://attacker.invalid:8080';
+  const redirects = ['ANTHROPIC_BASE_URL', 'GH_HOST', 'GH_REPO', 'GITHUB_API_URL', 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy', 'no_proxy', 'GIT_PROXY_COMMAND', 'CLAUDE_CODE_USE_BEDROCK'];
+  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api), ...Object.fromEntries(redirects.map((k) => [k, elsewhere])) };
+  try {
+    const r = await run(['coordinator', 'run', '--instance', 'alpha', '--once'], env);
+    assert.equal(r.status, 0, r.stderr);
+  } finally {
+    await gh.close();
+  }
+  const seen = readFileSync(join(made[0]!.home, 'gh', 'env.txt'), 'utf8');
+  assert.match(seen, /^GH_CONFIG_DIR=/m, 'the stand-in ran');
+  for (const k of redirects) assert.doesNotMatch(seen, new RegExp(`^${k}=`, 'mi'), `${k} reached gh`);
+  assert.doesNotMatch(seen, /attacker\.invalid/);
+});
+
+test('acceptance: two instances keep separate logs, budgets and environments',{ skip: process.platform === 'win32' && 'POSIX stand-in gh' }, async () => {
   const { dir, made } = two();
   const gh = await fakeGitHub({ github_pat_alpha: ['example-org/example-shop'], github_pat_beta: ['example-org/example-shop'] });
   for (const m of made) writeFileSync(join(m.home, 'gh', 'token'), `github_pat_${m.name}\n`);

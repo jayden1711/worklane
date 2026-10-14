@@ -146,6 +146,24 @@ export interface InstanceHealth {
   error: string | null;
 }
 
+/**
+ * The machine's outbound proxy, read-only: set by root in network.json (docs/network.md), never from the page. A
+ * refused file is said in red: children then go direct.
+ */
+export function OutboundProxy({ network: n }: { network: NonNullable<HealthView['network']> }) {
+  if (n.proxy)
+    return (
+      <div className="text-[12.5px] text-ink-2" data-testid="health-network">
+        Outbound proxy: <code className="font-mono text-[12px]">{n.proxy}</code> (from <code className="font-mono text-[12px]">{n.file}</code>)
+      </div>
+    );
+  return (
+    <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-network-refused">
+      <span className="font-medium text-red">Outbound proxy refused:</span> <span className="break-all">{n.error}</span>
+    </div>
+  );
+}
+
 /** The panel from its data (also what the render checks render). `instances`: on a hub, every instance's view. */
 /** A held engine update, in red: rolled back (a failed migration, or services that didn't come up) and not retried. */
 export function UpdateHold({ hold }: { hold: NonNullable<HealthView['updateHold']> }) {
@@ -191,6 +209,12 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
         // The machine's, so any instance's view (on the hub) shows it.
         const hold = view.updateHold ?? instances?.map((i) => i.view?.updateHold).find(Boolean) ?? null;
         return hold ? <UpdateHold hold={hold} /> : null;
+      })()}
+
+      {(() => {
+        // The machine's, so any instance's view (on the hub) shows it.
+        const network = view.network ?? instances?.map((i) => i.view?.network).find(Boolean) ?? null;
+        return network ? <OutboundProxy network={network} /> : null;
       })()}
 
       <OffsiteBackup status={view.offsiteBackup ?? null} docs={view.docs?.backups ?? null} />
