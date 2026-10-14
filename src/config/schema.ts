@@ -181,6 +181,23 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
   /**
+   * The harness eval suite (src/harness-evals/): a fixed set of past tasks (`tasks`, beside the engine's own
+   * templates/evals/tasks and the private ones in the held-out store) replayed through the real coordinator in a
+   * scratch instance, scored on success, cost, wall-clock and human interventions. Run on this machine at
+   * tests.yaml nightly_at: once a week (`weekly`) and when the engine's src/ changed (`on_change`), at most
+   * `budget_usd` per run, `samples` replays per task. Off by default: it spends real money.
+   */
+  harness_evals: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      weekly: z.boolean().default(true),
+      on_change: z.boolean().default(true),
+      budget_usd: z.number().positive().max(500).default(20),
+      samples: z.number().int().min(1).max(10).default(1),
+      tasks: z.string().min(1).optional(),
+    })
+    .prefault({}),
+  /**
    * Repeated "no"s become checks (src/checks-from-feedback.ts): people's words when they turn the harness's work
    * down (reviews requesting changes, closed PRs, revised or rejected plans, objections, chat corrections), with
    * the reverts as evidence, are grouped into constraints. At `min_sightings` one proposal per constraint: a draft

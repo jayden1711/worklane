@@ -53,7 +53,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { SuperfanWatch } from './coordinator/superfan.js';
+import { HarnessEvals } from './coordinator/harness-evals.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
@@ -78,7 +78,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends SuperfanWatch {
+export class Coordinator extends HarnessEvals {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -132,6 +132,7 @@ export class Coordinator extends SuperfanWatch {
     await step('gardener', () => this.checkGardener(), undefined);
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
+    await step('harness evals', () => this.checkHarnessEvals(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -155,6 +156,7 @@ export class Coordinator extends SuperfanWatch {
     await this.feedbackChecksRun;
     await this.optimizeRun;
     await this.superfanRun;
+    await this.harnessEvalRun;
     await this.prBatchIdle();
   }
 
