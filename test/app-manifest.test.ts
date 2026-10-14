@@ -386,3 +386,82 @@ test("the hub's sign-in takes GitHub's bases from the same variables as the mani
     });
   }
 });
+
+// INVARIANT: where sign-in goes is decided once, when the hub starts, from the hub process's own environment (its
+// systemd unit, which only root writes). Nothing that arrives later can move it: not a query parameter, a header or a
+// cookie on a request, not a signed-in person, and not the environment changing afterwards.
+test("sign-in's GitHub bases come only from the hub's own environment at start: no request, cookie or signed-in person can change them", { skip: !posix }, async () => {
+  const gh = await fakeGitHub();
+  const dir = mkdtempSync(join(tmpdir(), 'amf-signin-env-'));
+  writeFileSync(join(dir, 'client-secret'), `${CLIENT_SECRET}\n`);
+  writeFileSync(join(dir, 'session-secret'), `${'s'.repeat(48)}\n`);
+  const web = mkdtempSync(join(tmpdir(), 'amf-web-'));
+  writeFileSync(join(web, 'index.html'), '<!doctype html><title>hub</title>');
+  const names = [`${BRAND.envPrefix}_GITHUB_API`, `${BRAND.envPrefix}_GITHUB_WEB`] as const;
+  const saved = names.map((n) => process.env[n]);
+  const EVIL = 'https://evil.example.test';
+  const hubWith = async (base: string | null) => {
+    for (const n of names) {
+      if (base) process.env[n] = base;
+      else delete process.env[n];
+    }
+    const h = await startHub({ instances: [], stateDir: mkdtempSync(join(tmpdir(), 'amf-hub-')), webDir: web, signIn: signInFromFiles({ clientId: CLIENT_ID, publicUrl: PUBLIC, dir }), appManifest: { isMachineOwner: () => true } });
+    // The hub is up: from here on, the environment says something else.
+    for (const n of names) process.env[n] = EVIL;
+    return h;
+  };
+  /** Everything a request can carry that names another GitHub. */
+  const tries: { q: string; headers: Record<string, string> }[] = [
+    { q: '', headers: {} },
+    { q: `?web=${EVIL}&api=${EVIL}&github_web=${EVIL}&github_api=${EVIL}`, headers: {} },
+    { q: `?${names[0]}=${EVIL}&${names[1]}=${EVIL}&redirect_uri=${EVIL}/auth/callback&client_id=Iv1.someoneelse1`, headers: {} },
+    { q: '', headers: { 'x-forwarded-host': 'evil.example.test', 'x-forwarded-proto': 'https', origin: EVIL, referer: `${EVIL}/` } },
+    { q: '', headers: { [names[0].toLowerCase()]: EVIL, [names[1].toLowerCase()]: EVIL, 'x-github-api': EVIL, 'x-github-web': EVIL } },
+    { q: '', headers: { cookie: `${names[0]}=${EVIL}; ${names[1]}=${EVIL}; web=${EVIL}; api=${EVIL}` } },
+  ];
+  const loginTarget = async (base: string, t: (typeof tries)[number], cookie?: string) => {
+    const r = await fetch(`${base}/auth/login${t.q}`, { redirect: 'manual', headers: { ...t.headers, ...(cookie ? { cookie: [t.headers.cookie, cookie].filter(Boolean).join('; ') } : {}) } });
+    assert.equal(r.status, 302);
+    return { to: new URL(r.headers.get('location')!), r };
+  };
+  try {
+    // Started with the variables naming the fake GitHub: that is where sign-in goes, whatever a request says.
+    const h = await hubWith(gh.url);
+    const base = h.url.replace(/\/$/, '');
+    try {
+      for (const t of tries) {
+        const { to } = await loginTarget(base, t);
+        assert.equal(to.origin, new URL(gh.url).origin, `to the hub's own GitHub: ${JSON.stringify(t)}`);
+        assert.equal(to.searchParams.get('redirect_uri'), `${PUBLIC}/auth/callback`);
+        assert.equal(to.searchParams.get('client_id'), CLIENT_ID);
+      }
+      // The code's exchange too: it reaches the fake (which alone knows this code), though the request and the
+      // environment by now both name another GitHub.
+      const { to, r } = await loginTarget(base, tries[0]!);
+      const stateCookie = r.headers.getSetCookie().find((c) => c.startsWith(`${STATE_COOKIE}=`))!.split(';')[0]!;
+      gh.signins.set('c-ada', 'ada');
+      const back = await fetch(`${base}/auth/callback?code=c-ada&state=${to.searchParams.get('state')}&api=${EVIL}&web=${EVIL}`, { redirect: 'manual', headers: { cookie: stateCookie, 'x-github-api': EVIL } });
+      const session = back.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))?.split(';')[0];
+      assert.ok(session, `signed in through the hub's own GitHub (${back.status})`);
+      assert.equal(gh.signins.has('c-ada'), false, 'the fake took the code');
+      // A signed-in person, a machine owner even, is no different.
+      for (const t of tries) assert.equal((await loginTarget(base, t, session)).to.origin, new URL(gh.url).origin, `signed in: ${JSON.stringify(t)}`);
+    } finally {
+      await h.close();
+    }
+
+    // Started without them: GitHub itself, whatever a request or the later environment says.
+    const plain = await hubWith(null);
+    try {
+      for (const t of tries) assert.equal((await loginTarget(plain.url.replace(/\/$/, ''), t)).to.origin, 'https://github.com', `unset: ${JSON.stringify(t)}`);
+    } finally {
+      await plain.close();
+    }
+  } finally {
+    names.forEach((n, i) => {
+      if (saved[i] === undefined) delete process.env[n];
+      else process.env[n] = saved[i];
+    });
+    await gh.close();
+  }
+});

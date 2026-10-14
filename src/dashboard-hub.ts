@@ -116,7 +116,10 @@ export function signInFromFiles(o: { clientId: string; publicUrl: string; dir: s
   };
   // WHY: the manifest flow, the coordinator and the setup scripts already read GitHub's bases from these two variables
   // (a fake GitHub in CI); sign-in read neither, so no CI run on a real host could ever sign a machine owner in to
-  // finish a manifest flow. Only whoever writes the hub's unit (root) can set them.
+  // finish a manifest flow.
+  // INVARIANT: read here once, as the hub starts, from the hub process's own environment and nowhere else. On a server
+  // that is the hub's systemd unit and its drop-ins under /etc/systemd/system, which only root writes; the hub's own
+  // user can't change a running unit's environment, and no request, cookie or signed-in person reaches this.
   const api = process.env[`${BRAND.envPrefix}_GITHUB_API`];
   const web = process.env[`${BRAND.envPrefix}_GITHUB_WEB`];
   return { clientId: o.clientId, clientSecret: read('client-secret'), sessionSecret: read('session-secret'), publicUrl: u.origin, ...(api ? { api } : {}), ...(web ? { web } : {}) };
