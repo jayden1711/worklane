@@ -26,6 +26,8 @@ import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
 import { CliRunner, type AgentRunner, type CommitIdentity, type RunAs } from './runner.js';
+import { CliAgentRunner, withCliAgents } from './cli-agents.js';
+import type { CliAgentName } from './providers.js';
 import { latestBaseline } from './baseline.js';
 import { instanceConfigProblems, instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
 import { startConfig } from './config/live.js';
@@ -230,7 +232,11 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // The machine watchdog (src/watchdog/): this instance's checks, and the machine's and the posting if elected.
   const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(i.runAs ? { runAs: i.runAs } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
-  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  // WHY: item 38. A build routed to another vendor's CLI (policy opt-in only) runs as the lane's agent user, never as this one.
+  const lanes = laneRuns(i);
+  const vendor = (agent: CliAgentName) => new CliAgentRunner(agent, { runAs: (lane) => lanes[lane]?.runAs, identity });
+  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile);
+  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /**

@@ -70,7 +70,7 @@ for u in "${users[@]}"; do
   for ok in install up serve public-url; do
     sudo -n -l -U "$u" "$MACHINE_HELPER" tailscale "$ok" >/dev/null || { echo "FAIL: $u can't run tailscale $ok" >&2; exit 1; }
   done
-  for bad in "tailscale" "tailscale up --auth-key=tskey-auth-x" "tailscale up --authkey tskey-auth-x" "tailscale up x" "tailscale serve 4398" "tailscale serve --https=443 http://127.0.0.1:4398" "tailscale public-url https://x.example" "tailscale install 1.0.0" "tailscale status" "tailscale logout" "tailscale UP"; do
+  for bad in "tailscale funnel" "tailscale funnel 443" "tailscale serve --funnel" "tailscale serve funnel on" "tailscale serve --bg --https=443 http://127.0.0.1:4399" "tailscale serve --set-path=/x http://127.0.0.1:4398" "tailscale serve http://0.0.0.0:4399" "tailscale serve --tcp=22 tcp://127.0.0.1:22" "tailscale up --advertise-exit-node" "tailscale up --advertise-routes=198.51.100.0/24" "tailscale up --ssh" "tailscale up --accept-routes" "tailscale up --login-server=https://x.example" "tailscale" "tailscale up --auth-key=tskey-auth-x" "tailscale up --authkey tskey-auth-x" "tailscale up x" "tailscale serve 4398" "tailscale serve --https=443 http://127.0.0.1:4398" "tailscale public-url https://x.example" "tailscale install 1.0.0" "tailscale status" "tailscale logout" "tailscale UP"; do
     # shellcheck disable=SC2086 # each case is its words
     if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
   done

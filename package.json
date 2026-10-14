@@ -39,8 +39,8 @@
     "check:denylist": "node scripts/check-denylist.mjs",
     "build:web": "vite build --config web/vite.config.ts --logLevel warn && node scripts/web-licenses.mjs",
     "build:desktop": "cargo build --release --locked --manifest-path desktop/Cargo.toml",
-    "check:push": "node scripts/push-gate.mjs --range origin/main..HEAD",
-    "setup:hooks": "git config core.hooksPath .githooks"
+    "check:push": "node scripts/push-gate-hook.mjs --range origin/main..HEAD",
+    "setup:hooks": "node scripts/setup-hooks.mjs"
   },
   "devDependencies": {
     "@radix-ui/react-dialog": "1.1.23",

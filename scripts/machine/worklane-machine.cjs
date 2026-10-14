@@ -42,6 +42,8 @@
 // coordinator's user alone reads (--for <the instance whose coordinator asked>: from SUDO_USER, never an argument);
 // serve forwards https 443 to the hub's sign-in port and nothing else; public-url sets the hub's URL to this
 // machine's own tailnet name through dashboards.sh. An admin runs tailscale.sh from a terminal instead.
+// None of the four can turn on Tailscale Funnel or reach beyond the tailnet: there is no funnel command here, serve's
+// target is the script's fixed loopback port, `up` takes no flag, and the script does nothing while Funnel is on.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
