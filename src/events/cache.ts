@@ -7,7 +7,8 @@
 // again. INVARIANT: every event and every snapshot handed out is frozen, so no view can change what the next request
 // reads: a view that tries throws, and that request fails rather than every later one going wrong.
 import { existsSync, statSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './read-only.js';
 import type { StoredEvent } from './types.js';
 
 type Row = { id: number; ts: string; type: string; actor: string; source: string; payload: string };
@@ -20,13 +21,8 @@ const deepFreeze = <T>(v: T): T => {
   return v;
 };
 
-/** An events database opened read-only, waiting out another connection's lock. */
+/** An events database opened read-only, waiting out another connection's lock (src/events/read-only.ts). */
 export type OpenRead = (path: string) => DatabaseSync;
-const openRead: OpenRead = (path) => {
-  const db = new DatabaseSync(path, { readOnly: true });
-  db.exec('PRAGMA busy_timeout = 5000');
-  return db;
-};
 
 export class EventCache {
   private snap: readonly StoredEvent[] = Object.freeze([]);
@@ -39,7 +35,7 @@ export class EventCache {
 
   constructor(
     readonly path: string,
-    private readonly open: OpenRead = openRead,
+    private readonly open: OpenRead = openReadOnly,
   ) {}
 
   /**
