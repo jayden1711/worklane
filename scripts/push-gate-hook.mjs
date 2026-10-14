@@ -13,10 +13,13 @@
 // It fails closed: no origin, no default branch on it, a gate file missing there, or any error refuses the push.
 // Only when the fetch itself fails (offline) does it fall back: to origin's default branch as last fetched, or
 // with none to the checkout's own copy, each under a loud warning.
+//
+// The first-time-setup hatch (PUSH_GATE_BOOTSTRAP=1, when origin holds no gate yet) is a person's, for one push:
+// it is refused inside an agent run, and each use prints a loud line and is appended to HATCH_LOG in the git dir.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** The gate and every file it imports (test/push-gate-hook.test.ts checks this against the real imports). */
@@ -25,6 +28,11 @@ export const GATE_CODE = ['scripts/push-gate.mjs', 'scripts/lib/denylist.mjs'];
 export const GATE_RULES = { required: ['.denylist.json'], optional: ['.denylist-allow', '.gitleaks.toml', '.gitleaksignore'] };
 const REMOTE = 'origin';
 const SELF = 'scripts/push-gate-hook.mjs';
+const HATCH = 'PUSH_GATE_BOOTSTRAP';
+/** What the engine sets in every agent's environment (src/runner.ts agentEnv). */
+const AGENT_MARKER = 'WORKLANE_AGENT';
+/** Where each use of the hatch is recorded: one JSON line per use, in the repo's common git dir (never pushed). */
+export const HATCH_LOG = 'push-gate-bootstrap.log';
 
 class Refusal extends Error {}
 /** A refusal that first-time setup may answer with PUSH_GATE_BOOTSTRAP=1 (origin doesn't hold the gate yet). */
@@ -104,8 +112,38 @@ function checkoutState(branch) {
   return [`checkout at ${head}`, behind === null ? `how far behind ${REMOTE}/${branch}: unknown (never fetched here)` : `${behind} commit(s) behind ${REMOTE}/${branch} as last fetched`];
 }
 
+/**
+ * Record one use of the hatch; returns the record and its path. INVARIANT: no record, no hatch: a use that can't
+ * be written down is refused.
+ */
+function recordHatch(why, branch, mode) {
+  const file = join(resolve(git(['rev-parse', '--git-common-dir']).trim()), HATCH_LOG);
+  let user = process.env.USER ?? process.env.USERNAME ?? 'unknown';
+  try {
+    user = userInfo().username;
+  } catch {
+    // WHY: no passwd entry for this uid (a container): the environment's name stands.
+  }
+  const entry = {
+    at: new Date().toISOString(),
+    user,
+    mode,
+    head: tryGit(['rev-parse', 'HEAD']),
+    branch: tryGit(['symbolic-ref', '--quiet', '--short', 'HEAD']),
+    checkout: tryGit(['rev-parse', '--show-toplevel']),
+    default_branch: `${REMOTE}/${branch}`,
+    why,
+  };
+  try {
+    appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  } catch (e) {
+    throw new Refusal(`${HATCH}=1, but its use could not be recorded in ${file} (${e.message}), so the hatch is not used.`);
+  }
+  return { file, entry };
+}
+
 /** Fill `dir` with the gate to run. Returns the line that says where it came from. */
-function loadGate(dir, top) {
+function loadGate(dir, top, mode) {
   const branch = defaultBranch();
   const ref = `refs/remotes/${REMOTE}/${branch}`;
   try {
@@ -137,13 +175,25 @@ function loadGate(dir, top) {
     return `${REMOTE}/${branch} at ${at}`;
   } catch (e) {
     if (!(e instanceof NotOnOrigin)) throw e;
-    if (process.env.PUSH_GATE_BOOTSTRAP !== '1') {
-      throw new Refusal(`${e.message}\nFirst-time setup (the gate isn't on ${REMOTE}/${branch} yet): push once with PUSH_GATE_BOOTSTRAP=1 to use the checkout's own copy.`);
+    if (process.env[HATCH] !== '1') {
+      throw new Refusal(`${e.message}\nFirst-time setup (the gate isn't on ${REMOTE}/${branch} yet): push once with ${HATCH}=1 to use the checkout's own copy.`);
+    }
+    // WHY: the hatch runs rules the pushed branch can change, so only a person may choose it. The engine's guardrails
+    // and agent environment keep it from agents; this is the same refusal at the push itself.
+    if (process.env[AGENT_MARKER] === '1') {
+      throw new Refusal(`${e.message}\n${HATCH}=1 is set, but this is an agent run (${AGENT_MARKER}=1): the first-time-setup hatch is for a person's own push, never an agent's.`);
     }
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { mode: 0o700 });
     extractFromCheckout(top, dir);
-    loud([`PUSH GATE: PUSH_GATE_BOOTSTRAP=1. ${e.message}`, `Using THE CHECKOUT'S OWN COPY of the gate and its rules:`, ...checkoutState(branch).map((l) => `  ${l}`)]);
+    const { file, entry } = recordHatch(e.message, branch, mode);
+    loud([
+      `PUSH GATE: ${HATCH}=1. ${e.message}`,
+      `FIRST-TIME-SETUP HATCH USED by ${entry.user} at ${entry.at}: this push is NOT judged by ${REMOTE}'s rules.`,
+      `Using THE CHECKOUT'S OWN COPY of the gate and its rules:`,
+      ...checkoutState(branch).map((l) => `  ${l}`),
+      `Recorded in ${file}`,
+    ]);
     return "the checkout's own copy (bootstrap)";
   }
 }
@@ -170,7 +220,7 @@ function main(argv) {
   const dir = mkdtempSync(join(tmpdir(), 'push-gate-'));
   try {
     chmodSync(dir, 0o700);
-    const from = loadGate(dir, top);
+    const from = loadGate(dir, top, hookMode ? `push to ${argv[0] ?? 'an unnamed remote'}` : argv.join(' '));
     console.error(`push gate: gate and rules from ${from}`);
     if (hookMode) noteIfHookIsOld();
     // WHY: the gate reads its rules (and gitleaks its config) from the directory it runs in, so it runs in the
