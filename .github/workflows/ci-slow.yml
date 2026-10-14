@@ -970,10 +970,12 @@ jobs:
             if sudo -u "$u" cat "$d/login-url" >/dev/null 2>&1; then echo "$u can read the login link" >&2; exit 1; fi
           done
           id="$(sudo sed 's#.*/##' "$d/login-url")"; echo "::add-mask::$id"; [ "${#id}" = 16 ]
+          # The id to look for goes in a file of the runner's, never on a sudo command line (sudo logs those to the journal).
+          (umask 077; printf '%s\n' "$id" > "$F/ts-link-id")
           # A second step while this one waits is refused: one at a time.
           if sudo -u wl-ci sudo -n "$HELPER" tailscale serve < /dev/null 2> "$F/ts-busy.txt"; then echo "a second tailscale step started" >&2; exit 1; fi
           grep -q 'a tailscale step is already running' "$F/ts-busy.txt"
-          leaked() { sudo journalctl --no-pager > "$F/journal.txt" 2>&1 || true; sudo grep -qF "$id" "$F/journal.txt" "$d/steps.jsonl" /var/lib/worklane/machine-changes.jsonl; }
+          leaked() { sudo journalctl --no-pager > "$F/journal.txt" 2>&1 || true; sudo grep -qFf "$F/ts-link-id" "$F/journal.txt" "$d/steps.jsonl" /var/lib/worklane/machine-changes.jsonl; }
           if leaked; then echo "the login link is in the journal, the steps or the changes log" >&2; exit 1; fi
           sudo grep -q '"step":"up","state":"waiting"' "$d/steps.jsonl"
           # The owner logs in (the stand-in's way): the machine is on the tailnet under a name, with a certificate.
@@ -984,7 +986,7 @@ jobs:
           sudo tail -n 1 "$d/steps.jsonl" | jq -e --arg n "$name" '.step=="up" and .state=="done" and .detail=="on the tailnet as \($n)"'
           sudo test ! -e "$d/login-url"
           if leaked; then echo "the login link is in the journal, the steps or the changes log" >&2; exit 1; fi
-          rm -f "$F/journal.txt"
+          rm -f "$F/journal.txt" "$F/ts-link-id"
           # tailscale up got a timeout and nothing else: no key as an argument or in its environment.
           [ "$(sudo jq -c 'select(.args[0]=="up")' /var/lib/ci-tailscale/calls)" = '{"args":["up","--timeout=600s"],"authkey_env":false}' ]
           if sudo grep -q 'tskey' /var/lib/ci-tailscale/calls "$d/steps.jsonl"; then echo "a key reached tailscale or the steps" >&2; exit 1; fi
