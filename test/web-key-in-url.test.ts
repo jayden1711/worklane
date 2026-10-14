@@ -4,7 +4,7 @@
 // a dropped stream, and the real UI in Chrome with every request it makes recorded.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +15,7 @@ import { writeLive } from '../src/console.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { RunFeed } from '../src/run-feed.js';
-import { REAL_CHROME_TIMEOUT, realChromeTests } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const WEB_SRC = join(repoRoot, 'web', 'src');
@@ -179,12 +179,11 @@ test('a dropped stream reconnects, with the last id it saw and the key in the he
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
-const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
 const RUN = '2026-01-01T00-00-00-000Z-worker-keyurl';
 
 test(
   'in a real Chrome: the run feed, live state, the Setup console and the Board update live, and no request URL carries the key',
-  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'web-key-url-chrome-'));
     const { dir: root } = exampleProject();
