@@ -528,7 +528,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                           Not from here yet: {f.repoConfig.error}
                         </p>
                       ) : (
-                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} />
+                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onMerged={() => onRecheck?.()} />
                       )
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />

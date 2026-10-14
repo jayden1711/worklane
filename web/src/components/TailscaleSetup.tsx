@@ -13,6 +13,34 @@ const RUN_TONE: Record<NonNullable<TailscaleData['run']>['status'], 'info' | 'wa
 const RUN_LABEL: Record<NonNullable<TailscaleData['run']>['status'], string> = { running: 'running', waiting: 'waiting on you', done: 'done', failed: 'failed', stalled: 'stopped without finishing' };
 const LINE_TONE: Record<TailscaleStepLine['state'], 'neutral' | 'info' | 'warn' | 'ok' | 'danger'> = { started: 'neutral', running: 'info', waiting: 'warn', done: 'ok', failed: 'danger' };
 
+/** How long a request handed to the step's unit is waited on for the unit's first line, at the busy pace. */
+const HANDOFF_MS = 60_000;
+
+/**
+ * Whether the card looks again every few seconds rather than at its idle pace: a step is running or waiting on the owner,
+ * a request waits for the coordinator, or the newest request was handed to the step's own unit and the unit hasn't
+ * written its first line yet (the progress file still shows an earlier step, or none). Without that last case the card
+ * went idle between the request finishing and the step starting, and showed the step only 20 s later.
+ */
+export function tailscaleBusy(d: Pick<TailscaleData, 'run' | 'requests'>, now = Date.now()): boolean {
+  if (d.run && (d.run.status === 'running' || d.run.status === 'waiting')) return true;
+  if (d.requests.some((r) => r.status === 'pending' || r.status === 'running')) return true;
+  const last = d.requests[0];
+  if (!last || last.status !== 'done' || now - Date.parse(last.finishedAt ?? last.at) > HANDOFF_MS) return false;
+  // Progress lines carry whole seconds; a request is recorded to the millisecond.
+  return !d.run || Date.parse(d.run.startedAt) < Date.parse(last.at) - 1_000;
+}
+
+/**
+ * Whether a step ended between two reads. The card then reads again at once, with Tailscale asked afresh, so the next
+ * step is offered from what Tailscale says after the step, not at the idle pace.
+ */
+export function tailscaleStepEnded(prev: Pick<TailscaleData, 'run'> | null, next: Pick<TailscaleData, 'run'>): boolean {
+  const was = prev?.run;
+  const now = next.run;
+  return !!was && !!now && (was.status === 'running' || was.status === 'waiting') && now.step === was.step && now.startedAt === was.startedAt && (now.status === 'done' || now.status === 'failed');
+}
+
 /** What the machine says now, in a line. */
 function summary(d: TailscaleData): { tone: 'ok' | 'neutral' | 'warn'; label: string; text: string } {
   const s = d.status;
@@ -200,11 +228,23 @@ export function TailscaleSetupView({ data, onChanged, initialConfirming = null }
 export function TailscaleSetupPanel() {
   const [data, setData] = useState<TailscaleData | null>(null);
   const el = useRef<HTMLDivElement>(null);
-  const load = () => getTailscale().then(setData, () => setData(null));
+  const last = useRef<TailscaleData | null>(null);
+  const load = (fresh = false) =>
+    getTailscale(fresh).then(
+      (d) => {
+        const ended = tailscaleStepEnded(last.current, d);
+        last.current = d;
+        setData(d);
+        // A step just ended: read again now, with Tailscale asked afresh, so the next step is offered at once.
+        if (ended) void load(true);
+      },
+      () => setData(null),
+    );
   useEffect(() => void load(), []);
-  const active = !!data && (data.run?.status === 'running' || data.run?.status === 'waiting' || data.requests.some((r) => r.status === 'pending' || r.status === 'running'));
+  const active = !!data && tailscaleBusy(data);
   useEffect(() => {
-    // While a step runs, every 3 s; otherwise every 20 s, so a login or a setting changed on Tailscale's pages shows up.
+    // While a step runs (or is being handed to its unit), every 3 s; otherwise every 20 s, so a login or a setting
+    // changed on Tailscale's own pages shows up.
     const t = window.setInterval(() => void load(), active ? 3000 : 20_000);
     return () => window.clearInterval(t);
   }, [active]);

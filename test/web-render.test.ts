@@ -3,7 +3,7 @@
 // data; decisions are still answerable only where the server says so.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +16,7 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
@@ -51,6 +51,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string } }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -61,6 +62,9 @@ interface Render {
   renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
   renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
+  tailscaleBusy(d: unknown, now?: number): boolean;
+  tailscaleStepEnded(prev: unknown, next: unknown): boolean;
+  accountBusy(d: unknown, now?: number): boolean;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
@@ -2279,4 +2283,81 @@ test("the first-run page's Discord step: the token's place and a paste box, the 
   assert.match(r.renderFirstRun(f, { open: 'discord', discord: stored }), /data-step="discord"[\s\S]*?data-testid="first-run-fix-panel"[\s\S]*?data-testid="discord-setup"/);
   const done = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'discord' ? { ...s, done: true } : s)) })) } };
   assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
+});
+
+test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  assert.doesNotMatch(r.renderRepoConfigForm(c), /repo-config-merge/, 'nothing to merge before a PR is proposed');
+  const proposed = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7' });
+  assert.match(proposed, /data-testid="repo-config-result"[^>]*>proposed: merge the PR to apply it/);
+  assert.match(proposed, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"/);
+  assert.match(proposed, /data-testid="repo-config-merge-review"[^>]*>Merge PR #(<!-- -->)?7(<!-- -->)? here…/);
+  const confirming = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7', mergePlan: { command: 'gh pr merge 7 --repo example-org/example-shop --squash', then: "then this checkout's main is fast-forwarded to origin's" } });
+  assert.match(confirming, /data-testid="repo-config-merge-confirming"[\s\S]*?gh pr merge 7 --repo example-org\/example-shop --squash[\s\S]*?fast-forwarded to origin(&#x27;|')s\.[\s\S]*?data-testid="repo-config-merge-confirm"[^>]*>Confirm merge[\s\S]*?data-testid="repo-config-merge-cancel"/);
+});
+
+test('Tailscale: the read that shows a step ended offers the next step at once, from the status after it, with no wait for the idle poll', { skip: process.platform === 'win32' }, async () => {
+  // Put together here so the repo holds no tailnet name, even a made-up one (the denylist's rule).
+  const name = ['box', 'tail0example', 'ts', 'net'].join('.');
+  const st = (over: Partial<TailscaleStatus>): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: false, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test', ...over });
+  let tailscale = st({ state: 'NeedsLogin', name: null, https: false });
+  const tsDir = mkdtempSync(join(tmpdir(), 'tailscale-ended-'));
+  const at = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  const line = (state: string, detail: string) => `${JSON.stringify({ at: at(), step: 'up', state, detail })}\n`;
+  writeFileSync(join(tsDir, 'steps.jsonl'), line('started', '') + line('running', 'tailscale up (no auth key)') + line('waiting', 'the login link is in alpha\'s dashboard'));
+  const dir = mkdtempSync(join(tmpdir(), 'tailscale-ended-dash-'));
+  const { dir: root } = exampleProject();
+  const eventsDb = join(dir, 'events.db');
+  new EventLog(eventsDb).close();
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'alpha', machineOwnersFile: machineOwnersFile('example-owner'), tailscaleDir: tsDir, tailscaleStatus: async () => tailscale, slotsDir: join(dir, 'slots') });
+  const read = async () => {
+    const res = await fetch(`${d.url.split('/?')[0]!}/api/tailscale`, { headers: { authorization: `Bearer ${d.token}`, ...asDevicePerson('example-owner') } });
+    assert.equal(res.status, 200);
+    return (await res.json()) as { next: string | null; run: { status: string }; busy: string | null; steps: { id: string; blocked: string | null }[] };
+  };
+  const serveButton = (html: string) => /data-step="serve"[^]*?<button([^>]*)data-testid="tailscale-step-run"/.exec(html)![1]!;
+  try {
+    // up is waiting on the owner: the card polls at its busy pace, and serve can't be asked for yet.
+    const waiting = await read();
+    assert.deepEqual([waiting.run.status, waiting.next], ['waiting', 'up']);
+    assert.ok(r.tailscaleBusy(waiting));
+    assert.match(serveButton(r.renderTailscaleSetup(waiting)), /disabled=""/);
+    // The owner logs in: tailscale is up, and the step's last line is written, all within the status cache's 3 s.
+    tailscale = st({});
+    appendFileSync(join(tsDir, 'steps.jsonl'), line('done', `on the tailnet as ${name}`));
+    // The very next read, with no wait: the step is done, Tailscale's status is the one after it, and serve is offered.
+    const ended = await read();
+    assert.deepEqual([ended.run.status, ended.next, ended.busy], ['done', 'serve', null]);
+    assert.equal(ended.steps.find((s) => s.id === 'serve')!.blocked, null);
+    assert.doesNotMatch(serveButton(r.renderTailscaleSetup(ended)), /disabled/, 'the Serve button is enabled on the render after that read');
+    // And the card sees the step end, so it reads again at once (fresh) rather than at its idle pace.
+    assert.ok(r.tailscaleStepEnded(waiting, ended));
+    assert.ok(!r.tailscaleStepEnded(ended, ended), 'only once');
+    assert.ok(!r.tailscaleBusy(ended), 'then idle: nothing left running');
+  } finally {
+    await d.close();
+  }
+});
+
+test('Tailscale and Claude account: a request handed to its own unit keeps the card at its busy pace until the unit writes its first line', () => {
+  const now = Date.parse('2026-10-14T12:00:30Z');
+  const req = (over: Record<string, unknown> = {}) => ({ id: 'mr-1', args: ['tailscale', 'serve'], by: 'ada', at: '2026-10-14T12:00:20.500Z', status: 'done', detail: 'started', finishedAt: '2026-10-14T12:00:22Z', ...over });
+  const run = (startedAt: string, status = 'done') => ({ step: 'up', startedAt, status, detail: '', lines: [] });
+  // The request is done (the unit was started), but the progress file still shows the step before: keep looking.
+  assert.ok(r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now));
+  assert.ok(r.tailscaleBusy({ run: null, requests: [req()] }, now));
+  // The unit's first line is there: from now on its own status decides.
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:21Z'), requests: [req()] }, now));
+  assert.ok(r.tailscaleBusy({ run: run('2026-10-14T12:00:21Z', 'running'), requests: [req()] }, now));
+  // A refused or failed request starts no unit; and after a minute the unit is taken not to have started.
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req({ status: 'refused' })] }, now));
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now + 120_000));
+  // The Claude account switch is started the same way (its own unit): the panel used to stop looking entirely.
+  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', tokenFrom: 'alpha', waitingForToken: false, token: null, instances: [] });
+  const account = req({ args: ['claude-account', 'switch'] });
+  assert.ok(r.accountBusy({ switch: sw('2026-10-13T09:00:00Z'), requests: [account] }, now));
+  assert.ok(r.accountBusy({ switch: null, requests: [account] }, now));
+  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [account] }, now));
+  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [account] }, now));
+  assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
 });
