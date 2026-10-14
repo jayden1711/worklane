@@ -7,6 +7,7 @@ import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 import { safeProjectEnv } from '../project-env.js';
+import { withoutPushGateHatch } from '../guardrails/push-hook.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -600,7 +601,8 @@ export function shellCommand(command: string): [file: string, args: string[]] {
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   delete env.NODE_TEST_CONTEXT;
-  return env;
+  // WHY: project commands run code an agent wrote; the push gate's hatch in the engine's own environment stops here.
+  return withoutPushGateHatch(env);
 }
 
 /**
@@ -843,6 +845,20 @@ export function openUrl(url: string): void {
   } catch {
     // no browser here: the URL is printed anyway
   }
+}
+
+/**
+ * A browser opener that opens nothing: it writes the URL it is given to `urlFile` (this user's only), so a program
+ * that opens a browser through $BROWSER (claude auth login) hands its URL to the dashboard instead. Written into
+ * `dir` (a 0700 directory of this user's), 0700. Null where $BROWSER can't name such a script (Windows): there the
+ * program opens the browser itself.
+ */
+export function browserRelay(dir: string, urlFile: string): string | null {
+  if (process.platform === 'win32') return null;
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const file = join(dir, 'browser-relay');
+  writeExecutable(file, `#!/bin/sh\numask 077\nprintf '%s\\n' "$1" > ${q(urlFile)}\n`, 0o700);
+  return file;
 }
 
 /** A native executable's file name on this OS. */

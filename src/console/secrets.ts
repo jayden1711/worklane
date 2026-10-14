@@ -42,21 +42,45 @@ export async function readSecretBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
+ * What the server does for one credential beyond storing it (the dashboard's, per credential name):
+ * - `shape`: what its value must look like; one that doesn't is refused with `what`, a fixed text, and nothing is
+ *   stored;
+ * - `stored`: runs once the file is installed, with the file's path only (never the value), inside the answer's
+ *   transaction: when it throws, the ask stays open. What it returns is added to the answer's detail.
+ */
+export interface SecretRule {
+  shape?: { re: RegExp; what: string };
+  stored?: (ask: Ask & { kind: 'paste_secret' }, file: string) => string | void;
+}
+
+/**
  * Install a pasted secret for an open paste_secret ask and answer it, once. Owner only. The answer records
  * who, when and the file it went to; the value goes nowhere but that file.
  */
-export function storeSecret(log: EventLog, id: string, a: { by: string; role: Role | null; value: string; dir: string }): Ask {
+export function storeSecret(log: EventLog, id: string, a: { by: string; role: Role | null; value: string; dir: string; rules?: Record<string, SecretRule> }): Ask {
   const value = a.value.replace(/\r?\n$/, '');
   if (!value) throw new AskError('the secret is empty');
   if (value.length > MAX_SECRET) throw new AskError(`the secret is longer than ${MAX_SECRET} bytes`);
   if (/[\0]/.test(value)) throw new AskError('the secret has a NUL byte');
   return recordAnswer(log, id, { by: a.by, role: a.role, answer: 'stored' }, (ask) => {
     if (ask.kind !== 'paste_secret') throw new AskError(`ask ${id} isn't a paste_secret ask`);
+    const rule = a.rules && Object.hasOwn(a.rules, ask.credential) ? a.rules[ask.credential] : undefined;
+    // INVARIANT: a refusal is the rule's fixed text, never the value.
+    if (rule?.shape && !rule.shape.re.test(value)) throw new AskError(rule.shape.what);
+    let file: string;
     try {
-      return `installed ${installOwnerOnlySecret(a.dir, ask.credential, value)} (0400, this user only)`;
+      file = installOwnerOnlySecret(a.dir, ask.credential, value);
     } catch (e) {
       // The OS error names the path, never the value; keep only its first line.
       throw new AskError(`couldn't install the secret: ${String((e as Error).message).split('\n')[0]}`);
     }
+    let more: string | void;
+    try {
+      more = rule?.stored?.(ask, file);
+    } catch (e) {
+      // It was given the path only, so its message can't hold the value.
+      throw new AskError(`the secret is installed at ${file}, but the step after it failed: ${String((e as Error).message).split('\n')[0]}`);
+    }
+    return `installed ${file} (0400, this user only)${more ? `; ${more}` : ''}`;
   });
 }

@@ -59,7 +59,7 @@ test_run:
 - every protected path above inaccessible, and the Docker socket too, so only the helper starts containers;
 - no other run's workspace: `runs/` is an empty read-only tmpfs with only this run's directory bound in;
 - a private `/tmp`, `HOME` inside the run's directory, no devices, no new privileges;
-- `TMPDIR` (and `TMP`, `TEMP`) the run's own short directory, `/tmp/wlt-<8 hex>`, bound into that private `/tmp`: a Unix socket's path has at most 107 bytes, and Chrome's `$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket` didn't fit under the run's directory. The helper makes it as the test user, 0700, and refuses one that is already there;
+- `TMPDIR` (and `TMP`, `TEMP`) the run's own short directory, `/var/lib/wlt/<8 hex>`, the only one in the sandbox's `/var/lib/wlt`: a Unix socket's path has at most 107 bytes, and Chrome's `$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket` didn't fit under the run's directory. The helper makes it (the test user's, 0700) and refuses one that is already there. `/var/lib/wlt` is root's, 0711, made by the helper itself. It is not under `/tmp` or `/var/tmp`: the coordinator's unit has a private `/tmp`, so a directory the helper made there would not be in the host's `/tmp`, where systemd looks for it to bind it into the run;
 - an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment.
 - the command exactly as written, for bash alone. Otherwise systemd-run expands `${...}` in it itself (as `ExecStart=` does), which blanks a shell-only `${x}`. On systemd 254 and later the helper passes `--expand-environment=no`. On an older one it writes each `$` as `$$`, systemd's escape for a literal `$`.
 
@@ -104,13 +104,21 @@ Posting needs the App's **Checks: read & write** permission, which only the owne
 
 ## On every PR
 
-With `test_run` in tests.yaml and the sandbox's check passing at start (`testrun.sandbox`), the coordinator's tick (src/coordinator/test-runs.ts) works like this:
+With `test_run` in tests.yaml and the sandbox's check passing (`testrun.sandbox`), the coordinator's tick (src/coordinator/test-runs.ts) works like this:
 
 - At most every 90 s, one API call lists the open PRs. That covers the harness's, the owner's and bots' alike.
 - It fetches each new head (`refs/pull/<n>/head`) and runs the fast tiers on it, with the files the PR changes against its base. Then it posts the checks on that head.
 - **New head:** the run on the old head is cancelled, and a run starts on the new one. A closed PR's run is cancelled too. A cancelled run posts no check.
 - **Restarts:** a head already run isn't run again. A run a restart cut short is wiped at start, recorded as `interrupted`, and run again.
 - **Bots:** a bot's PR gets the fast tier. Its full tiers (a batch, in PR mode) wait until the owner approves it (`fullRunAllowed`).
+
+**When the sandbox's check fails** (src/testrun/sandbox-watch.ts). The coordinator runs the helper's `check` at start. A failure never switches test runs off for the life of the process:
+
+- **Journal:** the failure, with its FAIL lines, is on the coordinator's stderr (`journalctl -u worklane-<name>.service`), and so is the recovery.
+- **Alert:** `testrun.sandbox` records each change. Health and the dashboard say "Test runs are off", and the watchdog raises one `test_sandbox` incident (the Health page, and the ops channel), resolved when the check passes.
+- **Retry:** the check runs again 30 s, 1 min and 2 min after a failure, then every 5 min, never two at once. When it passes, test runs go on in the running coordinator: no restart.
+- **PRs:** while it fails no run starts. Each open PR head gets one failing check, "Not run: test runs are off (the test sandbox check is failing)", with the FAIL lines. When the check passes, each of those heads runs, and its real check replaces that one.
+- **Batches and the deploy gate** wait while it fails, as they do without test runs: no batch runs, nothing merges untested, the deploy branch doesn't move.
 
 ## Test selection
 
@@ -137,6 +145,8 @@ How `imports` decides (src/testrun/affected.ts; the coordinator reads the code f
 - If the plan fails (git can't read the commit), the run takes the whole suite.
 
 The engine's own CI selects the same way on a pull request (scripts/ci/affected.mjs, run in each test shard after the build; a push to main, and a PR labelled `full-ci`, run every file). It forces the whole suite for `package.json` and its lockfile, any `tsconfig`, `.nvmrc`, `test/helpers.ts`, `scripts/ci/` and `.github/`. `test/helpers.ts` is described per export rather than scanned (most tests import it for `repoRoot` alone); `test/ci-affected.test.ts` keeps the description in step with the file. A test that runs `git ls-files` in the repo depends on which files exist, and runs when a change adds one. A `src/` module that reads the directory it runs from as a whole (`npm pack` of the engine) reads the package: `package.json` and its `files`. The selected files are split into the 4 shards by `test/timings.json`, and a shard with none of them passes.
+
+The shards are balanced on the per-file durations in `test/timings.json` (`scripts/ci/shard.mjs`). A test file with no timing there never fails anything: it is weighed as the median file, and each shard's plan (and `test/ci-shard.test.ts`) prints a warning that lists the untimed files. So a pull request that adds a test file needs no edit to `test/timings.json`. To refresh it, run `node scripts/ci/timings.mjs` on an up-to-date checkout of main (it reads the newest green `ci` run on main with `gh`; `--run <id>`, `--log <file>` and `--dry-run` are there too) and open a pull request with the result. No workflow does this by itself, since writing the file back would need a bot commit on main. Only a file that is really wrong fails: not JSON, or a duration that isn't a positive number.
 
 ## Agents skip local full runs
 

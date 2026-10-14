@@ -74,17 +74,17 @@ test('acceptance: every run_as section of the setup scripts runs as a real other
     assert.match(readFileSync(yaml, 'utf8'), /^ {2}agent_user: wl-site-agent\n {2}agent_home: \/var\/lib\/wl-site-agent$/m);
     r = runAs(listed + engine[0]!, ['site', `/srv/worklane/site/example shop`, repo, '/var/lib/wl-site-agent']);
     assert.equal(r.stdout, 'instance site exists; agents run as wl-site-agent\n');
-    r = runAs(checkout[0]!, ['site', dest, repo, 'https://github.com']);
+    r = runAs(checkout[0]!, ['site', dest, repo]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /^git -c credential.helper= -c credential.helper=!\/usr\/local\/bin\/worklane git-credential --instance site clone -q https:\/\/github.com\/example-org\/example shop.git /m);
     assert.match(r.stdout, /^git config core.sharedRepository group$/m);
     assert.match(r.stdout, /^git -c core.hooksPath=\/dev\/null pull -q --ff-only$/m);
     assert.match(r.stdout, /^worklane install --root \. --git-hooks-only$/m);
-    // No config yet: auto-config, as the coordinator, with the API it is given; nothing branched or pushed here.
+    // No config yet: auto-config, as the coordinator; nothing branched or pushed here. No GitHub host is handed on.
     const proposed = `worklane() { echo "args: $* api=\${WORKLANE_GITHUB_API:-}" >&2; echo '{"kind":"proposed","detail":"x","pr":"https://github.com/example-org/example shop/pull/1","questions":[]}'; }\n`;
-    r = runAs(proposed + checkout[1]!, ['site', dest, 'http://127.0.0.1:8999']);
+    r = runAs(proposed + checkout[1]!, ['site', dest]);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /^args: instance auto-config site api=http:\/\/127\.0\.0\.1:8999$/m);
+    assert.match(r.stderr, /^args: instance auto-config site api=$/m, 'the script hands it no host');
     assert.match(r.stdout, /^auto-config: \{"kind":"proposed"/m);
     assert.doesNotMatch(r.stdout, /git (switch|add|commit|push)/);
     r = runAs(service[0]!, ['site']);

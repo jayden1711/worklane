@@ -41,7 +41,7 @@ export abstract class DeployCommands extends ChannelChat {
 
   /** The gate is configured (on, or off and refusing). */
   private deployOn(cfg: IntakeConfig): boolean {
-    return (!!this.d.deployGate || this.gateOff()) && this.channelOn(cfg);
+    return (!!this.liveDeployGate || this.gateOff()) && this.channelOn(cfg);
   }
 
   /** tests.yaml has deploy_gate, switched off (no `enabled: true`). */
@@ -85,7 +85,7 @@ export abstract class DeployCommands extends ChannelChat {
   }
 
   private async deployCommand(cfg: IntakeConfig, src: IntakeSource, r: IncomingReport, who: { login: string; role: 'owner' | 'writer' | 'viewer' | null }) {
-    const gate = this.d.deployGate;
+    const gate = this.liveDeployGate;
     const id = reportId(r);
     const ref = parseDeployCommand(r.text)!;
     const where = { channel: r.thread!.id };
@@ -110,19 +110,19 @@ export abstract class DeployCommands extends ChannelChat {
     const say = (text: string) => this.say(src, thread, `reply:${msg}`, text.slice(0, 1900));
     const asked = this.pendingOverride(id);
     if (!asked) return say('This was answered already; your reply changes nothing.');
-    if (!this.d.deployGate || this.gateOff()) return say(`Nothing moved: ${DEPLOY_GATE_OFF}.`);
+    if (!this.liveDeployGate || this.gateOff()) return say(`Nothing moved: ${DEPLOY_GATE_OFF}.`);
     const answer = parseDeployReply(r.text);
     if (!mayApproveHighRisk(cfg, r.sender.id, who.role) || who.login.toLowerCase() !== asked.by.toLowerCase()) return say(`Only @${asked.by}, who asked, can confirm or cancel this; nothing moved.`);
     if (answer === null) return say('Nothing moved. Reply exactly **confirm** to deploy it, or **cancel**.');
     if (answer === 'cancel') {
       this.emit('deploy_gate.override', { ...asked, thread, stage: 'cancelled', detail: 'cancelled by the owner' });
-      return say(`Cancelled: \`${this.d.deployGate!.branch}\` stays where it is.`);
+      return say(`Cancelled: \`${this.liveDeployGate!.branch}\` stays where it is.`);
     }
-    const got = await this.d.deployGate!.override(asked.sha, who.login);
+    const got = await this.liveDeployGate!.override(asked.sha, who.login);
     const gate = got.gate === null ? 'unknown' : got.gate === 'green' ? 'override while green' : `override while ${got.gate}`;
     auditWrite(this.d.log, { login: who.login, role: who.role!, via: 'discord' }, this.d.instance, 'deploy_gate.override', { sha: asked.sha, ok: got.ok, gate, ...(got.ok ? { from: got.from } : { reason: got.reason }) });
     this.emit('deploy_gate.override', { ...asked, thread, stage: got.ok ? 'confirmed' : 'refused', detail: got.ok ? gate : got.reason.slice(0, 1000) });
-    return say(got.ok ? `Moved: \`${this.d.deployGate!.branch}\` is at \`${short(asked.sha)}\` (${gate}); the host deploys it next.` : `Not moved: ${got.reason}.`);
+    return say(got.ok ? `Moved: \`${this.liveDeployGate!.branch}\` is at \`${short(asked.sha)}\` (${gate}); the host deploys it next.` : `Not moved: ${got.reason}.`);
   }
 
   /**
@@ -134,7 +134,7 @@ export abstract class DeployCommands extends ChannelChat {
     const gate = this.d.cfg.tests.deploy_gate;
     const channel = cfg.discord.ops_channel;
     const src = this.chatSource();
-    if (!this.d.deployGate || !gate || !cfg.discord.enabled || !channel || !src) return;
+    if (!this.liveDeployGate || !gate || !cfg.discord.enabled || !channel || !src) return;
     const repo = this.d.cfg.project.project.repo;
     const link = (sha: string) => `https://github.com/${repo}/commit/${sha}`;
     const types = gate.notify === 'ops' ? (['deploy_gate.moved', 'deploy_gate.held', 'deploy_gate.post_deploy'] as const) : (['deploy_gate.post_deploy'] as const);

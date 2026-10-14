@@ -13,7 +13,11 @@
 #   bash scripts/setup/credentials.sh <name> verify-app
 #       Read-only: the same check with the key already installed (after changing the App's permissions).
 #   bash scripts/setup/credentials.sh <name> claude
-#       The agent user's Claude login (interactive).
+#       The agent user's Claude login: the token `claude setup-token` prints (run it on a machine signed in to the
+#       Claude account the agents should use), pasted at a hidden prompt, or on stdin when there is no terminal
+#       (automation). Installed as wl-<name>-agent's own Claude login (~/.claude/.credentials.json, 0600), never
+#       echoed, never an argument; then checked with `claude auth status` as that user. The dashboard's equivalent is
+#       Add project's paste box (the first-run page's Sign in to Claude).
 #   bash scripts/setup/credentials.sh <name> github
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
@@ -35,8 +39,11 @@
 #       coordinator user can't read it, and the sandbox denies it to agent commands. Prints the credentials.yaml
 #       line to add. Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
 #   bash scripts/setup/credentials.sh <name> intake-discord
-#       Work intake (docs/intake.md): the chat bot's token. Pasted (not shown) and installed for wl-<name>
-#       only, 0400, in the instance home, which no agent user can read. Prints the credentials.yaml line to add.
+#       Work intake (docs/intake.md): the chat bot's token. Pasted at a hidden prompt, or on stdin when there is no
+#       terminal (automation); never an argument, never echoed. Installed for wl-<name> only (0400, in a 0700
+#       directory of its own in that user's home, which no agent user can read), then its path is written into the
+#       instance's credentials.yaml (intake.discord_token) through the engine's config code, the rest kept. The
+#       dashboard's equivalent is the First run page's Discord step (its paste box).
 #
 # The App's permissions (checked by app-permissions.mjs): Contents read/write (fetch, push task branches,
 # lease refs), Issues read/write (the backlog), Pull requests read/write (open PRs; Worklane never merges),
@@ -141,9 +148,21 @@ JS
     ;;
   claude)
     # Only the agent user signs in. An eval user needs a Claude login only once evals are on.
-    say "Claude: sign in as $agent. In the session, run /login and follow the link; then /exit."
-    sudo -iu "$agent" claude
-    sudo -iu "$agent" claude auth status --json
+    id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    say "Claude: the token from claude setup-token, for $agent only ($(home_of "$agent")/.claude/.credentials.json, 0600)"
+    token=""
+    if [ -t 0 ]; then
+      read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
+      echo
+    else
+      IFS= read -r token || true
+    fi
+    token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    claude_token_ok "$token" || { token=""; echo "that is not a token from claude setup-token (sk-ant-oat01-...); nothing installed" >&2; exit 1; }
+    printf '%s' "$token" | install_claude_token "$agent"
+    token=""
+    claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token" >&2; exit 1; }
+    echo "$agent is signed in to Claude, per claude auth status"
     ;;
   eval-key)
     # Evals are off unless you turn them on: no key, no eval lane, and the eval user needs no Claude login.
@@ -209,11 +228,27 @@ JS
     echo "and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;
   intake-discord)
-    read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token; echo
-    [[ "$token" =~ ^[A-Za-z0-9._-]{50,100}$ ]] || { echo "that doesn't look like a bot token; nothing installed" >&2; exit 1; }
-    install_secret "$intake_dir/discord-token" "$token"; unset token
-    echo "installed $intake_dir/discord-token (0400, $coord only). In credentials.yaml set:"
-    echo "  intake: { discord_token: $intake_dir/discord-token }"
+    id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
+    # credentials.yaml must be there to write into, so say so before asking for the token.
+    creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
+    sudo -u "$coord" test -f "$creds" || { echo "no $creds yet: the instance's GitHub credential comes first (credentials.sh $name github-app ...); nothing installed" >&2; exit 1; }
+    token=""
+    if [ -t 0 ]; then
+      read -rsp "Paste the chat bot's token, then Enter (it is not shown): " token || true
+      echo
+    else
+      IFS= read -r token || true
+    fi
+    token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    [[ "$token" =~ ^[A-Za-z0-9._-]{50,100}$ ]] || { token=""; echo "that doesn't look like a bot token; nothing installed" >&2; exit 1; }
+    say "install the bot token for $coord only ($intake_dir/discord-token, 0400, in a 0700 directory)"
+    install_secret "$intake_dir/discord-token" "$token"; token=""
+    # The entry in credentials.yaml, written by the engine's own config code as $coord: validated against the schema,
+    # the file's other settings kept. Only the path is passed. Never a hand edit.
+    say "write the token's path into $name's credentials.yaml, as $coord"
+    run_as "$coord" 'worklane instance set-discord-token "$1" --file "$2"' "$name" "$intake_dir/discord-token"
+    echo "next, as $coord: worklane discord channels --instance $name   (the channels the bot can see, read-only)"
+    echo "then intake.yaml in the instance home (docs/intake.md; or the dashboard's First run page, Discord), and restart the instance."
     ;;
   *) echo "unknown credential $what" >&2; exit 2 ;;
 esac

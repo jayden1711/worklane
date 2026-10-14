@@ -12,7 +12,7 @@ import { credentialProblems, initInstance, instanceProblems, listInstances, load
 import { childEnv } from '../src/os/index.js';
 import { agentEnv } from '../src/runner.js';
 import { instanceEnv } from '../src/service.js';
-import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
+import { agentIsSelf, exampleProject, repoRoot, loopbackGitHub } from './helpers.js';
 
 function setup(policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: pr\n') {
   const dir = mkdtempSync(join(tmpdir(), 'instances-'));
@@ -133,7 +133,7 @@ test('acceptance: two instances keep separate logs, budgets and environments', {
   const { dir, made } = two();
   const gh = await fakeGitHub({ github_pat_alpha: ['example-org/example-shop'], github_pat_beta: ['example-org/example-shop'] });
   for (const m of made) writeFileSync(join(m.home, 'gh', 'token'), `github_pat_${m.name}\n`);
-  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api, GH_TOKEN: 'inherited-token-must-not-be-used', ANTHROPIC_API_KEY: 'inherited-key' };
+  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api), GH_TOKEN: 'inherited-token-must-not-be-used', ANTHROPIC_API_KEY: 'inherited-key' };
   try {
     for (const m of made) {
       const r = await run(['coordinator', 'run', '--instance', m.name, '--once'], env);
@@ -167,7 +167,7 @@ test('acceptance: two instances keep separate logs, budgets and environments', {
 test('acceptance: a coordinator refuses a GitHub token that can see repos outside its instance', { skip: process.platform === 'win32' && 'POSIX stand-in gh' }, async () => {
   const { dir, made } = two();
   const gh = await fakeGitHub({ github_pat_wide: ['example-org/example-shop', 'example-org/payroll'] });
-  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api) };
   try {
     for (const [token, why] of [
       ['github_pat_wide', /can reach 1 repo\(s\) outside this instance/],

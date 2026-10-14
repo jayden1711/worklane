@@ -442,6 +442,7 @@ export async function runInit(c: InitContext, file: string): Promise<number> {
       c.io.say(`\nstopped at ${s.title} (${left} step${left === 1 ? '' : 's'} left). Run \`${BRAND.cli} init\` again once that's fixed: it picks up here.`);
       c.state.finishedAt = null;
       save();
+      if (c.mode === 'local' && s.id === 'repo-config' && c.root && !existsSync(join(c.root, BRAND.configDir))) await offerSetupPage(c);
       return 1;
     }
   }
@@ -450,6 +451,24 @@ export async function runInit(c: InitContext, file: string): Promise<number> {
   c.io.say(`\nall ${steps.length} steps done or skipped. \`${BRAND.cli} doctor\` shows this checklist again${c.mode === 'local' ? `; \`${BRAND.cli} up\` starts the coordinator, \`${BRAND.cli} dashboard\` opens the dashboard (its First-run page has this checklist)` : ''}.`);
   for (const u of unavailableIn(c.mode)) c.io.say(`   not in ${c.mode} mode: ${u.feature}: ${u.why}`);
   return 0;
+}
+
+/**
+ * WHY: auto-config's questions and its setup PR are easier in the browser: with a terminal, init offers the
+ * dashboard's setup mode (src/setup-mode.ts), which hands over to the dashboard once the config is in.
+ */
+async function offerSetupPage(c: InitContext): Promise<void> {
+  const cmd = `${BRAND.cli} dashboard --root ${c.root}`;
+  if (!c.interactive) {
+    c.io.say(`or finish in the browser: \`${cmd}\` opens the setup page`);
+    return;
+  }
+  const a = await c.io.ask('Finish in the browser (answer the questions, draft and merge the config)? [Y/n] ');
+  if (a === null || /^n/i.test(a.trim())) {
+    c.io.say(`later: \`${cmd}\` opens the setup page`);
+    return;
+  }
+  await c.io.interactive(process.execPath, [fileURLToPath(new URL('./cli.js', import.meta.url)), 'dashboard', '--root', c.root!]);
 }
 
 /** The engine's own checkout (where scripts/ lives), from this module's place in dist/src/. */
@@ -629,7 +648,7 @@ export interface FirstRunLive {
   fresh?: boolean;
   localMs?: number;
   netMs?: number;
-  context?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
+  context?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts' | 'skipped'>>;
 }
 
 /** The setup context for a checkout or an instance, with what init recorded (auto-config's questions and PR). */
@@ -658,7 +677,7 @@ export async function firstRunLiveView(file: string, o: { root: string; repo: st
   const mode: Mode = state?.mode ?? (o.instance ? 'server' : 'local');
   const ctx = setupContext(state, { mode, root: o.root, repo: o.repo, instance: o.instance, stateDir: o.live.stateDir, policyFile: o.live.policyFile });
   const opts = { cache: o.live.cache ?? new Map(), fresh: !!o.live.fresh, localMs: o.live.localMs ?? 0, netMs: o.live.netMs ?? 0 };
-  const setup = o.live.probe ? checkSetup({ ...ctx, ...o.live.context }, o.live.probe, opts) : await checkSetupOffThread({ ...ctx, ...(o.live.context?.machine ? { machine: o.live.context.machine } : {}) }, opts);
+  const setup = o.live.probe ? checkSetup({ ...ctx, ...o.live.context }, o.live.probe, opts) : await checkSetupOffThread({ ...ctx, ...(o.live.context?.machine ? { machine: o.live.context.machine } : {}), ...(o.live.context?.skipped ? { skipped: o.live.context.skipped } : {}) }, opts);
   return firstRunView(file, { root: o.root, repo: o.repo, instance: o.instance, ...(o.has ? { has: o.has } : {}), setup });
 }
 

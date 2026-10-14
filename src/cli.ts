@@ -1,11 +1,15 @@
 #!/usr/bin/env node
+// INVARIANT: first, so node:sqlite's experimental warning never reaches stderr (quiet-sqlite.ts). Every node process
+// the engine starts with engine code in it (the coordinator service, the dashboard, queued jobs, hooks) is this file.
+import './quiet-sqlite.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
-import { initCommand, MODES, type Mode } from './init.js';
+import { engineRoot, initCommand, MODES, type Mode } from './init.js';
 import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
 import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
@@ -31,12 +35,14 @@ import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
 import { DetachError, detachDashboard, detachedLines } from './dashboard-detach.js';
+import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from './setup-mode.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
+import { SetupOver, startSetupHub } from './hub-setup.js';
 import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setGithubApp } from './instance.js';
+import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
@@ -136,6 +142,11 @@ usage: ${BRAND.cli} <command> [options]
                                    port only, on this machine (docs/dashboard.md);
                                    --console-user: the admin user the owner terminal runs as
                                    from the Tailscale devices --console-devices lists (none: refused)
+  dashboard --hub-setup --public-url https://<host> --signin-dir dir [--port n] [--service]
+                                   the hub in setup mode, before sign-in exists (dashboards.sh --setup
+                                   runs it): one page, unlocked by a one-time setup token from a 0600
+                                   file, makes the sign-in App through GitHub's manifest flow, stores
+                                   its secret in --signin-dir, then exits; it won't start once that exists
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -152,14 +163,18 @@ usage: ${BRAND.cli} <command> [options]
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
-  discord channels [--instance name]
+  discord channels [--instance name] [--json]
                                    read-only: the text and announcement channels the instance's bot can see,
-                                   one "<server> / #<channel> <id>" line each (run as the instance's user)
+                                   one "<server> / #<channel> <id>" line each (run as the instance's user);
+                                   --json: one JSON line, with each server's id and the bot's application
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
   instance set-github-app <name> --app-id <n> --installation-id <n> --key <path>
                                    point credentials.yaml at the instance's App (credentials.sh github-app runs it)
+  instance set-discord-token <name> --file <path>
+                                   point credentials.yaml at the chat bot's token file (credentials.sh
+                                   intake-discord runs it); the token is never an argument
   instance auto-config <name> [--answer <id>=<choice>]...
                                    server mode's repo config: detect, check as the agent user, propose the setup PR
                                    through the App; one JSON line says where it stands (checkout.sh runs it)
@@ -656,6 +671,26 @@ async function main(argv: string[]): Promise<number> {
       const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
       // --service: run under a service manager: no browser, and the token stays in its file, out of the log.
       const service = flag(opts, '--service');
+      if (flag(opts, '--hub-setup')) {
+        // The hub in setup mode (src/hub-setup.ts): one page that makes the sign-in App, then exits (dashboards.sh --setup).
+        const publicUrl = option(opts, '--public-url');
+        const signinDir = option(opts, '--signin-dir');
+        if (!publicUrl || !signinDir) throw new Error('--hub-setup needs --public-url https://<host> and --signin-dir <dir>');
+        const portOpt = option(opts, '--port');
+        const next = `sudo bash ${join(engineRoot(), 'scripts', 'setup', 'dashboards.sh')}`;
+        let h: Awaited<ReturnType<typeof startSetupHub>>;
+        try {
+          h = await startSetupHub({ stateDir: join(stateDir(), 'dashboard-hub'), signinDir, publicUrl, port: portOpt ? Number(portOpt) : HUB_PORT, nextCommand: next });
+        } catch (e) {
+          if (!(e instanceof SetupOver)) throw e;
+          console.log(e.message);
+          return 0;
+        }
+        // INVARIANT: never the token itself: only the file it is in.
+        console.log(`${BRAND.name} dashboard hub, setup mode (served on ${h.url}, loopback only)\n  open: ${new URL(publicUrl).origin}\n  the one-time setup token is in ${h.tokenFile} (sudo cat it on this machine; it works once)\n  it turns itself off once the sign-in App is made`);
+        console.log(`setup mode off: ${await h.closed}`);
+        return 0;
+      }
       const hubArg = option(opts, '--hub');
       if (hubArg) {
         // One view over several instances, each served by its own dashboard as its own user (dashboard-hub.ts).
@@ -670,7 +705,7 @@ async function main(argv: string[]): Promise<number> {
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
         const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
         const bg = service ? `${h.breakGlassUrl.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.breakGlassUrl;
-        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}\n(loopback only)`);
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;
@@ -699,10 +734,32 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       const instance = instanceOpt;
+      const portOpt = option(opts, '--port');
+      let fromSetup = false;
+      if (needsSetupMode(root, instance)) {
+        // WHY: no config yet: the first-run page alone (src/setup-mode.ts) until the checkout's config loads, then the dashboard.
+        let login = '';
+        try {
+          login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        } catch {
+          // not signed in to gh yet: the first-run page says so
+        }
+        const cfg = setupModeConfig(root, login || undefined);
+
+        const port = portOpt ? Number(portOpt) : LOCAL_DASHBOARD_PORT;
+        const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: login || cfg.project.owners.default, port, setupMode: {} });
+        // INVARIANT: the dashboard's key is never in a URL this prints or opens: the page asks for it once (src/dashboard-detach.ts).
+        const shown = setupModeLines(root, port);
+        console.log(shown.lines.join('\n'));
+        if (!flag(opts, '--no-open') && !service) openUrl(shown.url);
+        while (!configReady(root)) await new Promise((r) => setTimeout(r, 2_000));
+        await d.close();
+        console.log(`the config is here: switching to the dashboard`);
+        fromSetup = true;
+      }
       // An instance's log is readable only by its coordinator user: run this as that user.
       const site = dashboardSite(root, instance);
       const cfg = site.cfg;
-      const portOpt = option(opts, '--port');
       const userOpt = option(opts, '--user');
       const noOpen = flag(opts, '--no-open');
       const app = flag(opts, '--app');
@@ -717,7 +774,7 @@ async function main(argv: string[]): Promise<number> {
       }
       user = user || cfg.project.owners.default;
       const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(instance ? { instance } : {}) });
-      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
+      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service || fromSetup ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
         const bin = desktopBinary();
@@ -729,7 +786,8 @@ async function main(argv: string[]): Promise<number> {
         }
         console.error(`desktop window not built (npm run build:desktop, or set ${BRAND.envPrefix}_DESKTOP); opening the browser instead`);
       }
-      if (!noOpen && !service) openUrl(d.url);
+      // WHY: the setup page in the browser reloads itself onto this one (web/src/pages/FirstRun.tsx).
+      if (!noOpen && !service && !fromSetup) openUrl(d.url);
       await new Promise(() => {});
       return 0;
     }
@@ -845,8 +903,7 @@ async function main(argv: string[]): Promise<number> {
       if (args.at(-1) !== 'get') return 0;
       const input = await readStdin();
       const host = /^host=(.*)$/m.exec(input)?.[1] ?? '';
-      const api = new URL(process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com');
-      if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
+      if (host !== new URL(GITHUB_WEB).host) return 0; // not ours: let git try other helpers
       // A GitHub request this helper can't answer stops git (quit): it must never fall back to a terminal prompt.
       // The instance comes from the helper's own command line, then the environment, and then, because
       // `sudo -u` clears the environment, the coordinator user's only instance.
@@ -869,7 +926,7 @@ async function main(argv: string[]): Promise<number> {
           if (existsSync(g.path)) return 0;
           return refuse(`instance ${name}: credentials.yaml has no GitHub App, and no gh login at ${g.path}; ${setUp}`);
         }
-        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
+        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, GITHUB_API);
         process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
         return 0;
       } catch (e) {
@@ -949,7 +1006,7 @@ async function main(argv: string[]): Promise<number> {
         } catch (e) {
           failure = (e as Error).message.split('\n')[0]!;
         }
-        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, GITHUB_API) : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
         if (!scope.ok) console.log(`  github token REFUSED: ${scope.why}`);
         else if (gh.kind === 'app') {
           // Installation tokens last about an hour and are minted again before they run out; the key is what ages.
@@ -980,6 +1037,28 @@ async function main(argv: string[]): Promise<number> {
           return 1;
         }
         console.log(`wrote ${file} (github: App ${appId}, installation ${installationId}; the rest kept)`);
+        return 0;
+      }
+      if (sub === 'set-discord-token' && target) {
+        // credentials.sh intake-discord, after it installed the token file: the entry in credentials.yaml, validated,
+        // the rest kept. Only the file's path is passed: the token is never an argument.
+        const tokenFile = option(rest, '--file');
+        if (!tokenFile?.startsWith('/') || rest.length !== 1) {
+          console.error('usage: instance set-discord-token <name> --file <absolute path to the token file>');
+          return 2;
+        }
+        const file = join(instancesDir(), target, 'credentials.yaml');
+        if (!existsSync(join(instancesDir(), target, 'instance.yaml'))) {
+          console.error(`no instance "${target}" for this user (${join(instancesDir(), target)}): \`${BRAND.cli} instance init\` first`);
+          return 1;
+        }
+        try {
+          setDiscordToken(file, tokenFile);
+        } catch (e) {
+          console.error((e as Error).message);
+          return 1;
+        }
+        console.log(`wrote ${file} (intake.discord_token: ${tokenFile}; the rest kept)`);
         return 0;
       }
       if (sub === 'setup-status' && target) {
@@ -1014,7 +1093,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance auto-config <name> [--answer <id>=<choice>]...');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance auto-config <name> [--answer <id>=<choice>]...');
       return 2;
     }
 
@@ -1056,11 +1135,12 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'discord': {
+      const json = flag(rest, '--json');
       if (sub !== 'channels' || rest.length) {
         console.error(commandUsage('discord'));
         return 2;
       }
-      return discordChannelsCommand({ instance: instanceOpt });
+      return discordChannelsCommand({ instance: instanceOpt, json });
     }
 
     case 'prod-read': {
