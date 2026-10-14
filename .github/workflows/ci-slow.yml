@@ -2200,12 +2200,23 @@ jobs:
       - name: "no secret in any URL the browser asked for, any log or output, the journal, a unit, the machine's state, or any process's arguments"
         run: |
           kill "$(cat "$F/argv.pid")" || true
-          # Every secret of the run, one per line, in a file of the runner's only.
+          # Every secret of the run, "<name><TAB><value>" one per line, in a file of the runner's only; $F/never holds the
+          # values alone (grep's pattern file). Values are only ever read from these files, never put in an argument.
+          one() { printf '%s\t' "$1"; tr -d '\n' < "$2"; echo; }
           (umask 077
-            for x in "$LOCAL_KEY" "$F/hub-key" "$F/setup-token" "$F/client-secret" "$F/claude-token" "$F/app-secrets" "$F/manifest-code" "$F/browser/tailscale-link"; do cat "$x"; echo; done
-            sed -n 2p "$FK/app.pem"
-            sudo cat "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state/dashboard-token"; echo
-          ) | grep -v '^$' > "$F/never"
+            one "the local dashboard key" "$LOCAL_KEY"
+            one "the hub's key" "$F/hub-key"
+            one "the setup token" "$F/setup-token"
+            one "the sign-in App's client secret" "$F/client-secret"
+            one "the Claude token" "$F/claude-token"
+            printf 'the App client secret\t'; sed -n 1p "$F/app-secrets"
+            printf 'the App webhook secret\t'; sed -n 2p "$F/app-secrets"
+            one "the manifest code" "$F/manifest-code"
+            one "the tailscale login link id" "$F/browser/tailscale-link"
+            printf "a line of the App's key\t"; sed -n 2p "$FK/app.pem"
+            printf "the instance's dashboard key\t"; sudo cat "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state/dashboard-token" | tr -d '\n'; echo
+          ) | awk -F'\t' '$2 != ""' > "$F/never-named"
+          (umask 077; cut -f2- "$F/never-named" > "$F/never")
           # The local key, the hub's key, the setup token, the sign-in secret, the Claude token, the App's two secrets,
           # the one-time code, the login link's id, a line of the App's key, the instance's own key.
           [ "$(wc -l < "$F/never")" = 11 ] || { echo "expected 11 secrets, have $(wc -l < "$F/never")" >&2; exit 1; }
@@ -2218,9 +2229,18 @@ jobs:
           # The local dashboard's state, but for the key's own file.
           if grep -rqaFf "$F/never" --exclude=dashboard-token "$HOME/.local/state"; then echo "a secret is in the local state" >&2; leaks=1; fi
           if sudo grep -rqaFf "$F/never" /etc/systemd/system /var/lib/worklane /etc/worklane; then echo "a secret is in a unit or the machine's state" >&2; leaks=1; fi
+          # For a URL that holds one: which secret (by name), the URL's path and its parameter names, every value masked.
+          # INVARIANT: no value is printed. awk reads the secrets from the file, and prints the path and names only.
+          awk -F'\t' 'NR == FNR { name[$2] = $1; next }
+            { for (v in name) if (index($0, v)) {
+                u = $0; sub(/^[a-z]+:\/\/[^\/]*/, "", u); p = u; q = ""
+                if ((i = index(u, "?")) > 0) { p = substr(u, 1, i - 1); n = split(substr(u, i + 1), kv, "&"); for (j = 1; j <= n; j++) { split(kv[j], a, "="); q = q (q == "" ? "?" : "&") a[1] "=***" } }
+                printf "URL leak in %s: %s in %s%s\n", FILENAME, name[v], p, q
+              } }' "$F/never-named" "$F"/browser/urls-*.txt | sort | uniq -c >&2
           [ "$leaks" = 0 ]
-          # The browser's own URLs: none carries a key or token parameter at all.
-          if grep -E '[?&](t|token|key|code)=' "$F"/browser/urls-*.txt | grep -v '^http://127.0.0.1:[0-9]*/assets/'; then echo "a URL carries a credential parameter" >&2; exit 1; fi
+          # The browser's own URLs: none carries a key or token parameter at all (path and names only, values masked).
+          bad="$(grep -hE '[?&](t|token|key|code)=' "$F"/browser/urls-*.txt | grep -v '^http://127.0.0.1:[0-9]*/assets/' | sed -E 's#^[a-z]+://[^/]*##; s#=([^&]*)#=***#g' | sort -u || true)"
+          if [ -n "$bad" ]; then echo "a URL carries a credential parameter:" >&2; echo "$bad" >&2; exit 1; fi
           echo "checked $(cat "$F"/browser/urls-*.txt | wc -l) URLs, $(wc -l < "$F/argv.txt") distinct process argument lists, the journal, the logs and the machine's state"
       - name: "the walk's screens and how long each took"
         if: always()
