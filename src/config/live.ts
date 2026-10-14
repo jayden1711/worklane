@@ -81,6 +81,8 @@ export function changedSections(a: Config, b: Config): Section[] {
 
 export type ConfigPoll =
   | { kind: 'same' }
+  /** The first poll: the default branch's config is the one running, and it validated (nothing to swap in). */
+  | { kind: 'confirmed'; sha: string | null }
   /** The default branch's config is valid again (or back to the one running) after an invalid one. */
   | { kind: 'recovered'; sha: string | null }
   | { kind: 'applied'; sha: string; cfg: Config; restart: RestartSetting[]; changed: Section[] }
@@ -100,6 +102,8 @@ export interface LiveConfigOptions {
 export class LiveConfig {
   private good: string | null;
   private bad: string | null = null;
+  /** Whether a poll has run: the first one validates the default branch's config even when it is the running one. */
+  private polled = false;
   private readonly ref: string;
 
   constructor(private readonly o: LiveConfigOptions) {
@@ -110,12 +114,18 @@ export class LiveConfig {
   /** Whether the default branch's config differs from the running one, and if so, the config to swap in. */
   poll(running: Config): ConfigPoll {
     const tree = configTree(this.o.repo, this.ref);
-    if (tree === null || tree === this.good) {
+    // WHY: an incident raised for an invalid config outlives the process (incidents.json). The first poll checks the
+    // branch's config for itself, never trusting `good` (a start on the checkout's config may be on the same tree), so
+    // a start on a valid config resolves it, and a start on an invalid one raises it.
+    const first = !this.polled;
+    this.polled = true;
+    // Checked before `good`: the running tree can be the one found invalid (by the instance's checks), never "recovered".
+    if (tree !== null && tree === this.bad) return { kind: 'same' };
+    if (tree === null || (tree === this.good && !first)) {
       if (this.bad === null) return { kind: 'same' };
       this.bad = null;
       return { kind: 'recovered', sha: this.sha() };
     }
-    if (tree === this.bad) return { kind: 'same' };
     const sha = this.sha() ?? this.ref;
     let wanted: Config;
     try {
@@ -126,6 +136,10 @@ export class LiveConfig {
       this.bad = tree;
       const errors = e instanceof ConfigInvalid ? e.errors : [{ file: BRAND.configDir, path: '', message: (e as Error).message.split('\n')[0]! }];
       return { kind: 'invalid', sha, errors };
+    }
+    if (tree === this.good) {
+      this.bad = null;
+      return { kind: 'confirmed', sha: this.sha() };
     }
     this.good = tree;
     this.bad = null;

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { CONFIG_INCIDENT } from '../src/config/live.js';
 import { AgentsConfig } from '../src/config/schema.js';
 import { budgetState, checksFingerprint, failureFingerprint, identicalStreak, TASK_BUDGET_INCIDENT } from '../src/coordinator/loop-control.js';
 import type { StoredEvent } from '../src/events/types.js';
@@ -160,7 +161,8 @@ test('budget: at 85% of the issue\'s tokens one incident is raised, however many
   assert.match(s.raised[0]!.detail, /900 of 1,000 tokens/);
   assert.deepEqual(f.log.read(0, ['task.budget']).map((e) => (e.payload as { level: string }).level), ['warn', 'over']);
   assert.match(blockedWhy(f), /stopped at its budget: 1,200 of 1,000 tokens \(budget\.task_tokens\), 120%/);
-  assert.deepEqual(s.resolved, [{ kind: TASK_BUDGET_INCIDENT, key: `alice#${n}` }], 'resolved once the task has stopped');
+  // First the start-up resolve of a stale config_invalid (the default branch's config validated), then the budget's.
+  assert.deepEqual(s.resolved, [{ kind: CONFIG_INCIDENT, key: 'alice' }, { kind: TASK_BUDGET_INCIDENT, key: `alice#${n}` }], 'resolved once the task has stopped');
 });
 
 test('budget: agent time counts each run (the coordinator times one claude reported no time for), and a run never outlasts what is left', { skip }, async () => {
