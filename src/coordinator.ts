@@ -30,6 +30,7 @@ import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
 import { needsPlan, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
+import { TaskGraph } from './coordinator/task-graph.js';
 import { changedFiles } from './merge-base.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
@@ -51,7 +52,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { Learnings } from './coordinator/learnings.js';
+import { SuperfanWatch } from './coordinator/superfan.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
@@ -76,7 +77,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends Learnings {
+export class Coordinator extends SuperfanWatch {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -131,6 +132,7 @@ export class Coordinator extends Learnings {
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
+    await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -151,6 +153,7 @@ export class Coordinator extends Learnings {
     await this.gardenerRun;
     await this.feedbackChecksRun;
     await this.optimizeRun;
+    await this.superfanRun;
     await this.prBatchIdle();
   }
 
@@ -233,6 +236,7 @@ export class Coordinator extends Learnings {
     this.d.deployGate?.stop();
     this.d.previews?.stop();
     this.prBatchStop();
+    this.superfanStop();
   }
 
   /** What a shutdown still waits on: the tick step, tasks and live runs (named in the log when it runs out of time). */
@@ -490,7 +494,9 @@ export class Coordinator extends Learnings {
     // Hotspots: a task that would change a file a running task changes too waits; the loop goes on to the
     // next ready task, so the slot is used meanwhile. The files come from a cheap guess, never an agent run.
     const globs = this.d.cfg.project.hotspots ?? DEFAULT_HOTSPOTS;
-    const files = globs.length && ready.length ? this.repoFileIndex(globs) : null;
+    const files = ready.length ? this.repoFileIndex(globs) : null;
+    this.graph.seed(ready);
+    const planned = this.plannedFiles();
     // Fill free capacity this tick: one pass over the ready issues, one start per free worker.
     for (const issue of ready) {
       if (this.active.size >= (workers.count ?? 1)) break;
@@ -525,8 +531,11 @@ export class Coordinator extends Learnings {
         }
         continue;
       }
-      const hotspots = files ? hotspotsIn(estimateFiles(`${issue.title}\n${issue.body}`, files, globs), globs) : [];
-      const clash = pickDispatch([{ issue: issue.number, hotspots }], [...this.taskHotspots].map(([n, h]) => ({ issue: n, hotspots: h })), 1).held[0];
+      if (await this.graph.held(issue)) continue;
+      // WHY: a running task owns its hotspots and its plan's files; this one waits if it would change any of them.
+      const estimated = files ? estimateFiles(`${issue.title}\n${issue.body}`, files, globs) : [];
+      const owns = [...hotspotsIn(estimated, globs), ...(planned.get(issue.number) ?? [])];
+      const clash = pickDispatch([{ issue: issue.number, hotspots: [...new Set([...estimated, ...owns])] }], this.graph.claims.running(), 1).held[0];
       if (clash) {
         this.noteHotspotHold(clash);
         continue;
@@ -537,7 +546,7 @@ export class Coordinator extends Learnings {
         break; // try again next tick
       }
       this.endHotspotHold(issue.number, true);
-      this.taskHotspots.set(issue.number, hotspots);
+      this.graph.claims.set(issue.number, owns);
       const p = this.runTask(issue, contract.done_when)
         .catch(async (e: Error) => {
           this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}`, kind: 'error', message: e.message.slice(0, 500) });
@@ -551,7 +560,7 @@ export class Coordinator extends Learnings {
         .finally(() => {
           slot.release();
           this.active.delete(issue.number);
-          this.taskHotspots.delete(issue.number);
+          this.graph.claims.release(issue.number);
           // WHY: item 33; a note is a side record, so a problem writing it never touches the task's own outcome.
           try {
             this.noteLearnings(issue.number, doneWhenCommands(localDoneWhen(contract.done_when, this.d.cfg.tests), this.d.cfg.tests.runner));
@@ -564,8 +573,27 @@ export class Coordinator extends Learnings {
     }
     // A held task that is no longer ready (closed, relabeled) stops waiting.
     const stillReady = new Set(ready.map((i) => i.number));
-    for (const n of this.heldOn()) if (!stillReady.has(n)) this.endHotspotHold(n, false);
+    // INVARIANT: a running task waiting on files in-task is not ready, yet still held.
+    for (const n of this.heldOn()) if (!stillReady.has(n) && !this.active.has(n)) this.endHotspotHold(n, false);
+    this.graph.dropNotReady(stillReady);
     return started;
+  }
+
+  private graph_: TaskGraph | null = null;
+
+  protected get graph(): TaskGraph {
+    return (this.graph_ ??= new TaskGraph({ backlog: this.d.backlog, emit: (t, p) => this.emit(t, p), read: (types) => this.d.log.read(0, types), now: () => this.nowMs(), ...(this.d.ownershipPollMs ? { pollMs: this.d.ownershipPollMs } : {}) }));
+  }
+
+  /** WHY: an issue planned before (a held plan approved, a requeue) is judged by its plan's files too. */
+  private plannedFiles(): Map<number, string[]> {
+    const out = new Map<number, string[]>();
+    for (const e of this.d.log.read(0, ['plan.posted'])) {
+      const p = e.payload as EventPayload<'plan.posted'>;
+      const files = (p.plan as { files?: unknown }).files;
+      out.set(p.issue, Array.isArray(files) ? files.filter((f): f is string => typeof f === 'string') : []);
+    }
+    return out;
   }
 
   /** The checkout's file list, indexed for hotspot estimates; rebuilt only when the checkout's commit or the globs change. */
@@ -697,6 +725,14 @@ export class Coordinator extends Learnings {
         if ('stop' in p) return;
         plan = p.plan;
         planComments = p.commentsAt;
+        await this.graph.own(n, plan.files, {
+          live: (i) => i === n || this.active.has(i),
+          halted: () => {
+            if (this.halt.signal.aborted) throw this.haltError();
+          },
+          onHold: (h) => this.noteHotspotHold(h),
+          onFree: () => this.endHotspotHold(n, true),
+        });
       }
 
       const repro = doneWhen.some((d) => 'repro' in d && d.repro) ? await this.reproduce(issue, doneWhen, base, path) : null;

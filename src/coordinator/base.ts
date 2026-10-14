@@ -48,9 +48,6 @@ export abstract class CoordinatorBase {
 
   protected active = new Map<number, Promise<void>>();
 
-  /** The hotspot files each running task is expected to change. */
-  protected taskHotspots = new Map<number, string[]>();
-
   protected fileIx: { key: string; ix: FileIndex } | null = null;
 
   /** The default branch's tip as last seen, and when it was last checked. */
