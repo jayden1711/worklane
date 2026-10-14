@@ -94,7 +94,7 @@ jobs:
           docker run --rm worklane-trial sh -c 'gitleaks version && claude --version && node --version'
       - name: no GitHub from here on (a stand-in gh, signed in, that reaches nothing; a stand-in claude, signed in)
         run: echo "$GITHUB_WORKSPACE/scripts/ci/stand-ins" >> "$GITHUB_PATH"
-      - name: bootstrap in local mode, twice
+      - name: bootstrap in local mode, three times, each ending with the same one wizard URL that answers
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
@@ -104,15 +104,32 @@ jobs:
           git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
           tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
           bash scripts/bootstrap.sh --dry-run --mode local --engine "$tgz" "$ex"
+          # Unattended (--yes): init's checklist here, then the dashboard and its URL.
           bash scripts/bootstrap.sh --mode local --yes --engine "$tgz" "$ex" | tee "$RUNNER_TEMP/first.log"
           # Each step's result line ("   done: ...") can follow what the step printed doing it: count them, not neighbours.
           [ "$(grep -cE '^   done: ' "$RUNNER_TEMP/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$RUNNER_TEMP/first.log"
-          # The second run: no --mode and no terminal (local, said so); it installs nothing and redoes no step.
+          grep -q 'started in the background' "$RUNNER_TEMP/first.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$RUNNER_TEMP/first.log")"
+          [ "$(ls -l "$kf" | cut -c1-10)" = '-rw-------' ] || { ls -l "$kf"; echo "the key file isn't 0600" >&2; exit 1; }
+          u1="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/first.log" "$kf" /api/first-run | tail -n 1)"
+          # The second run, the one command as a person runs it: no --mode and no terminal (local, said so); no checklist
+          # in the terminal, nothing installed, the dashboard already running: the same URL.
           bash scripts/bootstrap.sh --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/second.log"
-          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/|init --mode|started in the background' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
           grep -q 'no --mode, and no terminal to ask on: local mode' "$RUNNER_TEMP/second.log"
-          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/second.log"
+          grep -q 'already running; nothing changed' "$RUNNER_TEMP/second.log"
+          u2="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/second.log" "$kf" /api/first-run | tail -n 1)"
+          # The dashboard stopped (a reboot, say): the third run, unattended from a config file (the wizard's steps as
+          # key=value lines), redoes no step, starts the dashboard again, and ends at the same URL.
+          pkill -f 'dashboard --service --root' && sleep 2
+          printf 'mode=local\n' > "$RUNNER_TEMP/setup.conf"
+          bash scripts/bootstrap.sh --config "$RUNNER_TEMP/setup.conf" --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/third.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/third.log"
+          grep -q 'started in the background' "$RUNNER_TEMP/third.log"
+          u3="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/third.log" "$kf" /api/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] && [ "$u2" = "$u3" ] || { echo "the URL changed: $u1 / $u2 / $u3" >&2; exit 1; }
+          echo "every run ended with $u1"
       - name: doctor shows the checklist, and what local mode can't do
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -218,7 +235,7 @@ jobs:
         run: |
           . /etc/wl-ci.env
           if command -v node; then echo "node is already here; the bootstrap must fetch its own" >&2; exit 1; fi
-      - name: bootstrap in local mode, twice
+      - name: bootstrap in local mode, twice, each ending with the same one wizard URL that answers
         shell: wsl-sudo {0}
         run: |
           . /etc/wl-ci.env
@@ -230,10 +247,16 @@ jobs:
           bash "$WS/scripts/bootstrap.sh" --mode local --yes --engine "$tgz" "$ex" | tee "$H/first.log"
           [ "$(grep -cE '^   done: ' "$H/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$H/first.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$H/first.log")"
+          [ "$(stat -c %a "$kf")" = 600 ]
+          u1="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/first.log" "$kf" /api/first-run | tail -n 1)"
           bash "$WS/scripts/bootstrap.sh" --engine "$tgz" "$ex" < /dev/null | tee "$H/second.log"
-          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/|init --mode|started in the background' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
           grep -q 'no --mode, and no terminal to ask on: local mode' "$H/second.log"
-          grep -q 'resuming: 6 of 6 steps done earlier' "$H/second.log"
+          grep -q 'already running; nothing changed' "$H/second.log"
+          u2="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/second.log" "$kf" /api/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
+          pkill -f 'dashboard --service --root' || true
       - name: doctor shows the checklist, the OS as WSL, and what local mode can't do
         shell: wsl-sudo {0}
         run: |
@@ -276,6 +299,9 @@ jobs:
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
+    env:
+      # The second instance's name is as long as the helper takes (21), so a run's paths are the longest a host has.
+      I2: ci2-sandbox-long-name
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -291,7 +317,7 @@ jobs:
       - name: a coordinator user and the full-run lock (what instance.sh and the machine script make)
         run: |
           # Two instances, so each test user's check also proves it can't reach the other's state.
-          for u in wl-ci wl-ci2; do
+          for u in wl-ci "wl-$I2"; do
             sudo useradd --create-home --shell /bin/bash "$u"
             sudo chmod 0750 "$(getent passwd "$u" | cut -d: -f6)"
           done
@@ -336,11 +362,11 @@ jobs:
           grep -q '^restarted worklane-test-ci-docker.service' "$RUNNER_TEMP/reinstall.log"
           tail -n 5 "$RUNNER_TEMP/reinstall.log" | grep -qx 'OK: all checks passed'
           # A second instance's test user, then both checks again: each must be shut out of the other's state.
-          sudo bash scripts/setup/test-user.sh install ci2 --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install2.log"
+          sudo bash scripts/setup/test-user.sh install "$I2" --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install2.log"
           tail -n 5 "$RUNNER_TEMP/install2.log" | grep -qx 'OK: all checks passed'
-          for i in ci ci2; do
+          for i in ci "$I2"; do
             sudo bash scripts/setup/test-user.sh check "$i" | tee "$RUNNER_TEMP/check-$i.log"
-            grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo ci2 || echo ci)" "$RUNNER_TEMP/check-$i.log"
+            grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo "$I2" || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
       - name: systemd-run leaves a command's ${...} to bash, on this systemd (the flag) and as an older one needs it ($$)
@@ -365,7 +391,7 @@ jobs:
         run: |
           H=/usr/local/libexec/worklane-testrun
           need="$(sed -n 's/^PROTOCOL=\([0-9][0-9]*\)$/\1/p' scripts/machine/worklane-testrun.sh)"
-          sudo sha256sum /etc/sudoers.d/worklane-test-ci /etc/sudoers.d/worklane-test-ci2 > "$RUNNER_TEMP/sudoers.before"
+          sudo sha256sum /etc/sudoers.d/worklane-test-ci "/etc/sudoers.d/worklane-test-$I2" > "$RUNNER_TEMP/sudoers.before"
           old() {
             # The helper as a machine had it before db-start took max_connections: no version command.
             sudo install -o root -g root -m 0755 test/fixtures/testrun-helper-protocol-1.sh "$H"
@@ -398,6 +424,47 @@ jobs:
           in_step
           sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed'
           sudo rm -rf "$E"
+      - name: a sandboxed run with the longest instance name and run id binds Chrome's SingletonSocket under its TMPDIR, and Chrome runs
+        run: |
+          # Regression: with TMPDIR under the run's directory, Chrome died with "Socket path too long". The run's TMPDIR is
+          # /tmp/wlt-<8 hex>, the test user's own, 0700; a socket where Chrome puts one binds, and headless Chrome runs.
+          H=/usr/local/libexec/worklane-testrun
+          id="fast-$(printf 'c%.0s' $(seq 43))"
+          [ "${#I2}" -eq 21 ] && [ "${#id}" -eq 48 ]
+          as2() { sudo -u "wl-$I2" sudo -n "$H" "$I2" "$@"; }
+          r="$(mktemp -d)"
+          id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+          git init -q "$r" && date > "$r/f" && git -C "$r" add f && git -C "$r" "${id_[@]}" commit -q -m probe
+          for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$id/$x" HEAD; done
+          git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base"
+          sha="$(git -C "$r" rev-parse HEAD)"
+          as2 create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$sha" "$sha" < "$r/b"
+          t="/tmp/wlt-$(printf '%s/%s' "$I2" "$id" | sha256sum | cut -c1-8)"
+          echo "the run's TMPDIR on the host: $t, $(sudo stat -c '%U %a' "$t")"
+          [ "$(sudo stat -c '%U %a' "$t")" = "wl-test-$I2 700" ]
+          # Where Chrome binds: mkdtemp under TMPDIR, then SingletonSocket in it. And, for contrast, the old place.
+          probe='import os, socket, tempfile
+          d = tempfile.mkdtemp(prefix="org.chromium.Chromium.")
+          p = os.path.join(d, "SingletonSocket")
+          s = socket.socket(socket.AF_UNIX); s.bind(p); s.close()
+          print("TMPDIR", os.environ["TMPDIR"], "TMP", os.environ["TMP"], "TEMP", os.environ["TEMP"])
+          print("bound", p, len(p.encode()), "bytes")
+          old = os.path.join(os.path.dirname(os.getcwd()), "tmp", "org.chromium.Chromium.abcdef")
+          os.makedirs(old)
+          try:
+              socket.socket(socket.AF_UNIX).bind(os.path.join(old, "SingletonSocket")); print("old place bound")
+          except OSError as e:
+              print("old place:", len(os.path.join(old, "SingletonSocket").encode()), "bytes:", e)'
+          out="$(as2 exec "$id" 120 -- "python3 -c '$probe' && google-chrome --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir=\"\$TMPDIR/profile\" --dump-dom about:blank | head -c 200")"
+          echo "$out"
+          grep -qx "TMPDIR $t TMP $t TEMP $t" <<<"$out"
+          grep -q "^bound $t/org.chromium.Chromium.[A-Za-z0-9_]*/SingletonSocket " <<<"$out"
+          grep -q '^old place: .*AF_UNIX path too long' <<<"$out"
+          grep -q '<html><head></head><body></body></html>' <<<"$out"
+          as2 wipe "$id"
+          if sudo test -e "$t"; then echo "$t is still there after the wipe" >&2; exit 1; fi
+          echo "wiped: $t is gone"
+          rm -rf "$r"
       - name: a red main tip doesn't block the updater, as root (the newest green first-parent commit; its verdict memo root-owned)
         run: sudo "$(command -v node)" scripts/ci/updater-lookback-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
       - name: the database image, pinned to the digest it has today
@@ -584,7 +651,7 @@ jobs:
           jq -se 'length == 18 and (map(select(.state=="done")) | length == 9) and (map(select(.state=="ask" or .state=="failed")) | length == 0)' "$F/run3.jsonl"
           sudo grep -q '"what":"add-project".*"to":"ci example/alpha"' /var/lib/worklane/machine-changes.jsonl
           if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
-      - name: "the updater through the machine helper, as the coordinator: installed off, a release signer added and none replaced, a tag verified only against an added key, the channel; any other arguments refused by sudo"
+      - name: "the updater through the machine helper, as the coordinator: installed off, the release channel only, a signer staged and the signers file untouched; adding a signer and any other arguments refused by sudo"
         run: sudo "$(command -v node)" scripts/ci/updater-setup-root.mjs wl-ci
       - name: "claude-account: a stand-in claude, and a second instance (beta, with an eval user) whose coordinator finishes its run on SIGTERM"
         run: |
@@ -759,6 +826,20 @@ jobs:
           set +e; sudo -H -u wl-gamma worklane doctor --mode server --instance gamma --root /srv/worklane/gamma/gamma > "$F2/doctor2.log" 2>&1; set -e
           cat "$F2/doctor2.log"
           for s in tools claude github repo-config coordinator protection; do grep -q "^ok    setup $s: " "$F2/doctor2.log"; done
+      - name: "server: the install ends with one URL, the hub's wizard, no key in it; it answers 200, and the checklist given the hub's key; a rerun prints the same"
+        run: |
+          tail -n 12 "$F2/boot3.log"
+          # The hub's key, root's to read: copied into a 0600 file of the runner's, never into an argument.
+          hk="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; sudo cat "$hk" > "$F2/hub-key")
+          u1="$(bash scripts/ci/wizard-url.sh "$F2/boot3.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
+          # The sign-in App is set up here, but the machine has no public name (no Tailscale, no --public-url): the break-glass.
+          [ "$u1" = http://127.0.0.1:4398/first-run ]
+          grep -qF "asks once for the hub's key: it is in $hk" "$F2/boot3.log"
+          sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot4.log" 2>&1 || { cat "$F2/boot4.log"; exit 1; }
+          u2="$(bash scripts/ci/wizard-url.sh "$F2/boot4.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
+          rm -f "$F2/hub-key"
       - name: the units and the fake's log, on failure
         if: failure()
         run: |

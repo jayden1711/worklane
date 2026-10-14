@@ -46,6 +46,7 @@ interface Render {
   renderMetrics(m: unknown): string;
   renderMetricsPanel(state: unknown): string;
   renderFlaky(f: unknown): string;
+  renderHarnessEvals(h: unknown): string;
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
@@ -95,7 +96,11 @@ interface Render {
   onInstance(instance: string | null, path: string, init: unknown, scope: Promise<unknown>): Promise<unknown>;
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
-  renderSignIn(): string;
+  renderSignIn(local?: boolean): string;
+  renderKeyPage(): string;
+  renderKeyForm(error?: string | null): string;
+  needsKey(hubPage: boolean, key: string): boolean;
+  tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
   renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
   renderHeader(title: string): string;
@@ -324,6 +329,36 @@ test('the PR page: what waits for you and exactly why, what is moving, what auto
   for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-gave-up-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
     assert.match(html, new RegExp(`data-testid="${id}"`), `data-testid ${id}`);
   }
+});
+
+test("the dashboard key: a page opened without one (the install's URL) asks for it in a hidden field or its file; it is tried in a header, then kept in this tab only", async () => {
+  assert.equal(r.needsKey(false, ''), true, "an instance's own page with no key asks for it");
+  assert.equal(r.needsKey(false, 'k'.repeat(32)), false);
+  assert.equal(r.needsKey(true, ''), false, 'a hub page signs in instead');
+  const page = r.renderKeyPage();
+  assert.match(page, /data-testid="key-page"/);
+  assert.match(page, /<input id="dash-key" type="password" autoComplete="off"|<input id="dash-key" type="password" autocomplete="off"/);
+  assert.match(page, /data-testid="key-file"[\s\S]*type="file"/, 'or its file');
+  assert.match(r.renderKeyForm("That key doesn't open this dashboard."), /role="alert" data-testid="key-error">That key doesn(&#x27;|')t open this dashboard\./);
+
+  const key = 'a'.repeat(32);
+  const kept: Partial<Record<string, string>> = {};
+  const store = { setItem: (k: string, v: string) => void (kept[k] = v) };
+  const calls: { url: string; auth: string | undefined }[] = [];
+  const answer = (ok: boolean, body: unknown = {}) => async (url: string, init?: { headers?: Record<string, string> }) => (calls.push({ url, auth: init?.headers?.authorization }), { ok, json: async () => body });
+  assert.equal(await r.tryKey(`  ${key}\n`, { hub: false, get: answer(true), store }), true, 'pasted with spaces, or read from the file with its newline');
+  assert.deepEqual(calls, [{ url: '/api/role', auth: `Bearer ${key}` }], 'in a header, never the URL');
+  assert.deepEqual(kept, { 'dash-token': key });
+  for (const k of Object.keys(kept)) Reflect.deleteProperty(kept, k);
+  assert.equal(await r.tryKey(key, { hub: false, get: answer(false), store }), false, 'a wrong key');
+  assert.equal(await r.tryKey('not a key!', { hub: false, get: answer(true), store }), false, 'not even asked');
+  assert.equal(await r.tryKey(key, { hub: true, get: answer(true, { login: null, csrf: null, breakGlass: false }), store }), false, "the hub's sign-in port says 200 to anyone: only the break-glass answer counts");
+  assert.deepEqual(kept, {}, 'nothing kept unless it opened the dashboard');
+  assert.equal(await r.tryKey(key, { hub: true, get: answer(true, { login: null, csrf: null, breakGlass: true }), store }), true);
+  assert.equal(calls.at(-1)!.url, '/api/me');
+
+  assert.match(r.renderSignIn(true), /data-testid="sign-in-key"[\s\S]*data-testid="key-form"/, "on this machine, the hub's sign-in page takes the key too");
+  assert.doesNotMatch(r.renderSignIn(), /key-form/, 'not through the public sign-in');
 });
 
 test('sign-in: the hub page shows a GitHub sign-in when nobody is signed in; the signed-in person, their role and a sign-out; the owners\' audit log', async () => {
@@ -1822,6 +1857,21 @@ test('flaky tests: each quarantined check is a row with its sightings, issue and
   assert.match(html, /The updater still needs every check green/);
   const none = r.renderFlaky({ releaseAfter: 10, quarantined: [], released: [], rates: [{ days: 7, redRuns: 0, flakyReruns: 0, rate: null }, { days: 30, redRuns: 0, flakyReruns: 0, rate: null }], canClear: false });
   assert.match(none, /No flaky tests found yet/);
+});
+
+test('harness evals: one row per run, newest first, with success, its change from the baseline, cost, wall-clock and interventions per replay', async () => {
+  const { harnessEvalView } = await import('../src/harness-evals/score.js');
+  let id = 0;
+  const ev = (type: string, payload: object, ts: string) => ({ id: ++id, ts, type, actor: 'a', source: 'coordinator', payload }) as never;
+  const task = (run: string, ok: boolean) => ev('harness_eval.task', { run, task: 'repo-1', held_out: false, sample: 1, success: ok, done_when: ok, verdict: ok, outcome: ok ? 'queued' : 'blocked', cost_usd: 1, wall_ms: 120_000, interventions: ok ? 0 : 1, detail: '' }, '2026-10-01T00:00:00Z');
+  const run = (rid: string, passed: number, cost: number, ts: string, extra: object = {}) => ev('harness_eval.run', { id: rid, trigger: 'change', engine: 'a'.repeat(40), pr: 42, tasks: 1, samples: 2, runs: 2, passed, cost_usd: cost, wall_ms: 240_000, interventions: 2 - passed, budget_usd: 10, stopped: null, ...extra }, ts);
+  const view = harnessEvalView([task('r1', true), task('r1', true), run('r1', 2, 2, '2026-10-01T00:00:00Z'), task('r2', true), task('r2', false), run('r2', 1, 3, '2026-10-08T00:00:00Z')]);
+  const html = r.renderHarnessEvals({ ...view, enabled: true });
+  const rows = [...html.matchAll(/data-testid="harness-eval-run" data-run="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(rows, ['r2', 'r1'], 'newest first');
+  assert.match(html, /data-run="r2"[\s\S]*?data-testid="harness-eval-success"[^>]*>50% \(1\/2\)[\s\S]*?−50 pts[\s\S]*?~\$1\.50[\s\S]*?\+\$0\.50[\s\S]*?2\.0 min[\s\S]*?0\.50/);
+  assert.match(html, /data-testid="harness-evals-tasks"[\s\S]*?repo-1: 1\/2/);
+  assert.match(r.renderHarnessEvals({ enabled: false, runs: [], latest: [] }), /No runs yet/);
 });
 
 test('learnings: each cause with its sightings and stages; Promote only for an owner on a ready cause not promoted yet', () => {

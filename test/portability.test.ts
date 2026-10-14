@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigInvalid, loadConfig } from '../src/config/load.js';
@@ -79,7 +79,11 @@ test('home_of reads the passwd database (getent), not /home/<user>', { skip: pos
   const bin = fakeBin({ getent: 'wl-shop:x:1001:1001::/var/lib/wl-shop:/bin/bash' });
   const r = sh('home_of wl-shop', [], basePath(bin));
   assert.equal(r.stdout.trim(), '/var/lib/wl-shop', r.stderr);
-  for (const f of readdirSync(setup)) assert.doesNotMatch(readFileSync(join(setup, f), 'utf8').replace(/^\s*#.*$/gm, ''), /\/home\/\$/, `${f} assumes /home/<user>`);
+  // Every file under scripts/setup, the ones in its subdirectories (installed beside a script) too.
+  for (const f of readdirSync(setup, { recursive: true, encoding: 'utf8' })) {
+    if (!statSync(join(setup, f)).isFile()) continue;
+    assert.doesNotMatch(readFileSync(join(setup, f), 'utf8').replace(/^\s*#.*$/gm, ''), /\/home\/\$/, `${f} assumes /home/<user>`);
+  }
 });
 
 test('tests.yaml command_timeout_s (default 2 hours) bounds project commands and agent runs', () => {

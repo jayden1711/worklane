@@ -119,6 +119,7 @@ Each item merged as its own reviewed PR, with tests that fail without it, on CI 
   - Two tasks that would change the same shared file never run at once (hotspot holds).
   - A running task owns its plan's files too: a task that would change one waits, before it starts or, if its own plan names it, before it builds. A wait cycle between running tasks lets the lower issue go ahead (`ownership.deadlock`); a claim left with no task is dropped (`ownership.stale`).
   - An issue that says `Depends on #n` or `Blocked by #n` waits until those issues close, then starts on its own. A dependency cycle is reported on each issue in it, never waited on silently.
+  - A `type:goal` issue is not built: a read-only goal planner splits it into 2 to 10 child issues whose `Depends on` lines order them. The split is checked whole (keys, edges, no cycle, a done_when per child) before anything is filed. The children are worked as this instance's own while their bodies stay as filed; an edited child needs a writer again.
   - A combined-state check runs the fast tier on PR plus main before an auto-merge, but only when main touched what the PR touches.
   - Merge metrics show what each of these costs per merged PR.
 - **Frozen-test guard:** task files the agent can read, and a hook that fails closed when it can't check.

@@ -58,11 +58,12 @@ test_run:
 - a read-only system (`ProtectSystem=strict`), no `/home`, `/root` or `/run/user` (`ProtectHome=tmpfs`);
 - every protected path above inaccessible, and the Docker socket too, so only the helper starts containers;
 - no other run's workspace: `runs/` is an empty read-only tmpfs with only this run's directory bound in;
-- a private `/tmp`, `TMPDIR` and `HOME` inside the run's directory, no devices, no new privileges;
+- a private `/tmp`, `HOME` inside the run's directory, no devices, no new privileges;
+- `TMPDIR` (and `TMP`, `TEMP`) the run's own short directory, `/tmp/wlt-<8 hex>`, bound into that private `/tmp`: a Unix socket's path has at most 107 bytes, and Chrome's `$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket` didn't fit under the run's directory. The helper makes it as the test user, 0700, and refuses one that is already there;
 - an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment.
 - the command exactly as written, for bash alone. Otherwise systemd-run expands `${...}` in it itself (as `ExecStart=` does), which blanks a shell-only `${x}`. On systemd 254 and later the helper passes `--expand-environment=no`. On an older one it writes each `$` as `$$`, systemd's escape for a literal `$`.
 
-**The wipe.** After every run, pass or fail: the run's units are killed and stopped, its containers and volumes removed, and its directory deleted. The wipe then looks again and fails if anything is left.
+**The wipe.** After every run, pass or fail: the run's units are killed and stopped, its containers and volumes removed, and its directory and its `TMPDIR` deleted. The wipe then looks again and fails if anything is left.
 
 **Caches** are shared by one instance's runs (never across instances). A run can write into a cache that a later run with the same lockfile uses. That is the same boundary as the agents' dependency cache (`src/dep-cache.ts`): npm and pnpm check every cached package against its integrity hash.
 
