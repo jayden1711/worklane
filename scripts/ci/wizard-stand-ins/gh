@@ -65,13 +65,14 @@ case "${1:-} ${2:-}" in
     # <state>". A merge fast-forwards the base to the head, as GitHub's merge of a branch based on it ends up.
     need_login
     sub="$2"; shift 2
-    repo="" base="" head="" n=""
+    repo="" base="" head="" n="" jq=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --repo) repo="$2"; shift 2 ;;
         --base) base="$2"; shift 2 ;;
         --head) head="$2"; shift 2 ;;
-        --title | --body | --json | --jq | --state) shift 2 ;;
+        --jq) jq="$2"; shift 2 ;;
+        --title | --body | --json | --state) shift 2 ;;
         --*) shift ;;
         *) n="$1"; shift ;;
       esac
@@ -89,7 +90,9 @@ case "${1:-} ${2:-}" in
         done ;;
       view)
         [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
-        set -- $(cat "$d/prs/$n"); echo "$4" ;;
+        set -- $(cat "$d/prs/$n")
+        # With --jq (.state): the state alone. Without it, gh prints the JSON fields asked for.
+        if [ -n "$jq" ]; then echo "$4"; else printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","url":"https://github.com/%s/pull/%s"}\n' "$4" "$2" "$3" "$1" "$n"; fi ;;
       merge)
         [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
         set -- $(cat "$d/prs/$n")

@@ -320,9 +320,9 @@ async function local() {
     assert.match(readFileSync(st(`prs/${configPr}`), 'utf8'), / MERGED$/m, 'merged at "GitHub" by the page');
     assert.equal(sh('git', ['-C', checkout, 'rev-parse', 'HEAD']).out, sh('git', ['-C', bare, 'rev-parse', 'main']).out, 'the checkout is at the merged main');
     assert.match(readFileSync(join(checkout, '.worklane', 'config.yaml'), 'utf8'), /required_checks:[\s\S]*- test/);
-    // The page's state after the action (it re-reads when an action ends), checked once.
-    await open('/first-run');
-    assert.match((await text(row('required-checks'))) ?? '', /required: test/);
+    // On the same page (a reload within 10 s would serve the cached checklist): the merge triggers the page's own fresh
+    // re-check (onMerged); the signal is the step's line after that re-check, bounded.
+    await waitText(row('required-checks'), /required: test/, 20_000);
     return { result: done };
   });
 }
