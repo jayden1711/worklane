@@ -269,3 +269,82 @@ test('a malformed GitHub answer gives no bot identity (the coordinator then refu
   const fake = (async () => new Response('[]', { status: 200 })) as unknown as typeof fetch;
   await assert.rejects(appBotIdentity({ appId: 7, installationId: 42, keyPath: keyFile() }, fake, 'https://api.test'), /no usable slug/);
 });
+
+/** A stand-in GitHub on loopback that takes every request and never answers; it records each Authorization it was sent. */
+async function silentGitHub() {
+  const auth: string[] = [];
+  const server = createServer((req) => {
+    auth.push(String(req.headers.authorization ?? '').replace(/^Bearer /, ''));
+    req.resume();
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  return {
+    api: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    auth,
+    close: () =>
+      new Promise<void>((r) => {
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
+}
+
+/** Settle `p`, or fail after `ms`: without a timeout of its own, a call to a silent server never settles. */
+const within = <T>(p: Promise<T>, ms: number) =>
+  Promise.race([
+    p.then(
+      (v) => ({ settled: 'resolved' as const, v }),
+      (e: unknown) => ({ settled: 'rejected' as const, e }),
+    ),
+    new Promise<{ settled: 'hung' }>((r) => setTimeout(() => r({ settled: 'hung' }), ms).unref()),
+  ]);
+
+test('regression: minting an installation token gives up on a GitHub that never answers (a TimeoutError), and the error carries no credential', async () => {
+  const gh = await silentGitHub();
+  const c = { appId: 7, installationId: 42, keyPath: keyFile() };
+  try {
+    const started = Date.now();
+    const r = await within(mintInstallationToken(c, ['example-org/example-shop'], fetch, gh.api, Date.now(), 200), 5_000);
+    assert.equal(r.settled, 'rejected', 'it gave up instead of hanging the tick');
+    assert.ok(Date.now() - started < 5_000);
+    const e = (r as { e: Error }).e;
+    assert.equal(e.name, 'TimeoutError');
+    assert.equal(gh.auth.length, 1, 'the request reached the stand-in');
+    const jwt = gh.auth[0]!;
+    assert.ok(jwt.split('.').length === 3, 'it was sent the App JWT');
+    const shown = [e.message, String(e.stack), JSON.stringify(e), String((e as { cause?: unknown }).cause ?? '')].join('\n');
+    assert.ok(!shown.includes(jwt) && !shown.includes(jwt.split('.')[2]!), 'the App JWT appears nowhere in the error');
+    assert.ok(!shown.includes('PRIVATE KEY'), 'nor the key');
+  } finally {
+    await gh.close();
+  }
+});
+
+test('every App request is sent with a time limit (the same 30 s as every other GitHub call)', async () => {
+  const signals: unknown[] = [];
+  const fake = (async (url: string, init: RequestInit) => {
+    signals.push(init.signal);
+    if (url.endsWith('/access_tokens')) return new Response(JSON.stringify({ token: 'ghs_x', expires_at: new Date(Date.now() + 3_600_000).toISOString() }), { status: 201 });
+    if (url.endsWith('/app')) return new Response(JSON.stringify({ slug: 'site-app' }), { status: 200 });
+    return new Response(JSON.stringify({ id: 4242 }), { status: 200 });
+  }) as unknown as typeof fetch;
+  const c = { appId: 7, installationId: 42, keyPath: keyFile() };
+  await mintInstallationToken(c, ['example-org/example-shop'], fake, 'https://api.test');
+  await appBotIdentity(c, fake, 'https://api.test');
+  assert.equal(signals.length, 3);
+  for (const s of signals) assert.ok(s instanceof AbortSignal, 'a signal on the request');
+});
+
+test("regression: the App's bot identity gives up on a GitHub that never answers", async () => {
+  const gh = await silentGitHub();
+  try {
+    const r = await within(appBotIdentity({ appId: 7, installationId: 42, keyPath: keyFile() }, fetch, gh.api, 200), 5_000);
+    assert.equal(r.settled, 'rejected');
+    assert.equal((r as { e: Error }).e.name, 'TimeoutError');
+    const jwt = gh.auth[0]!;
+    const e = (r as { e: Error }).e;
+    assert.ok(![e.message, String(e.stack)].join('\n').includes(jwt), 'no App JWT in the error');
+  } finally {
+    await gh.close();
+  }
+});
