@@ -820,6 +820,8 @@ jobs:
           rc=0; sudo bash "$p/setup/tailscale.sh" install > "$F/ts-pin.txt" 2>&1 || rc=$?
           cat "$F/ts-pin.txt"; rm -rf "$p"
           [ "$rc" = 1 ]
+          # Its progress file goes too: the next step waits for the real install's own last line, not this one's.
+          sudo grep -q '"step":"install","state":"failed"' /var/lib/worklane/tailscale/steps.jsonl && sudo rm -f /var/lib/worklane/tailscale/steps.jsonl
           fpr="$(sed -n 's/^TAILSCALE_SIGNER_FPR=//p' scripts/setup/lib.sh)"
           # It names the key the repository really serves, which is the one this commit pins.
           grep -qF "install failed: the signing key fetched isn't the pinned one (pinned 0000000000000000000000000000000000000000, got $fpr); nothing installed" "$F/ts-pin.txt"
