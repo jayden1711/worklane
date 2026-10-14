@@ -41,6 +41,7 @@ import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
 import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
+import { updateDrain } from './update-drain.js';
 import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
@@ -554,7 +555,7 @@ export class Coordinator extends HarnessEvals {
       }
       const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${issue.number}`, this.d.slotsDir);
       if (!slot) {
-        this.noteHold({ reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+        this.noteHold({ reason: updateDrain(this.d.slotsDir) ? 'draining for an engine update: no new agent starts until it is installed' : 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
         break; // try again next tick
       }
       this.endHotspotHold(issue.number, true);
