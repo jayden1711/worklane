@@ -572,7 +572,7 @@ jobs:
             for secret in canary pw; do
               seen="$(grep -cF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" || true) $(grep -cF -- "${!secret}" "$RUNNER_TEMP/journal-$which.txt" || true)"
               echo "$which helper: the $secret in argv/units as nobody, in the journal: $seen (lines)"
-              grep -hF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" "$RUNNER_TEMP/journal-$which.txt" | sort -u | head -n 3 | cut -c1-240 | sed "s/^/  $which, $secret seen: /"
+              grep -hF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" "$RUNNER_TEMP/journal-$which.txt" | sort -u | head -n 3 | cut -c1-240 | sed "s/^/  $which, $secret seen: /" || true  # WHY: none seen is the pass, and grep then exits 1
               echo "$which $secret $seen" >> "$RUNNER_TEMP/seen"
             done
             echo "$which helper: who can ask the test user's Docker for the container's environment (docker inspect): $(sudo stat -c '%U:%G %a' /run/worklane-test-ci-docker)"
