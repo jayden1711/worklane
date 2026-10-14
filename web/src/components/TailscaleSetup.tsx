@@ -7,6 +7,7 @@
 // else gets nothing here: the server sends them no data, and the view renders nothing for them.
 import { useEffect, useRef, useState } from 'react';
 import { getTailscale, tailscaleAction, type TailscaleAction, type TailscaleData, type TailscaleStepLine, type TailscaleStepView } from '../api';
+import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
 import { ago, Badge, Button, Card, cx } from './ui';
 
 const RUN_TONE: Record<NonNullable<TailscaleData['run']>['status'], 'info' | 'warn' | 'ok' | 'danger'> = { running: 'info', waiting: 'warn', done: 'ok', failed: 'danger', stalled: 'danger' };
@@ -224,9 +225,13 @@ export function TailscaleSetupView({ data, onChanged, initialConfirming = null }
   );
 }
 
-/** The panel: loaded, and looked at again every few seconds while a step or a request is under way. Hidden on refusal. */
+/**
+ * The panel: loaded, and looked at again every few seconds while a step or a request is under way. Hidden on refusal;
+ * a look that fails otherwise keeps the last good data, and a step being confirmed, on screen (web/src/refresh.tsx).
+ */
 export function TailscaleSetupPanel() {
-  const [data, setData] = useState<TailscaleData | null>(null);
+  const [loaded, setLoaded] = useState<Loaded<TailscaleData>>(NOTHING_YET);
+  const data = loaded.data;
   const el = useRef<HTMLDivElement>(null);
   const last = useRef<TailscaleData | null>(null);
   const load = (fresh = false) =>
@@ -234,13 +239,14 @@ export function TailscaleSetupPanel() {
       (d) => {
         const ended = tailscaleStepEnded(last.current, d);
         last.current = d;
-        setData(d);
+        setLoaded({ data: d, stale: null });
         // A step just ended: read again now, with Tailscale asked afresh, so the next step is offered at once.
         if (ended) void load(true);
       },
-      () => setData(null),
+      (error: unknown) => setLoaded((p) => afterLoad(p, { error })),
     );
   useEffect(() => void load(), []);
+  useRetry(loaded, () => void load());
   const active = !!data && tailscaleBusy(data);
   useEffect(() => {
     // While a step runs (or is being handed to its unit), every 3 s; otherwise every 20 s, so a login or a setting
@@ -255,7 +261,8 @@ export function TailscaleSetupPanel() {
   }, [shown]);
   if (!data) return null;
   return (
-    <div ref={el} id="tailscale">
+    <div ref={el} id="tailscale" className="space-y-1">
+      {shown && <StaleNote stale={loaded.stale} />}
       <TailscaleSetupView data={data} onChanged={() => void load()} />
     </div>
   );
