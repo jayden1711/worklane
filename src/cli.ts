@@ -151,6 +151,12 @@ usage: ${BRAND.cli} <command> [options]
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
                                    (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
+  testrun measure --instance name --tier t[,t...] --set KEY=V1,V2,... [--sha commit] [--json]
+                                   (as the instance's coordinator user) one sandboxed test run per value of a
+                                   key tests.yaml test_run env already has, in sequence, through the same
+                                   helper, slots, lock and limits as a PR's run; prints each value's wall time,
+                                   the tiers' status, CPU and memory, and their suites' durations. Posts no
+                                   check; refused while the machine has a test run or full run going
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
@@ -802,6 +808,11 @@ async function main(argv: string[]): Promise<number> {
         log.close();
       }
       return 0;
+    }
+
+    case 'testrun': {
+      const m = await import('./testrun/measure-cli.js');
+      return m.measureCommand(instanceOpt, sub, rest);
     }
 
     case 'stuck-scan': {
