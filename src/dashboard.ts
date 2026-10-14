@@ -60,6 +60,7 @@ import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { applyPolicy, planPolicy, policyForm, PolicyEditError } from './policy-edit.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
@@ -1226,7 +1227,31 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // Each open action's plan, shown before its button does anything (all local reads: no network).
           const actions: Record<string, ActionPlan> = {};
           for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (!s.done && s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = actionPlan(s.fix.action, actionContext(), actionDeps());
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere });
+          const policy = opts.policyFile ? policyForm(opts.policyFile, opts.limitsPath) : null;
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy });
+        }
+        // The Policy form (src/policy-edit.ts): without confirm, the change these values would make (nothing written);
+        // with it, that change written. The owners only; refusals and writes audited.
+        if (url.pathname === '/api/first-run/policy' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown };
+          const values = body.values && typeof body.values === 'object' ? (body.values as Record<string, unknown>) : {};
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.policy_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!opts.policyFile) return refused(400, "the policy is a server instance's: this dashboard serves a checkout");
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may change its policy; @${who.login} is a ${who.role}`);
+          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) };
+          try {
+            if (body.confirm !== true) return json(res, 200, { ok: true, changes: planPolicy(o).changes, confirmed: false });
+            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login });
+            setupCache.delete('policy');
+            audit(who, 'first_run.policy', { changes });
+            return json(res, 200, { ok: true, changes, confirmed: true });
+          } catch (e) {
+            if (e instanceof PolicyEditError) return refused(400, e.message);
+            throw e;
+          }
         }
         // A Fix action (src/setup-actions.ts): the owners only, after they confirmed the plan the page showed; every run
         // and refusal audited. Its step is checked again on the next poll.

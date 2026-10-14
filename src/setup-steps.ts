@@ -138,7 +138,9 @@ export type Fix =
   /** The Start button: the coordinator's service. */
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
+  | { kind: 'form'; form: 'policy'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -662,7 +664,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: true,
     reach: 'most',
     today: "On github.com, the repo's Settings, Rules (or Branches): protect the default branch and require your checks. Needed for land_mode direct.",
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'protection', label: 'Protect' },
     network: true,
     detect: (k) => {
       const b = defaultBranch(k) ?? 'main';
@@ -687,7 +689,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page changes workers and budget.",
-    fix: { kind: 'screen', path: '/settings', label: 'Settings (workers, budget and the other instance settings)' },
+    fix: { kind: 'form', form: 'policy', label: 'Review' },
     detect: (k) => {
       if (!k.c.policyFile) return no('no policy file for this instance');
       const r = readPolicy(k.c.policyFile);

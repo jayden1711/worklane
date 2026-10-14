@@ -4,10 +4,11 @@
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
+import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type PolicyChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
+import { PolicyForm } from '../components/PolicyForm';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -188,7 +189,9 @@ function FixPanel({ s }: { s: SetupStepView }) {
 }
 
 function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' ? s.fix.label : 'Fix';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' ? s.fix.label : 'Fix';
+  // WHY: a form's values can be reviewed and changed whether or not the step is done (the policy starts valid).
+  const offered = !s.done || s.fix.kind === 'form';
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
       <div className="flex gap-3">
@@ -203,15 +206,15 @@ function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; 
           </div>
           <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
         </div>
-        {!s.done && (
+        {offered && (
           <Button size="sm" variant={open ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
             {label}
           </Button>
         )}
       </div>
-      {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
+      {open && offered && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          {s.fix.kind === 'action' ? action : <FixPanel s={s} />}
+          {s.fix.kind === 'action' || s.fix.kind === 'form' ? action : <FixPanel s={s} />}
         </div>
       )}
     </li>
@@ -295,7 +298,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null }) {
   const [open, setOpen] = useState<string | null>(initialOpen);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
@@ -358,7 +361,13 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   s={s}
                   open={open === s.id}
                   onFix={() => fix(s)}
-                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : undefined}
+                  action={
+                    s.fix.kind === 'action' ? (
+                      <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && f.policy ? (
+                      <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
+                    ) : undefined
+                  }
                 />
               ))}
             </ol>

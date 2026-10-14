@@ -46,7 +46,7 @@ interface Render {
   renderFlaky(f: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[] }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1233,6 +1233,30 @@ test("the first-run page, a Fix the dashboard does itself: its plan shown first,
   const unavailable = r.renderFirstRun({ ...withPlans, actions: { 'git-hooks': { ...plans['git-hooks'], available: false, why: 'nothing is missing', changes: [], commands: [] } } }, { open: 'pre-commit' });
   assert.match(unavailable, /data-testid="first-run-action-unavailable"[^>]*>Not from here: nothing is missing\./);
   assert.doesNotMatch(unavailable, /first-run-action-button/);
+});
+
+test("the first-run page, Policy form: each key with its bounds and why, the isolation keys read-only, Review then the change and Confirm; writers can't edit", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop' });
+  const policy = {
+    fields: [
+      { key: 'budget.daily_usd', value: 20, kind: 'number', min: 1, max: 100, step: 1, why: "the instance's daily spend ceiling" },
+      { key: 'land_mode', value: 'pr', kind: 'choice', choices: ['pr', 'direct'], why: 'pr: every change lands through a PR' },
+      { key: 'auto_merge', value: false, kind: 'boolean', why: 'on: the harness merges its own PRs' },
+    ],
+    fixed: [{ key: 'sandbox', value: true }, { key: 'lanes', value: ['default'] }],
+    error: null,
+  };
+  const html = r.renderFirstRun({ ...f, policy, canAct: true }, { open: 'policy' });
+  assert.match(html, /data-step="policy"[\s\S]*?data-testid="first-run-fix" data-fix="form"[^>]*>Review</);
+  assert.match(html, /data-testid="policy-form"[\s\S]*?data-key="budget\.daily_usd"[\s\S]*?type="number"[^>]*min="1"[^>]*max="100"[\s\S]*?1–100[\s\S]*?daily spend ceiling[\s\S]*?data-key="land_mode"[\s\S]*?<select[\s\S]*?direct[\s\S]*?data-key="auto_merge"[\s\S]*?type="checkbox"/);
+  assert.match(html, /data-testid="policy-fixed"[^>]*>Not changed here \(isolation; set at a root shell\): sandbox true · lanes default/);
+  assert.match(html, /data-testid="policy-review"[^>]*>Review the change/);
+  assert.doesNotMatch(html, /policy-confirm"/);
+  const confirming = r.renderFirstRun({ ...f, policy, canAct: true }, { open: 'policy', policyChanges: [{ key: 'auto_merge', from: false, to: true }] });
+  assert.match(confirming, /data-testid="policy-confirming"[\s\S]*?data-testid="policy-change"[^>]*>auto_merge: false → true[\s\S]*?data-testid="policy-confirm"[^>]*>Confirm/);
+  const writer = r.renderFirstRun({ ...f, policy, canAct: false }, { open: 'policy' });
+  assert.match(writer, /data-testid="policy-refused"[^>]*>Only the instance(&#x27;|')s owners can change its policy/);
+  assert.match(writer, /type="number"[^>]*disabled=""/);
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

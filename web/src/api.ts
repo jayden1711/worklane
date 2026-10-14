@@ -741,7 +741,31 @@ export interface FirstRun {
   actions?: Record<string, FirstRunActionPlan>;
   /** Whether this viewer may run a Fix action (the instance's owners). */
   canAct?: boolean;
+  /** A server instance's policy form (src/policy-edit.ts); null for a checkout. */
+  policy?: FirstRunPolicy | null;
 }
+export interface FirstRunPolicyField {
+  key: string;
+  value: number | boolean | string;
+  kind: 'number' | 'boolean' | 'choice';
+  min?: number;
+  max?: number;
+  step?: number;
+  choices?: string[];
+  why: string;
+}
+export interface FirstRunPolicy {
+  fields: FirstRunPolicyField[];
+  fixed: { key: string; value: unknown }[];
+  error: string | null;
+}
+export interface PolicyChange {
+  key: string;
+  from: unknown;
+  to: unknown;
+}
+/** Preview (confirm false: nothing written) or write the policy change these values make. */
+export const changePolicy = (values: Record<string, unknown>, confirm: boolean) => api<{ ok: boolean; changes: PolicyChange[]; confirmed: boolean }>('/api/first-run/policy', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunActionPlan {
   id: string;
   step: string;
@@ -758,7 +782,8 @@ export type SetupFix =
   | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  | { kind: 'form'; form: 'policy'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
