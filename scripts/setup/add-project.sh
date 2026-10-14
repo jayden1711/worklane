@@ -232,7 +232,7 @@ wait_for_config() {
   local line kind detail pr msg shown="" deadline
   deadline=$(( $(date +%s) + ${SETUP_WAIT_SECONDS:-$(( timeout * 60 ))} ))
   while [ ! -d "$checkout/.worklane" ]; do
-    line="$(run_as "$coord" 'umask 0002; [ -z "${3:-}" ] || export WORKLANE_GITHUB_API="$3"; "$2" instance auto-config "$1"' "$name" "$ENGINE_CLI" "${WORKLANE_GITHUB_API:-}" || true)"
+    line="$(run_as "$coord" 'umask 0002; "$2" instance auto-config "$1"' "$name" "$ENGINE_CLI" || true)"
     kind="$(printf '%s' "$line" | json_field kind)"; detail="$(printf '%s' "$line" | json_field detail)"; pr="$(printf '%s' "$line" | json_field pr)"
     case "$kind" in
       merged)

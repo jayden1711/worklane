@@ -104,6 +104,8 @@
   "test/gardener-coordinator.test.ts": 718,
   "test/gardener.test.ts": 13,
   "test/github-app.test.ts": 4355,
+  "test/github-hosts-wizard.test.ts": 50,
+  "test/github-hosts.test.ts": 2900,
   "test/github-scope.test.ts": 34,
   "test/goal-split.test.ts": 2622,
   "test/guardrails.test.ts": 15,

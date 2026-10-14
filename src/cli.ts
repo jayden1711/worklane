@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
@@ -902,8 +903,7 @@ async function main(argv: string[]): Promise<number> {
       if (args.at(-1) !== 'get') return 0;
       const input = await readStdin();
       const host = /^host=(.*)$/m.exec(input)?.[1] ?? '';
-      const api = new URL(process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com');
-      if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
+      if (host !== new URL(GITHUB_WEB).host) return 0; // not ours: let git try other helpers
       // A GitHub request this helper can't answer stops git (quit): it must never fall back to a terminal prompt.
       // The instance comes from the helper's own command line, then the environment, and then, because
       // `sudo -u` clears the environment, the coordinator user's only instance.
@@ -926,7 +926,7 @@ async function main(argv: string[]): Promise<number> {
           if (existsSync(g.path)) return 0;
           return refuse(`instance ${name}: credentials.yaml has no GitHub App, and no gh login at ${g.path}; ${setUp}`);
         }
-        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
+        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, GITHUB_API);
         process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
         return 0;
       } catch (e) {
@@ -1006,7 +1006,7 @@ async function main(argv: string[]): Promise<number> {
         } catch (e) {
           failure = (e as Error).message.split('\n')[0]!;
         }
-        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, GITHUB_API) : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
         if (!scope.ok) console.log(`  github token REFUSED: ${scope.why}`);
         else if (gh.kind === 'app') {
           // Installation tokens last about an hour and are minted again before they run out; the key is what ages.

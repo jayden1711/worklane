@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { agentSettingsPath } from '../src/agent-settings.js';
 import { agentSettings } from '../src/install.js';
 
@@ -106,3 +106,14 @@ export function seedInstanceItems(log: { append(type: string, data: unknown, act
 // A number marks an item only as a whole number: b's PR 9270 must not match a byte count like 15381192704.
 export const marksOf = (m: InstanceMarks): RegExp =>
   new RegExp([...[m.issue, m.issue + 1, m.issue + 2, m.pr].map((n) => `(?<![0-9])${n}(?![0-9])`), ...[m.run, m.project, m.actor, m.title].map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))].join('|'));
+
+/**
+ * A child engine process's GitHub, when a test runs the CLI as its own process against a fake on this machine: the
+ * engine's GitHub hosts are constants (src/github-hosts.ts), so the child loads the loopback stand-in
+ * (scripts/ci/loopback-github.mjs), which is told a port on 127.0.0.1 and nothing else. `api` is the fake's URL.
+ */
+export function loopbackGitHub(api: string): Record<string, string> {
+  const u = new URL(api);
+  if (u.hostname !== '127.0.0.1') throw new Error(`a fake GitHub on 127.0.0.1, not ${u.hostname}`);
+  return { NODE_OPTIONS: `--import=${pathToFileURL(join(repoRoot, 'scripts', 'ci', 'loopback-github.mjs')).href}`, CI_LOOPBACK_GITHUB_PORT: u.port };
+}

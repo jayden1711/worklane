@@ -16,18 +16,15 @@ name="${1:?usage: checkout.sh <name> <owner/repo>}"
 repo="${2:?the instance repo (owner/name) missing}"
 coord="wl-$name" work="wl-$name-work"
 dest="/srv/worklane/$name/${repo#*/}"
-# GitHub itself, unless root points these at another (WORKLANE_GITHUB_WEB and _API, as the engine reads them: a test's fake).
-web="${WORKLANE_GITHUB_WEB:-https://github.com}" api="${WORKLANE_GITHUB_API:-}"
-[[ "$web" =~ ^https?://[A-Za-z0-9.:-]+$ && ( -z "$api" || "$api" =~ ^https?://[A-Za-z0-9.:/-]+$ ) ]] || { echo "WORKLANE_GITHUB_WEB / _API: a plain origin" >&2; exit 2; }
+# GitHub itself, always: the clone carries the App's token, so no setting names another host.
 
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
-  [ -z "${5:-}" ] || export WORKLANE_GITHUB_API="$5"
   # The instance is on the helper line itself: `sudo -u <coordinator> git ...` clears the environment.
   helper="!/usr/local/bin/worklane git-credential --instance $1"
   if [ ! -d "$2/.git" ]; then
-    git -c credential.helper= -c "credential.helper=$helper" clone -q "$4/$3.git" "$2"
+    git -c credential.helper= -c "credential.helper=$helper" clone -q "https://github.com/$3.git" "$2"
   fi
   cd "$2"
   # Later fetches and pushes from this checkout use the App too; nothing else can authenticate here.
@@ -40,7 +37,7 @@ run_as "$coord" '
   # push from it may update the default branch (the pre-push hook; the harness merges through GitHub only).
   worklane install --root . --git-hooks-only
   git log -1 --format="checkout at %h (%s)"
-' "$name" "$dest" "$repo" "$web" "$api"
+' "$name" "$dest" "$repo"
 
 say "permissions: the code is group-writable for agents; the repo's git config and hooks are not"
 chgrp -R "$work" "$dest"
@@ -57,7 +54,6 @@ say "Worklane config in the repo, and the guardrail hooks for $name's agent runs
 # rewrites them from the current config.
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
-  [ -z "${3:-}" ] || export WORKLANE_GITHUB_API="$3"
   cd "$2"
   engine=/opt/worklane/current/dist/src/cli.js
   if [ -d .worklane ]; then
@@ -82,4 +78,4 @@ run_as "$coord" '
     questions) echo "auto-config has questions to answer before it proposes the config (the line above says how)" ;;
     *) echo "auto-config failed: the line above says why" >&2; exit 1 ;;
   esac
-' "$name" "$dest" "$api"
+' "$name" "$dest"

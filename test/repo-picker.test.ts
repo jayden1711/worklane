@@ -5,7 +5,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
@@ -87,9 +86,10 @@ test("GitHub's refusals become a message, never a throw, and the page still take
 test("the dashboard's repo picker: the signed-in person's account by default, another on request; owners and writers only", { skip: process.platform === 'win32' }, async () => {
   clearRepoListCache();
   const g = await gh();
-  const env = `${BRAND.envPrefix}_GITHUB_API`;
-  const saved = process.env[env];
-  process.env[env] = g.url;
+  // The route asks GitHub itself (its host is a constant): for this test, this process's fetch carries those requests
+  // to the fake, and leaves the test's own calls to the dashboard alone.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => realFetch(String(input).replace(/^https:\/\/api\.github\.com/, g.url), init)) as typeof fetch;
   const dir = mkdtempSync(join(tmpdir(), 'repo-picker-'));
   const { dir: root } = exampleProject();
   const eventsDb = join(dir, 'events.db');
@@ -110,7 +110,6 @@ test("the dashboard's repo picker: the signed-in person's account by default, an
   } finally {
     await d.close();
     await g.close();
-    if (saved === undefined) delete process.env[env];
-    else process.env[env] = saved;
+    globalThis.fetch = realFetch;
   }
 });

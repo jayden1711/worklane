@@ -15,7 +15,7 @@ import { authorizeUrl, loginFromCode, SESSION_COOKIE, STATE_COOKIE } from '../sr
 import { EventLog } from '../src/events/log.js';
 import { currentUser } from '../src/os/index.js';
 import { APP_SECRET, FAKE_PEM, fakeGitHub as fake, WEBHOOK_SECRET } from './fake-github.js';
-import { repoRoot } from './helpers.js';
+import { loopbackGitHub, repoRoot } from './helpers.js';
 import {
   AGENT_APP_PERMISSIONS,
   AGENT_SECRET_FILES,
@@ -84,7 +84,8 @@ async function setup(o: { signIn?: boolean } = {}) {
     web: gh.url,
     users: { coordinator: currentUser(), viewer: currentUser() },
     homeOf: () => home,
-    verify: verifyWithScript(gh.url),
+    // The real script, as its own process: its GitHub host is a constant, so the child gets the loopback stand-in.
+    verify: verifyWithScript({ node: { env: loopbackGitHub(gh.url) } }),
     onAsk: (a) => (asked.push(a), undefined),
     log: (l) => lines.push(l),
     pollMs: 20,
