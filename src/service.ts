@@ -11,6 +11,7 @@ import { appKeyAge, appKeyWarning, tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
+import { machineNetworkConfig, outboundEnv } from './network.js';
 import { GITHUB_API } from './github-hosts.js';
 import { switchedOnto } from './claude-account.js';
 import { FileBacklog } from './backlog/file.js';
@@ -132,7 +133,9 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   });
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
-  return env;
+  // INVARIANT: no inherited variable decides where the coordinator's children (gh, git, claude) send credentials;
+  // only root's network.json sets a proxy (src/network.ts). This env becomes the coordinator's process.env.
+  return outboundEnv(env);
 }
 
 /** Write the instance coordinator's own git hooks dir from the config in effect (push-guard.ts). */
@@ -174,6 +177,10 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // The coordinator's own git hooks (core.hooksPath in instanceEnv): the pre-push hook that refuses the default branch.
   writeInstanceHooks(i);
   const env = instanceEnv(i);
+  // WHY: a refused network.json means children go direct; say so at start, as the Health page does.
+  const net = machineNetworkConfig();
+  if (net.error) console.error(net.error);
+  else if (net.proxy) console.error(`outbound proxy: ${net.proxy.host} (from ${net.proxy.file})`);
   // The GitHub credential must reach this instance's repo and nothing else.
   const tokens = instanceTokens(i, env);
   let token = '';

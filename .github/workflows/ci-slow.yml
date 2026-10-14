@@ -949,6 +949,58 @@ jobs:
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
           if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
+      - name: "outbound env on a real unit, as the coordinator (#381 follow-up): the unit's redirecting variables reach no child; root's network.json proxy does; a writable or non-root one is refused"
+        run: |
+          # As wl-ci in a transient unit whose own environment points every redirecting variable elsewhere: the env the
+          # instance's coordinator builds (instanceEnv, its implicit gh/git children) and a project command's (childEnv),
+          # each printed by a real child. The proxy file is really root's here, which the unit tests can't make.
+          d=/var/tmp/outbound-ci && sudo install -d -m 0755 "$d"
+          cat > "$F/outbound.mjs" <<'EOF'
+          const engine = '/opt/worklane/current/dist/src';
+          const { spawnSync } = await import('node:child_process');
+          const { projectCommand } = await import(`${engine}/os/index.js`);
+          const { loadInstance } = await import(`${engine}/instance.js`);
+          const { instanceEnv } = await import(`${engine}/service.js`);
+          const envOf = (file, args, env) => Object.fromEntries(spawnSync(file, args, { env, encoding: 'utf8' }).stdout.split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+          const c = projectCommand('env');
+          console.log(JSON.stringify({ project: envOf(c.file, c.args, c.env), coordinator: envOf('/usr/bin/env', [], instanceEnv(loadInstance('ci'))) }));
+          EOF
+          sudo install -m 0644 "$F/outbound.mjs" "$d/outbound.mjs"
+          bad=http://attacker.invalid:8080
+          probe() {
+            sudo systemd-run --uid=wl-ci --wait --pipe --quiet -p WorkingDirectory=/ \
+              -p "Environment=HTTPS_PROXY=$bad HTTP_PROXY=$bad ALL_PROXY=$bad NO_PROXY=* https_proxy=$bad http_proxy=$bad all_proxy=$bad no_proxy=*" \
+              -p "Environment=ANTHROPIC_BASE_URL=$bad ANTHROPIC_API_URL=$bad GH_HOST=attacker.invalid GH_REPO=attacker.invalid/o/r GITHUB_API_URL=$bad GIT_PROXY_COMMAND=/bin/false CLAUDE_CODE_USE_BEDROCK=1" \
+              /usr/local/bin/node "$d/outbound.mjs"
+          }
+          check() { # $1: the probe's JSON; $2: the proxy root set, or empty for none
+            for k in project coordinator; do
+              jq -e --arg k "$k" '.[$k] | (.PATH | length > 0) and (to_entries | map(select(.value | test("attacker|^\\*$"))) | length == 0)' <<<"$1" || return 1
+              jq -e --arg k "$k" '.[$k] | keys | map(select(test("^(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|GH_HOST|GH_REPO|GITHUB_API_URL|GIT_PROXY_COMMAND|CLAUDE_CODE_USE_BEDROCK|ALL_PROXY)$"; "i"))) | length == 0' <<<"$1" || return 1
+              if [ -n "$2" ]; then
+                jq -e --arg k "$k" --arg p "$2" '.[$k] | .HTTPS_PROXY == $p and .HTTP_PROXY == $p and .https_proxy == $p and .http_proxy == $p and .NO_PROXY == "localhost,127.0.0.1" and .no_proxy == "localhost,127.0.0.1"' <<<"$1" || return 1
+              else
+                jq -e --arg k "$k" '.[$k] | keys | map(select(test("_proxy$"; "i"))) | length == 0' <<<"$1" || return 1
+              fi
+            done
+          }
+          n=/etc/worklane/network.json
+          out="$(probe)"
+          check "$out" ""
+          printf '{"proxy": "http://proxy.ci.invalid:3128", "no_proxy": "localhost,127.0.0.1"}\n' > "$F/network.json"
+          sudo install -o root -g root -m 0644 "$F/network.json" "$n"
+          check "$(probe)" "http://proxy.ci.invalid:3128"
+          # Writable by others, then not root's, then a proxy with a login: each refused, so no proxy at all.
+          sudo chmod 0666 "$n"
+          check "$(probe)" ""
+          sudo chmod 0644 "$n"
+          sudo chown wl-ci "$n"
+          check "$(probe)" ""
+          sudo chown root "$n"
+          printf '{"proxy": "http://user:pass@proxy.ci.invalid:3128"}\n' | sudo tee "$n" >/dev/null
+          check "$(probe)" ""
+          sudo rm -f "$n"
+          sudo rm -rf "$d"
       - name: through the machine helper, as the coordinator, every step is skipped as done
         run: |
           sudo -u wl-ci sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }

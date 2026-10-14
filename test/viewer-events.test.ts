@@ -3,13 +3,14 @@
 // Writers and the owner get everything.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { EventSchemas, type StoredEvent } from '../src/events/types.js';
+import { machineNetwork } from '../src/network.js';
 import { forViewer, stateForViewer, VIEWER_EVENTS } from '../src/viewer-events.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
@@ -156,6 +157,19 @@ test('a viewer\'s state has no costs, spend, budget or agent runs; a writer\'s a
     const vh = await s.get<H>('/api/health', 'someone-else');
     assert.ok(vh.usage.days.length && vh.usage.days.every((d) => !('estimatedUsd' in d) && typeof d.runs === 'number'));
     for (const who of ['example-collaborator', 'example-owner']) assert.equal((await s.get<H>('/api/health', who)).usage.days[0]!.estimatedUsd, 1.25);
+    // The machine's outbound proxy (root's network.json) is its network layout: writers only.
+    const f = join(mkdtempSync(join(tmpdir(), 'net-')), 'network.json');
+    writeFileSync(f, JSON.stringify({ proxy: 'http://proxy.internal:3128' }));
+    chmodSync(f, 0o644);
+    const saved = { ...machineNetwork };
+    Object.assign(machineNetwork, { file: f, ownerUid: typeof process.getuid === 'function' ? process.getuid() : -1 });
+    try {
+      type N = { network: { proxy: string | null } | null };
+      assert.equal((await s.get<N>('/api/health', 'someone-else')).network, null, 'a viewer gets no proxy');
+      if (process.platform !== 'win32') for (const who of ['example-collaborator', 'example-owner']) assert.equal((await s.get<N>('/api/health', who)).network?.proxy, 'proxy.internal:3128', who);
+    } finally {
+      Object.assign(machineNetwork, saved);
+    }
   } finally {
     await s.d.close();
   }
