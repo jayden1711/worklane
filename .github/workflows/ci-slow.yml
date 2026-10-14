@@ -1199,13 +1199,20 @@ jobs:
           cat "$t/git-gh-server.log"
           sudo rm -f "$n"
           sudo rm -rf /etc/worklane/ca "$d"
-      - name: through the machine helper, as the coordinator, every step is skipped as done
+      - name: through the machine helper, as the coordinator from inside its own sandbox, every step is skipped as done
         run: |
-          sudo -u wl-ci sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }
+          # As the coordinator really calls it: through sudo from inside its unit (ProtectSystem=full), the unit's settings
+          # read from the one service.sh generates. The helper runs add-project.sh in a unit of its own.
+          mapfile -t props < <(bash scripts/ci/coordinator-unit-props.sh ci)
+          args=(); for p in "${props[@]}"; do args+=(-p "$p"); done
+          sudo systemd-run --wait --pipe --collect --quiet "${args[@]}" sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }
+          # (The read-only failure of the old inline way is shown in the updater step, for install-updater and set-slots.
+          # A rerun of add-project that skips every step could pass inline too, so it would prove nothing here.)
           cat "$F/run3.jsonl"
           jq -se 'length == 18 and (map(select(.state=="done")) | length == 9) and (map(select(.state=="ask" or .state=="failed")) | length == 0)' "$F/run3.jsonl"
           sudo grep -q '"what":"add-project".*"to":"ci example/alpha"' /var/lib/worklane/machine-changes.jsonl
           if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
+          echo "OK: add-project, called by the coordinator from inside its sandbox, ran in a unit of its own: every step skipped as done"
       - name: "the updater through the machine helper, as the coordinator: installed off, the release channel only, a signer staged and the signers file untouched; adding a signer and any other arguments refused by sudo"
         run: sudo "$(command -v node)" scripts/ci/updater-setup-root.mjs wl-ci
       # Wizard screen 11's terminal half and its server path, on the instance add-project made (ci): credentials.sh

@@ -479,3 +479,66 @@ test('the pattern rules (add-project, stage-update-signer, discard-update-signer
   assert.match(sh, /^mv -f "\$\(dirname "\$HELPER_RULES"\)\/\.helper-rules\.json\.tmp" "\$HELPER_RULES"$/m);
   assert.match(readFileSync(join(setup, 'lib.sh'), 'utf8'), /^HELPER_RULES=\/etc\/worklane\/helper-rules\.json$/m);
 });
+
+test('every step that writes system paths runs in a transient unit of its own, started with the same arguments; nothing else does, and --in-unit is root\'s alone', () => {
+  const h = createRequire(import.meta.url)(helperSrc) as { needsUnit: (a: string[]) => boolean; unitCommand: (a: string[], user?: string, self?: string, node?: string, pid?: number) => string[]; IN_UNIT: string };
+  const k = ed25519();
+  // The coordinator's own unit runs with ProtectSystem=full: /usr, /boot and /etc read-only for sudo and this helper.
+  const writes = [['set-slots', '3'], ['set-test-slots', '2'], ['set-updates', 'on'], ['set-updates', 'off'], ['set-update-channel', 'release'], ['install-updater'], ['add-project', 'alpha', 'example/alpha'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['discard-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['claude-account', 'status']];
+  for (const a of writes) assert.equal(h.needsUnit(a), true, JSON.stringify(a));
+  // Already units of their own (systemd-run --no-block), and anything the helper refuses: never wrapped.
+  for (const a of [['tailscale', 'up'], ['claude-account', 'switch'], ['set-slots', '17'], ['install-updater', 'x'], ['rm', '-rf', '/'], []]) assert.equal(h.needsUnit(a), false, JSON.stringify(a));
+  assert.deepEqual(h.unitCommand(['install-updater'], 'wl-alpha', '/usr/local/libexec/worklane-machine', '/usr/bin/node', 42), [
+    '--unit', 'worklane-machine-install-updater-42', '--wait', '--pipe', '--collect', '--quiet', '--service-type=exec', '--description', 'worklane-machine install-updater',
+    '--property', 'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 HOME=/root SUDO_USER=wl-alpha',
+    '/usr/bin/node', '/usr/local/libexec/worklane-machine', '--in-unit', 'install-updater',
+  ]);
+  // Who asked passes to the unit only when it is a user name: nothing of the caller's otherwise.
+  assert.doesNotMatch(h.unitCommand(['set-slots', '3'], 'x y;id').join(' '), /SUDO_USER/);
+  // --in-unit is never on sudo's list, and the helper refuses it from anyone but root.
+  assert.doesNotMatch(sudoers('wl-alpha').stdout, /in-unit/);
+  if (posix && process.getuid?.() !== 0) {
+    const r = helperIn(mkdtempSync(join(tmpdir(), 'machine-'))).run('--in-unit', 'set-slots', '3');
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /--in-unit is the helper's own, as root/);
+  }
+  // As root it goes to systemd-run before anything is written: main checks root and needsUnit first.
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.match(src, /if \(!inner && process\.getuid && process\.getuid\(\) === 0 && needsUnit\(args\)\) return inUnit\(args\);\n  const add = parseAddProject\(args\);/);
+});
+
+test('a step is recorded only once it has run: as done when it exited 0, as failed when it failed or never started; never as a change before it happened', () => {
+  const h = helperIn(mkdtempSync(join(tmpdir(), 'machine-')));
+  const { runLogged } = createRequire(import.meta.url)(h.copy) as { runLogged: (what: string, to: string, run: () => number) => number };
+  const records = () => (existsSync(h.log) ? readFileSync(h.log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { what: string; to: string }) : []);
+  let seen: number | null = null;
+  assert.equal(
+    runLogged('install-updater', 'updates.sh', () => {
+      seen = records().length;
+      return 1;
+    }),
+    1,
+  );
+  assert.equal(seen, 0, 'nothing is recorded while the step runs');
+  assert.equal(
+    runLogged('install-updater', 'updates.sh', () => {
+      throw new Error('spawn bash ENOENT');
+    }),
+    1,
+  );
+  assert.deepEqual(records().map((c) => [c.what, c.to]), [['install-updater', 'failed: updates.sh: exit 1'], ['install-updater', 'failed: updates.sh: exit 1']], 'a failed step writes no success record');
+  assert.equal(runLogged('install-updater', 'updates.sh', () => 0), 0);
+  assert.deepEqual(records().at(-1)?.to, 'updates.sh');
+  // Every step the helper runs inline goes through it; a unit started with --no-block is recorded only after systemd-run, by outcome.
+  const src = readFileSync(helperSrc, 'utf8');
+  for (const s of ["runLogged('install-updater', 'updates.sh',", "runLogged('add-project', `${p.name} ${p.repo}`,", "runLogged('claude-account', 'status',"]) assert.ok(src.includes(s), s);
+  const units: [string, string, string][] = [
+    ["spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT", "logLine('claude-account', null, `switch (token", "logLine('claude-account', null, `failed: switch"],
+    ["spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT", "logLine('tailscale', null, action);", "logLine('tailscale', null, `failed: ${action}: not started`);"],
+  ];
+  for (const [start, ok, failed] of units) {
+    const at = src.indexOf(start);
+    assert.ok(at > 0 && src.indexOf(ok) > at && src.indexOf(failed) > at, `${ok}: recorded after systemd-run, by outcome`);
+    assert.equal(src.split(ok).length, 2, `${ok}: one success record`);
+  }
+});

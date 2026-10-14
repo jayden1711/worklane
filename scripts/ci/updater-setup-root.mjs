@@ -37,8 +37,15 @@ const SIGNERS = '/etc/worklane/allowed_signers';
 const PENDING = '/var/lib/worklane/pending-signers.json';
 const CHANGES = '/var/lib/worklane/machine-changes.jsonl';
 
-/** The helper, as the coordinator, through sudo: exactly how its unit runs it. */
-const helper = (...args) => spawnSync('sudo', ['-u', coordinator, 'sudo', '-n', HELPER, ...args], { encoding: 'utf8', cwd: '/' });
+// The coordinator calls the helper through sudo from INSIDE its own unit (ProtectSystem=full: /usr, /boot and /etc
+// read-only, for sudo and the helper too), never from a plain shell. So every call here is made from a transient unit
+// with the coordinator unit's own settings, read from the unit service.sh generates (coordinator-unit-props.sh).
+const props = execFileSync('bash', ['/opt/worklane/current/scripts/ci/coordinator-unit-props.sh', coordinator.slice(3)], { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+for (const want of ['ProtectSystem=full', 'PrivateTmp=yes', `User=${coordinator}`]) assert.ok(props.includes(want), `the coordinator unit sets ${want}: ${props.join(' ')}`);
+const asUnit = (propsUsed, argv, input) => spawnSync('systemd-run', ['--wait', '--pipe', '--collect', '--quiet', ...propsUsed.flatMap((x) => ['-p', x]), ...argv], { encoding: 'utf8', cwd: '/', ...(input === undefined ? {} : { input }) });
+/** The helper, as the coordinator, through sudo, from inside the coordinator's sandbox: exactly how its unit runs it. */
+const helper = (...args) => asUnit(props, ['sudo', '-n', HELPER, ...args]);
+console.log(`OK: every helper call below is made from inside a transient unit with the coordinator unit's settings: ${props.join(' ')}`);
 const ok = (...args) => {
   const r = helper(...args);
   assert.equal(r.status, 0, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
@@ -71,8 +78,24 @@ assert.equal(early.status, 1, 'a channel before the updater is installed');
 assert.match(early.stderr, /updates\.json is missing: install the updater first/);
 assert.ok(!existsSync(CONFIG), 'and no config appeared');
 
-// ---- install-updater
-console.log(ok('install-updater'));
+// ---- the old way, for comparison: a step run inline, in the process sudo started inside the coordinator's sandbox.
+// (The helper's own --in-unit form is that inline run; only root may use it, so this is root with the same sandbox.)
+{
+  const rootSandbox = [...props.filter((x) => !/^(User|Group)=/.test(x)), 'User=root'];
+  const old = asUnit(rootSandbox, [process.execPath, HELPER, '--in-unit', 'install-updater']);
+  assert.notEqual(old.status, 0, 'the inline install-updater must fail in the sandbox');
+  assert.match(`${old.stdout}${old.stderr}`, /Read-only file system/, `${old.stdout}${old.stderr}`);
+  const oldSlots = asUnit(rootSandbox, [process.execPath, HELPER, '--in-unit', 'set-slots', '3']);
+  assert.notEqual(oldSlots.status, 0);
+  assert.match(`${oldSlots.stdout}${oldSlots.stderr}`, /EROFS|read-only file system/i);
+  assert.ok(!existsSync(UPDATER) && !existsSync(CONFIG), 'nothing was installed by the inline attempt');
+  console.log(`OK: inline, inside the coordinator's sandbox (the old way), install-updater fails: ${`${old.stderr}${old.stdout}`.split('\n').find((l) => /Read-only file system/.test(l)).trim()}; and set-slots fails with EROFS`);
+}
+
+// ---- install-updater, the new way: the helper starts it in a unit of its own
+const installed = ok('install-updater');
+console.log(installed);
+console.log('OK: install-updater, called by the coordinator from inside its sandbox, ran in a unit of its own and installed the updater');
 assert.equal(owner(UPDATER), '0:0 755');
 assert.ok(readFileSync(UPDATER).equals(readFileSync('/opt/worklane/current/scripts/machine/worklane-update.cjs')), 'the installed engine\'s updater');
 assert.equal(owner(CONFIG), '0:0 644');
@@ -84,7 +107,9 @@ assert.ok(Array.isArray(cfg.required_checks) && cfg.required_checks.length > 0, 
 assert.equal(sh('systemctl', ['is-active', 'worklane-update.timer']), 'active');
 assert.equal(sh('systemctl', ['is-enabled', 'worklane-update.timer']), 'enabled');
 assert.ok(!existsSync(SIGNERS), 'installing lists no signer');
-assert.deepEqual(changes().filter((c) => c.what === 'install-updater').map((c) => [c.by, c.to]), [[coordinator, 'updates.sh']]);
+// The inline attempt above (root, in the sandbox) failed, and the log says so: a step is recorded only once it has run,
+// as failed when it failed. The coordinator's install is the one done.
+assert.deepEqual(changes().filter((c) => c.what === 'install-updater').map((c) => [c.by, c.to]), [['root', 'failed: updates.sh: exit 1'], [coordinator, 'updates.sh']]);
 // The updater as installed runs, as its unit runs it, and does nothing while off.
 updaterRun();
 assert.equal(sh('systemctl', ['show', '-p', 'Result', '--value', 'worklane-update.service']), 'success');
@@ -92,6 +117,15 @@ assert.equal(sh(UPDATER, []), 'disabled');
 // A second install changes nothing it had.
 ok('install-updater');
 assert.deepEqual(JSON.parse(readFileSync(CONFIG, 'utf8')), cfg);
+
+// ---- set-slots, the new way: /etc/worklane/slots.json changes though the caller's /etc is read-only.
+{
+  const before = existsSync('/etc/worklane/slots.json') ? readFileSync('/etc/worklane/slots.json', 'utf8') : null;
+  assert.match(ok('set-slots', '3'), /slots\.max_agents: .* -> 3/);
+  assert.equal(JSON.parse(readFileSync('/etc/worklane/slots.json', 'utf8')).max_agents, 3);
+  if (before !== null) writeFileSync('/etc/worklane/slots.json', before);
+  console.log('OK: set-slots, called from inside the coordinator\'s sandbox, wrote /etc/worklane/slots.json from a unit of its own');
+}
 
 // ---- set-update-channel: to release only. A machine an admin put on main (as root, here) can be moved back; never the other way.
 writeFileSync(CONFIG, `${JSON.stringify({ ...cfg, channel: 'main' })}\n`);
