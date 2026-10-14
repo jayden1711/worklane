@@ -37,6 +37,8 @@ export interface TestRunSetup {
   api?: string;
   /** The host (tests inject one; production is always the sandbox). */
   host?: RunHost;
+  /** A line for the journal when the sandbox's check fails (default: stderr). */
+  say?: (line: string) => void;
 }
 
 export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: EventLog; actor: string; root: string; stateDir: string; remote?: string }): Promise<PrTestRuns | undefined> {
@@ -51,7 +53,12 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
   if (helper.ok) {
     const checked = host.kind === 'sandbox' ? await host.check().catch((e: Error) => ({ ok: false, detail: `the check didn't run: ${e.message}` })) : { ok: false, detail: 'not the sandbox' };
     d.log.append('testrun.sandbox', { ok: checked.ok, detail: checked.detail.slice(0, 2000) }, d.actor);
-    if (!checked.ok) return undefined;
+    if (!checked.ok) {
+      // WHY: this was silent: test runs stayed off with nothing in the journal (journalctl -u <unit>), only an event.
+      const lines = checked.detail.slice(0, 2000).split('\n').map((l) => `  ${l}`).join('\n');
+      (s.say ?? ((line: string) => console.error(line)))(`test runs are OFF: the test sandbox check failed; no test run starts until it passes.\n${lines}`);
+      return undefined;
+    }
   }
   useTestRuns({
     run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper, sparseExclude: cfg.tests.checkout.sparse_exclude },
