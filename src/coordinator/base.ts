@@ -301,6 +301,14 @@ export abstract class CoordinatorBase {
     return (this.d.now?.() ?? new Date()).getTime();
   }
 
+  /**
+   * Why no new work may start now: the disk is full (the event log's writes wait in memory) or below its floor
+   * (src/disk-guard.ts). Every place that holds on the usage pause holds on this too; runs in flight go on.
+   */
+  protected diskHeld(): string | null {
+    return this.d.disk?.held() ?? null;
+  }
+
   /** The usage-limit pause in force (src/usage-limit.ts), from the log, or null. */
   protected usagePause(): UsagePause | null {
     return pauseOf(this.d.log.read(0, ['usage.paused', 'usage.resumed']));

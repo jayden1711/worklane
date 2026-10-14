@@ -6,9 +6,12 @@
 //   ops_channel    the Discord channel incidents are posted to, when no instance's intake.yaml names one
 //                  (discord.ops_channel); the post goes with the bot token of the instance that posts
 //   dashboard_url  the dashboard's https address, for the links in posts, when intake.yaml has none
+//   min_free_gb    no test run or agent run starts while a filesystem it writes to has less free than the larger of
+//   min_free_pct   these: GiB (1-10000; default 10) and % of the filesystem (0-50; default 5) (src/disk-guard.ts)
 import { readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
 import { DISK_PCT, STALL_HOURS } from './probes.js';
+import { FLOOR_GB, FLOOR_PCT } from '../disk-guard.js';
 
 export const WATCHDOG_CONFIG = `/etc/${BRAND.cli}/watchdog.json`;
 
@@ -17,6 +20,9 @@ export interface WatchdogConfig {
   diskPct: number;
   opsChannel: string | null;
   dashboardUrl: string | null;
+  /** The free-disk floor before a test run or agent run starts: the larger of these GiB and this % of the filesystem. */
+  minFreeGb: number;
+  minFreePct: number;
 }
 
 const num = (v: unknown, lo: number, hi: number, dflt: number) => (typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : dflt);
@@ -35,5 +41,7 @@ export function watchdogConfig(path = WATCHDOG_CONFIG): WatchdogConfig {
     diskPct: num(j.disk_pct, 50, 99, DISK_PCT),
     opsChannel: typeof j.ops_channel === 'string' && /^\d{5,25}$/.test(j.ops_channel) ? j.ops_channel : null,
     dashboardUrl: typeof j.dashboard_url === 'string' && /^https:\/\/[^\s/]+(?:\/[^\s]*)?$/.test(j.dashboard_url) ? j.dashboard_url : null,
+    minFreeGb: num(j.min_free_gb, 1, 10_000, FLOOR_GB),
+    minFreePct: num(j.min_free_pct, 0, 50, FLOOR_PCT),
   };
 }

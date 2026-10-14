@@ -500,7 +500,7 @@ test('whenever a signer is staged, and whenever one is added (by --signer or a c
     updates: () => [],
     machineChanges: () => machineChanges(m.log),
     disks: () => [],
-    config: () => ({ stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null }),
+    config: () => ({ stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null, minFreeGb: 10, minFreePct: 5 }),
     poster: () => ({ poster: async (c: string) => (posts.push(c), true), dashboardUrl: 'https://hub.example.test', secrets: [] }),
     now: () => now,
   };

@@ -224,6 +224,8 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 - **Run it again later.** Settings has a **Setup screens** list with each screen's state. Its link opens that step on the first-run page (`/first-run?step=<id>`), even when the step is done, so it can be run again.
 - **Do it without the page.** Each screen names the command or config key that does the same thing, and the table below lists them all. The test `test/setup-automation.test.ts` checks that the table and the page agree.
 
+**A config change from the page (a checkout).** The first-run page acts on the config the checkout has now, read again on each request, not the one the dashboard started with. The Repo config form proposes a change as a PR from a branch of its own (`worklane/config-...`). Once it has, **Merge PR #n here** shows the `gh pr merge` command and, on Confirm, merges that PR (only an open one from the form's own branch into the default branch). It then fast-forwards the checkout's default branch to origin's (`src/checkout-sync.ts`). It is only ever a fast-forward: never a reset, a merge commit or a rebase. It is refused, with why and the `git pull --ff-only` to run, if the checkout has uncommitted changes to tracked files, has commits origin doesn't, or is on another branch. The next step reads the new config with no restart and no `git pull`. Setup mode's own merge already brought its config in the same way (a fetch and `git merge --ff-only`, as `init` does).
+
 **Before the config exists (setup mode).** A checkout with no `.worklane/` yet has no config for the dashboard to load. In that case `worklane dashboard --root <repo>` starts in setup mode and prints `http://127.0.0.1:<port>/first-run`, with no key in it, and the path of the dashboard key file (only you can read it). The page asks for the key once, in a hidden field or by choosing that file, sends it as a header and keeps it in that tab only. `worklane init` offers to open the same page when it stops at the repo config. Setup mode works like this:
 
 - The first-run page is the whole dashboard, and every address shows it.
@@ -306,8 +308,10 @@ Every agent on a machine uses one Claude login, stored for each agent user (each
 
 ```
 sudo bash scripts/setup/claude-account.sh switch          # every instance; or name some
-sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry
+sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry; or name some
 ```
+
+What `status` finds is kept in `/var/lib/worklane/claude-account/status.json` (root's, 0644; token ids, never a token). The first-run page's "The agents' Claude login" step reads it. add-project and `credentials.sh <name> claude` refresh their instance's records once its token is in, and a switch rewrites it.
 
 The switch:
 

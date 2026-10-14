@@ -163,6 +163,8 @@ JS
     token=""
     claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token" >&2; exit 1; }
     echo "$agent is signed in to Claude, per claude auth status"
+    # The first-run step reads it from claude-account's status.json: this instance's records, refreshed.
+    bash "$here/claude-account.sh" status "$name" >/dev/null 2>&1 || true
     ;;
   eval-key)
     # Evals are off unless you turn them on: no key, no eval lane, and the eval user needs no Claude login.

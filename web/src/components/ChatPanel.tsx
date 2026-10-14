@@ -5,13 +5,16 @@
 // server) only after a confirm, and proposals, each of which opens the flow that
 // already confirms that change: nothing runs from the chat itself. Anyone else gets
 // the answer read-only. On a hub, a question goes to the selected instance, or to
-// each instance's own server.
+// each instance's own server. An owner who turned it on in Settings gets a mic that dictates
+// into the box for review (web/src/voice/); it never sends.
 import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { MessageCircle, X } from 'lucide-react';
 import { askChat, chatAnswer, fileChatDraft, hub, hubInstance, requestKey, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatCitation, type HubInfo } from '../api';
 import { navigate } from '../App';
 import { Badge, Button, cx } from './ui';
+import { ComposerMic, MicInterim, mayDictate, useDictation } from '../voice/Mic';
+import { useVoicePrefs } from '../voice/prefs';
 
 const MAX = 4000;
 const POLL_MS = 2000;
@@ -244,8 +247,11 @@ function saveTurns(turns: Turn[]) {
   }
 }
 
-/** The floating Ask button and its panel. `cli` is the command the machine-only proposals name. */
-export function ChatPanel({ cli }: { cli: string }) {
+/**
+ * The floating Ask button and its panel. `cli` is the command the machine-only proposals name; `role` is this
+ * person's on the instance (State.role), which decides the owners-only mic.
+ */
+export function ChatPanel({ cli, role }: { cli: string; role?: string | undefined }) {
   const [restored] = useState(restoreTurns);
   const [open, setOpen] = useState(restored.open);
   const [q, setQ] = useState('');
@@ -256,6 +262,9 @@ export function ChatPanel({ cli }: { cli: string }) {
   const [busy, setBusy] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const [voice] = useVoicePrefs();
+  const mic = useDictation({ active: open && mayDictate(role, voice), prefs: voice, box: input, container: content, setText: setQ });
 
   useEffect(() => {
     void Promise.all([hub, hubInstance]).then(([h, current]) => {
@@ -290,6 +299,8 @@ export function ChatPanel({ cli }: { cli: string }) {
   const ask = async () => {
     const question = q.trim();
     if (!question || question.length > MAX) return;
+    // WHY: what is sent is what the person reviewed; nothing dictated lands after Ask.
+    mic.abort();
     setBusy(true);
     // One key per question: a retried POST is the same ask, never a second turn.
     const key = requestKey();
@@ -325,7 +336,16 @@ export function ChatPanel({ cli }: { cli: string }) {
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/10" />
-        <Dialog.Content onOpenAutoFocus={(e) => (e.preventDefault(), input.current?.focus())} className="fixed top-0 right-0 bottom-0 z-50 flex w-[min(440px,100vw)] flex-col bg-surface shadow-overlay" style={{ animation: 'fade-up 200ms cubic-bezier(0.23,1,0.32,1) both' }} data-testid="chat-panel" aria-describedby={undefined}>
+        <Dialog.Content
+          ref={content}
+          onEscapeKeyDown={(e) => {
+            // WHY: Esc while dictating stops listening first; the next Esc closes the panel.
+            if (mic.listening) {
+              e.preventDefault();
+              mic.stop();
+            }
+          }}
+          onOpenAutoFocus={(e) => (e.preventDefault(), input.current?.focus())} className="fixed top-0 right-0 bottom-0 z-50 flex w-[min(440px,100vw)] flex-col bg-surface shadow-overlay" style={{ animation: 'fade-up 200ms cubic-bezier(0.23,1,0.32,1) both' }} data-testid="chat-panel" aria-describedby={undefined}>
           <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
             <Dialog.Title className="text-[13.5px] font-medium text-ink">Ask</Dialog.Title>
             <span className="text-[11.5px] text-ink-3">answers cite what they come from; nothing runs from here</span>
@@ -381,7 +401,9 @@ export function ChatPanel({ cli }: { cli: string }) {
               className="w-full resize-none rounded-control bg-field px-2.5 py-2 text-[13px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]"
               data-testid="chat-input"
             />
+            <MicInterim listening={mic.listening} interim={mic.interim} error={mic.error} />
             <div className="flex items-center gap-2">
+              <ComposerMic role={role} prefs={voice} support={mic.support} listening={mic.listening} onToggle={mic.toggle} />
               <span className={cx('text-[11.5px] tabular-nums', q.length > MAX ? 'text-red' : 'text-ink-3')}>
                 {q.length > MAX ? `${q.length - MAX} over the ${MAX} limit` : '⌘↵ to ask'}
               </span>

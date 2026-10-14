@@ -296,9 +296,24 @@ test('status names each agent user\'s account, token id and expiry, and fails wh
   assert.deepEqual(m.calls().filter((c) => c.startsWith('systemctl') && !c.includes('is-active')), [], 'status pauses nothing');
 });
 
+test("status <instance>: only that instance's records are found again; every other instance's stays as it was (add-project and credentials.sh name theirs, bug B)", { skip: !posix }, () => {
+  const m = machine();
+  assert.equal(m.run(['status']).status, 0);
+  const before = readAccountStatus(join(m.T, 'var'))!;
+  assert.deepEqual(before.users.map((u) => [u.user, u.loggedIn]), [['wl-alpha-agent', true], ['wl-alpha-eval', true], ['wl-beta-agent', true]]);
+  writeFileSync(join(m.T, 'fail-auth-wl-alpha-agent'), '');
+  writeFileSync(join(m.T, 'fail-auth-wl-beta-agent'), '');
+  const r = m.run(['status', '--json', 'alpha']);
+  assert.equal(r.status, 1, 'alpha\'s agent is signed out now');
+  assert.deepEqual((JSON.parse(r.stdout) as { users: { user: string }[] }).users.map((u) => u.user), ['wl-alpha-agent', 'wl-alpha-eval'], 'only the named instance is asked');
+  const after = readAccountStatus(join(m.T, 'var'))!;
+  assert.deepEqual(after.users.map((u) => [u.user, u.loggedIn]).sort(), [['wl-alpha-agent', false], ['wl-alpha-eval', true], ['wl-beta-agent', true]], "beta's record kept as it was, not asked again");
+  assert.ok(!m.outputs(r).includes(OLD), 'never the token');
+});
+
 test('bad arguments are refused before anything runs', { skip: !posix }, () => {
   const m = machine();
-  for (const a of [[], ['swap'], ['switch', '--timeout', 'x'], ['switch', 'Bad'], ['switch', '--token-from', 'a;b'], ['status', 'alpha'], ['switch', '--nope']]) {
+  for (const a of [[], ['swap'], ['switch', '--timeout', 'x'], ['switch', 'Bad'], ['switch', '--token-from', 'a;b'], ['status', 'Bad'], ['switch', '--nope']]) {
     const r = m.run(a);
     assert.equal(r.status, 2, JSON.stringify(a));
   }

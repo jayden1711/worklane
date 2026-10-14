@@ -16,7 +16,8 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { BRAND } from './brand.js';
 import { GITHUB_API } from './github-hosts.js';
-import { loadConfigAt, type Config } from './config/load.js';
+import { loadConfig, loadConfigAt, type Config } from './config/load.js';
+import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -70,7 +71,7 @@ import { SETUP_STEPS, type DetectCache, type SetupContext, type SetupProbe } fro
 /** The steps skipped on the first-run page, in the dashboard's state dir. */
 export const SKIPS_FILE = 'first-run-skips.json';
 import { applyPolicy, planPolicy, policyForm, PolicyEditError } from './policy-edit.js';
-import { ConfigChangeError, planConfigChange, proposeConfigChange, repoConfigForm } from './config-change.js';
+import { ConfigChangeError, configPrMerge, planConfigChange, proposeConfigChange, repoConfigForm } from './config-change.js';
 import { configReady, newDraftJob, originPlan, pushableRepos, saveAnswers, setOrigin, setupPrMerge, SetupModeError, startDraft, type Run as SetupRun } from './setup-mode.js';
 import { systemProbe } from './setup-steps.js';
 import { gitRemoteRepo } from './install.js';
@@ -82,7 +83,7 @@ import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSet
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
-import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
+import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -195,6 +196,8 @@ export interface DashboardOptions {
   setupContext?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
   /** The first-run page's Start: installs and starts the coordinator's service; the OS adapter's installService when unset (tests). */
   startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
+  /** WHY: tests stand in for the checkout's git (src/checkout-sync.ts); git in the checkout when unset. */
+  checkoutGit?: GitRun;
   /** WHY: tests stand in for what the first-run page's Fix actions do to the machine (src/setup-actions.ts). */
   setupActions?: Partial<ActionDeps>;
   /** WHY: tests stand in for claude auth login and claude auth status (src/claude-signin.ts). */
@@ -855,10 +858,24 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const setupCache: DetectCache = new Map();
   let lastFresh = 0;
   const actionDeps = (): ActionDeps => ({ ...systemActionDeps(), ...opts.setupActions });
-  const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
+  /**
+   * The config the first-run page acts on: a checkout's as its working tree has it now (a merged config PR comes in by
+   * a fast-forward, so the next step sees it without a restart), else the one this dashboard started with (a server
+   * instance's, and setup mode's stand-in). A config that doesn't load now keeps the one it started with.
+   */
+  const liveCfg = (): Config => {
+    if (opts.instance || opts.setupMode) return opts.cfg;
+    try {
+      return loadConfig(opts.root);
+    } catch {
+      return opts.cfg;
+    }
+  };
+  const actionContext = (cfg: Config = liveCfg()) => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg });
+  const checkoutGit = (): GitRun => opts.checkoutGit ?? systemGit(opts.root);
   // INVARIANT: in setup mode the config is a stand-in, so only a fix that doesn't read it may run.
-  const planFor = (id: ActionId): ActionPlan =>
-    opts.setupMode && id !== 'install-tools' ? { id, step: ACTIONS[id].step, label: ACTIONS[id].label, available: false, why: "this checkout has no config yet: finish the repo config first", changes: [], commands: [] } : actionPlan(id, actionContext(), actionDeps());
+  const planFor = (id: ActionId, cfg: Config = liveCfg()): ActionPlan =>
+    opts.setupMode && id !== 'install-tools' ? { id, step: ACTIONS[id].step, label: ACTIONS[id].label, available: false, why: "this checkout has no config yet: finish the repo config first", changes: [], commands: [] } : actionPlan(id, actionContext(cfg), actionDeps());
   const setupRun = (): SetupRun => opts.setupMode?.run ?? ((cmd, args, o) => systemProbe().run(cmd, args, o));
   const draft = newDraftJob();
   const readSkips = (): string[] => {
@@ -879,12 +896,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   });
   /** Connect GitHub's device login (local mode): made on first use, one at a time. */
   let ghLogin: GhLogin | null = null;
-  // What tailscale.sh status says (src/tailscale-setup.ts), kept 3 s (it runs tailscale twice); asked afresh before a step is recorded.
-  let tailscaleCache: { at: number; status: TailscaleStatus | null } | null = null;
+  // What tailscale.sh status says (src/tailscale-setup.ts), kept 3 s (it runs tailscale twice); asked afresh before a step is
+  // recorded, and whenever the step's progress file has changed since: a step that just ended is shown with the status
+  // it left behind, never one read before it, so the next step is offered on the same read that shows it done.
+  let tailscaleCache: { at: number; stamp: string; status: TailscaleStatus | null } | null = null;
   const tailscaleNow = async (fresh = false) => {
-    if (!fresh && tailscaleCache && Date.now() - tailscaleCache.at < 3_000) return tailscaleCache.status;
+    const stamp = stepsStamp(opts.tailscaleDir ?? TAILSCALE_DIR);
+    if (!fresh && tailscaleCache && tailscaleCache.stamp === stamp && Date.now() - tailscaleCache.at < 3_000) return tailscaleCache.status;
     const status = await (opts.tailscaleStatus ?? tailscaleStatus)();
-    tailscaleCache = { at: Date.now(), status };
+    tailscaleCache = { at: Date.now(), stamp, status };
     return status;
   };
   // The first-run page's Discord step (src/intake/discord-setup.ts), a server instance's only. The bot's own view
@@ -1372,7 +1392,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // Each open action's plan, shown before its button does anything (all local reads: no network).
           const actions: Record<string, ActionPlan> = {};
           // WHY: a done step's fix can be run again (from Settings' Setup list), so every action's plan is here.
-          for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = planFor(s.fix.action);
+          const cfgNow = liveCfg();
+          for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = planFor(s.fix.action, cfgNow);
           const policy = opts.policyFile ? policyForm(opts.policyFile, opts.limitsPath) : null;
           // A checkout's config as the default branch has it (what a change is proposed against); a server's is add-project's.
           let repoConfig: ReturnType<typeof repoConfigForm> | { error: string } | null = null;
@@ -1458,14 +1479,43 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (opts.instance) return refused(400, "a server instance's config changes through its repo's PRs, not this form");
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may propose a config change; @${who.login} is a ${who.role}`);
           try {
-            if (body.confirm !== true) return json(res, 200, { ok: true, changes: planConfigChange({ root: opts.root, cfg: opts.cfg, values }), confirmed: false });
+            if (body.confirm !== true) return json(res, 200, { ok: true, changes: planConfigChange({ root: opts.root, cfg: liveCfg(), values }), confirmed: false });
             const gh = actionDeps().gh;
-            const r = proposeConfigChange({ root: opts.root, cfg: opts.cfg, values, by: who.login, io: { gh: (args) => gh(args) } });
+            const r = proposeConfigChange({ root: opts.root, cfg: liveCfg(), values, by: who.login, io: { gh: (args) => gh(args) } });
             audit(who, 'first_run.config_proposed', { changes: r.changes, branch: r.branch, url: r.url });
             return json(res, 200, { ok: true, ...r, confirmed: true });
           } catch (e) {
             if (e instanceof ConfigChangeError) return refused(400, e.message);
             return refused(500, (e as Error).message.split('\n')[0] ?? 'failed');
+          }
+        }
+        // Merge a PR the Repo config form proposed, then bring this checkout up to the merged default branch (a
+        // fast-forward only, src/checkout-sync.ts), so the next step reads the new config. Owners only; without confirm,
+        // what it would run; audited.
+        if (url.pathname === '/api/first-run/repo-config/merge' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { number?: unknown; confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.config_merge_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (opts.instance || opts.setupMode) return refused(400, opts.instance ? "a server instance's config changes through its repo's PRs, not this form" : 'in setup mode the setup PR merges from the setup card');
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may merge a config PR; @${who.login} is a ${who.role}`);
+          const cfgNow = liveCfg();
+          const branch = cfgNow.project.project.default_branch;
+          const gh = actionDeps().gh;
+          try {
+            const m = configPrMerge({ repo: cfgNow.project.project.repo, base: branch, number: body.number, gh: (args) => gh(args) });
+            const then = `then this checkout's ${branch} is fast-forwarded to origin's (only a fast-forward: refused if it has local changes or diverged)`;
+            if (body.confirm !== true) return json(res, 200, { ok: true, number: m.number, url: m.url, command: m.command.join(' '), then, confirmed: false });
+            const r = gh(m.command.slice(1));
+            if (r.status !== 0) return refused(502, `GitHub didn't merge PR #${m.number}: ${(r.stderr || r.stdout).trim().split('\n')[0] ?? ''}`);
+            const ff = fastForwardCheckout(branch, checkoutGit());
+            setupCache.clear();
+            audit(who, 'first_run.config_merged', { number: m.number, method: m.command.at(-1), synced: ff.ok, detail: ff.detail.slice(0, 300) });
+            return json(res, 200, { ok: true, number: m.number, merged: true, synced: ff.ok, detail: ff.detail, confirmed: true });
+          } catch (e) {
+            if (e instanceof ConfigChangeError) return refused(400, e.message);
+            throw e;
           }
         }
         // The Policy form (src/policy-edit.ts): without confirm, the change these values would make (nothing written);
@@ -1517,13 +1567,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           };
           if (!isActionId(id)) return refused(404, `no first-run action ${id}`);
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may run a first-run fix; @${who.login} is a ${who.role}`);
-          const plan = planFor(id);
+          const cfgNow = liveCfg();
+          const plan = planFor(id, cfgNow);
           if (!plan.available) return refused(409, `not run: ${plan.why ?? 'not available here'}`);
           if (body.confirm !== true) return refused(400, `${plan.label} changes this machine: review what it shows, then confirm it ({"confirm": true})`);
           if (actionRunning) return refused(409, `${actionRunning} is running: one fix at a time`);
           actionRunning = id;
           try {
-            const r = await ACTIONS[id].run(actionContext(), actionDeps()).catch((e: Error): { ok: boolean; detail: string } => ({ ok: false, detail: e.message.split('\n')[0] ?? 'failed' }));
+            const r = await ACTIONS[id].run(actionContext(cfgNow), actionDeps()).catch((e: Error): { ok: boolean; detail: string } => ({ ok: false, detail: e.message.split('\n')[0] ?? 'failed' }));
             setupCache.delete(plan.step);
             audit(who, 'first_run.action', { action: id, ok: r.ok, detail: r.detail.slice(0, 300) });
             return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: r.detail });
@@ -1822,7 +1873,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // Machine page asks on every visit, so this is an answer, not an error).
           if (!opts.instance || !mayViewTailscale(accountRequester, opts.machineOwnersFile)) return json(res, 200, noTailscaleView(who.login, opts.instance ?? null));
           const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
-          return json(res, 200, tailscaleView({ status: await tailscaleNow(), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
+          return json(res, 200, tailscaleView({ status: await tailscaleNow(url.searchParams.get('fresh') === '1'), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
         }
         // Run one step: a machine request (`tailscale <step>`, two fixed words) that the coordinator runs through the
         // machine helper, after the owner confirmed what the screen showed. Every request and refusal is audited.
