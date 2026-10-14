@@ -28,6 +28,22 @@
 // cgroup, because the switch stops every coordinator, that one included; it takes the token from the asking
 // instance's dashboard (--token-from <the instance whose coordinator asked>: from SUDO_USER, never an argument). An
 // admin switches from a terminal with claude-account.sh itself.
+//
+// The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
+//
+//   worklane-machine install-updater
+//   worklane-machine set-update-channel release|main
+//   worklane-machine add-update-signer <principal> ssh-ed25519 <public key>
+//
+// install-updater runs the installed engine's scripts/setup/updates.sh with no arguments, under the same root-owned
+// check: the updater, its timer and its config, off, an existing config kept as it is. set-update-channel writes
+// updates.json's "channel" and nothing else, and only once the updater is installed. add-update-signer adds one line,
+// `<principal> ssh-ed25519 <public key>`, to /etc/worklane/allowed_signers, the keys a release tag's signature is
+// checked against: the root of trust for the release channel. It only ever adds: every byte already in the file is
+// kept, in place, and a line already there is left alone. It takes one principal of an email's shape (no wildcard, no
+// list, no option such as cert-authority) and one ed25519 public key in its exact encoding; anything else is refused
+// before the file is read. Nothing here can remove a signer, point the updater at another file, or turn its
+// signature and check verification off: those stay with an admin at a root shell.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -39,9 +55,11 @@ const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const ADD_PROJECT = '/opt/worklane/current/scripts/setup/add-project.sh';
 const CLAUDE_ACCOUNT = '/opt/worklane/current/scripts/setup/claude-account.sh';
 const CLAUDE_ACCOUNT_UNIT = 'worklane-claude-account';
+const UPDATES = '/opt/worklane/current/scripts/setup/updates.sh';
+const SIGNERS = 'allowed_signers'; // in ETC
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | install-updater | set-update-channel release|main | add-update-signer <principal> ssh-ed25519 <public key>';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -141,6 +159,73 @@ function claudeAccount(action) {
   return 0;
 }
 
+// An ed25519 public key's encoding never varies: the key type's name, then 32 bytes, 51 bytes in all, 68 characters.
+const ED25519_HEAD = Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from('ssh-ed25519'), Buffer.from([0, 0, 0, 32])]);
+/** A signer's principal: one email-shaped name. Never a pattern (*, ?, !), a list (,) or anything quoted or spaced. */
+const signerPrincipal = (s) => typeof s === 'string' && s.length <= 254 && /^[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/.test(s);
+/** An ed25519 public key as ssh writes it (base64, 68 characters), decoding to exactly that key type and 32 bytes. */
+function ed25519Key(s) {
+  if (typeof s !== 'string' || !/^[A-Za-z0-9+/]{68}$/.test(s)) return false;
+  const blob = Buffer.from(s, 'base64');
+  return blob.length === 51 && blob.subarray(0, ED25519_HEAD.length).equals(ED25519_HEAD) && blob.toString('base64') === s;
+}
+/** A key's fingerprint as `ssh-keygen -l` prints it. */
+const fingerprint = (key) => `SHA256:${require('node:crypto').createHash('sha256').update(Buffer.from(key, 'base64')).digest('base64').replace(/=+$/, '')}`;
+
+/** The signer a list asks to add, or null when it is anything but `add-update-signer <principal> ssh-ed25519 <key>`. */
+function parseAddSigner(args) {
+  if (args.length !== 4 || args[0] !== 'add-update-signer' || !signerPrincipal(args[1]) || args[2] !== 'ssh-ed25519' || !ed25519Key(args[3])) return null;
+  return { principal: args[1], key: args[3] };
+}
+
+/**
+ * Add one signer line to the allowed signers file. What is there stays, byte for byte, with the new line after it;
+ * a line with this principal and key already there changes nothing. Written to a temp file beside it, then renamed.
+ */
+function addSigner(s) {
+  const file = path.join(ETC, SIGNERS);
+  const line = `${s.principal} ssh-ed25519 ${s.key}`;
+  let before = '';
+  let st = null;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    // none yet: this is its first line
+  }
+  if (st) {
+    if (!st.isFile()) {
+      process.stderr.write(`${file} isn't a regular file; not writing it\n`);
+      return 1;
+    }
+    before = fs.readFileSync(file, 'utf8');
+  }
+  const listed = before.split('\n').map((l) => l.trim().split(/\s+/));
+  if (listed.some((w) => w[0] === s.principal && w.at(-2) === 'ssh-ed25519' && w.at(-1) === s.key)) {
+    process.stdout.write(`${file}: ${line} (${fingerprint(s.key)}) is already listed; nothing changed\n`);
+    return 0;
+  }
+  const tmp = path.join(ETC, `.${SIGNERS}.tmp-${process.pid}`);
+  fs.writeFileSync(tmp, `${before}${before && !before.endsWith('\n') ? '\n' : ''}${line}\n`, { mode: 0o644 });
+  fs.chmodSync(tmp, 0o644);
+  fs.renameSync(tmp, file);
+  logLine('updates.allowed_signers', null, `added ${line} (${fingerprint(s.key)})`);
+  process.stdout.write(`${file}: added ${line} (${fingerprint(s.key)})\n`);
+  return 0;
+}
+
+/** updates.sh from the installed engine, as root, with no arguments: the updater, its timer and its config (off). */
+function installUpdater() {
+  const real = rootScript(UPDATES);
+  if (!real) return 1;
+  logLine('install-updater', null, 'updates.sh');
+  const r = spawnSync('bash', [real], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
+  if (r.error) {
+    process.stderr.write(`install-updater: ${r.error.message}\n`);
+    return 1;
+  }
+  return r.status === null ? 1 : r.status;
+}
+
 function addProject(p) {
   const real = rootScript(ADD_PROJECT);
   if (!real) return 1;
@@ -160,6 +245,8 @@ function parse(args) {
   if (cmd === 'set-slots' && /^([1-9]|1[0-6])$/.test(arg)) return { what: 'slots.max_agents', file: 'slots.json', key: 'max_agents', value: Number(arg) };
   if (cmd === 'set-test-slots' && /^[1-8]$/.test(arg)) return { what: 'slots.max_test_runs', file: 'slots.json', key: 'max_test_runs', value: Number(arg) };
   if (cmd === 'set-updates' && (arg === 'on' || arg === 'off')) return { what: 'updates.enabled', file: 'updates.json', key: 'enabled', value: arg === 'on' };
+  // The channel of an updater that is installed: a config holding only a channel would read as one that is set up.
+  if (cmd === 'set-update-channel' && (arg === 'release' || arg === 'main')) return { what: 'updates.channel', file: 'updates.json', key: 'channel', value: arg, existing: true };
   return null;
 }
 
@@ -177,12 +264,19 @@ function main(args) {
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
   if (account) return claudeAccount(account);
+  if (args.length === 1 && args[0] === 'install-updater') return installUpdater();
+  const signer = parseAddSigner(args);
+  if (signer) return addSigner(signer);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
   const file = path.join(ETC, change.file);
+  if (change.existing && !fs.existsSync(file)) {
+    process.stderr.write(`${file} is missing: install the updater first (install-updater)\n`);
+    return 1;
+  }
   const current = readJson(file);
   const from = current[change.key] === undefined ? null : current[change.key];
   const next = { ...current, [change.key]: change.value };
@@ -204,4 +298,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseAddProject, parseClaudeAccount, coordinatorInstance };
+module.exports = { parse, parseAddProject, parseClaudeAccount, coordinatorInstance, parseAddSigner, fingerprint };

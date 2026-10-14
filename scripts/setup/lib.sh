@@ -81,17 +81,22 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 28
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 31
 # allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8, claude-account status,
-# claude-account switch) as root, and nothing else.
+# claude-account switch, install-updater, set-update-channel release, set-update-channel main) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
 #
 # And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
 # two arguments of those shapes (sudo's anchored regular expression, sudo 1.9.10 or later; an older sudo matches it
 # literally, so never), which the helper checks again, strictly, before it runs add-project.sh.
+#
+# And `add-update-signer <principal> ssh-ed25519 <public key>`, a release signer for the updater, the same way: one
+# principal of an email's shape and one ed25519 public key in its fixed encoding (68 base64 characters after the type),
+# which the helper checks again (it decodes the key) before it adds the line to /etc/worklane/allowed_signers.
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
 ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
+ADD_SIGNER_SUDOERS_ARGS='^add-update-signer [A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
 machine_sudoers() {
   local u n cmds=()
   [ "$#" -ge 1 ] || { echo "machine_sudoers: no users" >&2; return 1; }
@@ -102,8 +107,9 @@ machine_sudoers() {
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
   cmds+=("$MACHINE_HELPER claude-account status" "$MACHINE_HELPER claude-account switch")
-  cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
-  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, and add a project, through one validating helper.\n'
+  cmds+=("$MACHINE_HELPER install-updater" "$MACHINE_HELPER set-update-channel release" "$MACHINE_HELPER set-update-channel main")
+  cmds+=("$MACHINE_HELPER $ADD_SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, add a project, and set the engine updater up (install it, its channel, add a release signer), through one validating helper.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift

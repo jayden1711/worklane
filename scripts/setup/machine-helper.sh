@@ -12,9 +12,14 @@
 #     which runs the installed engine's add-project.sh as root with exactly those (checked) arguments.
 #     And `claude-account status|switch`, the Claude account switch (claude-account.sh): status runs it; switch starts
 #     it as its own unit, taking the token from the asking instance's dashboard.
-#   - Lets each coordinator user wl-<name> run exactly those 28 commands as root (sudoers,
-#     listed one by one), and add-project with two arguments of its fixed shapes (a pattern; sudo 1.9.10 or
-#     later). The dashboard viewer wl-dash gets nothing.
+#     And the engine updater's setup: `install-updater` (the installed engine's updates.sh, no arguments),
+#     `set-update-channel release|main` (updates.json's channel, nothing else) and
+#     `add-update-signer <principal> ssh-ed25519 <public key>`, which adds one line to /etc/worklane/allowed_signers,
+#     the keys a release tag's signature is checked against. It only adds: nothing here removes or replaces a signer,
+#     or turns the updater's signature and check verification off.
+#   - Lets each coordinator user wl-<name> run exactly those 31 commands as root (sudoers,
+#     listed one by one), and add-project and add-update-signer with arguments of their fixed shapes (a pattern
+#     each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
@@ -54,7 +59,7 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 28 commands, and add-project <name> <owner/repo>"
+say "sudoers: ${users[*]} may run exactly the helper's 31 commands, add-project <name> <owner/repo> and add-update-signer <principal> ssh-ed25519 <public key>"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 
 say "check"
@@ -69,10 +74,25 @@ for u in "${users[@]}"; do
     # shellcheck disable=SC2086 # each case is its words
     if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
   done
+  sudo -n -l -U "$u" "$MACHINE_HELPER" install-updater >/dev/null || { echo "FAIL: $u can't run install-updater" >&2; exit 1; }
+  sudo -n -l -U "$u" "$MACHINE_HELPER" set-update-channel release >/dev/null || { echo "FAIL: $u can't run set-update-channel release" >&2; exit 1; }
+  # A public key of the right shape, made up for this check (all zero bytes): nothing is run, sudo only says whether it would.
+  probe_key="AAAAC3NzaC1lZDI1NTE5AAAAI$(printf 'A%.0s' $(seq 1 43))"
+  for bad in "install-updater --check x" "set-update-channel" "set-update-channel beta" "set-update-channel main x" "add-update-signer" "add-update-signer owner@example.com" \
+    "add-update-signer owner@example.com ssh-ed25519 ${probe_key}A" "add-update-signer owner@example.com ssh-ed25519 ${probe_key%A}" "add-update-signer owner@example.com ssh-rsa $probe_key" \
+    "add-update-signer * ssh-ed25519 $probe_key" "add-update-signer owner@example.com,other@example.com ssh-ed25519 $probe_key" "add-update-signer owner@example.com cert-authority ssh-ed25519 $probe_key" \
+    "add-update-signer owner@example.com ssh-ed25519 $probe_key extra" "remove-update-signer owner@example.com ssh-ed25519 $probe_key" "set-update-signers /tmp/x" "set-update-verify off"; do
+    # shellcheck disable=SC2086 # each case is its words; set -f: the * is a word, never a file list
+    if (set -f; sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1); then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+  done
+  if ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-update-signer owner@example.com ssh-ed25519 "$probe_key" >/dev/null 2>&1; then
+    add_signer_note="NOTE: this sudo ($(sudo -V | head -1)) doesn't match add-update-signer's pattern (it needs 1.9.10 or later), so adding a release signer from the dashboard is refused; add the line to /etc/worklane/allowed_signers in a terminal instead"
+  fi
   if ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then
     add_project_note="NOTE: this sudo ($(sudo -V | head -1)) doesn't match add-project's pattern (it needs 1.9.10 or later), so add-project from the dashboard is refused; run add-project.sh in a terminal instead"
   fi
 done
 if id -u wl-dash >/dev/null 2>&1 && sudo -n -l -U wl-dash "$MACHINE_HELPER" set-slots 1 >/dev/null 2>&1; then echo "FAIL: wl-dash may run the helper" >&2; exit 1; fi
 [ -z "${add_project_note:-}" ] || echo "$add_project_note"
+[ -z "${add_signer_note:-}" ] || echo "$add_signer_note"
 echo "OK: each coordinator may run the helper's exact commands; nothing else, and not wl-dash"
