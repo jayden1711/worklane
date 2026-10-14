@@ -1079,6 +1079,7 @@ jobs:
           sudo test -s "$d/login-url" || { sudo journalctl --no-pager -n 40 -u worklane-ci.service; exit 1; }
           [ "$(sudo stat -c '%U %G %a' "$d/login-url")" = "wl-ci root 400" ]
           id="$(sudo sed 's#.*/##' "$d/login-url")"; echo "::add-mask::$id"; [ "${#id}" = 16 ]
+          (umask 077; printf '%s\n' "$id" > "$F/ts-link-id")
           # The owner's view has the link, exactly the file's; nothing else on the machine does.
           sleep 4
           path=/api/tailscale; api > "$F/ts-view3.json"
@@ -1087,7 +1088,7 @@ jobs:
           rm -f "$F/ts-view3.json"
           path=/api/machine/tailscale
           [ "$(code -X POST -d '{"action":"up","confirm":true}')" = 409 ]
-          leaked() { sudo journalctl --no-pager > "$F/journal.txt" 2>&1 || true; sudo grep -qaF "$id" "$F/journal.txt" "$d/steps.jsonl" /var/lib/worklane/machine-changes.jsonl "$state"/events.db*; }
+          leaked() { sudo journalctl --no-pager > "$F/journal.txt" 2>&1 || true; sudo grep -qaFf "$F/ts-link-id" "$F/journal.txt" "$d/steps.jsonl" /var/lib/worklane/machine-changes.jsonl "$state"/events.db*; }
           if leaked; then echo "the login link is in the journal, the steps, the changes log or the event log" >&2; exit 1; fi
           # The event log has the request as two words, by the break-glass's owner, and the audit of it.
           sudo grep -qaF '"args":["tailscale","up"]' "$state"/events.db*
@@ -1099,7 +1100,7 @@ jobs:
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.step=="up" and .state=="done"'
           sudo test ! -e "$d/login-url"
           if leaked; then echo "the login link is in the journal, the steps, the changes log or the event log" >&2; exit 1; fi
-          rm -f "$F/journal.txt"
+          rm -f "$F/journal.txt" "$F/ts-link-id"
           [ "$(sudo jq -c 'select(.args[0]=="up")' /var/lib/ci-tailscale/calls)" = '{"args":["up","--timeout=600s"],"authkey_env":false}' ]
           idle; sleep 4
           path=/api/tailscale; api > "$F/ts-view4.json"
