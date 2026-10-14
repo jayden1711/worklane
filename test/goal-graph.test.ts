@@ -3,6 +3,7 @@
 // viewer that the viewer couldn't see before.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -72,20 +73,30 @@ test('the graph: a node per child with the state the dashboard shows, an edge pe
   assert.equal(goalGraph({ events, goal: GOAL }).nodes.find((n) => n.issue === 13)!.run, null, 'no run without runOf');
 });
 
-test('a cycle is flagged (its nodes and edges, once) and the graph still comes back', { timeout: 10_000 }, () => {
-  const g = goalGraph({ events: seed({ cycle: true }).log.read(0), goal: GOAL });
+/**
+ * The graph, worked out in a child process with a deadline: a hang is synchronous, so only a separate process can
+ * turn one into a failure instead of a stuck test run.
+ */
+function inChild(events: unknown[], goal: number): GoalGraph {
+  const mod = new URL('../src/goal-graph.js', import.meta.url).href;
+  const script = `import { goalGraph } from ${JSON.stringify(mod)}; process.stdout.write(JSON.stringify(goalGraph({ events: JSON.parse(process.argv[1]), goal: ${goal} })));`;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', script, JSON.stringify(events)], { encoding: 'utf8', timeout: 8_000, maxBuffer: 64 * 1024 * 1024 });
+  assert.equal(run.signal, null, 'finished within its deadline (never hangs)');
+  assert.equal(run.status, 0, run.stderr);
+  return JSON.parse(run.stdout) as GoalGraph;
+}
+
+test('a cycle is flagged (its nodes and edges, once) and the graph still comes back', { timeout: 30_000 }, () => {
+  const g = inChild(seed({ cycle: true }).log.read(0), GOAL);
   assert.deepEqual(g.cycles, [[12, 13]]);
   assert.deepEqual(g.nodes.filter((n) => n.cycle).map((n) => n.issue).sort(), [12, 13]);
   assert.deepEqual(g.edges.filter((e) => e.cycle).map((e) => `${e.from}>${e.to}`).sort(), ['12>13', '13>12']);
   assert.equal(g.nodes.length, 4);
 
-  // A ring of 400 tasks, each depending on the next, the last on the first, and on every other: still bounded.
+  // A ring of 400 tasks, each depending on the next two (the last ones on the first): still bounded, and capped.
   const n = 400;
   const children = Array.from({ length: n }, (_, i) => ({ number: 1000 + i, key: `k${i}`, depends_on: [1000 + ((i + 1) % n), 1000 + ((i + 2) % n)], body_hash: 'h' }));
-  const ring = [{ id: 1, ts: new Date().toISOString(), type: 'goal.split', actor: 'c', payload: { issue: 9, summary: '', children } }] as unknown as StoredEvent[];
-  const t0 = Date.now();
-  const big = goalGraph({ events: ring, goal: 9 });
-  assert.ok(Date.now() - t0 < 5_000, `took ${Date.now() - t0} ms`);
+  const big = inChild([{ id: 1, ts: new Date().toISOString(), type: 'goal.split', actor: 'c', payload: { issue: 9, summary: '', children } }], 9);
   assert.ok(big.cycles.length >= 1);
   assert.equal(big.total, n);
   assert.equal(big.capped, true, 'a large graph is capped, and says so');
