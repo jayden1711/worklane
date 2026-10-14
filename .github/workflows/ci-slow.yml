@@ -1793,6 +1793,8 @@ jobs:
         run: |
           ls -la "$F/browser" || true
           cat "$F"/browser/page-errors-*.txt 2>/dev/null || true
+          sudo journalctl --no-pager -n 60 -t worklane-machine -u worklane-update.service || true
+          sudo tail -n 20 /var/lib/worklane/machine-changes.jsonl || true
           sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service -u worklane-tailscale.service || true
           journalctl --user --no-pager -n 60 || true
           tail -n 60 "$F"/*.err "$FK/server.log" 2>/dev/null || true

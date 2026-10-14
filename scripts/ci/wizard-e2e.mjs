@@ -493,7 +493,14 @@ async function serverMachine() {
   await screen('screen 9: the updater installed from the Machine page (off until turned on)', async () => {
     await updaterState();
     await confirmUpdater(tid('updater-install'));
-    await until('the updater installed', async () => /installed, updates off/.test((await updaterState()) ?? ''), 240_000, 3000);
+    let seen = '';
+    try {
+      await until('the updater installed', async () => /installed, updates off/.test((seen = (await updaterState()) ?? '')), 240_000, 3000);
+    } catch (e) {
+      const files = sh('sudo', ['ls', '-la', '/etc/worklane', '/usr/local/libexec']).out;
+      const asWl = sh('sudo', ['-u', `wl-${instance}`, 'cat', '/etc/worklane/updates.json']);
+      throw new Error(`${e.message}; the page's step 1: ${seen.replace(/\s+/g, ' ')}; the section: ${((await text(tid('updater-setup'))) ?? '').replace(/\s+/g, ' ').slice(0, 1500)}; on the machine: ${files.replace(/\s+/g, ' ')}; updates.json as wl-${instance}: ${asWl.status} ${asWl.err}`);
+    }
     assert.equal(stat('/usr/local/libexec/worklane-update'), 'root 755');
     assert.equal(stat('/etc/worklane/updates.json'), 'root 644');
     const cfg = JSON.parse(sudoOk('cat', '/etc/worklane/updates.json'));
