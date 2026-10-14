@@ -313,7 +313,7 @@ async function switches(link: Link, cache: boolean): Promise<{ instance: number[
   }
 }
 
-test('the test can tell the instances apart: each has its own newest PR, its own cards and its own last event', { skip, timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('the test can tell the instances apart: each has its own newest PR, its own cards and its own last event', { skip, timeout: 60_000 }, async () => {
   assert.notEqual(await newestMerged(BUSY), await newestMerged(OTHER));
   assert.notEqual(await firstInProgress(BUSY), await firstInProgress(OTHER));
   assert.notEqual(s!.lastId[BUSY], s!.lastId[OTHER]);
