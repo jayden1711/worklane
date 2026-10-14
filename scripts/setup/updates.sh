@@ -4,7 +4,18 @@
 # or `sudo /usr/local/libexec/worklane-machine set-updates on` as a coordinator user once
 # machine-helper.sh is set up).
 #
-#   bash scripts/setup/updates.sh [--check "name" ...]      (repeat --check for each required check)
+#   bash scripts/setup/updates.sh [--check "name" ...] [--channel release|main]
+#                                 [--signer <principal> ssh-ed25519 <public key>] [--confirm-signer SHA256:<fingerprint>]
+#       (repeat --check for each required check)
+#
+# The last three are an admin's, at a root shell, and go through scripts/setup/updates-root.cjs, the only code that
+# writes /etc/worklane/allowed_signers (it only ever adds a line). Each is checked before anything is installed.
+#   --channel          what the updater follows. The dashboard can only set release; main is set here.
+#   --signer           adds one release signer: one line in allowed_signers, the ones there kept as they are.
+#   --confirm-signer   adds the signer the dashboard's Updater setup staged (the Machine page), named by the SHA256
+#                      fingerprint the page shows. It applies only a staged signer with exactly that fingerprint,
+#                      staged less than 24 hours ago, prints its principal and key first, and clears it from the
+#                      pending list. The dashboard itself can never add a signer: this command, or --signer, does.
 #
 #   - /usr/local/libexec/worklane-update (root:root 0755): every 10 minutes, when on, installs the newest
 #     signed release tag (channel "release", new installs: verified with `git verify-tag` against
@@ -17,22 +28,41 @@
 #   - /etc/worklane/updates.json (root:root 0644): enabled (false), channel ("release"), allowed_signers, the repo
 #     and branch to follow (this checkout's origin, main), and the required checks (each --check, or the defaults
 #     below). An existing file keeps its values, its channel included.
-#   - /etc/worklane/allowed_signers (root:root 0644, yours to create): one line per key allowed to sign releases,
-#     `<email> <public key>` (git's allowed signers format). Without it the release channel installs nothing.
+#   - /etc/worklane/allowed_signers (root:root 0644, yours to create: --signer, --confirm-signer, or by hand): one
+#     line per key allowed to sign releases, `<email> <public key>` (git's allowed signers format). Without it the
+#     release channel installs nothing.
 #   - /var/lib/worklane/updates.jsonl (root:root 0644): every attempt, install, refusal and rollback.
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 # Check names hold commas ("test (macos-latest, 22)"), so each is its own argument: nothing is ever split.
 checks=()
+channel=""
+signer=()
+confirm=""
+# An absolute path: node's require takes a relative one for a package name.
+root_steps="$(cd "$(dirname "$0")" && pwd)/updates-root.cjs"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check) checks+=("${2:?--check needs a check name}"); shift 2 ;;
+    --channel) [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--channel needs release or main" >&2; exit 2; }; channel="$2"; shift 2 ;;
+    --signer) [ "$#" -ge 4 ] || { echo "--signer needs <principal> ssh-ed25519 <public key>" >&2; exit 2; }; signer=("$2" "$3" "$4"); shift 4 ;;
+    --confirm-signer) [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--confirm-signer needs the staged signer's fingerprint (SHA256:...)" >&2; exit 2; }; confirm="$2"; shift 2 ;;
     --checks) echo "--checks (a comma-separated list) is gone: check names contain commas. Pass each with --check \"name\"." >&2; exit 2 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
 [ "${#checks[@]}" -gt 0 ] || checks=("${UPDATE_DEFAULT_CHECKS[@]}")
 command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
+# Checked before anything is installed: a channel there is, a signer of the exact shape, a fingerprint that is staged.
+if [ -n "$channel" ]; then
+  node "$root_steps" check channel "$channel" 2>/dev/null || { echo "--channel is release or main, not $channel" >&2; exit 2; }
+fi
+if [ "${#signer[@]}" -gt 0 ]; then
+  node "$root_steps" check add-signer "${signer[@]}" 2>/dev/null || { echo "--signer takes one principal of an email's shape, then ssh-ed25519, then that public key (a .pub file's second word); nothing was installed or changed" >&2; exit 2; }
+fi
+if [ -n "$confirm" ]; then
+  node "$root_steps" check confirm-signer "$confirm" || { echo "--confirm-signer takes the SHA256 fingerprint of a signer staged from the dashboard in the last 24 hours; nothing was installed or changed" >&2; exit 2; }
+fi
 command -v systemd-run >/dev/null || { echo "needs systemd" >&2; exit 1; }
 [ -d /etc/worklane ] || { echo "no /etc/worklane; run machine.sh first" >&2; exit 1; }
 origin="$(git -C "$(dirname "$0")" remote get-url origin)"
@@ -99,5 +129,17 @@ WantedBy=timers.target"
 systemctl daemon-reload
 systemctl enable --now worklane-update.timer
 systemctl list-timers worklane-update.timer --no-pager
-[ -f /etc/worklane/allowed_signers ] || echo "NOTE: no /etc/worklane/allowed_signers yet: the release channel installs nothing until it lists the key that signs releases"
+if [ -n "$channel" ]; then
+  say "the channel: $channel"
+  node "$root_steps" channel "$channel"
+fi
+if [ "${#signer[@]}" -gt 0 ]; then
+  say "a release signer, added to /etc/worklane/allowed_signers (the ones already listed stay as they are)"
+  node "$root_steps" add-signer "${signer[@]}"
+fi
+if [ -n "$confirm" ]; then
+  say "the staged release signer $confirm, added to /etc/worklane/allowed_signers (the ones already listed stay as they are)"
+  node "$root_steps" confirm-signer "$confirm"
+fi
+[ -f /etc/worklane/allowed_signers ] || echo "NOTE: no /etc/worklane/allowed_signers yet: the release channel installs nothing until it lists the key that signs releases (--signer <principal> ssh-ed25519 <public key>; or stage it on the Machine page's Updater setup, then --confirm-signer <its fingerprint>)"
 echo "updates are $(node -e 'process.stdout.write(require("/etc/worklane/updates.json").enabled ? "ON" : "OFF")'); turn them on from the hub's settings once machine-helper.sh is set up"

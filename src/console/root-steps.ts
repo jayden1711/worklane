@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -30,7 +30,7 @@ export function slotCeiling(): number {
   return typeof max === 'function' ? max() : max;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>. Nothing else. */
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>, and the updater's setup: install-updater, set-update-channel release, stage-update-signer and discard-update-signer <principal> ssh-ed25519 <public key>. Nothing else: nothing here adds a release signer or follows main. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -63,6 +63,29 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     allows: (a) => a.length === 1 && (a[0] === 'status' || a[0] === 'switch'),
     run: (a, exec) => claudeAccount(a[0] as 'status' | 'switch', exec),
   },
+  {
+    command: 'install-updater',
+    what: 'install the engine updater and its timer, with updates off (the installed engine\'s scripts/setup/updates.sh, as root)',
+    usage: 'install-updater',
+    allows: (a) => a.length === 0,
+    run: (_a, exec) => installUpdater(exec),
+  },
+  {
+    command: 'set-update-channel',
+    what: 'put the engine updater on the release channel: signed release tags only',
+    usage: 'set-update-channel release',
+    allows: (a) => a.length === 1 && a[0] === 'release',
+    run: (_a, exec) => followReleases(exec),
+  },
+  ...(['stage', 'discard'] as const).map(
+    (action): RootStepRule => ({
+      command: `${action}-update-signer`,
+      what: action === 'stage' ? 'stage one release-signing public key for an admin to confirm at a root shell (staging adds nothing to the keys the updater trusts)' : 'take a staged release signer back out of the pending list',
+      usage: `${action}-update-signer <principal> ssh-ed25519 <public key>`,
+      allows: (a) => a.length === 3 && signerPrincipalOk(a[0]) && a[1] === 'ssh-ed25519' && signerKeyOk(a[2]),
+      run: (a, exec) => stagedSigner(action, a[0]!, a[2]!, exec),
+    }),
+  ),
   {
     command: 'add-project',
     what: 'add a project to this machine (the installed engine\'s scripts/setup/add-project.sh, as root)',

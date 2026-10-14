@@ -11,6 +11,7 @@ import { unitStates } from '../os/stats.js';
 import { claudeAuthStatusJson, type RunAs } from '../runner.js';
 import { emergencyStop } from '../slots.js';
 import { updateLog } from '../updates.js';
+import { machineChanges } from '../machine.js';
 import type { IncidentSink } from '../usage-limit.js';
 import { watchdogConfig } from './config.js';
 import { raiseIncident, resolveIncident } from './incidents.js';
@@ -80,6 +81,7 @@ export function watchdogForInstance(o: {
     instances: () => machineInstances(),
     units: (u) => unitStates(u),
     updates: () => updateLog(),
+    machineChanges: () => machineChanges(),
     disks: () => machineDisks(),
     config: () => watchdogConfig(),
     poster: () => {
