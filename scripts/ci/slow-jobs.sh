@@ -35,7 +35,7 @@ case "${EVENT:-}" in
     if [ "${FULL:-false}" = true ] || grep -qE '^\.github/workflows/' <<< "$files"; then
       run="$ALL"
     else
-      if grep -qE '^(scripts/bootstrap\.sh|Dockerfile|\.dockerignore|package(-lock)?\.json|scripts/ci/stand-ins/)' <<< "$files"; then run="$BOOTSTRAP"; fi
+      if grep -qE '^(scripts/bootstrap\.sh|scripts/ci/wizard-url\.sh|src/dashboard-detach\.ts|web/src/components/DashboardKey\.tsx|Dockerfile|\.dockerignore|package(-lock)?\.json|scripts/ci/stand-ins/)' <<< "$files"; then run="$BOOTSTRAP"; fi
       if grep -qE '^(scripts/(setup|machine|ci)/|src/os/|src/testrun/|src/runner\.ts)' <<< "$files"; then run="$run $MACHINE"; fi
     fi
     ;;
