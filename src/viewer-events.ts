@@ -112,6 +112,7 @@ export function stateForViewer(state: Record<string, unknown>): Record<string, u
   }
   // How the default branch is guarded: the mode only, never the commits checked or an alert's detail.
   if (out.protection && typeof out.protection === 'object') out.protection = pick(out.protection as Record<string, unknown>, VIEWER_PROTECTION_FIELDS);
-  if (Array.isArray(state.errors)) out.errorCount = state.errors.length;
+  // Only the errors still current (src/projection.ts CoordinatorErrors), each as often as it happened; never the earlier ones.
+  if (Array.isArray(state.errors)) out.errorCount = (state.errors as { count?: unknown }[]).reduce((n, e) => n + (typeof e?.count === 'number' ? e.count : 1), 0);
   return out;
 }

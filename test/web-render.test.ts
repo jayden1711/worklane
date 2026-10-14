@@ -98,7 +98,12 @@ interface Render {
   renderBoard(boards: { name: string | null; data: unknown; error: string | null }[], now?: number): string;
   renderBoardTestRuns(boards: { name: string | null; data: unknown; error: string | null }[]): string;
   renderTestRuns(data: unknown, compact?: boolean): string;
-  renderInstances(hub: unknown, current: string, all?: boolean, status?: Record<string, string>): string;
+  renderInstances(hub: unknown, current: string, all?: boolean, status?: Record<string, string>, why?: Record<string, string>): string;
+  statusOf(all: unknown[]): Record<string, string>;
+  whyOf(all: unknown[]): Record<string, string>;
+  nextHub(prev: unknown, fresh: unknown): unknown;
+  healthPass(refresh: () => Promise<unknown>, load?: (h: unknown) => Promise<unknown[]>): Promise<{ hub: unknown; status: Record<string, string>; why: Record<string, string> }>;
+  renderCoordinatorErrors(errors: unknown[] | undefined, earlier?: unknown[], count?: number, now?: number): string;
   renderHealthPage(all: unknown[], target?: string): string;
   loadIncidents(hub: unknown, get: (name: string | null, path: string) => Promise<unknown>): Promise<unknown[]>;
   scopeOf(hub: unknown, saved: string | null, all: boolean): { current: string | null; all: boolean; instances: (string | null)[] };
@@ -3400,4 +3405,78 @@ test('the listening marker is our own ring, and holds still under prefers-reduce
   assert.match(css, /\.wake-ring::after \{[^}]*animation: wake-pulse /, 'it pulses');
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.wake-ring::after \{ display: none; animation: none; \} \}/, 'reduced motion: the pulse is gone');
   assert.match(css, /\.wake-ring \{[^}]*border: 2px solid var\(--red\)/, 'the still ring stays, in the theme token');
+});
+
+test("a dot for an instance whose incidents couldn't be read is grey (unknown) with why, not red; red stays for an open red incident or one not answering", async () => {
+  const view = (status: string) => ({ instance: null, status, open: [], resolved: [], detail: true });
+  const hub = { instances: [{ name: 'ok', up: true, error: null }, { name: 'broken', up: true, error: null }, { name: 'refused', up: true, error: null }, { name: 'gone', up: false, error: 'connect ECONNREFUSED' }] };
+  const all = await r.loadIncidents(hub, async (name) => {
+    if (name === 'refused') throw new Error('sign in first (401)');
+    return view(name === 'broken' ? 'red' : 'green');
+  });
+  assert.deepEqual(r.statusOf(all), { ok: 'green', broken: 'red', refused: 'unknown', gone: 'red' }, 'a read failure is unknown; a red incident and a down instance are red');
+  assert.deepEqual(r.whyOf(all), { refused: 'sign in first (401)', gone: "its dashboard isn't answering" });
+  // The sidebar: grey, with the error on hover and for screen readers.
+  const nav = r.renderInstances(hub, 'ok', false, r.statusOf(all), r.whyOf(all));
+  const dots = [...nav.matchAll(/data-status="(\w+)"[^>]*data-testid="instance-dot"[^>]*title="([^"]*)"[^>]*aria-label="([^"]*)"/g)].map((m) => [m[1], m[2], m[3]]);
+  assert.deepEqual(dots.map((d) => d[0]), ['green', 'red', 'unknown', 'red']);
+  assert.match(dots[2]![1]!, /status unknown.*sign in first \(401\)/, 'hover says why');
+  assert.equal(dots[2]![2], dots[2]![1], 'and so does the screen-reader label');
+  assert.match(dots[3]![2]!, /something is broken.*ECONNREFUSED/);
+  // Off a hub, this instance's own dot: grey when its incidents can't be read.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  try {
+    const own = await r.loadIncidents(null, async () => {
+      throw new Error('timed out');
+    });
+    const drawer = r.renderNavDrawer(asOwner as never, { status: r.statusOf(own), why: r.whyOf(own) } as never);
+    assert.match(drawer, /data-status="unknown" data-testid="instance-status-dot" title="status unknown[^"]*\(timed out\)"/);
+  } finally {
+    g.window = stub;
+  }
+  // The Health page's chip: the same.
+  assert.match(r.renderHealthPage(all), /data-status="unknown" data-testid="health-instance-dot" title="[^"]*sign in first/);
+});
+
+test('each health refresh asks the hub again: an instance down at page load is read, and selectable, once it answers', async () => {
+  const atLoad = { instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: false, error: 'connect ECONNREFUSED' }] };
+  const recovered = { instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: true, error: null }] };
+  const asked: (string | null)[] = [];
+  const get = async (name: string | null) => (asked.push(name), { instance: name, status: 'green', open: [], resolved: [], detail: true });
+  // The first pass, with the list from page load: b is skipped and red.
+  const first = await r.healthPass(async () => atLoad, (h) => r.loadIncidents(h, get));
+  assert.equal(first.status.b, 'red');
+  assert.deepEqual(asked, ['a']);
+  // The next pass, with the hub asked again: b is read and green, and its row is no longer disabled.
+  const next = await r.healthPass(async () => r.nextHub(first.hub, recovered), (h) => r.loadIncidents(h, get));
+  assert.equal(next.status.b, 'green');
+  assert.deepEqual(asked, ['a', 'a', 'b']);
+  const row = (html: string) => html.split('<button').filter((x) => x.includes('data-testid="instance-row"'))[1] ?? '';
+  assert.match(row(r.renderInstances(atLoad, 'a')), /disabled/, 'at load: b is down and can\'t be picked');
+  assert.doesNotMatch(row(r.renderInstances(next.hub, 'a', false, next.status)), /disabled|not answering/, 'once it answers: b can be picked');
+  // No answer from the hub keeps the last list rather than emptying the sidebar; the same answer keeps the same object.
+  assert.equal(r.nextHub(recovered, null), recovered);
+  assert.equal(r.nextHub(recovered, JSON.parse(JSON.stringify(recovered))), recovered);
+});
+
+test("the coordinator card: current errors once each with a count and since when (the viewer's local time); cleared ones folded as earlier", () => {
+  const now = Date.parse('2026-10-14T18:00:00.000Z');
+  const t = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const html = r.renderCoordinatorErrors(
+    [{ where: 'dispatch', message: 'fetch failed', kind: 'error', count: 3, first: '2026-10-14T17:00:00.000Z', last: '2026-10-14T17:40:00.000Z', at: '2026-10-14T17:40:00.000Z' }],
+    [{ where: 'reconcile', message: 'GitHub 502', kind: 'error', count: 1, first: '2026-10-14T16:00:00.000Z', last: '2026-10-14T16:00:00.000Z', at: '2026-10-14T16:00:00.000Z' }],
+    undefined,
+    now,
+  );
+  assert.equal([...html.matchAll(/data-testid="coordinator-error"/g)].length, 1, 'one entry for the three');
+  assert.match(html, /data-count="3"[^>]*>[\s\S]*?dispatch: fetch failed[\s\S]*?×3</);
+  assert.match(html, new RegExp(`data-testid="coordinator-error-when">3 times since ${t('2026-10-14T17:00:00.000Z')}, last ${t('2026-10-14T17:40:00.000Z')}<`));
+  assert.match(html, /<details[^>]*data-testid="coordinator-errors-earlier"(?![^>]*open)/, 'earlier ones: folded');
+  assert.match(html, /Earlier, since cleared \(1\)[\s\S]*reconcile: GitHub 502/);
+  // A viewer: how many now, never their text.
+  assert.match(r.renderCoordinatorErrors(undefined, [], 3, now), /data-testid="coordinator-errors-count"[^>]*>The coordinator is reporting errors now \(3\)/);
+  // Nothing current, nothing earlier: nothing shown.
+  assert.equal(r.renderCoordinatorErrors([], [], 0, now), '');
 });

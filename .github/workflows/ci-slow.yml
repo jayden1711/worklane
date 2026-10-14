@@ -2329,6 +2329,10 @@ jobs:
           journalctl --user --no-pager -n 60 || true
           tail -n 60 "$F"/*.err "$FK/server.log" 2>/dev/null || true
           cat "$HOME"/.local/state/worklane/projects/*/dashboard.log 2>/dev/null | tail -n 60 || true
+          # The local coordinator unit's own output: its stdout and stderr go to coordinator.log (StandardOutput=append:),
+          # not the journal, which has only systemd's lines (e.g. "exited, status=2").
+          systemctl --user status --no-pager 'dev.worklane.*' 2>/dev/null || true
+          tail -n 80 "$HOME"/.local/state/worklane/projects/*/coordinator.log 2>/dev/null || true
       - name: the browser's screenshots
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

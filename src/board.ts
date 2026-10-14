@@ -11,6 +11,7 @@ import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js
 import type { LiveRun } from './console.js';
 import type { ProcessGroupUsage } from './os/stats.js';
 import { batchSummaries, prBatchStatus, type BatchStatus } from './coordinator/pr-batch.js';
+import { localDay } from './local-day.js';
 
 export const BOARD_COLUMNS = ['planning', 'building', 'verifying', 'waiting', 'landing'] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
@@ -160,7 +161,7 @@ export function columnOf(t: Pick<Task, 'status'>, o: { waits: boolean; pr: Pick<
 /** The Board for one instance, as this role sees it. */
 export function boardView(i: BoardInput): BoardView {
   const now = i.now ?? new Date();
-  const p = project(i.events, now.toISOString().slice(0, 10));
+  const p = project(i.events, localDay(now));
   const prs = prsView(i.events).prs;
   const digest = waitingOnYou(i.events, now);
   const owner = isOwner(i.role);
