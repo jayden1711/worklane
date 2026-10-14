@@ -203,7 +203,11 @@ assert.ok(journal.includes(`signers_changed: ${SIGNERS} appeared outside updates
 for (let i = 0; i < 20 && !signersIncidents().length; i++) await new Promise((r) => setTimeout(r, 250));
 assert.deepEqual(signersIncidents().map((i) => [i.severity, i.title, i.key]), [['red', 'The release signers file changed outside updates.sh', 'allowed_signers']]);
 assert.ok(signersIncidents()[0].detail.includes(mine.fingerprint));
-assert.equal(spawnSync('sudo', ['-u', coordinator, 'test', '-w', '/var/lib/worklane/agent-slots/incidents.json']).status, 0, 'the coordinator can still write the incident store');
+// The store is replaced whole on every write (a temp file renamed over it), so root having written it doesn't lock a
+// coordinator out: as the coordinator, raise and resolve an incident of its own, with the installed engine.
+const probe = spawnSync('sudo', ['-u', coordinator, 'node', '--input-type=module', '-e', 'const m = await import("file:///opt/worklane/current/dist/src/watchdog/incidents.js"); m.raiseIncident("disk_full", "ci-probe", "a probe", "nothing"); m.resolveIncident("disk_full", "ci-probe");'], { encoding: 'utf8', cwd: '/' });
+assert.equal(probe.status, 0, `the coordinator can still write the incident store: ${probe.stderr}`);
+assert.equal(signersIncidents().length, 1, 'and the updater\'s incident is still in it');
 assert.equal(signersState().hold.to, reported()[0].signers.to, 'held');
 // Not again on the next runs.
 for (let i = 0; i < 2; i++) sh('systemctl', ['start', 'worklane-update.service']);
