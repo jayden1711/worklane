@@ -11,6 +11,8 @@
 // installed, and dictation isn't running. Whenever it is open, `micOpen` is true, from the moment it is asked
 // for until its tracks are stopped, so the indicator (WakeIndicator.tsx) can't lag behind it.
 
+import { stopSpeaking } from './talk';
+
 /** One running detection: stop() ends it (the listener stops the microphone's tracks itself). */
 export interface WakeSession {
   stop(): void;
@@ -57,32 +59,6 @@ export const wakePhrase = (brand: string) => `hey ${brand}`;
 
 /** Whether this person gets the wake word: an owner who turned both the mic and the wake word on. */
 export const mayWake = (role: string | null | undefined, prefs: { dictation: boolean; wakeWord: boolean }) => role === 'owner' && prefs.dictation && prefs.wakeWord;
-
-// Talk-back (speechSynthesis) stops the moment the owner starts talking. The talk-back module registers its own
-// stop here; the browser's speech queue is cancelled either way.
-const stoppers = new Set<() => void>();
-
-/** For the talk-back module: called whenever the owner starts talking (the wake word). */
-export function onInterruptSpeech(fn: () => void) {
-  stoppers.add(fn);
-  return () => void stoppers.delete(fn);
-}
-
-/** Stop any talk-back now. */
-export function interruptSpeech(synth: { cancel(): void } | null | undefined = typeof window === 'undefined' ? undefined : window.speechSynthesis) {
-  try {
-    synth?.cancel();
-  } catch {
-    // WHY: a browser without speech synthesis has nothing to stop.
-  }
-  for (const fn of [...stoppers]) {
-    try {
-      fn();
-    } catch {
-      // WHY: one broken stopper doesn't keep the others (or the dictation) from running.
-    }
-  }
-}
 
 // The hand-off between the listener (App) and the Ask panel's dictation (ChatPanel), in this tab only.
 const wakeHandlers = new Set<() => void>();
@@ -136,7 +112,6 @@ export interface WakeEnv {
   onVisibility: (cb: () => void) => () => void;
   /** The microphone permission, or null where the browser can't say. */
   permission: () => Promise<PermissionLike | null>;
-  stopSpeaking?: () => void;
 }
 
 export function browserWakeEnv(): WakeEnv {
@@ -333,10 +308,10 @@ export class WakeListener {
 
   private hit(gen: number) {
     if (gen !== this.gen || !this.micOpen) return;
-    // The microphone is the dictation's now: close it first, stop any talk-back, then hand off.
+    // The microphone is the dictation's now: close it first, stop any talk-back (talk.ts) at once, then hand off.
     this.handedOff = true;
     this.close();
-    (this.env.stopSpeaking ?? interruptSpeech)();
+    stopSpeaking();
     this.emit();
     this.hooks.onWake();
   }

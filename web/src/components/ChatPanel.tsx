@@ -6,7 +6,8 @@
 // already confirms that change: nothing runs from the chat itself. Anyone else gets
 // the answer read-only. On a hub, a question goes to the selected instance, or to
 // each instance's own server. An owner who turned it on in Settings gets a mic that dictates
-// into the box for review (web/src/voice/); it never sends.
+// into the box for review (web/src/voice/); it never sends. One who turned on talk-back hears answers read aloud
+// by the browser (web/src/voice/talk.ts): no code, nothing secret-shaped, stopped by talking, Esc, closing or a new question.
 import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { MessageCircle, X } from 'lucide-react';
@@ -15,6 +16,7 @@ import { navigate } from '../App';
 import { Badge, Button, cx } from './ui';
 import { ComposerMic, MicInterim, mayDictate, useDictation } from '../voice/Mic';
 import { useVoicePrefs } from '../voice/prefs';
+import { TalkStatus, mayTalk, useTalkBack } from '../voice/TalkBack';
 import { onWake, setDictating, startOnWake } from '../voice/wake';
 
 const MAX = 4000;
@@ -266,6 +268,9 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
   const content = useRef<HTMLDivElement>(null);
   const [voice] = useVoicePrefs();
   const mic = useDictation({ active: open && mayDictate(role, voice), prefs: voice, box: input, container: content, setText: setQ });
+  const talk = useTalkBack({ active: open && mayTalk(role, voice), prefs: voice });
+  // WHY: only answers that arrive while this page is open are read; the ones restored on load were heard before.
+  const heard = useRef(new Set(restored.turns.flatMap((t) => t.asks.map((a) => a.id))));
 
   // The wake word (voice/wake.ts): open the panel, then start dictating into the box once the mic can. Nothing sends.
   const woken = useRef(false);
@@ -308,13 +313,29 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
     return () => window.clearTimeout(timer);
   }, [turns, pending]);
 
-  useEffect(() => bottom.current?.scrollIntoView({ block: 'end' }), [turns.length]);
+  // WHY: braces, not an expression: Chrome's scrollIntoView now returns a Promise, and React calls whatever an
+  // effect returns as its cleanup, which threw and took the panel down on the next question.
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: 'end' });
+  }, [turns.length]);
+
+  // Each new answer, once, read aloud when talk-back is on (useTalkBack does nothing otherwise).
+  useEffect(() => {
+    for (const t of turns)
+      for (const a of t.asks) {
+        if (!a.id || a.f.state !== 'answered' || heard.current.has(a.id)) continue;
+        heard.current.add(a.id);
+        if (open && mayTalk(role, voice)) talk.speak(a.f.answer.answer);
+      }
+  }, [turns]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ask = async () => {
     const question = q.trim();
     if (!question || question.length > MAX) return;
-    // WHY: what is sent is what the person reviewed; nothing dictated lands after Ask.
+    // WHY: what is sent is what the person reviewed; nothing dictated lands after Ask. A new question stops the
+    // last answer being read.
     mic.abort();
+    talk.stop();
     setBusy(true);
     // One key per question: a retried POST is the same ask, never a second turn.
     const key = requestKey();
@@ -353,11 +374,12 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
         <Dialog.Content
           ref={content}
           onEscapeKeyDown={(e) => {
-            // WHY: Esc while dictating stops listening first; the next Esc closes the panel.
+            // WHY: Esc while dictating stops listening first, and while reading aloud stops reading; the next Esc closes the panel.
             if (mic.listening) {
               e.preventDefault();
               mic.stop();
             }
+            if (talk.escape()) e.preventDefault();
           }}
           onOpenAutoFocus={(e) => (e.preventDefault(), input.current?.focus())} className="fixed top-0 right-0 bottom-0 z-50 flex w-[min(440px,100vw)] flex-col bg-surface shadow-overlay" style={{ animation: 'fade-up 200ms cubic-bezier(0.23,1,0.32,1) both' }} data-testid="chat-panel" aria-describedby={undefined}>
           <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
@@ -416,6 +438,7 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
               data-testid="chat-input"
             />
             <MicInterim listening={mic.listening} interim={mic.interim} error={mic.error} />
+            <TalkStatus role={role} prefs={voice} speaking={talk.speaking} note={talk.note} onStop={talk.stop} />
             <div className="flex items-center gap-2">
               <ComposerMic role={role} prefs={voice} support={mic.support} listening={mic.listening} onToggle={mic.toggle} />
               <span className={cx('text-[11.5px] tabular-nums', q.length > MAX ? 'text-red' : 'text-ink-3')}>
