@@ -15,6 +15,7 @@ import { SESSION_COOKIE, STATE_COOKIE } from '../src/dashboard-auth.js';
 import { EventLog } from '../src/events/log.js';
 import { currentUser } from '../src/os/index.js';
 import { APP_SECRET, FAKE_PEM, fakeGitHub as fake } from './fake-github.js';
+import { loopbackGitHub } from './helpers.js';
 import {
   AGENT_APP_PERMISSIONS,
   agentKeyDir,
@@ -82,7 +83,8 @@ async function setup(o: { signIn?: boolean } = {}) {
     web: gh.url,
     users: { coordinator: currentUser(), viewer: currentUser() },
     homeOf: () => home,
-    verify: verifyWithScript(gh.url),
+    // The real script, as its own process: its GitHub host is a constant, so the child gets the loopback stand-in.
+    verify: verifyWithScript({ node: { env: loopbackGitHub(gh.url) } }),
     onAsk: (a) => (asked.push(a), undefined),
     log: (l) => lines.push(l),
     pollMs: 20,

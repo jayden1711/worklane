@@ -36,6 +36,7 @@ export const HELPER_PATHS = {
     engineCli: 'dist/src/cli.js',
     agentIsSelf: ['dist/src/cli.js', 'src/install.ts', 'src/agent-settings.ts'],
     exampleProject: 'examples/basic',
+    loopbackGitHub: 'scripts/ci/loopback-github.mjs',
   },
 };
 

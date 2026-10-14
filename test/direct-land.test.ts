@@ -16,7 +16,7 @@ import { healthView } from '../src/health.js';
 import { initInstance } from '../src/instance.js';
 import { childEnv, which } from '../src/os/index.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
-import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
+import { agentIsSelf, exampleProject, repoRoot, loopbackGitHub } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const cli = join(repoRoot, 'dist', 'src', 'cli.js');
@@ -73,7 +73,7 @@ const run = (args: string[], env: NodeJS.ProcessEnv) =>
 async function start(landMode: 'direct' | 'pr', protection: number) {
   const { dir, home } = instance(landMode);
   const gh = await fakeGitHub(protection);
-  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  const env = { ...childEnv(), PATH: `${gh.bin}${delimiter}${process.env.PATH}`, [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api) };
   try {
     const r = await run(['coordinator', 'run', '--instance', 'alpha', '--once'], env);
     const log = new EventLog(join(home, 'state', 'events.db'));

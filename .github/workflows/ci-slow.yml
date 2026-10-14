@@ -655,6 +655,8 @@ jobs:
         shell: bash
     env:
       GH_FAKE: http://127.0.0.1:8999
+      # The stand-in for GitHub's hosts in every engine process of this job (see the fake GitHub's step).
+      LOOPBACK: --import=/opt/worklane/current/scripts/ci/loopback-github.mjs
       HELPER: /usr/local/libexec/worklane-machine
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -697,11 +699,15 @@ jobs:
           # The App's key, as one would download it (the fake checks the JWT's App id, not its signature).
           openssl genrsa -traditional -out "$f/app.pem" 2048 2>/dev/null || openssl genrsa -out "$f/app.pem" 2048
           echo "F=$f" >> "$GITHUB_ENV"
-          # The fake is reached through these, as the engine reads them: kept through sudo, and set for the units.
-          printf 'Defaults env_keep += "WORKLANE_GITHUB_API WORKLANE_GITHUB_WEB"\n' > "$f/sudoers" && sudo visudo -cf "$f/sudoers" && sudo install -m 0440 "$f/sudoers" /etc/sudoers.d/ci-fake-github
+          # The engine's GitHub hosts are constants, so the fake is reached through a stand-in loaded into each engine
+          # process (scripts/ci/loopback-github.mjs: GitHub's hosts go to a port on 127.0.0.1, anything else off this
+          # machine is refused): kept through sudo, and set for the units. git's own requests to github.com go to
+          # the fake through the runner's git config.
+          sudo git config --system url."$GH_FAKE/example/alpha".insteadOf https://github.com/example/alpha
+          printf 'Defaults env_keep += "NODE_OPTIONS CI_LOOPBACK_GITHUB_PORT"\n' > "$f/sudoers" && sudo visudo -cf "$f/sudoers" && sudo install -m 0440 "$f/sudoers" /etc/sudoers.d/ci-fake-github
           for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do
             sudo install -d "/etc/systemd/system/$u.service.d"
-            printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE" "$GH_FAKE" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
+            printf '[Service]\nEnvironment=NODE_OPTIONS=%s CI_LOOPBACK_GITHUB_PORT=8999\n' "$LOOPBACK?port=8999" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
           # The dashboard sign-in App's secrets (credentials.sh dashboard-signin), for the hub dashboards.sh starts.
           printf 'cisigninclientsecret0123456789\n' | sudo bash scripts/setup/credentials.sh dashboard-signin
@@ -710,7 +716,7 @@ jobs:
           # The stand-in token: in a file of the runner's only, masked in case anything prints it; never in the env.
           t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token"); unset t
           set +e
-          sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test < /dev/null > "$F/run1.jsonl" 2> "$F/run1.err"
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test < /dev/null > "$F/run1.jsonl" 2> "$F/run1.err"
           rc=$?
           set -e
           cat "$F/run1.jsonl"; tail -n 20 "$F/run1.err"
@@ -721,8 +727,8 @@ jobs:
           id wl-ci && id wl-ci-agent
       - name: the App by hand (the manual way), then the rerun goes on from the App step to the end
         run: |
-          echo n | sudo env WORKLANE_GITHUB_API="$GH_FAKE" bash scripts/setup/credentials.sh ci github-app 91 4242 "$F/app.pem" example/alpha
-          cat "$F/claude-token" | sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test > "$F/run2.jsonl" 2> "$F/run2.err" || { cat "$F/run2.jsonl"; tail -n 60 "$F/run2.err"; exit 1; }
+          echo n | sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/credentials.sh ci github-app 91 4242 "$F/app.pem" example/alpha
+          cat "$F/claude-token" | sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test > "$F/run2.jsonl" 2> "$F/run2.err" || { cat "$F/run2.jsonl"; tail -n 60 "$F/run2.err"; exit 1; }
           cat "$F/run2.jsonl"
           for s in instance app; do jq -se --arg s "$s" 'map(select(.step==$s and .state=="done")) | length == 1' "$F/run2.jsonl"; done
           [ "$(jq -sc 'map(select(.state=="started") | .step)' "$F/run2.jsonl")" = '["instance","app","claude-token","checkout","policy","service","test-user","machine-helper","dashboards"]' ]
@@ -739,7 +745,8 @@ jobs:
           if sudo -u wl-ci test -r "$c"; then echo "the coordinator can read the agent's Claude login" >&2; exit 1; fi
           d=/srv/worklane/ci/alpha
           sudo test -f "$d/.worklane/config.yaml"
-          [ "$(sudo git -C "$d" config --get remote.origin.url)" = "$GH_FAKE/example/alpha.git" ]
+          # The checkout's origin is GitHub's own URL: no setting moved it (the runner's git config carries it to the fake).
+          [ "$(sudo git -C "$d" config --get remote.origin.url)" = "https://github.com/example/alpha.git" ]
           sudo git -C "$d" config --get-all credential.helper | grep -qx '!/usr/local/bin/worklane git-credential --instance ci'
           grep -q '^git as x-access-token: POST /example/alpha.git/git-upload-pack$' "$F/requests.log"
           if grep '^git as ' "$F/requests.log" | grep -v '^git as x-access-token:'; then echo "git authenticated as someone else" >&2; exit 1; fi
@@ -852,6 +859,7 @@ jobs:
           git -C "$f2/seed" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
           git -C "$f2/seed" push -q "$f2/git/example/gamma.git" main
           nohup node scripts/ci/fake-github.mjs "$GITHUB_WORKSPACE/dist" 8998 "$f2/git" example/gamma "$f2/requests.log" > "$f2/server.log" 2>&1 &
+          sudo git config --system url."$GH_FAKE2/example/gamma".insteadOf https://github.com/example/gamma
           for _ in $(seq 1 30); do curl -sf "$GH_FAKE2/repos/example/gamma" >/dev/null && break; sleep 1; done
           curl -sf "$GH_FAKE2/repos/example/gamma"
           { echo "F2=$f2"; echo "GH_FAKE2=$GH_FAKE2"; } >> "$GITHUB_ENV"
@@ -862,11 +870,11 @@ jobs:
           tar -xzf "$f2/gitleaks.tgz" -C "$f2" gitleaks && sudo install -m 0755 "$f2/gitleaks" /usr/local/bin/gitleaks
           for u in worklane-gamma worklane-dashboard-gamma; do
             sudo install -d "/etc/systemd/system/$u.service.d"
-            printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE2" "$GH_FAKE2" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
+            printf '[Service]\nEnvironment=NODE_OPTIONS=%s CI_LOOPBACK_GITHUB_PORT=8998\n' "$LOOPBACK?port=8998" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
           sudo bash scripts/setup/instance.sh gamma
           # No instance home yet (the audit's first run): credentials.sh makes it and writes the App in, no hand edit.
-          echo n | sudo env WORKLANE_GITHUB_API="$GH_FAKE2" bash scripts/setup/credentials.sh gamma github-app 91 4242 "$F/app.pem" example/gamma 2>&1 | tee "$f2/creds.log"
+          echo n | sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash scripts/setup/credentials.sh gamma github-app 91 4242 "$F/app.pem" example/gamma 2>&1 | tee "$f2/creds.log"
           if grep -q 'set in credentials.yaml' "$f2/creds.log"; then echo "credentials.sh still asks for a hand edit" >&2; exit 1; fi
           grep -q '^wrote .*/instances/gamma/credentials.yaml (github: App 91, installation 4242; the rest kept)$' "$f2/creds.log"
           h="$(getent passwd wl-gamma | cut -d: -f6)"
@@ -876,14 +884,14 @@ jobs:
           [ "$(sudo cat "$h/.config/gamma-app/made-by")" = by-hand ]
       - name: "--after-credentials: auto-config's questions, answered as the coordinator, then its setup PR; waiting (exit 3), never success (B4)"
         run: |
-          boot() { set +e; sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/$1.log" 2>&1; rc=$?; set -e; cat "$F2/$1.log"; echo "rc=$rc"; }
+          boot() { set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/$1.log" 2>&1; rc=$?; set -e; cat "$F2/$1.log"; echo "rc=$rc"; }
           boot boot1
           [ "$rc" = 3 ]
           grep -q '"kind":"questions"' "$F2/boot1.log"
           grep -q 'waiting for the repo config: no setup PR yet' "$F2/boot1.log"
           if grep -q 'POST /repos/example/gamma/pulls' "$F2/requests.log"; then echo "a PR was opened with a question open" >&2; exit 1; fi
           # The question, answered the way the line says: as the coordinator.
-          sudo -H -u wl-gamma env WORKLANE_GITHUB_API="$GH_FAKE2" bash -c 'umask 0002; worklane instance auto-config gamma --answer one-test-file=none' | tee "$F2/answer.json"
+          sudo -H -u wl-gamma env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash -c 'umask 0002; worklane instance auto-config gamma --answer one-test-file=none' | tee "$F2/answer.json"
           jq -e '.kind == "proposed" and .pr == "http://127.0.0.1:8998/example/gamma/pull/1"' "$F2/answer.json"
           [ "$(grep -c '^POST /repos/example/gamma/pulls$' "$F2/requests.log")" = 1 ]
           # The setup branch holds the drafted config: make test, checked as the agent user, within the instance policy.
@@ -893,7 +901,7 @@ jobs:
           [ "$(git -C "$F2/git/example/gamma.git" rev-parse main)" = "$(git -C "$F2/seed" rev-parse HEAD)" ]
       - name: "rerun --after-credentials: no 'branch already exists', the same PR, still waiting (B5)"
         run: |
-          set +e; sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot2.log" 2>&1; rc=$?; set -e
+          set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot2.log" 2>&1; rc=$?; set -e
           cat "$F2/boot2.log"
           [ "$rc" = 3 ]
           if grep -q 'already exists' "$F2/boot2.log"; then echo "the rerun tripped on the setup branch" >&2; exit 1; fi
@@ -901,7 +909,7 @@ jobs:
           [ "$(grep -c '^POST /repos/example/gamma/pulls$' "$F2/requests.log")" = 1 ]
       - name: "init --mode server: the true status, exit 1 while the setup PR waits, and how the App was made (B6); doctor as the coordinator reads it (B7)"
         run: |
-          set +e; sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" worklane init --mode server example/gamma --instance gamma --timeout 1 < "$F/claude-token" > "$F2/init1.log" 2>&1; rc=$?; set -e
+          set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < "$F/claude-token" > "$F2/init1.log" 2>&1; rc=$?; set -e
           cat "$F2/init1.log"
           [ "$rc" = 1 ]
           if grep -q 'steps done or skipped' "$F2/init1.log"; then echo "init claimed it was done" >&2; exit 1; fi
@@ -919,11 +927,11 @@ jobs:
       - name: "the setup PR merges: --after-credentials succeeds, the coordinator runs; init exits 0; doctor as the coordinator all ok"
         run: |
           git -C "$F2/git/example/gamma.git" update-ref refs/heads/main refs/heads/worklane/setup
-          sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot3.log" 2>&1 || { cat "$F2/boot3.log"; exit 1; }
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot3.log" 2>&1 || { cat "$F2/boot3.log"; exit 1; }
           cat "$F2/boot3.log"
           sudo test -f /srv/worklane/gamma/gamma/.worklane/config.yaml
           systemctl is-active worklane-gamma.service
-          sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init2.log" 2>&1 || { cat "$F2/init2.log"; exit 1; }
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init2.log" 2>&1 || { cat "$F2/init2.log"; exit 1; }
           cat "$F2/init2.log"
           grep -q 'all 8 steps done or skipped' "$F2/init2.log"
           set +e; sudo -H -u wl-gamma worklane doctor --mode server --instance gamma --root /srv/worklane/gamma/gamma > "$F2/doctor2.log" 2>&1; set -e
@@ -939,7 +947,7 @@ jobs:
           # The sign-in App is set up here, but the machine has no public name (no Tailscale, no --public-url): the break-glass.
           [ "$u1" = http://127.0.0.1:4398/first-run ]
           grep -qF "asks once for the hub's key: it is in $hk" "$F2/boot3.log"
-          sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot4.log" 2>&1 || { cat "$F2/boot4.log"; exit 1; }
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot4.log" 2>&1 || { cat "$F2/boot4.log"; exit 1; }
           u2="$(bash scripts/ci/wizard-url.sh "$F2/boot4.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
           [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
           rm -f "$F2/hub-key"
