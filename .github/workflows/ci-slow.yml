@@ -838,14 +838,16 @@ jobs:
           boot() { set +e; sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner "$@" ci example/alpha > "$F/$log" 2>&1; rc=$?; set -e; tail -n 12 "$F/$log"; echo "rc=$rc"; }
           last_is_url() { tail -n 1 "$F/$1" | grep -qE '^https?://'; }
           # No https origin (no Tailscale here, no --public-url): no URL at all, the reason and the fix; nothing started.
-          log=boot-a.log boot
+          log=boot-a.log
+          boot
           [ "$rc" = 4 ]
           grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/$log"
           if last_is_url "$log"; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
           if systemctl is-active -q "$u"; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
           [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
           # The origin given, but nothing serves it yet (tailscale serve): setup mode starts, and still no URL: it doesn't answer.
-          log=boot-b.log boot --public-url "$pub"
+          log=boot-b.log
+          boot --public-url "$pub"
           [ "$rc" = 4 ]
           systemctl is-active "$u"
           grep -qF "no URL to open yet: the hub's setup mode runs on this machine (port 4399), but $pub doesn't reach it" "$F/$log"
