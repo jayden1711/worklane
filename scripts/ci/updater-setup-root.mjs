@@ -405,6 +405,23 @@ const heldLine = runLogs.find((e) => e.event === 'held');
 assert.match(heldLine.reason, /the signers file changed outside updates\.sh at .* hasn't been acknowledged .*no release is installed until an admin runs: sudo bash \/opt\/worklane\/current\/scripts\/setup\/updates\.sh --acknowledge-signers/);
 assert.ok(!existsSync(join(opt, 'current')) && !existsSync(join(opt, newest)) && installedSha === 'a'.repeat(40), 'nothing built, installed or switched');
 console.log(`OK 3/5: release v1.0.3 (${newest.slice(0, 12)}, signed by a listed key, checks green) was not installed: run() returned held: ${heldLine.reason.slice(0, 160)}`);
+// Before the acknowledgement: nothing a coordinator can run through the helper lifts this hold. Each command really
+// rewrites updates.json (the channel, the switch); the file is put back as it was afterwards.
+{
+  const holdBytes = sha(STATE);
+  const cfgNow = readFileSync(CONFIG, 'utf8');
+  for (const args of [['set-update-channel', 'release'], ['set-updates', 'off'], ['set-updates', 'on'], ['set-update-channel', 'release']]) {
+    ok(...args);
+    assert.equal(sha(STATE), holdBytes, `${args.join(' ')} left signers-state.json as it was`);
+    assert.ok(updater.signersHold(), `still held after ${args.join(' ')}`);
+  }
+  assert.equal(await updater.run(deps), 'held', 'and a run is still held');
+  // --release-hold is for a rolled-back commit: it leaves the signers hold alone too.
+  sh('bash', ['/opt/worklane/current/scripts/setup/updates.sh', '--release-hold']);
+  assert.equal(sha(STATE), holdBytes);
+  writeFileSync(CONFIG, cfgNow);
+  console.log(`OK: the signers hold stayed through set-update-channel release and set-updates off/on as ${coordinator} through sudo, and through --release-hold; only --acknowledge-signers is left to lift it`);
+}
 const ack = sh('bash', ['/opt/worklane/current/scripts/setup/updates.sh', '--acknowledge-signers']);
 assert.ok(ack.includes(intruder.fingerprint) && ack.includes('release installs are no longer held'), ack);
 assert.equal(signersState().hold, null);
