@@ -30,6 +30,10 @@ test('aliases: an agents.yaml with model_routing and eval_routing loads and rout
   const rows = Object.fromEntries(effectiveRouting(a).map((r) => [r.key, r.from]));
   assert.equal(rows.build, 'model_routing.build');
   assert.equal(rows.eval_cheap, 'eval_routing.cheap_model');
+  // #338's reflection key: haiku by default, settable under either name.
+  assert.equal(modelRouting(parse({})).reflection, 'haiku');
+  assert.equal(modelRouting(parse({ model_routing: { reflection: 'sonnet' } })).reflection, 'sonnet');
+  assert.equal(modelRouting(parse({ routing: { reflection: 'opus' } })).reflection, 'opus');
 });
 
 test('a key set both in routing and under an old name is refused, at the old name', () => {

@@ -54,7 +54,7 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
     if (!checked.ok) return undefined;
   }
   useTestRuns({
-    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper },
+    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper, sparseExclude: cfg.tests.checkout.sparse_exclude },
     checks: { repo: s.repo, token: s.token, log: d.log, actor: d.actor, ...(s.api ? { api: s.api } : {}) },
   });
   const names = checkNamesFor(config);

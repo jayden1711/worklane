@@ -89,7 +89,6 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
   app.stdout?.on('data', tail);
   app.stderr?.on('data', tail);
   app.on('error', (e) => (appOut += `\n${e.message}`));
-  let browser: Awaited<ReturnType<typeof launchChrome>> | null = null;
   let ev: FlowEvidence | null = null;
   try {
     await until(
@@ -103,11 +102,55 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
     ).catch((e: Error) => {
       throw new Error(`${e.message}\nthe app said:\n${appOut.trim().split('\n').slice(-20).join('\n') || '(nothing)'}`);
     });
+    ev = await drive({ ...o, chrome, steps, base, allow: isLocal, t0 });
+    return ev;
+  } finally {
+    // WHY: every path ends here, a thrown error included: an app left running would outlive the check.
+    const notes: string[] = [];
+    try {
+      if (!(await stopApp(app, o.runAs))) notes.push(`the app (pid ${app.pid}) didn't stop`);
+    } catch (e) {
+      notes.push(`stopping the app failed: ${(e as Error).message}`);
+    }
+    // WHY: cleanup is reported, never a reason the flow fails.
+    if (ev && notes.length) ev.notes = [...(ev.notes ?? []), ...notes];
+  }
+}
 
-    browser = await launchChrome(chrome, { ...(o.noSandbox ? { noSandbox: true } : {}), ...(o.chromeProfileRoot ? { profileRoot: o.chromeProfileRoot } : {}) });
+/** INVARIANT: a flow against a deployed preview (docs/previews.md) reaches its origin only, or an in-page scheme. */
+export function isOnOrigin(url: string, origin: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (['data:', 'blob:', 'about:'].includes(u.protocol)) return true;
+  const o = new URL(origin);
+  const scheme = u.protocol === 'wss:' ? 'https:' : u.protocol === 'ws:' ? 'http:' : u.protocol;
+  return scheme === o.protocol && u.host === o.host;
+}
+
+/** docs/previews.md: a flow against an app already deployed at `origin`; nothing is started or stopped here. */
+export async function runFlowAt(o: { app: AppConfig; flow: string; origin: string; outDir: string; chrome?: string | null; noSandbox?: boolean; chromeProfileRoot?: string }): Promise<FlowRun> {
+  const steps = o.app.flows[o.flow];
+  if (!steps) throw new Error(`no flow "${o.flow}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
+  const chrome = o.chrome === undefined ? findChrome(process.env.CHROME) : o.chrome;
+  if (!chrome) return { flow: o.flow, skipped: 'no Chrome or Chromium on this machine (set CHROME to its path); browser checks skipped' };
+  const base = new URL(o.origin).origin;
+  return drive({ ...o, chrome, steps, base, allow: (url) => isOnOrigin(url, base), t0: Date.now() });
+}
+
+/** INVARIANT: every request `allow` refuses is refused, and Chrome is stopped however the flow ends. */
+async function drive(o: { app: AppConfig; flow: string; outDir: string; chrome: string; noSandbox?: boolean; chromeProfileRoot?: string; steps: FlowStep[]; base: string; allow: (url: string) => boolean; t0: number }): Promise<FlowEvidence> {
+  const { steps, base, t0 } = o;
+  let browser: Awaited<ReturnType<typeof launchChrome>> | null = null;
+  let ev: FlowEvidence | null = null;
+  try {
+    browser = await launchChrome(o.chrome, { ...(o.noSandbox ? { noSandbox: true } : {}), ...(o.chromeProfileRoot ? { profileRoot: o.chromeProfileRoot } : {}) });
     const cdp = browser.cdp;
     ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, durationMs: 0, ...(browser.notes.length ? { notes: [...browser.notes] } : {}) };
-    watch(cdp, ev, o.app.thresholds.slow_request_ms);
+    watch(cdp, ev, o.app.thresholds.slow_request_ms, o.allow);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Log.enable');
@@ -142,28 +185,18 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
     ev.durationMs = Date.now() - t0;
     return ev;
   } finally {
-    // Every path ends here, a thrown error included, and each part of teardown runs whatever the one before
-    // did: a browser or an app left running would outlive the check (and keep a test run from ever exiting).
-    const notes: string[] = [];
     try {
       browser?.cdp.close();
     } catch {
       // already closed
     }
     const chromeNote = browser ? await browser.close() : null;
-    if (chromeNote) notes.push(chromeNote);
-    try {
-      if (!(await stopApp(app, o.runAs))) notes.push(`the app (pid ${app.pid}) didn't stop`);
-    } catch (e) {
-      notes.push(`stopping the app failed: ${(e as Error).message}`);
-    }
-    // Cleanup is reported, never a reason the flow fails.
-    if (ev && notes.length) ev.notes = [...(ev.notes ?? []), ...notes];
+    if (ev && chromeNote) ev.notes = [...(ev.notes ?? []), chromeNote];
   }
 }
 
 /** Collect console errors, failed and slow requests; refuse every request that isn't to the app on localhost. */
-function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number) {
+function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number, allow: (url: string) => boolean) {
   cdp.on('Runtime.exceptionThrown', (p) => {
     const d = p.exceptionDetails as { text: string; url?: string; exception?: { description?: string } };
     ev.consoleErrors.push({ kind: 'exception', text: d.exception?.description ?? d.text, ...(d.url ? { url: d.url } : {}) });
@@ -180,7 +213,7 @@ function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number) {
   });
   cdp.on('Fetch.requestPaused', (p) => {
     const req = p.request as { url: string };
-    if (isLocal(req.url)) void cdp.send('Fetch.continueRequest', { requestId: p.requestId }).catch(() => {});
+    if (allow(req.url)) void cdp.send('Fetch.continueRequest', { requestId: p.requestId }).catch(() => {});
     else {
       ev.blockedRequests.push(req.url.slice(0, 300));
       void cdp.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }).catch(() => {});

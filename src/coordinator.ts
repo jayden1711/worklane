@@ -20,7 +20,7 @@ import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } fr
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { evalRouting } from './eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
-import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
+import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REFLECTION_SCHEMA, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
@@ -45,25 +45,27 @@ import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
 import { countAssertions } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
-import { refillPool, takeFromPool } from './worktree-pool.js';
+import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { Optimizer } from './coordinator/optimize.js';
+import { ChecksFromFeedback } from './coordinator/checks-from-feedback.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
+import { budgetState, checksFingerprint, DEFAULT_MAX_ATTEMPTS, failureFingerprint, identicalStreak, IDENTICAL_FAILURES, reassigned, reflectionBrief, reflectionFeedback, sinceReset, TASK_BUDGET_INCIDENT, taskUsage, timeLeftMs, type FailureKind } from './coordinator/loop-control.js';
+import { modelRouting } from './model-routing.js';
 import { labelWeek } from './coordinator/stage-labels.js';
 import { doneWhenCommands } from './stage-label.js';
 import { localDoneWhen } from './testrun/local.js';
 import { repoGit } from './main-watch.js';
-import { MergePosts, takeOpsSlot } from './merge-posts.js';
+import { MergePosts } from './merge-posts.js';
 import { CiMetrics } from './ci-metrics.js';
 import { redactPii } from './intake/redact.js';
-import { scrub } from './watchdog/post.js';
+import { scrub, takeOpsPost } from './watchdog/post.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -74,7 +76,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends Optimizer {
+export class Coordinator extends ChecksFromFeedback {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -117,13 +119,16 @@ export class Coordinator extends Optimizer {
     await step('pr-batch', () => this.prBatchTick(), undefined);
     await step('merged', () => this.watchMerges(), undefined);
     await step('main watch', () => this.watchMain(), undefined);
+    await step('fix forward', () => this.fixForwardStep(), undefined);
     await step('merge posts', () => this.postMerges(), undefined);
     await step('ci metrics', () => this.measureCi(), undefined);
     await step('deploy gate', () => this.d.deployGate?.step(), undefined);
+    await step('previews', () => this.d.previews?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);
     await step('gardener', () => this.checkGardener(), undefined);
+    await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
@@ -136,12 +141,14 @@ export class Coordinator extends Optimizer {
     while (this.active.size) await Promise.all([...this.active.values()]);
     await this.d.prTestRuns?.idle();
     await this.d.deployGate?.idle();
+    await this.d.previews?.idle();
     await this.chatQueue;
     await this.intakeQueue;
     await this.quickIdle();
     await this.poolRefill;
     await this.correctionsRun;
     await this.gardenerRun;
+    await this.feedbackChecksRun;
     await this.optimizeRun;
     await this.prBatchIdle();
   }
@@ -182,7 +189,7 @@ export class Coordinator extends Optimizer {
         if (this.postedKeys().has(key)) return 'sent';
         const channel = intake()?.discord.ops_channel;
         const src = this.chatSource();
-        if (!channel || !src || !takeOpsSlot({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}), now: m.now?.() ?? Date.now() })) return 'limited';
+        if (!channel || !src || !takeOpsPost({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}), now: m.now?.() ?? Date.now() })) return 'limited';
         await this.channelSend(src, key, { channel }, { kind: 'notice', text });
         return 'sent';
       },
@@ -223,6 +230,7 @@ export class Coordinator extends Optimizer {
     // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
     this.d.prTestRuns?.stop();
     this.d.deployGate?.stop();
+    this.d.previews?.stop();
     this.prBatchStop();
   }
 
@@ -476,7 +484,8 @@ export class Coordinator extends Optimizer {
       return 0;
     }
     let started = 0;
-    const ready = await this.d.backlog.list('ready');
+    // Fix-forward's fix task for a red default branch goes first: until it is green, only its PR merges.
+    const ready = (await this.d.backlog.list('ready')).sort((a, b) => Number(this.fixForward.isFixTask(b.number)) - Number(this.fixForward.isFixTask(a.number)));
     // Hotspots: a task that would change a file a running task changes too waits; the loop goes on to the
     // next ready task, so the slot is used meanwhile. The files come from a cheap guess, never an agent run.
     const globs = this.d.cfg.project.hotspots ?? DEFAULT_HOTSPOTS;
@@ -489,7 +498,9 @@ export class Coordinator extends Optimizer {
       if (hold) break;
       if (this.active.has(issue.number) || !this.isTerminal(issue.number)) continue;
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
-      const act = canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      // Fix-forward's fix task: this instance filed it (its own event log says so), so it is worked whoever the tracker says opened it.
+      const fixTask = issue.state === 'open' && issue.labels.includes('ready') && this.fixForward.isFixTask(issue.number) ? { actionable: true, why: 'fix-forward: the fix task for a red default branch' } : null;
+      const act = fixTask ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
@@ -596,8 +607,10 @@ export class Coordinator extends Optimizer {
       try {
         spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
         const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-        const r = await refillPool(this.wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb });
-        if (r.created.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
+        const wt = this.wt;
+        const keyFiles = this.d.cfg.tests.worktree.setup_key;
+        const r = await refillPool(wt, { size, base, estSizeGb: this.d.cfg.tests.worktree.est_size_gb, key: (b) => setupKey(wt, b, keyFiles) });
+        if (r.created.length || r.moved.length || r.removed.length || r.errors.length) this.emit('worktree.pool_refilled', { base, created: r.created, moved: r.moved, removed: r.removed, errors: r.errors.map((x) => x.slice(0, 500)) });
       } catch (e) {
         this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree pool', kind: 'error', message: (e as Error).message.slice(0, 500) });
       } finally {
@@ -633,11 +646,15 @@ export class Coordinator extends Optimizer {
     heartbeat.unref();
 
     const { name, branch, taskFile } = this.paths(n);
+    // Raised when the issue's runs reach 85% of its budget; resolved once the task stops here, however it ends.
+    let budgetRaised = false;
     try {
       // A worktree already set up on this base, from the pool, when there is one; else a fresh one.
       const pooled = this.d.cfg.tests.worktree.pool > 0 ? takeFromPool(this.wt, base, branch) : null;
       if (pooled) this.emit('worktree.pooled', { issue: n, name: pooled.name });
-      const { path, setupErrors } = pooled ? { path: pooled.path, setupErrors: [] as string[] } : createWorktree(this.wt, name, branch, base);
+      let wtName = pooled ? pooled.name : name;
+      // A reassign starts the attempts again in a fresh worktree.
+      let { path, setupErrors } = pooled ? { path: pooled.path, setupErrors: [] as string[] } : createWorktree(this.wt, name, branch, base);
       if (setupErrors.length) throw new Error(`worktree setup failed: ${setupErrors.join('; ')}`);
       this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen });
 
@@ -678,8 +695,14 @@ export class Coordinator extends Optimizer {
       const repro = doneWhen.some((d) => 'repro' in d && d.repro) ? await this.reproduce(issue, doneWhen, base, path) : null;
       // The frozen test is off-limits to the worker: its hook denies writes to it.
       if (repro?.path) this.writeTask(taskFile, { id: `issue-${n}`, done_when: doneWhen, frozen: [repro.path] });
-      const maxAttempts = this.d.maxAttempts ?? 3;
+      // agents.yaml max_attempts (default 8), read from the live config; a test may set its own.
+      const maxAttempts = this.d.maxAttempts ?? this.d.cfg.agents.max_attempts ?? DEFAULT_MAX_ATTEMPTS;
       let feedback: string[] = [];
+      // Where every attempt starts: the base, with the frozen reproduction test when there is one. A reassign goes back here.
+      const start = this.git(path, 'rev-parse', 'HEAD');
+      // Once reassigned (src/coordinator/loop-control.ts), the task's attempts run on the escalated model.
+      let escalate = reassigned(this.events(n));
+      const failed = (attempt: number, kind: FailureKind, text: string) => this.emit('attempt.failed', { issue: n, attempt, kind, fingerprint: failureFingerprint(kind, text).slice(0, 200) });
       // The push limits the last attempt hit, if that's why it was rejected: the block then lists them.
       let refused: string[] | null = null;
       // Attempts are counted from the log, so a restart or an emergency stop's requeue continues the count
@@ -697,10 +720,36 @@ export class Coordinator extends Optimizer {
           this.emit('optimize.result', { issue: n, target: optimizing.target ?? '', head: null, outcome: 'discarded', why, before: optimizing.baseline, after: null, gain: null, pct: null, noise: null });
           return await this.optimizeDiscard(n, why, optimizing.baseline);
         }
-        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan, 0, noOpenModel);
+        // The issue's budget: an incident at 85%, stopped at 100%.
+        const budget = this.taskBudget(n);
+        if (budget.raised) budgetRaised = true;
+        if (budget.level === 'over') return await this.block(n, owner, `stopped at its budget: ${budget.detail}. Raise agents.yaml budget, or label it \`ready\` again to start over with a fresh budget.`);
+        // The same failure IDENTICAL_FAILURES times in a row: no more attempts down that road. Reassigned once (a
+        // fresh worktree, the escalated model); the second time it is blocked.
+        const streak = identicalStreak(this.events(n));
+        if (streak.count >= IDENTICAL_FAILURES) {
+          if (escalate) return await this.block(n, owner, `the same failure ${streak.count} times in a row, again after a reassign to a fresh worktree and the escalated model: ${streak.fingerprint}`);
+          try {
+            removeWorktree(this.wt, wtName);
+          } catch {
+            // not ours or already gone: the fresh one replaces it either way
+          }
+          ({ path, setupErrors } = createWorktree(this.wt, name, branch, start));
+          wtName = name;
+          if (setupErrors.length) throw new Error(`worktree setup failed: ${setupErrors.join('; ')}`);
+          escalate = true;
+          this.emit('task.reassigned', { issue: n, attempt, fingerprint: streak.fingerprint!.slice(0, 200), repeats: streak.count, model: this.buildModelFor(issue, attempt, noOpenModel, true) });
+          await this.d.backlog.comment(n, `[${BRAND.cli}] The same failure ${streak.count} times in a row (${streak.fingerprint}): starting again from \`${start.slice(0, 8)}\` in a fresh worktree, on the escalated model.`);
+          feedback = [`Earlier attempts failed the same way ${streak.count} times in a row (${streak.fingerprint}); their work was discarded. Take a different approach.`];
+        }
+        // Before a retry: a short read-only look at why the last attempt failed, for this attempt's brief.
+        if (feedback.length && attempt > 1) feedback = [...feedback, ...(await this.reflect(issue, doneWhen, path, start, feedback, attempt))];
+        const left = timeLeftMs(taskUsage(this.events(n)), this.d.cfg.agents.budget);
+        const out = await this.build(issue, doneWhen, path, taskFile, repro, feedback, attempt, plan, 0, noOpenModel, { escalate, ...(left !== null ? { timeoutMs: Math.max(60_000, Math.min(left, this.commandTimeoutMs)) } : {}) });
         if (out.stop) return;
         // Stopped by the stuck-run guard: a failed attempt, whatever it committed.
         if (out.stuck) {
+          failed(attempt, 'stuck', out.stuck);
           feedback = stuckFeedback(out.stuck);
           continue;
         }
@@ -712,6 +761,7 @@ export class Coordinator extends Optimizer {
           const done = await this.confirmNoChange(n, owner, path, base, head, doneWhen, repro, out.noChange);
           if (done.confirmed) return;
           this.emit('change.rejected', { issue: n, why: done.why });
+          failed(attempt, 'rejected', done.why);
           feedback = [`Your previous attempt was rejected: ${done.why}`];
           continue;
         }
@@ -729,16 +779,19 @@ export class Coordinator extends Optimizer {
         }
         if ('rejected' in change) {
           this.emit('change.rejected', { issue: n, why: change.rejected });
+          failed(attempt, 'rejected', change.rejected);
           feedback = [`Your previous attempt was rejected: ${change.rejected}`];
           continue;
         }
         const checks = await this.verify(n, path, head, doneWhen, repro);
         if (checks.some((c) => c.status !== 'pass')) {
+          this.emit('attempt.failed', { issue: n, attempt, kind: 'checks', fingerprint: checksFingerprint(checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped')).slice(0, 200) });
           feedback = [`Independent checks failed on your last attempt:`, ...checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped').map((c) => `- ${c.check}: ${c.status}\n${c.tail}`)];
           continue;
         }
         const verdict = await this.evaluate(issue, doneWhen, path, base, head, change.patchHash, checks, repro, change.tampered, change.files);
         if (!verdict.patch_correct && attempt < maxAttempts) {
+          failed(attempt, 'evaluator', verdict.advice);
           feedback = [`The independent evaluator rejected your change: ${verdict.advice}`];
           continue;
         }
@@ -794,6 +847,73 @@ export class Coordinator extends Optimizer {
       await this.d.backlog.comment(n, `[${BRAND.cli}] Stopped by an emergency stop; requeued from the start once it is lifted.`);
     } finally {
       clearInterval(heartbeat);
+      if (budgetRaised) this.d.incidents?.resolveIncident(TASK_BUDGET_INCIDENT, `${this.d.instance}#${n}`);
+    }
+  }
+
+  /**
+   * The issue's runs against its agents.yaml budget (src/coordinator/loop-control.ts). Each level is recorded once
+   * per reset, and the incident is raised once, when the first is (`raised`: it is open).
+   */
+  private taskBudget(n: number): { level: 'ok' | 'warn' | 'over'; detail: string; raised: boolean } {
+    const events = this.events(n);
+    const usage = taskUsage(events);
+    const s = budgetState(usage, this.d.cfg.agents.budget);
+    if (s.level === 'ok') return { level: 'ok', detail: '', raised: false };
+    const recorded = sinceReset(events).filter((e) => e.type === 'task.budget').map((e) => (e.payload as { level: string }).level);
+    if (!recorded.includes(s.level)) this.emit('task.budget', { issue: n, level: s.level, share: Math.round(s.share * 1000) / 1000, tokens: Math.round(usage.tokens), minutes: Math.round(usage.minutes * 10) / 10, detail: s.detail.slice(0, 500) });
+    if (!recorded.length) this.d.incidents?.raiseIncident(TASK_BUDGET_INCIDENT, `${this.d.instance}#${n}`, `Issue #${n} has used ${s.detail}`, s.level === 'over' ? `It was stopped; raise agents.yaml budget or label #${n} ready again.` : `It is stopped at 100%; raise agents.yaml budget if it should go on.`);
+    return { level: s.level, detail: s.detail, raised: true };
+  }
+
+  /** A build's model: as routed for the attempt, or escalated once the task was reassigned. */
+  private buildModelFor(issue: Issue, attempt: number, noOpenModel: boolean, escalate: boolean): string {
+    return buildRoute(this.d.cfg, issue.labels, escalate ? Math.max(attempt, modelRouting(this.d.cfg.agents).escalate_after + 1) : attempt, noOpenModel).model;
+  }
+
+  /**
+   * Before a retry: a short read-only run on the cheap tier (model routing's `reflection`) reads why the last attempt
+   * failed and the change it left, and says what failed and what to change; that goes into the next attempt's brief.
+   * Its cost counts toward the issue's budget. A failed reflection never stops the task: the attempt goes on without it.
+   */
+  private async reflect(issue: Issue, doneWhen: DoneWhenList, path: string, start: string, feedback: string[], attempt: number): Promise<string[]> {
+    const n = issue.number;
+    const { model, route } = runRoute(this.d.cfg, 'reflection');
+    const earlier = sinceReset(this.events(n)).filter((e) => e.type === 'attempt.failed').map((e) => (e.payload as { fingerprint: string }).fingerprint).slice(0, -1);
+    let changed = '';
+    try {
+      changed = this.git(path, 'diff', '--stat', start).slice(0, 3000);
+    } catch {
+      // no diff to show: the brief says so
+    }
+    const began = Date.now();
+    try {
+      const r = await this.d.runner.run({
+        env: this.projectEnv(),
+        role: 'reflection',
+        ...laneOf(issue),
+        stateDir: this.d.stateDir,
+        prompt: reflectionBrief(issueBrief(issue, doneWhen), feedback, earlier, changed),
+        appendSystemPrompt: rolePrompt(this.d.cfg, 'reflection'),
+        cwd: path,
+        model,
+        route,
+        allowedTools: ['Read', 'Glob', 'Grep'],
+        disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'],
+        maxTurns: 15,
+        maxBudgetUsd: Math.min(1, Math.max(0.1, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+        jsonSchema: REFLECTION_SCHEMA,
+        stallMs: 5 * 60_000,
+        timeoutMs: Math.min(15 * 60_000, this.commandTimeoutMs),
+      });
+      this.cost(n, 'reflection', r.durationMs === undefined ? { ...r, durationMs: Date.now() - began } : r);
+      const lines = r.reason === 'succeeded' ? reflectionFeedback(r.structured as { what_failed?: unknown; what_to_change?: unknown } | undefined) : [];
+      this.emit('attempt.reflected', { issue: n, attempt, model, ok: lines.length > 0, ...(lines.length ? {} : { why: (r.reason === 'succeeded' ? 'no what_failed / what_to_change in its output' : `${r.reason}: ${r.detail}`).slice(0, 500) }) });
+      return lines;
+    } catch (e) {
+      if (e instanceof StoppedByOwner || e instanceof Halted || e instanceof ShuttingDown || e instanceof UsagePaused) throw e;
+      this.emit('attempt.reflected', { issue: n, attempt, model, ok: false, why: (e as Error).message.slice(0, 500) });
+      return [];
     }
   }
 
@@ -898,12 +1018,13 @@ export class Coordinator extends Optimizer {
     }
   }
 
-  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0, noOpenModel = false): Promise<BuildOut> {
+  private async build(issue: Issue, doneWhen: DoneWhenList, path: string, taskFile: string, repro: { path: string } | null, feedback: string[], attempt: number, plan: Plan | null = null, researched = 0, noOpenModel = false, more: { escalate?: boolean; timeoutMs?: number } = {}): Promise<BuildOut> {
     const n = issue.number;
     const role = this.d.cfg.agents.roles.workers!;
     // Routed (src/model-routing.ts): the high-risk model for an L3 or high-risk issue, or once `escalate_after`
-    // attempts have failed; the build model otherwise (an open model only on the default route, src/providers.ts).
-    const { model, route } = buildRoute(this.d.cfg, issue.labels, attempt, noOpenModel);
+    // attempts have failed (or the task was reassigned); the build model otherwise (an open model only on the default
+    // route, src/providers.ts).
+    const { model, route } = buildRoute(this.d.cfg, issue.labels, more.escalate ? Math.max(attempt, modelRouting(this.d.cfg.agents).escalate_after + 1) : attempt, noOpenModel);
     const remaining = Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday());
     const { runner, checks } = this.d.cfg.tests;
     const extra = [
@@ -934,14 +1055,16 @@ export class Coordinator extends Optimizer {
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
-      timeoutMs: this.commandTimeoutMs,
+      // Within the issue's time budget, when it has one.
+      timeoutMs: more.timeoutMs ?? this.commandTimeoutMs,
       onStart: (p) => {
         pid = p;
         this.emit('run.started', { issue: n, role: 'worker', model, worktree: path, pid: p, pgid: p, attempt, ...(researched ? { resumed: 'research' as const } : {}) });
       },
     });
     void pid;
-    this.cost(n, 'worker', r);
+    // The run's time counts toward the issue's budget even when claude reported none (a timeout, a stop).
+    this.cost(n, 'worker', r.durationMs === undefined ? { ...r, durationMs: Date.now() - started } : r);
     // Its session is kept: a fix run on this issue's PR resumes it (src/coordinator/fix-runs.ts).
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000), ...(r.sessionId && SESSION_ID.test(r.sessionId) ? { session: r.sessionId } : {}) });
     const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown; intent?: string; risk_class?: RiskClass };
@@ -973,7 +1096,7 @@ export class Coordinator extends Optimizer {
     // attempt resumes with the answer (or why there is none) in its brief. Past the limit, its output stands as is.
     if (s.research_request && researched < MAX_REQUESTS_PER_TASK) {
       const section = await this.answerResearch(issue, s.research_request, path, 'worker');
-      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1, noOpenModel);
+      return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1, noOpenModel, more);
     }
     if (s.ask) {
       await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '', ...(s.ask.detail ? [`${RECOMMENDATION_PREFIX}${s.ask.detail}`] : [])]);

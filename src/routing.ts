@@ -19,6 +19,8 @@ export const ROUTING = {
   intake_thread: { default: 'sonnet' as string, task: 'questions and picks in a decision thread' },
   stage_judge: { default: 'sonnet' as string, task: 'the stage-label judge' },
   eval_answer: { default: 'sonnet' as string, task: 'eval answers' },
+  // WHY: a few lines from a rejection and a diff: the cheap tier (#338).
+  reflection: { default: 'haiku' as string, task: "the read-only reflection before a worker's retry" },
   eval_cheap: { default: 'sonnet' as string, task: 'the evaluator, for changes at eval_cheap_levels' },
   eval_cheap_levels: { default: ['L0'] as Level[], task: 'review levels judged by eval_cheap (the rest: the evaluator role\'s model)' },
   eval_escalate: { default: true as boolean, task: 'a failed or uncertain eval_cheap verdict is judged once more by the evaluator role\'s model' },

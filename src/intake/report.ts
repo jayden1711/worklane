@@ -4,7 +4,7 @@
 // repo, so no agent can read who is trusted or change it. See docs/intake.md.
 import { z } from 'zod';
 
-export const SOURCES = ['discord', 'bug-store', 'alerts'] as const;
+export const SOURCES = ['discord', 'bug-store', 'alerts', 'github'] as const;
 export type Source = (typeof SOURCES)[number];
 
 /** Who sent it, as the source identifies them: a Discord user id, a store row's reporter id, or an alert's kind. */
@@ -95,6 +95,8 @@ export const IntakeConfig = z.strictObject({
       'bug-store': z.array(z.string().min(1)).default([]),
       /** Production alert kinds whose reports are filed `ready`; every other kind's draft is an Inbox decision. */
       alerts: z.array(z.string().min(1)).default([]),
+      // WHY: GitHub logins compare case-insensitively; the github source lowercases the author too.
+      github: z.array(z.string().regex(GITHUB_LOGIN, 'a GitHub login').transform((l) => l.toLowerCase())).default([]),
     })
     .prefault({}),
   /** One server only: messages from any other server, and every direct message, are dropped unstored. */
@@ -206,6 +208,14 @@ export const IntakeConfig = z.strictObject({
           window_minutes: z.number().int().min(1).max(10_080).default(60),
         })
         .prefault({}),
+    })
+    .prefault({}),
+  // WHY: off by default; when on, outsiders' issues reach work only through triage and the trust policy (decide.ts).
+  github: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      // INVARIANT: at least a minute between listings, so the intake timer never polls GitHub on every pass.
+      poll_minutes: z.number().int().min(1).max(1440).default(5),
     })
     .prefault({}),
   /**

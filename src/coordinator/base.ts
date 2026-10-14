@@ -43,7 +43,7 @@ export abstract class CoordinatorBase {
   protected get wt(): WorktreeOptions {
     const cacheEnv = this.depCacheEnv();
     // The setup steps as the config now says (it follows the default branch); the root is fixed at start.
-    return { ...this.wtBase, setup: this.d.cfg.tests.worktree.setup, env: this.projectEnv(), ...(cacheEnv ? { cacheEnv } : {}) };
+    return { ...this.wtBase, setup: this.d.cfg.tests.worktree.setup, env: this.projectEnv(), sparseExclude: this.d.cfg.tests.checkout.sparse_exclude, ...(cacheEnv ? { cacheEnv } : {}) };
   }
 
   protected active = new Map<number, Promise<void>>();
