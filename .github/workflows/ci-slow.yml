@@ -472,12 +472,14 @@ jobs:
     # manifest flow's, served by scripts/ci/fake-github.mjs): a first run stops at the App step (no hub yet) naming its
     # retry; the App by hand (credentials.sh github-app), then the rerun goes on from there with a stand-in Claude
     # token: the checkout cloned through the App's credential helper, the coordinator's service active, the machine
-    # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step.
+    # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step. Last,
+    # with the hub up, another instance gets its App through the manifest flow itself (wizard screen 5), GitHub's
+    # conversion faked: no real App is made.
     name: add-project (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -519,11 +521,12 @@ jobs:
           git -C "$f/seed" init -q -b main && git -C "$f/seed" add -A
           git -C "$f/seed" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
           git -C "$f/seed" push -q "$f/git/example/alpha.git" main
-          nohup node scripts/ci/fake-github.mjs "$GITHUB_WORKSPACE/dist" 8999 "$f/git" example/alpha "$f/requests.log" > "$f/server.log" 2>&1 &
+          # The App's key, as one would download it (the fake checks the JWT's App id, not its signature); a manifest
+          # conversion on the fake returns this same key.
+          openssl genrsa -traditional -out "$f/app.pem" 2048 2>/dev/null || openssl genrsa -out "$f/app.pem" 2048
+          nohup node scripts/ci/fake-github.mjs "$GITHUB_WORKSPACE/dist" 8999 "$f/git" example/alpha "$f/requests.log" "$f/app.pem" > "$f/server.log" 2>&1 &
           for _ in $(seq 1 30); do curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null && break; sleep 1; done
           curl -sf "$GH_FAKE/repos/example/alpha"
-          # The App's key, as one would download it (the fake checks the JWT's App id, not its signature).
-          openssl genrsa -traditional -out "$f/app.pem" 2048 2>/dev/null || openssl genrsa -out "$f/app.pem" 2048
           echo "F=$f" >> "$GITHUB_ENV"
           # The fake is reached through these, as the engine reads them: kept through sudo, and set for the units.
           printf 'Defaults env_keep += "WORKLANE_GITHUB_API WORKLANE_GITHUB_WEB"\n' > "$f/sudoers" && sudo visudo -cf "$f/sudoers" && sudo install -m 0440 "$f/sudoers" /etc/sudoers.d/ci-fake-github
@@ -545,7 +548,9 @@ jobs:
           [ "$rc" = 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
           jq -e 'select(.step=="instance" and .state=="done")' "$F/run1.jsonl" >/dev/null
           last="$(tail -n 1 "$F/run1.jsonl")"
-          jq -e '.step=="app" and .state=="failed" and (.detail|test("no dashboard hub")) and (.retry|test("add-project.sh ci example/alpha .*credentials.sh ci github-app"))' <<<"$last"
+          jq -e '.step=="app" and .state=="failed" and (.detail|test("no dashboard hub")) and (.detail|test("manifest flow")) and (.retry|test("add-project.sh ci example/alpha .*worklane app-manifest ci example/alpha$"))' <<<"$last"
+          # Manifest only: the App step never sends anyone off to make an App by hand.
+          if jq -e '(.detail + " " + .retry) | test("by hand|credentials.sh")' <<<"$last"; then echo "the App step still names the manual way" >&2; exit 1; fi
           id wl-ci && id wl-ci-agent
       - name: the App by hand (the manual way), then the rerun goes on from the App step to the end
         run: |
@@ -757,6 +762,56 @@ jobs:
           set +e; sudo -H -u wl-gamma worklane doctor --mode server --instance gamma --root /srv/worklane/gamma/gamma > "$F2/doctor2.log" 2>&1; set -e
           cat "$F2/doctor2.log"
           for s in tools claude github repo-config coordinator protection; do grep -q "^ok    setup $s: " "$F2/doctor2.log"; done
+      # Wizard screen 5: the agents' App through GitHub's manifest flow, for a new instance (delta), with the real hub,
+      # add-project.sh as root and the machine owner's browser played by scripts/ci/manifest-browser.mjs. The fake GitHub
+      # stands in for GitHub's side (the one-time code and its conversion); nothing is created on GitHub.
+      - name: "the agents' App through the manifest flow: add-project.sh as root, the hub's callback from a signed-in machine owner, GitHub's conversion faked"
+        run: |
+          sudo bash scripts/setup/machine-owners.sh --first ci-owner
+          jq -e '.owners | index("ci-owner") != null' /etc/worklane/machine-owners.json
+          systemctl is-active worklane-dashboard-hub.service
+          for u in worklane-delta worklane-dashboard-delta; do
+            sudo install -d "/etc/systemd/system/$u.service.d"
+            printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE" "$GH_FAKE" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
+          done
+          ( set +e; sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh delta example/alpha --timeout 3 < "$F/claude-token" > "$F/run4.jsonl" 2> "$F/run4.err"; echo "$?" > "$F/run4.rc" ) &
+          node scripts/ci/manifest-browser.mjs "$GITHUB_WORKSPACE/dist" http://127.0.0.1:4399 https://hub.example.test "$GH_FAKE" ci-owner "$F/run4.jsonl" "$F/manifest-code" || { cat "$F/run4.jsonl"; tail -n 40 "$F/run4.err"; exit 1; }
+          wait
+          cat "$F/run4.jsonl"
+          [ "$(cat "$F/run4.rc")" = 0 ] || { tail -n 60 "$F/run4.err"; exit 1; }
+          jq -se 'map(select(.state=="failed")) | length == 0' "$F/run4.jsonl"
+          jq -se 'map(select(.step=="app" and .state=="ask" and .ask.kind=="approve_link")) | length == 2' "$F/run4.jsonl"
+          jq -se 'map(select(.step=="app" and .state=="done" and (.detail|test("made through the manifest flow$")))) | length == 1' "$F/run4.jsonl"
+          grep -q '^POST /app-manifests/<code>/conversions$' "$F/requests.log"
+      - name: "the App's key, client secret and webhook secret: the coordinator's own 0400 files, nobody else's, and in no output, log or journal"
+        run: |
+          h="$(getent passwd wl-delta | cut -d: -f6)"; d="$h/.config/delta-app"
+          [ "$(sudo stat -c '%U %a' "$d")" = "wl-delta 700" ] || { sudo stat -c '%U %a' "$d"; exit 1; }
+          for f in private-key.pem client-secret webhook-secret; do
+            [ "$(sudo stat -c '%U %a' "$d/$f")" = "wl-delta 400" ] || { sudo stat -c '%n %U %a' "$d/$f"; exit 1; }
+          done
+          # What GitHub's conversion returned, as the fake has it, for comparing and for the leak check below.
+          node --input-type=module -e 'const f = await import(process.argv[1]); process.stdout.write(f.APP_SECRET + "\n" + f.WEBHOOK_SECRET + "\n");' "file://$GITHUB_WORKSPACE/dist/test/fake-github.js" > "$F/app-secrets"
+          sudo cat "$d/private-key.pem" | cmp - "$F/app.pem"
+          sudo cat "$d/client-secret" | cmp - <(sed -n 1p "$F/app-secrets" | tr -d '\n')
+          sudo cat "$d/webhook-secret" | cmp - <(sed -n 2p "$F/app-secrets" | tr -d '\n')
+          for u in wl-dash wl-delta-agent wl-ci; do
+            for f in private-key.pem client-secret webhook-secret; do
+              if sudo -u "$u" test -r "$d/$f"; then echo "$u can read $d/$f" >&2; exit 1; fi
+            done
+          done
+          [ "$(sudo cat "$d/made-by")" = manifest ]
+          sudo node -e 'const y=require("/opt/worklane/current/node_modules/yaml");const g=y.parse(require("fs").readFileSync(process.argv[1],"utf8")).github;if(!(g.kind==="app"&&g.app_id===91&&g.installation_id===4242&&g.key_path===process.argv[2]))process.exit(1)' "$h/.local/state/worklane/instances/delta/credentials.yaml" "$d/private-key.pem"
+          # The checkout came through that App (its key signed for the installation token), and the coordinator runs.
+          sudo test -f /srv/worklane/delta/alpha/.worklane/config.yaml
+          systemctl is-active worklane-delta.service
+          # Never echoed: the secrets, a line of the key and the one-time code are in no output of the run, no file the
+          # machine keeps about it, and no unit's journal.
+          { cat "$F/app-secrets"; sed -n 2p "$F/app.pem"; cat "$F/manifest-code"; } > "$F/never"
+          [ "$(grep -c . "$F/never")" = 4 ]
+          if grep -qFf "$F/never" "$F/run4.jsonl" "$F/run4.err" "$F/requests.log" "$F/server.log"; then echo "a secret or the code was echoed" >&2; exit 1; fi
+          if sudo grep -qFf "$F/never" /var/lib/worklane/machine-changes.jsonl "$h/.local/state/worklane/instances/delta/credentials.yaml" || sudo journalctl --no-pager | grep -qFf "$F/never"; then echo "a secret or the code reached a log" >&2; exit 1; fi
+          if sudo grep -rqFf "$F/never" /etc/systemd/system /var/lib/worklane; then echo "a secret or the code reached a unit or the machine's state" >&2; exit 1; fi
       - name: the units and the fake's log, on failure
         if: failure()
         run: |
