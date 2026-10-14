@@ -294,6 +294,8 @@ const heldSha = 'b'.repeat(40);
 writeFileSync(HELD, `${JSON.stringify({ sha: heldSha, at: new Date(Date.now() - 60_000).toISOString(), failed: ['worklane-ci.service: failed'] })}\n`, { mode: 0o644 });
 const heldBytes = sha(HELD);
 const heldNotes = [];
+const switched = [];
+let heldCurrent = 'a'.repeat(40);
 const heldRun = async () => {
   let current = 'a'.repeat(40);
   let clock = 0;
@@ -304,12 +306,12 @@ const heldRun = async () => {
     installedVersion: () => '1.0.0',
     verifyRelease: () => ({ ok: true, base: 'c'.repeat(40) }),
     exec: (file, args) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\trefs/tags/v1.0.9\n${heldSha}\trefs/tags/v1.0.9^{}\n` : file === 'git' ? `${heldSha}\trefs/heads/main\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-ci-standin.service loaded active running x\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n' : ''),
-    fetchJson: async (url) => (url.includes('/compare/') ? { status: 'ahead', behind_by: 0, ahead_by: 1, total_commits: 1, commits: [{ sha: heldSha, parents: [{ sha: current }], commit: { committer: { date: new Date(0).toISOString() } } }] } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
+    fetchJson: async (url) => (url.includes('/compare/') ? { status: 'ahead', behind_by: 0, ahead_by: 1, total_commits: 1, commits: [{ sha: heldSha, parents: [{ sha: current }], commit: { committer: { date: new Date(0).toISOString() } } }] } : { check_runs: (JSON.parse(readFileSync(CONFIG, 'utf8')).required_checks || []).map((name, id) => ({ name, status: 'completed', conclusion: 'success', started_at: '1', id })) }),
     slots: () => [],
     alive: () => false,
     installTree: () => {},
     syncHelpers: () => [],
-    switchTo: (s) => (current = s),
+    switchTo: (s) => (switched.push(s), (current = s), (heldCurrent = s)),
     now: () => clock,
     sleep: async (ms) => void (clock += ms),
     log: () => {},
@@ -329,12 +331,14 @@ console.log(`OK: a rolled-back commit stayed held through set-update-channel rel
 const released = sh('bash', [script, '--release-hold']);
 assert.ok(released.includes(`held: ${heldSha.slice(0, 12)}`) && released.includes('released:'), released);
 assert.ok(!existsSync(HELD) && existsSync('/var/lib/worklane/update-held.released.json'));
-// The next run gets past the hold. (What it does after that, waiting on the sandbox check or installing, is other code's.)
+// The next run installs the released commit: every required check green on it (the stand-in answers for each name
+// updates.json requires), switched to it, the result 'installed'.
 heldNotes.length = 0;
 const afterRelease = await heldRun();
-assert.notEqual(afterRelease, 'held');
-assert.ok(!heldNotes.some((n) => n.event === 'held'), JSON.stringify(heldNotes));
-console.log(`OK: sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold released it; the next run was no longer held (it returned ${afterRelease}${heldNotes.length ? `: ${heldNotes.at(-1).reason}` : ''})`);
+assert.equal(afterRelease, 'installed', JSON.stringify(heldNotes));
+assert.deepEqual(switched, [heldSha], 'switchTo was called with the released commit');
+assert.equal(heldCurrent, heldSha, 'current is the released commit');
+console.log(`OK: sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold released it; the next run installed ${heldSha.slice(0, 12)} (run() returned ${afterRelease}; switchTo ${switched[0].slice(0, 12)}; current ${heldCurrent.slice(0, 12)})`);
 writeFileSync(CONFIG, `${JSON.stringify({ ...JSON.parse(readFileSync(CONFIG, 'utf8')), enabled: false })}\n`);
 
 // ---- the signer rules and this runner's sudo
