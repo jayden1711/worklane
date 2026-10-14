@@ -145,7 +145,7 @@ export abstract class Intake extends QuickReplies {
       const batch = inbound.filter((r) => !r.thread || r.thread.kind === 'channel');
       for (const r of batch) {
         // Paused on the usage limit: the report isn't taken (so not acknowledged); it comes again after the reset.
-        if (this.halt.signal.aborted || this.stopped || this.usagePause()) break;
+        if (this.halt.signal.aborted || this.stopped || this.usagePause() || this.diskHeld()) break;
         try {
           await this.intakeReport(cfg, r);
         } catch (e) {

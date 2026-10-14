@@ -68,6 +68,7 @@ import { MergePosts } from './merge-posts.js';
 import { CiMetrics } from './ci-metrics.js';
 import { redactPii } from './intake/redact.js';
 import { scrub, takeOpsPost } from './watchdog/post.js';
+import { storageFailure } from './events/log.js';
 
 export type { CoordinatorDeps } from './coordinator/shared.js';
 export { logTail } from './coordinator/shared.js';
@@ -357,6 +358,8 @@ export class Coordinator extends HarnessEvals {
       if (this.halt.signal.aborted || this.stopped) return refuse('agents are stopped');
       const paused = this.usagePause();
       if (paused) return refuse(`paused on the Claude usage limit until ${resetWords(paused.resetAt, this.nowMs())}; it resumes on its own then`);
+      const disk = this.diskHeld();
+      if (disk) return refuse(`paused: ${disk}; it resumes on its own once there is room`);
       const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
       if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
       const events = this.d.log.read();
@@ -485,6 +488,12 @@ export class Coordinator extends HarnessEvals {
     const paused = this.usagePause();
     if (paused) {
       this.noteHold({ reason: `paused on the Claude usage limit until ${paused.resetAt}`, load: null, freeDiskPct: null });
+      return 0;
+    }
+    // WHY: a full disk, or one below its floor (src/disk-guard.ts): nothing new starts until there is room.
+    const disk = this.diskHeld();
+    if (disk) {
+      this.noteHold({ reason: `paused: ${disk}`, load: null, freeDiskPct: null });
       return 0;
     }
     if (!inRunWindow(this.d.cfg.project.agent_runtime.run_windows, this.d.now?.() ?? new Date())) {
@@ -744,8 +753,13 @@ export class Coordinator extends HarnessEvals {
     if (!issue.assignees.length) await this.d.backlog.setAssignees(n, [owner]);
     await this.d.backlog.comment(n, `[${BRAND.cli}] Claimed by \`${this.d.instance}\` (owner @${owner}, agent delegate: worker). Base \`${base.slice(0, 8)}\`, lease \`${leaseSha.slice(0, 8)}\`.`);
     const heartbeat = setInterval(() => {
-      const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
-      if (next) leaseSha = next;
+      try {
+        const next = renew({ ...lease, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString() }, leaseSha, { repo: this.d.repo, remote: this.remote });
+        if (next) leaseSha = next;
+      } catch (e) {
+        // WHY: a full disk fails the lease commit; thrown from a timer it would kill the coordinator. The next beat renews.
+        if (!storageFailure(e)) throw e;
+      }
     }, 20 * 60_000);
     heartbeat.unref();
 

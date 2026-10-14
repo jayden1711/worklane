@@ -22,7 +22,9 @@ import { Coordinator } from './coordinator.js';
 import { backup, dirStore } from './events/backup.js';
 import { maybeOffsiteBackup, OFFSITE_FILE } from './offsite-backup.js';
 import { tidyState } from './state-tidy.js';
-import { EventLog } from './events/log.js';
+import { EventLog, storageFailure } from './events/log.js';
+import { DiskGuard, startDiskGuard, TEST_RUN_BASE } from './disk-guard.js';
+import { watchdogConfig } from './watchdog/config.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
@@ -310,11 +312,27 @@ export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: n
   const agentTasks = commandsAs ? { dir: join(dirname(root), 'tasks'), gid: statSync(root).gid } : undefined;
   // Before anything reads or writes it: state/ as this engine keeps it, whatever an older engine left.
   const tidied = tidyState(state, agentTasks ? { agentTasksDir: agentTasks.dir } : {});
-  const log = new EventLog(site.logPath);
+  // INVARIANT: a write the full disk refuses never kills the coordinator: it waits in memory, in order, and the disk
+  // guard writes it again, holds new work meanwhile, and raises the disk_full incident (src/disk-guard.ts).
+  const log = new EventLog(site.logPath, { buffer: {} });
+  let inFlight = (): number | undefined => undefined;
+  const disk = new DiskGuard({
+    log,
+    instance: instanceId(),
+    paths: [state, ...(opts.testRun ? [TEST_RUN_BASE] : [])],
+    floor: () => {
+      const c = watchdogConfig();
+      return { gb: c.minFreeGb, pct: c.minFreePct };
+    },
+    ...(opts.incidents ? { incidents: {} } : {}),
+    inFlight: () => inFlight(),
+  });
+  const stopDisk = startDiskGuard(disk);
   // land_mode direct pushes the default branch itself: never on a branch GitHub doesn't protect (direct-land.ts).
   const refused = await directLandStartGate({ landMode: cfg.project.land_mode, api: opts.protection, local: localRemote(root, 'origin'), repo: cfg.project.project.repo, branch: cfg.project.project.default_branch, label: opts.label ?? 'coordinator', log, actor: instanceId() });
   if (refused) {
     console.error(refused);
+    stopDisk();
     log.close();
     lock.lock.release();
     return 1;
@@ -328,11 +346,12 @@ export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: n
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
   // The coordinator's own test runs of every PR (tests.yaml test_run). While the sandbox's check fails they are set up
   // but refuse every run, and the check is run again until it passes (src/testrun/sandbox-watch.ts).
-  const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
+  const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state, hold: () => disk.held() }) : undefined;
   // The pre-deploy gate (tests.yaml deploy_gate): only through the test runs just set up, and only while their sandbox's check passes.
   const deployGate = opts.testRun ? setupDeployGate(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state, testRunsReady: !!testRuns, ...(opts.incidents ? { incidents: opts.incidents } : {}) }) : undefined;
   const previews = opts.testRun ? setupPreviews(cfg, opts.testRun, { log, actor: instanceId(), stateDir: state }) : undefined;
-  const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(deployGate ? { deployGate } : {}), ...(previews ? { previews } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.mergePosts ? { mergePosts: opts.mergePosts } : {}), ...(opts.ciMetrics ? { ciMetrics: opts.ciMetrics } : {}),...(opts.protection ? { protection: opts.protection } : {}), ...(opts.incidents ? { incidents: opts.incidents } : {}), ...(opts.accountSwitched ? { accountSwitched: opts.accountSwitched } : {}), ...(opts.liveConfig ? { liveConfig: opts.liveConfig } : {}), ...(opts.superfan ? { superfan: opts.superfan } : {}) });
+  const coordinator = new Coordinator({ disk, cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(deployGate ? { deployGate } : {}), ...(previews ? { previews } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.mergePosts ? { mergePosts: opts.mergePosts } : {}), ...(opts.ciMetrics ? { ciMetrics: opts.ciMetrics } : {}),...(opts.protection ? { protection: opts.protection } : {}), ...(opts.incidents ? { incidents: opts.incidents } : {}), ...(opts.accountSwitched ? { accountSwitched: opts.accountSwitched } : {}), ...(opts.liveConfig ? { liveConfig: opts.liveConfig } : {}), ...(opts.superfan ? { superfan: opts.superfan } : {}) });
+  inFlight = () => coordinator.pending().filter((p) => !p.startsWith('tick step')).length;
   const version = (JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   log.append('coordinator.started', { instance: instanceId(), pid: process.pid, version }, instanceId());
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());
@@ -381,11 +400,21 @@ export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: n
   // The console's requests (message, stop), chat questions and intake (which pulls its sources on its own, slower
   // clock) are taken on the same short timer. Discord chat and decision-thread messages don't wait for it: each wakes
   // the coordinator as it arrives (src/coordinator/quick-replies.ts); this timer is their fallback.
+  // WHY: a full disk thrown from this timer (a state file it writes) would kill the process: said in the journal, and
+  // the next beat tries again. Anything else still throws, as before.
+  const diskOnly = (e: unknown) => {
+    if (!storageFailure(e)) throw e;
+    console.error(`coordinator: ${storageFailure(e)}; tried again in 5 s`);
+  };
   const watch = setInterval(() => {
-    coordinator.checkEmergency();
-    coordinator.checkConsole();
-    void coordinator.checkChat();
-    void coordinator.checkIntake();
+    try {
+      coordinator.checkEmergency();
+      coordinator.checkConsole();
+    } catch (e) {
+      diskOnly(e);
+    }
+    coordinator.checkChat().catch(diskOnly);
+    coordinator.checkIntake().catch(diskOnly);
   }, 5_000);
   watch.unref();
   watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
@@ -412,6 +441,13 @@ export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: n
     clearInterval(watch);
     watchdog?.stop();
     intake?.stop();
+    stopDisk();
+    // WHY: events still waiting for room get one last try; what can't be written is named in the journal, not lost silently.
+    const left = log.buffered().count;
+    if (left) {
+      const r = log.flush();
+      if (r.error) console.error(`coordinator: ${left} events couldn't be written before exit (${r.error}); they are lost`);
+    }
     log.close();
     lock.lock.release();
   }
