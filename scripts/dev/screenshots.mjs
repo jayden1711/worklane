@@ -69,9 +69,13 @@ const dash = await optional('dashboard.js');
 const ctx = await optional('guardrails/context.js');
 const record = await optional('run-record.js');
 const hubMod = await optional('dashboard-hub.js');
+const cdpMod = await optional('browser/cdp.js');
 const chat = await optional('chat.js');
 
-/** Start a dashboard process and wait for the URL it prints (with its token). */
+/**
+ * Start a dashboard process and wait for the URL it prints. The URL carries no key: the key is read from the file
+ * printed after it (an older engine put it on the URL as ?t=, which is still read).
+ */
 async function serve(args) {
   const p = cleanup.track(spawn(node, [cli, 'dashboard', ...args], { stdio: ['ignore', 'pipe', 'pipe'] }));
   let printed = '';
@@ -79,10 +83,10 @@ async function serve(args) {
     const t = setTimeout(() => fail(new Error(`no dashboard URL after 20 s:\n${printed}`)), 20_000);
     const on = (d) => {
       printed += d.toString();
-      const m = printed.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/);
+      const m = printed.match(/(http:\/\/127\.0\.0\.1:\d+)(?:\/\?t=([A-Za-z0-9_-]+)|\/? \(the page asks for the key once: it is in (.+)\))/);
       if (m) {
         clearTimeout(t);
-        done(m[0]);
+        done({ base: m[1], token: m[2] ?? readFileSync(m[3].trim(), 'utf8').trim() });
       }
     };
     p.stdout.on('data', on);
@@ -92,7 +96,7 @@ async function serve(args) {
       fail(new Error(`the dashboard exited (${code}): ${printed.trim().split('\n').slice(-2).join(' ')}`));
     });
   });
-  return { p, base: url.split('/?')[0], token: url.split('?t=')[1] };
+  return { p, ...url };
 }
 
 // Pull requests for the PR page (the demo lands directly, so it opens none): one waiting for a
@@ -322,8 +326,34 @@ const shots = [
   ...(inst ? [{ name: 'instance-settings', url: `${inst.base}/settings`, token: inst.token }, { name: 'instance-activity', url: `${inst.base}/activity`, token: inst.token }] : []),
 ];
 
-/** One screenshot. Chrome keeps running while the live stream is open, so it's stopped once the PNG is written. */
-async function shoot(url, file, theme) {
+/**
+ * One screenshot, through the DevTools protocol so the key can go in the tab's session storage (where the page's
+ * key form keeps it) instead of the URL, which the dashboard refuses. Chrome is stopped once the PNG is written.
+ */
+async function shoot(url, token, file, theme) {
+  if (cdpMod?.launchChrome) return shootCdp(url, token, file, theme);
+  // An engine without the DevTools helper: the old way, with the key on the URL (only such an engine accepts it).
+  return shootCli(`${url}${url.includes('?') ? '&' : '?'}t=${token}`, file, theme);
+}
+
+async function shootCdp(url, token, file, theme) {
+  rmSync(file, { force: true });
+  const b = await cdpMod.launchChrome(chrome, { width: 1440, height: 1000, extraArgs: ['--force-prefers-reduced-motion', ...(theme === 'dark' ? ['--force-dark-mode', '--blink-settings=preferredColorScheme=0'] : ['--blink-settings=preferredColorScheme=1'])] });
+  try {
+    await b.cdp.send('Page.enable');
+    await b.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `try { sessionStorage.setItem('dash-token', ${JSON.stringify(token)}); } catch {}` });
+    await b.cdp.send('Page.navigate', { url });
+    // A fixed wait for the page to render, not network idle (the live stream never idles).
+    await new Promise((r) => setTimeout(r, 4000));
+    const shot = await b.cdp.send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(file, Buffer.from(shot.data, 'base64'));
+  } finally {
+    await b.close();
+  }
+  return existsSync(file) && statSync(file).size > 0;
+}
+
+async function shootCli(url, file, theme) {
   const profile = mkdtempSync(join(tmpdir(), 'dash-chrome-'));
   rmSync(file, { force: true });
   const c = cleanup.track(spawn(chrome, [
@@ -362,8 +392,7 @@ let failed = 0;
 for (const theme of ['light', 'dark']) {
   for (const s of shots) {
     const file = join(out, `${s.name}-${theme}.png`);
-    const sep = s.url.includes('?') ? '&' : '?';
-    if (await shoot(`${s.url}${sep}t=${s.token}`, file, theme)) console.log(`wrote ${file}`);
+    if (await shoot(s.url, s.token, file, theme)) console.log(`wrote ${file}`);
     else {
       failed++;
       console.error(`FAIL ${s.name} (${theme})`);

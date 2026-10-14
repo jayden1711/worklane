@@ -31,7 +31,7 @@ The dashboard never listens on the network. To open it from your laptop, forward
 ssh -N -L <port>:127.0.0.1:<port> <you>@<always-on-host>
 ```
 
-Then open the URL `dashboard.sh` printed (`http://127.0.0.1:<port>/?t=<token>`) on the laptop. The page moves the token out of the address bar on load. The token is stored in the instance's state directory, so it stays the same across restarts; delete `dashboard-token` there to issue a new one.
+Then open the URL `dashboard.sh` printed (`http://127.0.0.1:<port>/`) on the laptop. The page asks once for the dashboard key: it is the `dashboard-token` file in the instance's state directory, readable only by its user. The page sends it in the `Authorization` header, the live streams included, and keeps it in that browser tab only. A key never goes in a URL: any request whose URL carries one (`?t=`, `?token=`, `?key=` and the like, or the key's value under any name) is refused with a 401, on every route of the dashboard and the hub, so a key never ends up in history, proxy logs or a referrer. The key stays the same across restarts; delete `dashboard-token` to issue a new one.
 
 Each instance has its own port and token: run one `dashboard.sh` and one tunnel per instance.
 
@@ -122,11 +122,11 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 - `tailscale serve` forwards only port 4399, so every request on 4399 arrives from `127.0.0.1`. That's why the token is never accepted on 4399 at all: "from localhost" there would include every tailnet user.
 - Port 4398 also listens on `127.0.0.1` only, is never forwarded, and refuses any request carrying a proxy's headers (`Tailscale-User-Login`, `X-Forwarded-For`, `X-Forwarded-Proto`, `Forwarded` and the like), whatever its address. Don't point `tailscale serve` at it.
-- To use it from your laptop, tunnel to it over ssh and open the break-glass URL (the token is in `~wl-dash/.local/state/worklane/dashboard-hub/dashboard-token`):
+- To use it from your laptop, tunnel to it over ssh and open the break-glass URL; the page asks once for the key (it is in `~wl-dash/.local/state/worklane/dashboard-hub/dashboard-token`) and sends it in a header, never the URL:
 
   ```bash
   ssh -N -L 4398:127.0.0.1:4398 <you>@<always-on-host>
-  # then: http://127.0.0.1:4398/?t=<token>
+  # then: http://127.0.0.1:4398/  (give the key on the page)
   ```
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.

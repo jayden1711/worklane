@@ -469,7 +469,7 @@ test('the break-glass token: refused on the proxied port, through a proxy, or fr
     // The real loopback path: the owner.
     const st = (await (await fetch(`${s.glass}/api/i/a/state`, { headers: { authorization: `Bearer ${s.h.token}` } })).json()) as { role: string; via: string; user: string };
     assert.deepEqual([st.role, st.via, st.user], ['owner', 'break-glass', 'example-owner']);
-    const hub = (await (await fetch(`${s.glass}/api/hub?t=${s.h.token}`)).json()) as { instances: { name: string; role: string }[] };
+    const hub = (await (await fetch(`${s.glass}/api/hub`, { headers: { authorization: `Bearer ${s.h.token}` } })).json()) as { instances: { name: string; role: string }[] };
     assert.deepEqual(hub.instances.map((i) => [i.name, i.role]), [['a', 'owner'], ['b', 'owner']]);
     // An instance's own server applies the same rule to its token used without a person named.
     const inst = `http://127.0.0.1:${s.a.port}`;

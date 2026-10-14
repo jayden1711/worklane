@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, streamUrl, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { navigate } from '../App';
 import { Header } from './Overview';
@@ -406,23 +406,18 @@ export function SetupPage() {
         .then((r) => setFocus(r.ask))
         .catch((e: Error) => setLinkErr(e.message));
     // Live: each new event (an add-project step, an ask) reloads the console, debounced.
-    let es: EventSource | null = null;
-    let closed = false;
     let timer: number | undefined;
-    void apiPath('/api/stream').then((p) => {
-      if (closed) return;
-      es = new EventSource(streamUrl(p));
-      es.addEventListener('change', (m) => {
-        const types = ((JSON.parse(String((m as MessageEvent).data || '{}')) as { types?: string[] }).types ?? []);
+    const es = liveStream(apiPath('/api/stream'), {
+      change: (m) => {
+        const types = (JSON.parse(m.data || '{}') as { types?: string[] }).types ?? [];
         if (types.length && !types.some((t) => /^(ask|machine|add_project)\./.test(t))) return;
         window.clearTimeout(timer);
         timer = window.setTimeout(load, 150);
-      });
+      },
     });
     return () => {
-      closed = true;
       window.clearTimeout(timer);
-      es?.close();
+      es.close();
     };
   }, []);
   const shown = new Set((adding?.runs ?? []).flatMap((r) => r.asks.map((a) => a.id)));

@@ -91,7 +91,7 @@ test('an answer through the hub is recorded by that instance\'s own server, in i
 test('the hub streams an instance\'s changes, and says when an instance isn\'t answering', async () => {
   const s = await setup();
   try {
-    const res = await fetch(`${s.base}/api/i/b/stream?t=${s.h.token}`);
+    const res = await fetch(`${s.base}/api/i/b/stream`, { headers: s.hh });
     const reader = res.body!.getReader();
     const dec = new TextDecoder();
     let got = '';

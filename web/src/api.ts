@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { openStream, type Stream, type StreamOptions } from './sse';
 
 export type TaskStatus =
   | 'triage' | 'ready' | 'claimed' | 'reproducing' | 'building' | 'verifying' | 'evaluating'
@@ -387,21 +388,12 @@ export function useFetch<T>(fn: () => Promise<T>, dep: unknown = 0): { data: T |
 /** In a browser (not the render checks, which render pages on the server). */
 const inBrowser = typeof window !== 'undefined';
 
+/**
+ * INVARIANT: the key is read from this tab's storage only, never from the address bar: the servers refuse a request
+ * whose URL carries a key (src/dashboard.ts keyInUrl), so a page opened that way never loads. The key page puts it here.
+ */
 function readToken(): string {
   if (!inBrowser) return '';
-  const url = new URL(window.location.href);
-  const t = url.searchParams.get('t');
-  if (t) {
-    try {
-      sessionStorage.setItem('dash-token', t);
-    } catch {
-      // storage unavailable: keep it in the URL instead
-      return t;
-    }
-    url.searchParams.delete('t');
-    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
-    return t;
-  }
   try {
     return sessionStorage.getItem('dash-token') ?? '';
   } catch {
@@ -485,8 +477,7 @@ export const keyMissing = inBrowser && needsKey(servedByHub, token);
 export const onLoopback = inBrowser && ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname);
 
 /**
- * INVARIANT: a key is tried (in a header, never a URL) before it is kept, and kept in this tab only, as a ?t= link's
- * is. On a hub only the break-glass answer counts: its sign-in port says 200 to anyone.
+ * INVARIANT: a key is tried (in a header, never a URL) before it is kept, and kept in this tab only. On a hub only the break-glass answer counts: its sign-in port says 200 to anyone.
  */
 export async function tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: RequestInit) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: Pick<Storage, 'setItem'> }): Promise<boolean> {
   const key = given.trim();
@@ -519,8 +510,14 @@ export async function terminalProtocols(): Promise<string[]> {
   return ['terminal.v1', ...(csrf ? [`csrf.${csrf}`] : [])];
 }
 
-/** A stream's URL: the break-glass token on it (EventSource sends no headers); a session's cookie goes by itself. */
-export const streamUrl = (path: string) => (token ? `${path}?t=${encodeURIComponent(token)}` : path);
+/**
+ * A live stream (server-sent events) at `path`, read with fetch so the break-glass key goes in the Authorization
+ * header like every other call (a session's cookie goes by itself). It reconnects after a drop, with Last-Event-ID.
+ * INVARIANT: no stream URL carries the key; EventSource, which can't send headers, isn't used (test/web-key-in-url.test.ts).
+ */
+export function liveStream(path: string | Promise<string>, on: StreamOptions['on'], o: Pick<StreamOptions, 'onOpen' | 'onError'> = {}): Stream {
+  return openStream(path, { headers: async (): Promise<Record<string, string>> => (await me, token ? { authorization: `Bearer ${token}` } : {}), on, ...o });
+}
 
 /** Sign out: the hub deletes the session (server-side), then the page shows the sign-in again. */
 export async function signOut(): Promise<void> {
@@ -646,24 +643,23 @@ export function useLiveState() {
 
   useEffect(() => {
     void refresh();
-    let es: EventSource | null = null;
-    let closed = false;
-    void apiPath('/api/stream').then((p) => {
-      if (closed) return;
-      es = new EventSource(streamUrl(p));
-      es.addEventListener('hello', () => setLive(true));
-      es.addEventListener('change', () => {
-        window.clearTimeout(timer.current);
-        timer.current = window.setTimeout(() => {
-          void refresh();
-          setPulse((p) => p + 1);
-        }, 150);
-      });
-      es.onerror = () => setLive(false);
-    });
+    const es = liveStream(
+      apiPath('/api/stream'),
+      {
+        hello: () => setLive(true),
+        change: () => {
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => {
+            void refresh();
+            setPulse((p) => p + 1);
+          }, 150);
+        },
+      },
+      { onError: () => setLive(false) },
+    );
     return () => {
-      closed = true;
-      es?.close();
+      window.clearTimeout(timer.current);
+      es.close();
     };
   }, [refresh]);
 
@@ -1269,10 +1265,10 @@ export async function onInstance<T>(instance: string | null, path: string, init:
   if (instance !== null && !s.instances.includes(instance)) throw new Error(`instance ${instance} isn't selected: choose it, or All instances, in the switcher`);
   return instance ? instanceApi<T>(instance, path, init) : api<T>(path, init);
 }
-/** A stream's URL on one instance in this page's scope (as onInstance): through the hub to the named one, or this page's own server (null). */
+/** A stream's path on one instance in this page's scope (as onInstance): through the hub to the named one, or this page's own server (null). No key: liveStream sends it. */
 export async function instanceStream(instance: string | null, path: string, scope: Promise<InstanceScope> = instanceScope): Promise<string> {
   if (instance !== null && !(await scope).instances.includes(instance)) throw new Error(`instance ${instance} isn't selected`);
-  return streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));
+  return instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : apiPath(path);
 }
 
 /** An instance's health, as its sidebar dot shows it: green (nothing open), amber (needs a person soon), red (broken). */

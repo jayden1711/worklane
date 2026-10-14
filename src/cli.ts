@@ -35,6 +35,7 @@ import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
 import { DetachError, detachDashboard, detachedLines } from './dashboard-detach.js';
+import { keyFileNote } from './dashboard-key-url.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
 import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
@@ -706,7 +707,8 @@ async function main(argv: string[]): Promise<number> {
         if ((clientId || publicUrl || signinDir) && !(clientId && publicUrl && signinDir)) throw new Error('sign-in needs all of --client-id, --public-url and --signin-dir');
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
         const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
-        const bg = service ? `${h.breakGlassUrl.split('?')[0]} (token in ${join(hubState, 'dashboard-token')})` : h.breakGlassUrl;
+        // INVARIANT: the printed and opened URLs carry no key; the key's file is named, never the key (keyFileNote).
+        const bg = `${h.breakGlassUrl} ${keyFileNote(h.keyFile)}`;
         console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ')}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
@@ -754,7 +756,7 @@ async function main(argv: string[]): Promise<number> {
       }
       user = user || cfg.project.owners.default;
       const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(instance ? { instance } : {}) });
-      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
+      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url} ${keyFileNote(d.keyFile)}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
         const bin = desktopBinary();

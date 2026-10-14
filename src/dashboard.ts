@@ -72,6 +72,7 @@ import { readSecretBody } from './console/secrets.js';
 import { AskError } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
+import { refuseKeyInUrl } from './dashboard-key-url.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -730,9 +731,12 @@ export const DEFAULT_WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url)
 /** Whether the web UI is built where the dashboard serves it. */
 export const webUiBuilt = (dir = DEFAULT_WEB_DIR) => existsSync(join(dir, 'index.html'));
 
-/** Whether a request carries this token (?t= or a bearer header), compared in constant time. */
-export function tokenGiven(req: IncomingMessage, url: URL, token: string): boolean {
-  const given = url.searchParams.get('t') ?? (req.headers.authorization ?? '').replace(/^Bearer /, '');
+/**
+ * Whether a request carries this token in its bearer header, compared in constant time. INVARIANT: never from the
+ * URL; a key in a URL is refused before this is asked (src/dashboard-key-url.ts).
+ */
+export function tokenGiven(req: IncomingMessage, _url: URL, token: string): boolean {
+  const given = (req.headers.authorization ?? '').replace(/^Bearer /, '');
   const a = Buffer.from(given);
   const b = Buffer.from(token);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -796,7 +800,7 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
 }
 
-export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; token: string; close: () => Promise<void> }> {
+export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; keyFile: string; token: string; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   try {
     assertLoopbackHost(host);
@@ -832,7 +836,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
    * owner's break-glass, accepted only from this machine's loopback and never through a proxy.
    */
   const identify = async (req: IncomingMessage, url: URL): Promise<Who | { status: number; error: string; login?: string }> => {
-    if (!tokenGiven(req, url, token)) return { status: 401, error: 'missing or wrong token; sign in through the hub, or open the URL printed by `dashboard` on this machine' };
+    if (!tokenGiven(req, url, token)) return { status: 401, error: 'missing or wrong key; sign in through the hub, or give the key on the page (its file is printed by `dashboard` on this machine)' };
     const named = req.headers[LOGIN_HEADER];
     if (named !== undefined) {
       if (!validLogin(named)) return { status: 400, error: 'not a GitHub login' };
@@ -915,6 +919,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    // Every route, the page itself included: a key in the URL is refused, never accepted.
+    if (refuseKeyInUrl(url, res, [token])) return;
     try {
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);
@@ -1552,7 +1558,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       const port = typeof addr === 'object' && addr ? addr.port : 0;
       resolveStart({
         server,
-        url: `http://${host.includes(':') ? `[${host}]` : host}:${port}/?t=${token}`,
+        // INVARIANT: no key in the URL; the page asks for it (keyFile names where it is).
+        url: `http://${host.includes(':') ? `[${host}]` : host}:${port}`,
+        keyFile: join(opts.stateDir, 'dashboard-token'),
         token,
         close: () =>
           new Promise<void>((r) => {

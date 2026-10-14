@@ -25,6 +25,7 @@ import { createServer, request, type IncomingMessage, type Server, type ServerRe
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
+import { refuseKeyInUrl } from './dashboard-key-url.js';
 import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, csrfFromProtocols, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 import { attachTerminal } from './console/terminal-server.js';
 import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
@@ -198,7 +199,7 @@ const listen = (server: Server, port: number, host: string) =>
     });
   });
 
-export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; token: string; session: SessionOf; close: () => Promise<void> }> {
+export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
@@ -256,6 +257,8 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   /** The hub's port: sign-in, sessions, and the instances as the signed-in person sees them. Never the token. */
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    // Every route: a key in the URL is refused (GitHub's sign-in callback carries code and state, never a key).
+    if (refuseKeyInUrl(url, res, [token])) return;
     try {
       const cookies = parseCookies(req.headers.cookie);
       if (url.pathname === '/auth/login' && req.method === 'GET') {
@@ -324,10 +327,12 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   /** The break-glass port: the owner's token, from this machine only, never through a proxy. It grants owner. */
   const breakGlass = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    // Every route, the page itself included: the break-glass key goes in a header only.
+    if (refuseKeyInUrl(url, res, [token])) return;
     try {
       if (url.pathname.startsWith('/api/')) {
         if (!breakGlassAllowed(req)) return json(res, 403, { error: "the break-glass is the owner's, on this machine only: refused through a proxy or from another address" });
-        if (!tokenGiven(req, url, token)) return json(res, 401, { error: 'missing or wrong token; open the URL the hub setup printed' });
+        if (!tokenGiven(req, url, token)) return json(res, 401, { error: 'missing or wrong key; give the break-glass key on the page (the hub setup printed its file)' });
         if (url.pathname === '/api/me' && req.method === 'GET') return json(res, 200, { login: null, csrf: null, breakGlass: true });
         // The manifest flow's runner (root, on this machine): register a flow, and collect its App once.
         if (await handleManifestBreakGlass(req, res, url, flows)) return;
@@ -377,7 +382,9 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     server,
     breakGlass,
     url: `http://${shown}:${port}/`,
-    breakGlassUrl: `http://${shown}:${bgPort}/?t=${token}`,
+    // INVARIANT: no key in the URL; the page asks for it (keyFile names where it is).
+    breakGlassUrl: `http://${shown}:${bgPort}`,
+    keyFile: join(opts.stateDir, 'dashboard-token'),
     token,
     session,
     close: () => {
