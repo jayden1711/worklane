@@ -933,6 +933,7 @@ export interface TailscaleStatus {
   serve: boolean;
   other443: boolean;
   breakGlassForwarded: boolean;
+  funnel: boolean;
   hubUrl: string | null;
 }
 export interface TailscaleStepView {

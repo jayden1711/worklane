@@ -154,6 +154,11 @@ export function TailscaleSetupView({ data, onChanged, initialConfirming = null }
         <p className="break-words" data-testid="tailscale-hub-url">
           The hub's URL now: {s?.hubUrl ? <span className="font-mono text-[12px] text-ink">{s.hubUrl}</span> : 'none read'}
         </p>
+        {s?.installed && (
+          <p className={cx('break-words', s.funnel && 'text-red')} data-testid="tailscale-funnel" data-funnel={s.funnel ? 'on' : 'off'}>
+            Funnel (the public internet): {s.funnel ? 'ON. Nothing here turns it on or off, and the HTTPS and URL steps do nothing while it is on. To turn it off, on the machine: tailscale funnel reset.' : 'off. Nothing here turns it on: the hub is reachable from your tailnet only.'}
+          </p>
+        )}
         {s?.breakGlassForwarded && <p className="text-red">tailscale serve forwards to the break-glass port (4398), which must never be forwarded: on the machine, run tailscale serve reset.</p>}
       </div>
       {s && (

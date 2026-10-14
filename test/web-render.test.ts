@@ -1845,7 +1845,7 @@ test('Tailscale and HTTPS: a machine owner sees the state, the four steps with w
   // Put together here so the repo holds no tailnet name, even a made-up one (the denylist's rule).
   const name = ['box', 'tail0example', 'ts', 'net'].join('.');
   const link = 'https://login.tailscale.com/a/0123456789abcdef';
-  const st = (over: Partial<TailscaleStatus> = {}): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: true, other443: false, breakGlassForwarded: false, hubUrl: 'https://hub.example.test', ...over });
+  const st = (over: Partial<TailscaleStatus> = {}): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: true, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test', ...over });
   const none = st({ installed: false, version: null, state: null, name: null, https: false, serve: false });
   const dirOf = (lines: object[], url?: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'tailscale-render-'));
@@ -1905,6 +1905,13 @@ test('Tailscale and HTTPS: a machine owner sees the state, the four steps with w
   const away = r.renderTailscaleSetup(tailscaleView({ status: none, dir: dirOf([]), events: [], who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, instance: 'shop', ownersFile }));
   assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the console&#x27;s allowed devices/);
   assert.equal([...away.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 4);
+  // Funnel: shown read-only. Off: it says nothing here turns it on. Already on: said in red, and neither later step can be asked for.
+  assert.match(done, /data-testid="tailscale-funnel" data-funnel="off"[^>]*>Funnel \(the public internet\): off\. Nothing here turns it on/);
+  const funnel = r.renderTailscaleSetup(view('ada', st({ funnel: true, serve: false })));
+  assert.match(funnel, /data-testid="tailscale-funnel" data-funnel="on"[^>]*>Funnel \(the public internet\): ON\. Nothing here turns it on or off/);
+  assert.equal([...funnel.matchAll(/data-testid="tailscale-step-blocked"[^>]*>Not yet: Tailscale Funnel is on for this machine/g)].length, 2);
+  assert.match(funnel, /data-step="serve"[\s\S]*?<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"[\s\S]*?data-step="public-url"[\s\S]*?<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/);
+  assert.doesNotMatch(fresh, /data-testid="tailscale-funnel"/, 'nothing to say about Funnel before tailscale is installed');
   // The engine has no setup script: it says so and offers no step.
   const old = r.renderTailscaleSetup(view('ada', null));
   assert.match(old, /no Tailscale setup script yet/);

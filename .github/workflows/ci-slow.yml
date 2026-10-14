@@ -1056,7 +1056,7 @@ jobs:
           idle() { for _ in $(seq 1 60); do systemctl is-active -q worklane-tailscale.service || return 0; sleep 1; done; return 1; }
           # The view, as the steps above left the machine: everything done, nothing to open.
           path=/api/tailscale; api | tee "$F/ts-view1.json"; echo
-          jq -e --arg n "$TS_NAME" '.machineOwner and .allowed and .status.installed and .status.state=="Running" and .status.name==$n and .status.https and .status.serve and .status.hubUrl=="https://\($n)" and .next==null and .loginUrl==null and (.steps|map(.done)|all)' "$F/ts-view1.json"
+          jq -e --arg n "$TS_NAME" '.machineOwner and .allowed and .status.installed and .status.state=="Running" and .status.name==$n and .status.https and .status.serve and (.status.funnel|not) and .status.hubUrl=="https://\($n)" and .next==null and .loginUrl==null and (.steps|map(.done)|all)' "$F/ts-view1.json"
           # Logged out again (the stand-in's way), nothing served.
           sudo rm -f /var/lib/ci-tailscale/state.json /var/lib/ci-tailscale/serve.json /var/lib/ci-tailscale/calls "$d/steps.jsonl"
           sleep 4

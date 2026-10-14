@@ -27,7 +27,7 @@ const posix = process.platform !== 'win32';
 const NAME = ['box', 'tail0example', 'ts', 'net'].join('.');
 const LINK = 'https://login.tailscale.com/a/0123456789abcdef';
 
-const status = (over: Partial<TailscaleStatus> = {}): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name: NAME, https: true, serve: true, other443: false, breakGlassForwarded: false, hubUrl: 'https://hub.example.test', ...over });
+const status = (over: Partial<TailscaleStatus> = {}): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name: NAME, https: true, serve: true, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test', ...over });
 const NONE = status({ installed: false, version: null, state: null, name: null, https: false, serve: false });
 const INSTALLED = status({ state: 'NeedsLogin', name: null, https: false, serve: false });
 const UP = status({ serve: false });
@@ -61,6 +61,19 @@ test("the engine's allowlist is exactly the helper's four tailscale commands: on
     ['up', '--authkey=tskey-auth-kExample-abcdef'],
     ['up', '--login-server=https://example.test'],
     ['up', '--for', 'alpha'],
+    ['up', '--advertise-exit-node'],
+    ['up', '--advertise-routes=198.51.100.0/24'],
+    ['up', '--ssh'],
+    ['up', '--accept-routes'],
+    ['funnel', '443'],
+    ['--funnel'],
+    ['serve', '--funnel'],
+    ['serve', 'funnel', 'on'],
+    ['serve', '--bg', '--https=443', 'http://127.0.0.1:4399'],
+    ['serve', '--set-path=/x', 'http://127.0.0.1:4398'],
+    ['serve', 'http://0.0.0.0:4399'],
+    ['serve', '--https=8443'],
+    ['public-url', '--name', 'other'],
     ['up --auth-key=tskey-auth-kExample-abcdef'],
     ['--auth-key=tskey-auth-kExample-abcdef'],
     ['UP'],
@@ -90,7 +103,9 @@ test("the engine's allowlist is exactly the helper's four tailscale commands: on
 });
 
 test("the script's status is read strictly: a name is a ts.net name or nothing, a URL an https origin or nothing", () => {
-  assert.deepEqual(parseTailscaleStatus(JSON.stringify({ installed: true, version: '1.104.1', pinned_version: '1.104.1', state: 'Running', name: NAME, https: true, serve: true, other_443: false, break_glass_forwarded: false, hub_url: `https://${NAME}` })), status({ hubUrl: `https://${NAME}` }));
+  assert.deepEqual(parseTailscaleStatus(JSON.stringify({ installed: true, version: '1.104.1', pinned_version: '1.104.1', state: 'Running', name: NAME, https: true, serve: true, other_443: false, break_glass_forwarded: false, funnel: false, hub_url: `https://${NAME}` })), status({ hubUrl: `https://${NAME}` }));
+  assert.equal(parseTailscaleStatus(JSON.stringify({ installed: true, funnel: true }))!.funnel, true);
+  assert.equal(parseTailscaleStatus(JSON.stringify({ installed: true, funnel: 'no' }))!.funnel, false);
   const odd = parseTailscaleStatus(JSON.stringify({ installed: true, version: '1; rm -rf /', pinned_version: 7, state: 'Running now', name: 'box.example.test', https: true, serve: true, hub_url: 'https://x.example.test/path?t=1' }))!;
   assert.deepEqual([odd.version, odd.pinnedVersion, odd.state, odd.name, odd.https, odd.serve, odd.hubUrl], [null, null, null, null, false, false, null]);
   assert.equal(parseTailscaleStatus(JSON.stringify({ installed: true, name: `x --client-id evil.${NAME}` }))!.name, null);
@@ -112,6 +127,14 @@ test('the four steps follow the machine: which is next, which wait, and what eac
   assert.match(tailscaleSteps(status({ serve: false, other443: true })).find((s) => s.id === 'serve')!.blocked!, /already forwards https 443 somewhere else/);
   assert.match(tailscaleSteps(status({ breakGlassForwarded: true, serve: false })).find((s) => s.id === 'serve')!.blocked!, /break-glass port, which must never be forwarded/);
   assert.match(tailscaleSteps(status({ hubUrl: null })).find((s) => s.id === 'public-url')!.blocked!, /no dashboard hub yet/);
+  // Funnel already on: shown, never changed; neither the HTTPS step nor the URL step can be asked for.
+  for (const s of [status({ funnel: true, serve: false }), status({ funnel: true })]) {
+    for (const id of ['serve', 'public-url'] as const) {
+      const step = tailscaleSteps(s).find((x) => x.id === id)!;
+      if (!step.done) assert.match(step.blocked!, /Tailscale Funnel is on for this machine, which publishes to the public internet; nothing here turns it on or off/, `${id}`);
+    }
+    assert.match(tailscaleSteps(s).find((x) => x.id === 'public-url')!.blocked!, /Funnel is on/);
+  }
   // Each says what it changes and the command that does the same without the dashboard.
   const all = tailscaleSteps(status());
   assert.deepEqual(all.map((s) => s.command.split('   ')[0]), TAILSCALE_ACTIONS.map((a) => `sudo bash scripts/setup/tailscale.sh ${a}`));
@@ -182,6 +205,8 @@ test('a step is a machine request of two fixed words: gated, one at a time, only
     refused(() => ask('up', { status: NONE }), 409, /not yet: install Tailscale first/);
     refused(() => ask('serve', { status: INSTALLED }), 409, /not yet: log this machine in to your tailnet first/);
     refused(() => ask('public-url', { status: UP }), 409, /not yet: put the hub on HTTPS first/);
+    refused(() => ask('serve', { status: status({ funnel: true, serve: false }) }), 409, /not yet: Tailscale Funnel is on/);
+    refused(() => ask('public-url', { status: status({ funnel: true }) }), 409, /not yet: Tailscale Funnel is on/);
     // A step is already running on the machine (from any dashboard, or a terminal).
     refused(() => ask('up', { dir: stepsDir(UP_WAITING) }), 409, /tailscale up is running; wait for it to end/);
     assert.deepEqual(machineRequests(log.read(0)), [], 'nothing was recorded by any refusal');

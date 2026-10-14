@@ -212,7 +212,13 @@ The dashboard never runs any of it: the coordinator runs the machine helper, whi
 
 **Two things stay on other sites.** MagicDNS and HTTPS certificates are turned on in Tailscale's admin console (DNS); until they are, the HTTPS step says so and links there. After the URL step, set the sign-in App's callback URL on GitHub to exactly `https://<name>/auth/callback`: sign-in at the new URL fails until you do. The hub restarts for that step, so a session at the old URL ends; the break-glass still works.
 
-What it can never do: forward the break-glass port (4398), replace something else already on 443, set the hub's URL to anything but this machine's own `*.ts.net` name, or install a package that isn't signed by the pinned key.
+What it can never do:
+
+- Turn on Tailscale Funnel, or publish anything outside your tailnet. There is no funnel command on this path, `tailscale serve` is tailnet-only, and the hub itself listens on `127.0.0.1`. The card shows Funnel's state read-only; if Funnel is already on, the HTTPS and URL steps do nothing until an admin turns it off (`tailscale funnel reset`).
+- Choose what is forwarded or where: the serve step is one fixed command to the hub's sign-in port. It never forwards the break-glass port (4398) and never replaces something else already on 443.
+- Change what `tailscale up` exposes: it is run with no flags (no exit node, routes, SSH, login server or auth key).
+- Set the hub's URL to anything but this machine's own `*.ts.net` name, which the script reads from `tailscale status` on the machine; nobody types it.
+- Install a package that isn't signed by the pinned key.
 
 ## Switching the agents' Claude account
 

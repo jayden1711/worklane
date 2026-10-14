@@ -59,6 +59,8 @@ export interface TailscaleStatus {
   serve: boolean;
   other443: boolean;
   breakGlassForwarded: boolean;
+  /** Tailscale Funnel (the public internet) is on for something on this machine. Shown, never changed from here. */
+  funnel: boolean;
   /** The hub's URL now (its unit's --public-url); null with no hub. */
   hubUrl: string | null;
 }
@@ -87,6 +89,7 @@ export function parseTailscaleStatus(text: string): TailscaleStatus | null {
     serve: !!name && o.serve === true,
     other443: o.other_443 === true,
     breakGlassForwarded: o.break_glass_forwarded === true,
+    funnel: o.funnel === true,
     hubUrl,
   };
 }
@@ -189,6 +192,7 @@ export interface TailscaleStepView {
 }
 
 const SCRIPT = 'scripts/setup/tailscale.sh';
+const FUNNEL_ON = 'Tailscale Funnel is on for this machine, which publishes to the public internet; nothing here turns it on or off, and this step does nothing while it is on (an admin: tailscale funnel reset)';
 
 /** The four steps against what the machine says now: which are done, which can run, and what each would change. */
 export function tailscaleSteps(s: TailscaleStatus | null): TailscaleStepView[] {
@@ -231,6 +235,8 @@ export function tailscaleSteps(s: TailscaleStatus | null): TailscaleStepView[] {
         ? 'log this machine in to your tailnet first'
         : s!.breakGlassForwarded
           ? 'tailscale serve forwards to the break-glass port, which must never be forwarded: an admin runs tailscale serve reset'
+          : s!.funnel
+            ? FUNNEL_ON
           : s!.serve
             ? null
             : s!.other443
@@ -238,7 +244,7 @@ export function tailscaleSteps(s: TailscaleStatus | null): TailscaleStepView[] {
               : !s!.https
                 ? `your tailnet doesn't issue an HTTPS certificate for ${name} yet: turn on MagicDNS and HTTPS certificates in Tailscale's DNS settings, then check again`
                 : null,
-      changes: [`runs tailscale serve --bg --https=443 http://127.0.0.1:4399: ${url} then reaches the hub's sign-in port`, 'nothing else is forwarded; the break-glass port (4398) never is'],
+      changes: [`runs tailscale serve --bg --https=443 http://127.0.0.1:4399: ${url} then reaches the hub's sign-in port, from your tailnet only`, 'nothing else is forwarded; the break-glass port (4398) never is; Funnel (the public internet) is never turned on'],
       command: cmd('serve'),
       link: running && !s!.serve && !s!.https ? { url: TAILSCALE_DNS_ADMIN, label: "Tailscale's DNS settings" } : null,
     },
@@ -246,9 +252,10 @@ export function tailscaleSteps(s: TailscaleStatus | null): TailscaleStepView[] {
       id: 'public-url',
       title: "Set the hub's public URL",
       done: running && !!s!.hubUrl && s!.hubUrl === url,
-      blocked: !running ? 'log this machine in to your tailnet first' : !s!.serve ? 'put the hub on HTTPS first: until then the new URL would reach nothing' : !s!.hubUrl ? 'this machine has no dashboard hub yet (an admin runs dashboards.sh)' : null,
+      blocked: !running ? 'log this machine in to your tailnet first' : s!.funnel ? FUNNEL_ON : !s!.serve ? 'put the hub on HTTPS first: until then the new URL would reach nothing' : !s!.hubUrl ? 'this machine has no dashboard hub yet (an admin runs dashboards.sh)' : null,
       changes: [
-        `the hub's URL becomes ${url}${s?.hubUrl && s.hubUrl !== url ? ` (now ${s.hubUrl})` : ''}, through dashboards.sh with the hub's other settings kept`,
+        `the hub's URL becomes ${url}${s?.hubUrl && s.hubUrl !== url ? ` (now ${s.hubUrl})` : ''}, through dashboards.sh with the hub's other settings kept: this machine's own tailnet name, read on the machine; no other name can be set`,
+        'the hub still listens on this machine only (127.0.0.1): nothing becomes reachable that tailscale serve does not already forward to your tailnet',
         "the hub and each instance's dashboard restart: this page reloads, and a session signed in at the old URL ends",
         `then, on GitHub, set the sign-in App's callback URL to exactly ${url}/auth/callback: sign-in at the new URL fails until it is`,
       ],
