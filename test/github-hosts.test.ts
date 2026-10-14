@@ -6,6 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -16,7 +18,7 @@ import { installationTokens } from '../src/github-app.js';
 import * as hosts from '../src/github-hosts.js';
 import { checkRepoScope } from '../src/github-scope.js';
 import { ghOverRest } from '../src/server-auto-config.js';
-import { availableAppName, convertManifest, installUrl, manifestTarget, ManifestFlows } from '../src/setup/app-manifest.js';
+import { availableAppName, convertManifest, installUrl, manifestTarget, ManifestFlows, verifyWithScript } from '../src/setup/app-manifest.js';
 import { childEnv } from '../src/os/index.js';
 import { loopbackGitHub, repoRoot } from './helpers.js';
 
@@ -203,7 +205,35 @@ test('the loopback stand-in reaches this machine only: GitHub goes to its port, 
     assert.equal(r.status, 2, `"${bad}": ${r.stdout}${r.stderr}`);
     assert.match(r.stderr, /must be a port on 127\.0\.0\.1/);
   }
+  // The port inside the import URL (it survives a user switch that clears the environment), taking precedence.
+  const inUrl = spawnSync(process.execPath, ['--input-type=module', '-e', `const { loopbackTarget } = await import(process.argv[1]); console.log(loopbackTarget('https://api.github.com/app'));`, `${standIn.NODE_OPTIONS!.replace('--import=', '')}?port=8998`], { encoding: 'utf8', env: { ...childEnv(), CI_LOOPBACK_GITHUB_PORT: '8999' } });
+  assert.equal(inUrl.stdout.trim(), 'http://127.0.0.1:8998/app', inUrl.stderr);
+  const badInUrl = spawnSync(process.execPath, ['--input-type=module', '-e', 'await import(process.argv[1])', `${standIn.NODE_OPTIONS!.replace('--import=', '')}?port=elsewhere.example.test`], { encoding: 'utf8', env: { ...childEnv() } });
+  assert.equal(badInUrl.status, 2);
   assert.throws(() => loopbackGitHub('https://elsewhere.example.test'), /127\.0\.0\.1/);
   // And the engine's own tree never loads it: it is CI's and the tests'.
   for (const f of [...filesUnder('src'), ...filesUnder('scripts/setup'), ...filesUnder('scripts/machine'), 'scripts/bootstrap.sh']) assert.doesNotMatch(read(f), /loopback-github|CI_LOOPBACK_GITHUB_PORT/, f);
+});
+
+test("the permission check's own process keeps the node options it was started with across the user switch, so a test's stand-in reaches it", async () => {
+  const seen: { file: string; argv: string[] }[] = [];
+  const fakeSpawn = ((file: string, argv: string[]) => {
+    seen.push({ file, argv });
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    setImmediate(() => child.emit('close', 0));
+    return child;
+  }) as unknown as typeof import('node:child_process').spawn;
+  const saved = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = '--no-warnings';
+  try {
+    await verifyWithScript({ spawn: fakeSpawn })({ user: 'someone-else', key: '/k', appId: 1, installationId: 2, repo: 'example/alpha' });
+  } finally {
+    if (saved === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = saved;
+  }
+  assert.equal(seen[0]!.file, 'sudo');
+  const argv = seen[0]!.argv;
+  const clean = argv.indexOf('-i');
+  assert.ok(clean > 0 && argv[clean - 1] === '/usr/bin/env', argv.join(' '));
+  assert.ok(argv.slice(clean + 1).includes('NODE_OPTIONS=--no-warnings'), `kept past env -i: ${argv.join(' ')}`);
 });

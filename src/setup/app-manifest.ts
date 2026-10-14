@@ -509,16 +509,18 @@ export const APP_PERMISSIONS_SCRIPT = fileURLToPath(new URL('../../../scripts/se
 /**
  * Run app-permissions.mjs as `user` (sudo when that isn't this user); it asks GitHub itself (its host is a constant
  * in the script). Its output names no secret. `node` is for a test's stand-in only: extra node arguments and
- * environment for the child, so a test can give that process a GitHub on its own machine.
+ * environment for the child, so a test can give that process a GitHub on its own machine; `spawn` is a test's too.
  */
-export function verifyWithScript(opts: { script?: string; node?: { args?: string[]; env?: Record<string, string> } } = {}): NonNullable<RunDeps['verify']> {
+export function verifyWithScript(opts: { script?: string; node?: { args?: string[]; env?: Record<string, string> }; spawn?: typeof spawn } = {}): NonNullable<RunDeps['verify']> {
   const script = opts.script ?? APP_PERMISSIONS_SCRIPT;
-  const env = opts.node?.env ?? {};
+  // The node options this process was started with go to the node it starts as the coordinator, as they would to
+  // any child: switching user (sudo env -i) would drop them. Whoever set them started this process (root, here).
+  const env = { ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}), ...(opts.node?.env ?? {}) };
   return (o) =>
     new Promise((done) => {
       const args = [...(opts.node?.args ?? []), '--input-type=module', '-', o.key, String(o.appId), String(o.installationId), o.repo];
       const [file, argv] = o.user === currentUser() ? [process.execPath, args] : asUser(o.user, process.execPath, args, env);
-      const p = spawn(file, argv, { cwd: '/', env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const p = (opts.spawn ?? spawn)(file, argv, { cwd: '/', env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
       let out = '';
       p.stdout.on('data', (c: Buffer) => (out += c.toString('utf8')));
       p.stderr.on('data', (c: Buffer) => (out += c.toString('utf8')));
