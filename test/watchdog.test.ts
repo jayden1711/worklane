@@ -16,7 +16,7 @@ import type { UpdateEntry } from '../src/updates.js';
 import { KINDS, raiseIncident, readIncidents, resolveIncident, REOPEN_MS, healthStatus } from '../src/watchdog/incidents.js';
 import { incidentSink } from '../src/watchdog/wire.js';
 import { USAGE_INCIDENT } from '../src/usage-limit.js';
-import { postPending, RATE, scrub } from '../src/watchdog/post.js';
+import { postPending, RATE, scrub, takeOpsPost } from '../src/watchdog/post.js';
 import { Watchdog, type WatchdogDeps } from '../src/watchdog/watchdog.js';
 import { watchdogConfig } from '../src/watchdog/config.js';
 import { loadConfig } from '../src/config/load.js';
@@ -260,6 +260,30 @@ test(`posts are rate-limited to ${RATE.max} per ${RATE.windowMs / 60_000} min ma
   assert.equal((await postPending({ poster, dir, now: () => now })).posted, 3, 'the rest, once the window passed');
   assert.equal(posts.length, RATE.max + 3, 'each incident posted once');
   assert.equal((await postPending({ poster, dir, now: () => new Date(now.getTime() + 3 * RATE.windowMs) })).posted, 0, 'nothing posted twice');
+});
+
+test('one ops-post limit for every caller (takeOpsPost): the direct-push alert (a Date or none), merge and fix-forward posts (epoch ms) and the incident posts share one window', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'incidents-'));
+  const t0 = Date.parse('2026-10-13T00:00:00Z');
+  // Two incident posts first: they count toward the same window.
+  for (let i = 0; i < 2; i++) raiseIncident('disk_full', `/s${i}`, `disk ${i}`, 'free space', { dir, now: new Date(t0 + i) });
+  assert.equal((await postPending({ poster: async () => true, dir, now: () => new Date(t0) })).posted, 2);
+  // The direct-push alert's call (a Date), and the merge posts' and fix-forward's (epoch ms), take what is left.
+  assert.equal(takeOpsPost({ dir, now: new Date(t0 + 1000) }), true);
+  assert.equal(takeOpsPost({ dir, now: t0 + 2000 }), true);
+  assert.equal(takeOpsPost({ dir, now: t0 + 3000 }), true);
+  assert.equal(RATE.max, 5);
+  assert.equal(takeOpsPost({ dir, now: new Date(t0 + 4000) }), false, 'the window is full, for a Date caller');
+  assert.equal(takeOpsPost({ dir, now: t0 + 4000 }), false, 'and for an epoch caller');
+  raiseIncident('disk_full', '/s9', 'disk 9', 'free space', { dir, now: new Date(t0 + 5000) });
+  assert.equal((await postPending({ poster: async () => true, dir, now: () => new Date(t0 + 5000) })).posted, 0, 'the incident posts wait too');
+  // A window later, every caller may post again.
+  assert.equal(takeOpsPost({ dir, now: t0 + RATE.windowMs + 1 }), true);
+  assert.equal(takeOpsPost({ dir, now: new Date(t0 + RATE.windowMs + 2) }), true);
+  // No `now`: the current time (the direct-push alert's call).
+  const fresh = mkdtempSync(join(tmpdir(), 'incidents-'));
+  assert.equal(takeOpsPost({ dir: fresh }), true);
+  assert.equal(readIncidents(fresh).posts.length, 1);
 });
 
 test('an incident resolved before it was ever posted is not posted at all', async () => {

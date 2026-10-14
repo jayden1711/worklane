@@ -12,7 +12,7 @@
 // job can look at the container's cgroup as root; --wipe then wipes every run in the ids file.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -61,7 +61,9 @@ const repo = mkdtempSync(join(homedir(), 'repo-'));
 const git = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.name=ci', '-c', 'user.email=ci@example.com', ...a], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: homedir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
 git('init', '-q', '-b', 'main');
 writeFileSync(join(repo, 'a.txt'), 'main\n');
-git('add', 'a.txt');
+mkdirSync(join(repo, 'art'));
+writeFileSync(join(repo, 'art', 'cards.bin'), 'binary\n');
+git('add', 'a.txt', 'art');
 git('commit', '-q', '-m', 'main');
 writeFileSync(join(repo, 'b.txt'), 'the change\n');
 git('add', 'b.txt');
@@ -98,6 +100,12 @@ rest += raw.stderr.slice(at);
 assert.equal(rest, '', 'every line of systemd-run\'s is recognised');
 assert.ok(own.stats.memPeakMb !== null && own.stats.cpuS !== null, JSON.stringify(own.stats));
 
+step('exec: a tier command\'s shell-only ${...} is bash\'s, not systemd\'s');
+const shellVars = await host.exec(id, 'x=hello; set -- one two; echo "got ${x} ${x%lo} ${#x} ${2} $x ${HOME:+home}"', {}, 60_000);
+console.log(JSON.stringify(shellVars.out));
+assert.equal(shellVars.code, 0);
+assert.match(shellVars.out, /^got hello hel 5 two hello home$/m, 'every ${...} expanded by bash');
+
 step('exec: stdout, stderr and planted summary-like lines, through the coordinator\'s host');
 const cmd = [
   'echo out-line',
@@ -118,6 +126,32 @@ assert.equal(r.out.match(/Memory peak:/g)?.length, 1, 'only the run\'s own Memor
 const { cpuS, memPeakMb } = r.stats;
 assert.ok(typeof cpuS === 'number' && cpuS >= 0.1 && cpuS < 60, `CPU ${cpuS}s: from systemd, not the planted 1h`);
 assert.ok(typeof memPeakMb === 'number' && memPeakMb > 0 && memPeakMb < 2048, `memory ${memPeakMb} MB: from systemd, not the planted 999G`);
+
+step('the object store: a second run of the commit gets no bundle, reads the store, leaves art/ out, and can\'t write the store');
+assert.ok((await host.storeTips()).includes(sha), 'the first run\'s commit is one of the store\'s tips');
+const id2 = newRunId('fast', sha);
+appendFileSync(idsFile, `${id2}\n`);
+const ws2 = await createWorkspace(host, repo, sha, id2, ['art']);
+console.log(JSON.stringify(ws2));
+assert.equal(ws2.bundleRefs, 0, 'the store has the commit and main: nothing sent');
+const store = `/var/lib/worklane-test/${instance}/store`;
+const probe = await host.exec(id2, [
+  's="$(dirname "$(cat .git/objects/info/alternates)")"; echo "store $s"',
+  'git cat-file -e HEAD:b.txt && echo read-ok',
+  'test ! -e art && echo art-left-out',
+  'echo "art in the commit: $(git ls-tree -r --name-only HEAD | grep -c "^art/")"',
+  'test -z "$(git status --porcelain)" && echo clean',
+  'for w in "$s/objects/probe" "$s/objects/pack/probe" "$s/refs/keep/probe" "$s/probe" "$s/HEAD"; do if ( : >> "$w" ) 2>/dev/null; then echo "WROTE $w"; else echo "refused $w"; fi; done',
+  'git --git-dir="$s" update-ref refs/keep/evil HEAD 2>/dev/null && echo "WROTE a ref"',
+  'true',
+].join('\n'), {}, 60_000);
+console.log(probe.out);
+assert.equal(probe.code, 0);
+assert.match(probe.out, new RegExp(`^store ${store}$`, 'm'), 'the workspace reads the instance\'s own store');
+for (const want of ['read-ok', 'art-left-out', 'art in the commit: 1', 'clean']) assert.match(probe.out, new RegExp(`^${want}$`, 'm'), want);
+assert.doesNotMatch(probe.out, /WROTE/, 'a run never writes the store');
+assert.equal(probe.out.match(/^refused /gm)?.length, 5);
+assert.throws(() => readdirSync(store), /EACCES/, 'the coordinator user can\'t read the test user\'s store');
 
 if (dbImage !== '-') {
   step(`db-start ${dbImage}, max_connections 250`);

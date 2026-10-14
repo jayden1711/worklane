@@ -69,6 +69,7 @@ function world(o: { owners?: string[]; alertOff?: boolean } = {}) {
     checkRuns: async () => (calls.push('runs'), []),
     statuses: async () => (calls.push('statuses'), []),
     role: async (login) => (calls.push('role'), roles.get(login) ?? null),
+    compare: async () => (calls.push('compare'), { status: 'behind', aheadBy: 0, behindBy: 1 }),
     pusher: async () => (calls.push('pusher'), { login: 'example-pusher', from: 'activity' }),
   };
   const chat = fakeChat();
@@ -110,7 +111,7 @@ test('direct-push alert: a direct push gives exactly one ops post, mentioning th
   const w = world();
   await w.watch(2); // protection asked; main's tip is the baseline
   const sha = w.directPush('hotfix.txt', 'Hotfix the totals by hand');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   const posts = opsPosts(w);
   assert.equal(posts.length, 1, 'one post to the ops channel');
   const p = posts[0]!;
@@ -150,7 +151,7 @@ test('direct-push alert: a PR merge gives no post, even one the watch flags; a d
   assert.equal(of(w.f, 'main_watch.direct_push').length, 0);
   // A direct push after it: posted.
   const sha = w.directPush('hotfix.txt', 'Hotfix');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   assert.equal(opsPosts(w).length, 1);
   assert.ok(opsPosts(w)[0]!.text.includes(sha.slice(0, 12)));
 });
@@ -159,7 +160,7 @@ test('direct-push alert: a second check of the same sha gives no second post', a
   const w = world();
   await w.watch(2);
   const sha = w.directPush('hotfix.txt', 'Hotfix');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   assert.equal(opsPosts(w).length, 1);
   // The same commit judged again (as after a restart that lost the watch's place): no second post.
   const md = w.c as unknown as { mainUnaccounted(o: object): Promise<void>; directPushNoted(sha: string, url: string, push: object): Promise<void>; directPushOutbound(): Promise<void> };
@@ -174,7 +175,7 @@ test('direct-push alert: nothing is posted when main_watch.direct_push_alert is 
   const w = world({ alertOff: true });
   await w.watch(2);
   w.directPush('hotfix.txt', 'Hotfix');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   assert.equal(of(w.f, 'main_watch.unaccounted').length, 1, 'the main watch still stops and alerts');
   const pushes = of<EventPayload<'main_watch.direct_push'>>(w.f, 'main_watch.direct_push');
   assert.equal(pushes.length, 1, 'the direct push is recorded');
@@ -189,7 +190,7 @@ test('direct-push alert: without Discord owners it posts with no mention, and th
   const w = world({ owners: [] });
   await w.watch(2);
   w.directPush('hotfix.txt', 'Hotfix');
-  await w.watch(2);
+  await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
   const posts = opsPosts(w);
   assert.equal(posts.length, 1);
   assert.deepEqual(posts[0]!.mentions, []);

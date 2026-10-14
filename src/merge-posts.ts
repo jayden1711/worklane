@@ -6,16 +6,16 @@
 //
 // On the coordinator's timer, it walks each new commit on the default branch's first-parent line, oldest first, and
 // asks GitHub which PR it is the merge commit of (GET /repos/{o}/{r}/commits/{sha}/pulls), then that PR for who merged
-// it: at most one API call per MERGE_POSTS_CALL_MS. A commit no merged PR has as its merge commit (a direct push, which
-// the main watch alerts on; a commit inside a rebase merge, whose last commit is the one posted) gets no post here.
+// it: at most one API call per MERGE_POSTS_CALL_MS. An answer with no merged PR is asked again until LINK_LAG_MS after
+// the first (GitHub links a merge to its PR a few seconds after it lands: asked at once, a merge went unposted). A
+// commit no merged PR has as its merge commit (a direct push, which the main watch alerts on; a commit inside a rebase
+// merge, whose last commit is the one posted) gets no post here.
 // The last commit walked, and what is known about the next, are kept in a state file in the instance's state dir, so a
 // restart neither posts a merge twice nor skips one; each post is also sent once per key (merge-post:<sha>).
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { WatchGit } from './main-watch.js';
+import { LINK_LAG_MS, type WatchGit } from './main-watch.js';
 import { writeGroupOnly } from './os/index.js';
-import { withIncidents } from './watchdog/incidents.js';
-import { RATE } from './watchdog/post.js';
 
 /** At most one GitHub API call per this long. */
 export const MERGE_POSTS_CALL_MS = 30_000;
@@ -48,7 +48,8 @@ export interface MergePostsState {
   /** When the last API call was made (ms). */
   lastCallAt: number;
   /** The commit being looked at, and what is known about it so far. */
-  pending: { sha: string; pulls?: MergePull[]; pr?: MergePull } | null;
+  /** `pullsAt`, `pullsLastAt`: when the commit's PRs were first and last asked (ms); an answer with no merged PR is asked again until one LINK_LAG_MS after the first. */
+  pending: { sha: string; pulls?: MergePull[]; pullsAt?: number; pullsLastAt?: number; pr?: MergePull } | null;
 }
 
 const EMPTY: MergePostsState = { version: 1, last: null, lastCallAt: 0, pending: null };
@@ -67,20 +68,6 @@ function writeState(file: string, s: MergePostsState) {
   const tmp = `${file}.${process.pid}.tmp`;
   writeGroupOnly(tmp, JSON.stringify(s, null, 2));
   renameSync(tmp, file);
-}
-
-/**
- * One ops post, within the same machine-wide limit as the watchdog's incident posts (watchdog/post.ts RATE): true,
- * and counted, when one may go now; false when the window is full (it waits for a later pass).
- */
-export function takeOpsSlot(o: { dir?: string; now?: number } = {}): boolean {
-  const t = o.now ?? Date.now();
-  return withIncidents(o.dir, (f) => {
-    const recent = f.posts.filter((x) => t - Date.parse(x) < RATE.windowMs);
-    if (recent.length >= RATE.max) return false;
-    f.posts = [...recent, new Date(t).toISOString()];
-    return true;
-  });
 }
 
 /** The key a merge's post is sent under, once. */
@@ -166,10 +153,15 @@ export class MergePosts {
       writeState(this.d.stateFile, s);
     }
     const p = s.pending;
-    if (!p.pulls) {
+    const linked = (l: MergePull[]) => l.some((x) => x.mergedAt && x.base === this.d.branch);
+    const lagging = () => !!p.pulls && !linked(p.pulls) && p.pullsAt !== undefined && (p.pullsLastAt ?? p.pullsAt) - p.pullsAt < LINK_LAG_MS;
+    if (!p.pulls || lagging()) {
       if (!this.take(s)) return;
       p.pulls = await this.d.api.commitPulls(p.sha);
+      p.pullsAt ??= this.now;
+      p.pullsLastAt = this.now;
       writeState(this.d.stateFile, s);
+      if (lagging()) return;
     }
     const cand = p.pulls.find((x) => x.mergedAt && x.base === this.d.branch && x.mergeCommit === p.sha);
     if (cand) {

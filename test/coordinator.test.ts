@@ -2117,8 +2117,13 @@ test('conflict fix: when the default branch moves (anyone merged), the open PRs 
   assert.ok(t.conflictStarted(), "PR 2's conflict fix started once main's tip moved");
 });
 
+/** Fix-forward off (max_attempts 0): a culprit is reverted at once, as before fix-forward. */
+const revertAtOnce = (cfg: ReturnType<typeof fixture>['cfg']) => {
+  cfg.project.fix_forward.max_attempts = 0;
+};
+
 test('auto-merge stop: main red after an auto-merge (green before it) stops auto-merge, opens a revert PR that never auto-merges, and asks the owner; only the operator resumes it', { skip }, async () => {
-  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: revertAtOnce });
   realMerges(t);
   const before = git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!;
   t.f.backlog.setChecks(before, passing);
@@ -2166,8 +2171,8 @@ test('auto-merge stop: main red after an auto-merge but already red before it: s
 });
 
 /** An auto-merged PR whose main commit fails `ci`; the tracker can re-run Actions jobs (recorded in `reruns`). */
-async function redAfterMerge() {
-  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+async function redAfterMerge(edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void) {
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, ...(edit ? { edit } : {}) });
   realMerges(t);
   const reruns: number[][] = [];
   t.f.backlog.rerunFailedJobs = async (ids) => {
@@ -2197,10 +2202,11 @@ test('flaky: main red after an auto-merge is re-run on the same commit first; gr
   assert.equal(filed.test, 'ci');
   assert.equal((await t.f.backlog.get(filed.issue)).title, 'Flaky test: ci', 'one issue for it');
   assert.ok(!(await t.f.backlog.get(filed.issue)).labels.includes('ready'), 'not ready: no agent opens a fix for it');
+  assert.equal(t.f.log.read(0, ['fix_forward.started', 'fix_forward.attempt']).length, 0, 'a flaky red is not a red for fix-forward: no culprit, no fix task');
 });
 
-test('flaky: main red, and red again on the re-run of the same commit: real, stopped and reverted as before', { skip }, async () => {
-  const { t, done, reruns } = await redAfterMerge();
+test('flaky: main red, and red again on the re-run of the same commit: real, stopped and reverted as before (fix-forward off)', { skip }, async () => {
+  const { t, done, reruns } = await redAfterMerge(revertAtOnce);
   assert.deepEqual(reruns, [[94]], 're-run first');
   assert.equal(t.f.log.read(0, ['merge.main_result', 'merge.stopped']).length, 0, 'nothing judged, stopped or reverted before the re-run is in');
   t.f.backlog.setChecks(done.sha, failing(96));
@@ -2640,7 +2646,7 @@ test('push limits on the change: refused before any check runs, the worker is to
       return { summary: 'fixed' };
     },
   });
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, maxAttempts: 3 });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -2961,7 +2967,7 @@ test('with test_run on, an agent run never starts the full suite: done_when suit
     const write = (what: string) => `node -e "require('fs').appendFileSync(process.argv[1], '${what}\\n')" ${JSON.stringify(mark)}`;
     f.cfg.tests.runner.full = write('full');
     f.cfg.tests.runner.changed = write('changed');
-    if (on) f.cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+    if (on) f.cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, full_checkout: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
     f.backlog.open({ title: 'Totals count negative quantities', body, author: 'example-owner', labels: ['ready'] });
     const runner = agents();
     const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });

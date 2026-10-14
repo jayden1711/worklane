@@ -11,7 +11,8 @@ import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload, EventType, StoredEvent } from '../src/events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
-import { BudgetRunner, runSuite, type SuiteOptions } from '../src/harness-evals/replay.js';
+import { BRAND } from '../src/brand.js';
+import { BudgetRunner, runSuite, scratchConfig, type SuiteOptions } from '../src/harness-evals/replay.js';
 import { harnessEvalDue } from '../src/harness-evals/schedule.js';
 import { baselineFor, commentMarkdown, evalRuns, scoreReplay } from '../src/harness-evals/score.js';
 import { engineRepo, HarnessTask, issueBody, loadSuite, PUBLIC_TASKS_DIR, readTasks, type LoadedTask } from '../src/harness-evals/tasks.js';
@@ -257,6 +258,22 @@ test('on a change to src/: the coordinator runs the suite within its budget and 
   await f.c.checkHarnessEvals();
   await f.c.idle();
   assert.equal(f.calls.length, 1);
+});
+
+test('the scratch config turns off everything scheduled, paid or networked beyond the agents, whatever the base enabled', () => {
+  const root = mkdtempSync(join(tmpdir(), 'scratch-cfg-'));
+  cpSync(join(repoRoot, 'examples', 'basic'), root, { recursive: true });
+  const dir = join(root, BRAND.configDir);
+  const add = (file: string, text: string) => writeFileSync(join(dir, file), `${readFileSync(join(dir, file), 'utf8')}\n${text}\n`);
+  add('config.yaml', 'gardener: { enabled: true }\nharness_evals: { enabled: true }\noptimize: { enabled: true }\nchecks_from_feedback: { enabled: true }');
+  add('tests.yaml', 'nightly_at: "02:00"\npreview: { enabled: false }');
+  const before = loadConfig(root);
+  assert.deepEqual([before.project.gardener.enabled, before.project.harness_evals.enabled, before.project.optimize.enabled, before.project.checks_from_feedback.enabled], [true, true, true, true]);
+  scratchConfig(root, 2);
+  const cfg = loadConfig(root);
+  assert.deepEqual([cfg.project.gardener.enabled, cfg.project.harness_evals.enabled, cfg.project.optimize.enabled, cfg.project.checks_from_feedback.enabled], [false, false, false, false]);
+  assert.deepEqual([cfg.project.backlog, cfg.project.land_mode, cfg.tests.nightly_at, cfg.tests.preview, cfg.tests.test_run], ['file', 'direct', undefined, undefined, undefined]);
+  assert.ok(cfg.agents.daily_budget_usd <= 2);
 });
 
 test("a replay's scratch coordinator never runs harness evals itself, even with them on in its config (no recursion)", async () => {

@@ -19,6 +19,7 @@ import type { MainWatchApi } from '../main-watch.js';
 import type { MergePostsApi } from '../merge-posts.js';
 import type { CiMetricsApi } from '../ci-metrics.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
+import type { Previews } from '../preview/previews.js';
 import { DEFAULT_GENERATED } from '../config/schema.js';
 
 export interface CoordinatorDeps {
@@ -133,6 +134,8 @@ export interface CoordinatorDeps {
   roleOf?: RoleOf;
   /** The pre-deploy gate (src/deploy-gate/, tests.yaml deploy_gate); absent: off. */
   deployGate?: DeployGate;
+  /** docs/previews.md: PR previews; absent, off. */
+  previews?: Previews;
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */

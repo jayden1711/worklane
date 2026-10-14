@@ -1,5 +1,5 @@
 // Model routing, decided in code: which model each kind of run uses. Haiku for the intake replier and the decision
-// thread summary (held-out 20/20 on haiku and on sonnet at 3 samples); Sonnet for
+// thread summary (held-out 20/20 on haiku and on sonnet at 3 samples), and the reflection before a retry; Sonnet for
 // L1/L2 builds, planning, research, eval answering and the stage-label judge; Opus for L3 and high-risk builds,
 // and for a build that already failed twice on its usual model. Intake triage stays on the model it had (the
 // researcher's, else the workers'): its held-out score dropped on haiku. The stage-label judge stays on sonnet:
@@ -15,7 +15,7 @@ export const MODEL_TIERS = ['haiku', 'sonnet', 'opus'] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
 /** Kinds of run routed here (not the evaluator, which eval_routing tiers). */
-export type RoutedRun = 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer';
+export type RoutedRun = 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer' | 'reflection';
 
 export interface ModelRouting {
   /** L1/L2 builds (worker, investigator, conflict fix). */
@@ -35,6 +35,8 @@ export interface ModelRouting {
   intake_thread: string;
   stage_judge: string;
   eval_answer: string;
+  /** The short read-only reflection before a worker's retry: what failed, what to change. */
+  reflection: string;
 }
 
 export const DEFAULT_HIGH_RISK_LABELS = ['size:L', 'money-path', 'review:L3', 'high-risk'];
@@ -61,6 +63,8 @@ export function modelRouting(agents: Pick<AgentsConfig, 'roles' | 'model_routing
     intake_thread: r.intake_thread ?? 'sonnet',
     stage_judge: r.stage_judge ?? 'sonnet',
     eval_answer: r.eval_answer ?? 'sonnet',
+    // A few lines from a rejection and a diff: the cheap tier.
+    reflection: r.reflection ?? 'haiku',
   };
 }
 

@@ -343,6 +343,24 @@ jobs:
             grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo ci2 || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
+      - name: systemd-run leaves a command's ${...} to bash, on this systemd (the flag) and as an older one needs it ($$)
+        run: |
+          # The helper's own systemd_command, against real systemd-run. Unescaped, systemd blanks a shell-only ${x}
+          # (the bug); with the version this host has, and with the $$ escapes a systemd older than 254 gets, bash sees it.
+          eval "$(sed -n '/^systemd_command() {/,/^}/p' scripts/machine/worklane-testrun.sh)"
+          die() { echo "$*" >&2; exit 2; }
+          v="$(systemd-run --version | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')"
+          echo "systemd $v"
+          cmd='x=hello; echo "got ${x} ${x%lo} $x"'
+          run() { local out flag c; out="$(systemd_command "$1" "$cmd")"; flag="${out%%$'\n'*}"; c="${out#*$'\n'}"; sudo systemd-run --wait --pipe --quiet ${flag:+"$flag"} /bin/bash -c "$c"; }
+          bug="$(sudo systemd-run --wait --pipe --quiet /bin/bash -c "$cmd")"
+          echo "unescaped, as before: $bug"
+          [ "$bug" != 'got hello hel hello' ] || { echo "systemd didn't expand it: the bug can't be shown here" >&2; exit 1; }
+          for ver in "$v" 253; do
+            out="$(run "$ver")"
+            echo "as systemd $ver gets it: $out"
+            [ "$out" = 'got hello hel hello' ]
+          done
       - name: an outdated helper is replaced by the updater (and by update-helper), as root, with sudoers unchanged
         run: |
           H=/usr/local/libexec/worklane-testrun

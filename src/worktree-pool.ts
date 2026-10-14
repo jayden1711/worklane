@@ -2,13 +2,18 @@
 // installed), so a task can start in one instead of waiting for a fresh setup. Off unless tests.yaml asks
 // for it (worktree.pool), refilled after each merge, and bounded by free disk.
 //
-// A pooled worktree is used where it is, never moved: setup steps such as a Python virtualenv or an
-// editable install record absolute paths, which a move would break. Taking one only switches its branch.
+// A pooled worktree is used where it is, never moved to another path: setup steps such as a Python virtualenv
+// or an editable install record absolute paths, which a move would break. Taking one only switches its branch.
+// When main moves and the files that pin the install (worktree.setup_key) didn't change, a pooled worktree
+// follows main by a checkout in place, keeping what its setup installed, so a merge doesn't empty the pool. It is
+// still set up on main only and handed to one task, never back: no task's change reaches another's dependencies.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import { diskFree, groupOnlyDir, writeGroupOnly } from './os/index.js';
+import { cacheKey } from './testrun/cache.js';
 import { createWorktreeAsync, removeWorktree, worktreePath, type WorktreeOptions } from './worktrees.js';
 
 export interface PoolEntry {
@@ -16,6 +21,8 @@ export interface PoolEntry {
   path: string;
   base: string;
   createdAt: string;
+  /** What its setup produced depends on (setupKey): the same key at a new main means it can move there as it is. */
+  key?: string | null;
 }
 
 /** Disk always left free after the pool: the larger of this and twice one worktree. */
@@ -43,19 +50,58 @@ export function poolFits(want: number, estSizeGb: number, freeGb: number): numbe
 }
 
 /**
- * Bring the pool to `size` worktrees on `base` (main's tip): stale ones (an older base, gone from disk) are
- * removed first; new ones are created with the project's setup, and one whose setup fails is removed again.
+ * What a worktree's setup produces depends on, at `base`: the setup steps, the project's variables, what the checkout
+ * leaves out, and the contents of the `files` that pin the install (tests.yaml worktree.setup_key, read at `base`).
+ * null without key files: nothing says a set-up worktree stays right on another commit.
+ */
+export function setupKey(o: WorktreeOptions, base: string, files: readonly string[]): string | null {
+  if (!files.length) return null;
+  return createHash('sha256')
+    .update(JSON.stringify({ setup: o.setup, env: o.env ?? {}, sparse: o.sparseExclude ?? [] }))
+    .update(cacheKey(o.repo, base, files))
+    .digest('hex')
+    .slice(0, 32);
+}
+
+/**
+ * A pooled worktree, still exactly as it was set up (clean, at its base), moved to `base` on its own pool branch: the
+ * tracked files follow main, and what setup installed (untracked, ignored) stays. False when it isn't clean or the
+ * checkout fails; the caller removes it then.
+ */
+function movePooled(e: PoolEntry, base: string): boolean {
+  try {
+    if (git(e.path, 'status', '--porcelain', '--untracked-files=no') !== '' || git(e.path, 'rev-parse', 'HEAD') !== e.base) return false;
+    git(e.path, 'checkout', '-q', '-B', git(e.path, 'rev-parse', '--abbrev-ref', 'HEAD'), base);
+    return git(e.path, 'rev-parse', 'HEAD') === base;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bring the pool to `size` worktrees on `base` (main's tip). A stale one (an older base) whose setup key is the same
+ * at `base` (`key`: none of the files that pin its install changed) is moved there and kept; any other stale one, or
+ * one gone from disk, is removed. New ones are created with the project's setup, and one whose setup fails is
+ * removed again.
  */
 export async function refillPool(
   o: WorktreeOptions,
-  p: { size: number; base: string; estSizeGb: number; freeGb?: () => number },
-): Promise<{ created: string[]; removed: string[]; errors: string[] }> {
+  p: { size: number; base: string; estSizeGb: number; freeGb?: () => number; key?: (base: string) => string | null },
+): Promise<{ created: string[]; moved: string[]; removed: string[]; errors: string[] }> {
   const removed: string[] = [];
+  const moved: string[] = [];
   const errors: string[] = [];
   const keep: PoolEntry[] = [];
+  let key: string | null | undefined;
+  const keyAt = () => (key === undefined ? (key = p.key?.(p.base) ?? null) : key);
   for (const e of readPool(o)) {
     if (e.base === p.base && existsSync(e.path)) {
       keep.push(e);
+      continue;
+    }
+    if (existsSync(e.path) && e.key && e.key === keyAt() && movePooled(e, p.base)) {
+      keep.push({ ...e, base: p.base });
+      moved.push(e.name);
       continue;
     }
     try {
@@ -82,11 +128,11 @@ export async function refillPool(
       }
       break; // the same setup would fail again for the next one
     }
-    keep.push({ name, path, base: p.base, createdAt: new Date().toISOString() });
+    keep.push({ name, path, base: p.base, createdAt: new Date().toISOString(), key: keyAt() });
     writePool(o, keep);
     created.push(name);
   }
-  return { created, removed, errors };
+  return { created, moved, removed, errors };
 }
 
 /**

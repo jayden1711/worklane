@@ -59,7 +59,8 @@ function commit(cwd: string, msg: string) {
 
 /**
  * The scratch instance's config, committed on top of the base: a file backlog, direct landing into the local remote,
- * and nothing scheduled (no nightly runs, test runs, deploy gate, gardener, optimization pass, or harness evals of its own). The daily
+ * and nothing scheduled, paid or networked beyond the agents (no nightly runs, test runs, deploy gate, PR previews,
+ * gardener, optimization pass, checks from feedback, or harness evals of its own). Intake is never wired into it. The daily
  * budget is at most the run's.
  */
 export function scratchConfig(root: string, budgetUsd: number): void {
@@ -78,9 +79,10 @@ export function scratchConfig(root: string, budgetUsd: number): void {
     d.setIn(['gardener', 'enabled'], false);
     d.deleteIn(['harness_evals']);
     d.deleteIn(['optimize']);
+    d.deleteIn(['checks_from_feedback']);
   });
   edit('tests.yaml', (d) => {
-    for (const k of ['nightly_at', 'test_run', 'deploy_gate']) d.delete(k);
+    for (const k of ['nightly_at', 'test_run', 'deploy_gate', 'preview']) d.delete(k);
   });
   edit('agents.yaml', (d) => {
     const cur = Number(d.get('daily_budget_usd') ?? budgetUsd);

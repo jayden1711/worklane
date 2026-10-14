@@ -104,7 +104,7 @@ function world(o: { postMerges?: boolean } = {}) {
     git(person, 'push', '-q', 'origin', 'main');
     return git(person, 'rev-parse', 'HEAD');
   };
-  return { f, pass, restart, merge, directPush, chat, calls, clock };
+  return { f, pass, restart, merge, directPush, chat, calls, clock, commitPulls };
 }
 
 const mergePosts = (w: ReturnType<typeof world>) => w.chat.posts.filter((p) => p.where === OPS_CHANNEL && p.text.startsWith('**Merged**'));
@@ -191,10 +191,26 @@ test('merge posts: a direct push (no PR) gets no post from merge posts; a merge 
   const w = world();
   await w.pass();
   const sha = w.directPush('hotfix.txt');
-  await w.pass(3);
+  await w.pass(6); // its empty commit-to-PR link is asked again for LINK_LAG_MS first
   assert.ok(w.calls.includes(`pulls ${sha.slice(0, 8)}`), 'GitHub was asked for its PR');
   assert.equal(mergePosts(w).length, 0, 'no post for a direct push');
   w.merge();
   await w.pass(4);
   assert.equal(mergePosts(w).length, 1);
+});
+
+test('regression: a merge whose commit-to-PR link lags is still posted once GitHub links it', async () => {
+  // GitHub links a merge commit to its PR a few seconds after it lands; asked at once, the link was empty and the
+  // merge was taken for a direct push: never posted.
+  const w = world();
+  await w.pass();
+  const { sha, number } = w.merge();
+  const linked = w.commitPulls.get(sha)!;
+  w.commitPulls.delete(sha); // not linked yet
+  await w.pass(2);
+  assert.ok(w.calls.includes(`pulls ${sha.slice(0, 8)}`), 'GitHub was asked');
+  w.commitPulls.set(sha, linked); // linked now
+  await w.pass(4);
+  assert.equal(mergePosts(w).length, 1, 'posted');
+  assert.ok(mergePosts(w)[0]!.text.includes(`#${number}`));
 });
