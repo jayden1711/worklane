@@ -13,7 +13,8 @@ import { fullRunLock, slotStatus, tryAgentSlot } from '../src/slots.js';
 import { testSlotsHeld, tryTestSlot } from '../src/testrun/slots.js';
 import { runLimitMs } from '../src/testrun/run.js';
 import { SETUP_TIMEOUT_S } from '../src/testrun/timeout.js';
-import { updateDrain, DRAIN_TTL_MAX_MS } from '../src/update-drain.js';
+import { drainRefusal, updateDrain, DRAIN_TTL_MAX_MS } from '../src/update-drain.js';
+import { addStartGate, passGate, TestRunHeld } from '../src/testrun/gate.js';
 import { updateDrainPath, UPDATE_DRAIN_FILE, SYSTEM_SLOTS } from '../src/os/index.js';
 import { drainView } from '../src/dashboard.js';
 import { updatesPanel } from '../src/updates.js';
@@ -386,6 +387,26 @@ test('the Updates panel: draining since when, and what is still finishing (read-
     writeFileSync(updateDrainPath(dir), JSON.stringify({ since, until: iso(Date.now() - 1), to: NEW }));
     assert.equal(drainView(dir), null, 'a lapsed flag is not shown');
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the shared start gate: the coordinator adds the drain as its `drain` source, and a run asked for while it stands is held, not started', () => {
+  assert.match(readFileSync(join(repoRoot, 'src', 'service.ts'), 'utf8'), /addStartGate\('drain', drainRefusal\);/);
+  const dir = mkdtempSync(join(tmpdir(), 'drain-source-'));
+  const was = process.env.AGENT_SLOTS_DIR;
+  process.env.AGENT_SLOTS_DIR = dir;
+  const ungate = addStartGate('drain', drainRefusal);
+  try {
+    passGate();
+    writeFileSync(updateDrainPath(dir), JSON.stringify({ since: iso(Date.now()), until: iso(Date.now() + 30 * MIN), to: NEW }));
+    assert.throws(passGate, (e: unknown) => e instanceof TestRunHeld && e.refusals.some((r) => r.source === 'drain' && /^draining for an engine update since /.test(r.reason)));
+    writeFileSync(updateDrainPath(dir), JSON.stringify({ since: iso(Date.now() - 90 * MIN), until: iso(Date.now() - 1), to: NEW }));
+    passGate();
+  } finally {
+    ungate();
+    if (was === undefined) delete process.env.AGENT_SLOTS_DIR;
+    else process.env.AGENT_SLOTS_DIR = was;
     rmSync(dir, { recursive: true, force: true });
   }
 });

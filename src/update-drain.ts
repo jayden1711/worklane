@@ -7,8 +7,11 @@
 // expiry, unreadable, or claiming more than DRAIN_TTL_MAX_MS ahead is ignored: an updater that crashed or was turned
 // off never leaves the machine drained.
 //
-// Every gate that starts work reads it here: tryTestSlot (src/testrun/slots.ts, every test run), fullRunLock and
-// tryAgentSlot (src/slots.ts). A shared start gate added later calls updateDrain() too.
+// Test runs: it is the `drain` source of the one start gate every test run passes (src/testrun/gate.ts, added by the
+// coordinator in src/service.ts), so a run asked for while it stands is held, not started. A run that passed the gate
+// before the drain began and is still queued for its slot is stopped at tryTestSlot (src/testrun/slots.ts), which reads
+// it under the slot directory's lock: the updater's flag write and a slot take can't cross there. Agents and the
+// full-run lock read it at tryAgentSlot and fullRunLock (src/slots.ts).
 import { readFileSync } from 'node:fs';
 import { slotsDir, updateDrainPath } from './os/index.js';
 
@@ -42,4 +45,10 @@ export function updateDrain(dir = slotsDir(), now = Date.now()): UpdateDrain | n
 /** What a gate says when the drain holds it. */
 export function drainHoldLine(d: UpdateDrain): string {
   return `draining for an engine update since ${d.since}: new test runs and agents wait until it is installed`;
+}
+
+/** The start gate's `drain` source (src/testrun/gate.ts): why no test run may start now, or null. Cheap, never throws. */
+export function drainRefusal(): string | null {
+  const d = updateDrain();
+  return d ? drainHoldLine(d) : null;
 }
