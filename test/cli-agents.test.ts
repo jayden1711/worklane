@@ -11,6 +11,7 @@ import { CliAgentRunner, cliAgentCommand, cliPrompt, cliRunRefusal, codexArgs, C
 import { loadConfig } from '../src/config/load.js';
 import { AgentsConfig } from '../src/config/schema.js';
 import { builtChangeRefusal, cliChangeRefusal, resolveProvider } from '../src/coordinator/providers.js';
+import { runRoute } from '../src/coordinator/model-routing.js';
 import { InstanceSettings } from '../src/instance.js';
 import { killTree } from '../src/os/index.js';
 import { PROVIDER_GATE_FILE, providerOf, providerRefusal } from '../src/providers.js';
@@ -338,4 +339,24 @@ test('a change another vendor\'s CLI built stands only at L1 or below, off prote
   assert.match(builtChangeRefusal('cli:codex', held)!, /L1 work only/);
   assert.equal(builtChangeRefusal('hosted:glm', held), null);
   assert.equal(builtChangeRefusal(undefined, held), null);
+});
+
+test('the reflection (a read-only role, routed since #340) is refused for cli: like the planner: in the schema, in routing and in the runner', async () => {
+  assert.match(providerRefusal('cli', { route: 'reflection' })!, /not reflection/);
+  const base = { daily_budget_usd: 10, roles: { workers: { enabled: true, model: 'sonnet' }, evaluator: { enabled: true, model: 'opus' } }, providers: { cli: { codex: { model: 'codex-model-x', tier: 'sonnet', usd_per_mtok_in: 1.25, usd_per_mtok_out: 10 } } } };
+  for (const section of ['routing', 'model_routing'] as const) {
+    const r = AgentsConfig.safeParse({ ...base, [section]: { reflection: 'cli:codex' } });
+    if (section === 'model_routing' && !r.success && r.error.issues.some((i) => /Unrecognized key/.test(i.message))) continue;
+    assert.equal(r.success, false, `${section}.reflection: cli:codex`);
+    assert.ok(!r.success && r.error.issues.some((i) => /not reflection/.test(i.message)), JSON.stringify(!r.success && r.error.issues));
+  }
+  const d = deps({ providers: { cli: ['codex'] } });
+  d.cfg.agents = AgentsConfig.parse({ ...base, routing: { build: 'cli:codex' } });
+  const { model, route } = runRoute(d.cfg, 'reflection');
+  const { provider: _p, ...req } = build('codex', { role: 'reflection', model: 'cli:codex', route });
+  assert.notEqual(model, 'cli:codex', 'the schema keeps cli: off the reflection, so its route never names it');
+  const f = await resolveProvider(req, d);
+  assert.equal(f.req.provider, undefined);
+  assert.match(f.fellBack!.reason, /cli models run only build/);
+  assert.match(cliRunRefusal('codex', build('codex', { role: 'reflection', route }))!, /cli models run only build/, 'and the runner refuses it itself');
 });
