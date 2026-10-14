@@ -22,9 +22,16 @@ for (const k of Object.keys(process.env)) {
 export const testMachine = mkdtempSync(join(tmpdir(), 'test-machine-'));
 const home = join(testMachine, 'home');
 
+/**
+ * Whether HOME itself moves. Not on macOS: headless Chrome there never answers a navigation with a fresh home
+ * (browser-run and browser-check time out after 90 s), so each default the engine derives from the home is moved
+ * one by one instead: XDG_*, the state dir and the tool prefix below.
+ */
+export const homeMoved = process.platform !== 'darwin';
+
 /** What the isolation sets: each a directory inside testMachine. */
 export const isolatedEnv: Readonly<Record<string, string>> = Object.freeze({
-  HOME: home,
+  ...(homeMoved ? { HOME: home } : { [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local') }),
   ...(process.platform === 'win32' ? { USERPROFILE: home } : {}),
   XDG_CONFIG_HOME: join(home, '.config'),
   XDG_STATE_HOME: join(home, '.local', 'state'),

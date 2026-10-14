@@ -1,7 +1,7 @@
 // The suite runs clean on a machine that already runs the engine (issue #312): every test process has a temporary
 // home, state dir and slot directory (test/isolate.ts), and a server a test stops keeps its port held by the test
 // (test/held-port.ts). Checked here end to end, with a live machine's environment and its fixed ports taken.
-import { isolatedEnv, testMachine } from './isolate.js';
+import { homeMoved, isolatedEnv, testMachine } from './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -57,10 +57,10 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
     assert.equal(process.env[k], v, k);
     assert.ok(inside(v), `${k} is inside ${testMachine}`);
   }
-  for (const [what, p] of [['homedir()', homedir()], ['stateDir()', stateDir()], ['instancesDir()', instancesDir()], ['slotsDir()', slotsDir()], ['toolPrefix()', toolPrefix()], ['machineInitDir()', machineInitDir()]] as const) {
-    assert.ok(inside(p), `${what} is ${p}, outside ${testMachine}`);
-  }
-  assert.ok(inside(childEnv().HOME!), 'a child the test starts gets the same home');
+  const derived: [string, string][] = [['stateDir()', stateDir()], ['instancesDir()', instancesDir()], ['slotsDir()', slotsDir()], ['toolPrefix()', toolPrefix()], ['machineInitDir()', machineInitDir()]];
+  // macOS keeps the real HOME (test/isolate.ts homeMoved); everything above, derived from it, is still temporary.
+  if (homeMoved) derived.push(['homedir()', homedir()], ["a child's HOME", childEnv().HOME!]);
+  for (const [what, p] of derived) assert.ok(inside(p), `${what} is ${p}, outside ${testMachine}`);
   const leaked = Object.keys(process.env).filter((k) => k.startsWith(`${BRAND.envPrefix}_`) && !(k in isolatedEnv) && k !== `${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`);
   assert.deepEqual(leaked, [], 'no engine setting from the shell');
 });
