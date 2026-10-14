@@ -422,7 +422,7 @@ export abstract class CoordinatorBase {
    */
   protected usage(r: RunResult): { model: string; usd: number; turns: number; provider?: string; tokens_in?: number; tokens_out?: number; secs?: number } {
     const named = r.provider ? providerOf(r.provider) : null;
-    const p = named ? (named.kind === 'local' ? this.d.cfg.agents.providers?.local : this.d.cfg.agents.providers?.hosted?.[named.name]) : undefined;
+    const p = named ? (named.kind === 'local' ? this.d.cfg.agents.providers?.local : named.kind === 'cli' ? (this.d.cfg.agents.providers?.cli as Record<string, { usd_per_mtok_in: number; usd_per_mtok_out: number }> | undefined)?.[named.name] : this.d.cfg.agents.providers?.hosted?.[named.name]) : undefined;
     const usd = named ? (providerCost(named.kind, p ?? {}, r.tokens ?? { in: 0, out: 0 }) ?? 0) : r.costUsd;
     return {
       model: r.model,

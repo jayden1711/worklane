@@ -48,7 +48,7 @@ import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
-import { hostedChangeRefusal } from './coordinator/providers.js';
+import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { Optimizer } from './coordinator/optimize.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
@@ -720,7 +720,7 @@ export class Coordinator extends Optimizer {
         refused = 'rejected' in change ? (change.refused ?? null) : null;
         // A hosted open model never builds L3, money-path or agent-instructions work: such a change is refused, and the
         // task goes on with the next attempt on the build's Anthropic model.
-        const hostedWhy = !('rejected' in change) && out.provider?.startsWith('hosted:') ? hostedChangeRefusal({ files: change.files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW }) : null;
+        const hostedWhy = 'rejected' in change ? null : builtChangeRefusal(out.provider, { files: change.files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, guardrails: this.d.cfg.guardrails });
         if (hostedWhy) {
           noOpenModel = true;
           this.emit('provider.fallback', { issue: n, role: 'worker', provider: out.provider!, reason: hostedWhy, model: buildRoute(this.d.cfg, issue.labels, attempt + 1, true).model });
