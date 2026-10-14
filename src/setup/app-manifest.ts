@@ -55,6 +55,8 @@ export const MANIFEST_STATE_MS = 10 * 60_000;
 /** An instance name, as add-project takes it. */
 export const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,20}$/;
 const REPO = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+/** A GitHub user or organization name. */
+export const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
 /** GitHub's longest App name. */
 const MAX_APP_NAME = 34;
 /** The machine's user names, as scripts/setup/lib.sh makes them: wl-<name> (coordinator), wl-dash (the hub). */
@@ -146,13 +148,15 @@ export function installUrl(slug: string, ids: { ownerId: number; repoId: number 
   return `${base}/permissions?suggested_target_id=${ids.ownerId}${ids.repoId ? `&repository_ids[]=${ids.repoId}` : ''}`;
 }
 
-/** What GitHub's conversion returns that the runner needs. pem and clientSecret are secrets. */
+/** What GitHub's conversion returns that the runner needs. pem, clientSecret and webhookSecret are secrets. */
 export interface ConvertedApp {
   id: number;
   slug: string;
   clientId: string;
   clientSecret: string;
   pem: string;
+  /** GitHub's webhook secret for the App, when it made one (the manifest's webhook is inactive, so it may not). */
+  webhookSecret: string | null;
   owner: string;
   htmlUrl: string;
 }
@@ -162,7 +166,7 @@ export async function convertManifest(code: string, o: { api?: string; fetch?: F
   const api = (o.api ?? defaultApi()).replace(/\/+$/, '');
   const r = await (o.fetch ?? fetch)(`${api}/app-manifests/${encodeURIComponent(code)}/conversions`, { method: 'POST', headers: HEADERS });
   if (r.status !== 201 && r.status !== 200) throw new Error(`GitHub ${r.status} converting the manifest code`);
-  let j: { id?: unknown; slug?: unknown; client_id?: unknown; client_secret?: unknown; pem?: unknown; owner?: { login?: unknown }; html_url?: unknown };
+  let j: { id?: unknown; slug?: unknown; client_id?: unknown; client_secret?: unknown; webhook_secret?: unknown; pem?: unknown; owner?: { login?: unknown }; html_url?: unknown };
   try {
     j = (await r.json()) as typeof j;
   } catch {
@@ -171,7 +175,8 @@ export async function convertManifest(code: string, o: { api?: string; fetch?: F
   if (typeof j.id !== 'number' || typeof j.slug !== 'string' || !/^[a-z0-9-]+$/.test(j.slug) || typeof j.pem !== 'string' || typeof j.client_id !== 'string' || typeof j.client_secret !== 'string') {
     throw new Error('GitHub returned no App id, slug, key or client secret for the manifest');
   }
-  return { id: j.id, slug: j.slug, clientId: j.client_id, clientSecret: j.client_secret, pem: j.pem, owner: typeof j.owner?.login === 'string' ? j.owner.login : '', htmlUrl: typeof j.html_url === 'string' ? j.html_url : '' };
+  const webhookSecret = typeof j.webhook_secret === 'string' && j.webhook_secret ? j.webhook_secret : null;
+  return { id: j.id, slug: j.slug, clientId: j.client_id, clientSecret: j.client_secret, pem: j.pem, webhookSecret, owner: typeof j.owner?.login === 'string' ? j.owner.login : '', htmlUrl: typeof j.html_url === 'string' ? j.html_url : '' };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -230,11 +235,18 @@ export class ManifestFlows {
   }
 
   /** Register a flow for the runner (break-glass only): its manifest, a fresh state token, and the page to open. */
-  async register(input: { kind?: unknown; instance?: unknown; repo?: unknown; publicUrl?: unknown }): Promise<Registered> {
+  async register(input: { kind?: unknown; instance?: unknown; repo?: unknown; owner?: unknown; publicUrl?: unknown }): Promise<Registered> {
     const kind = input.kind === 'signin' ? 'signin' : input.kind === 'agent' ? 'agent' : null;
     if (!kind) throw new FlowError('kind must be agent or signin');
     if (typeof input.instance !== 'string' || !INSTANCE_NAME.test(input.instance)) throw new FlowError(`instance must match ${INSTANCE_NAME}`);
-    if (!validRepo(input.repo)) throw new FlowError('repo must be owner/name');
+    // WHY: the sign-in App belongs to the machine, not to a repo: the hub's setup mode (src/hub-setup.ts) names only the
+    // account that owns it. The repo's owner is all a sign-in flow ever reads from it.
+    let repo = input.repo;
+    if (kind === 'signin' && repo === undefined && typeof input.owner === 'string') {
+      if (!GITHUB_LOGIN.test(input.owner)) throw new FlowError('owner must be a GitHub account or organization name');
+      repo = `${input.owner}/${input.owner}`;
+    }
+    if (!validRepo(repo)) throw new FlowError('repo must be owner/name');
     const publicUrl = this.o.publicUrl ?? (typeof input.publicUrl === 'string' ? input.publicUrl : '');
     let origin: URL;
     try {
@@ -245,7 +257,7 @@ export class ManifestFlows {
     if (origin.protocol !== 'https:' || origin.pathname !== '/' || origin.search) throw new FlowError("the public URL must be the hub's https origin");
     const api = this.o.api ?? defaultApi();
     const f = this.o.fetch ?? fetch;
-    const owner = input.repo.split('/')[0]!;
+    const owner = repo.split('/')[0]!;
     const u = await f(`${api}/users/${encodeURIComponent(owner)}`, { headers: HEADERS });
     const ownerType = u.ok && ((await u.json()) as { type?: string }).type === 'Organization' ? 'Organization' : 'User';
     const name = await availableAppName(appBaseName(input.instance, kind), { api, fetch: f });
@@ -254,8 +266,8 @@ export class ManifestFlows {
     const t = this.now();
     for (const [k, x] of this.flows) if (x.expiresAt + MANIFEST_STATE_MS < t) this.flows.delete(k);
     if (this.flows.size > 100) throw new FlowError('too many App setups pending on this hub');
-    const manifest = appManifest({ kind, name, repo: input.repo, publicUrl: origin.origin });
-    this.flows.set(id, { id, kind, instance: input.instance, repo: input.repo, name, manifest, target: manifestTarget(owner, ownerType, state, this.o.web ?? defaultWeb()), stateHash: sha(state), expiresAt: t + MANIFEST_STATE_MS, status: 'pending', by: null, error: null, app: null, waiters: new Set() });
+    const manifest = appManifest({ kind, name, repo, publicUrl: origin.origin });
+    this.flows.set(id, { id, kind, instance: input.instance, repo, name, manifest, target: manifestTarget(owner, ownerType, state, this.o.web ?? defaultWeb()), stateHash: sha(state), expiresAt: t + MANIFEST_STATE_MS, status: 'pending', by: null, error: null, app: null, waiters: new Set() });
     return { id, name, startUrl: `${origin.origin}${MANIFEST_START_PATH}/${id}`, expiresAt: new Date(t + MANIFEST_STATE_MS).toISOString() };
   }
 
@@ -485,6 +497,9 @@ export type RunResult =
   | { ok: true; kind: AppKind; appId: number; slug: string; clientId: string; by: string; installationId?: number; keyPath?: string; credentials?: string | null; secretPath?: string }
   | { ok: false; step: string; error: string };
 
+/** The agent App's secret files in its key directory: the key (credentials.sh's name), and the two other secrets. */
+export const AGENT_SECRET_FILES = Object.freeze({ key: 'private-key.pem', clientSecret: 'client-secret', webhookSecret: 'webhook-secret' });
+
 /** credentials.sh's paths, on top of a user's home. */
 export const agentKeyDir = (home: string, instance: string) => join(home, '.config', `${instance}-app`);
 export const signInDir = (home: string) => join(home, '.config', 'dashboard-signin');
@@ -589,13 +604,19 @@ export async function runAppManifest(o: { instance: string; repo: string; kind: 
     log(`then: dashboards.sh --client-id ${app.clientId} --public-url ${new URL(reg.startUrl).origin} <name>...`);
     return { ok: true, kind: 'signin', appId: app.id, slug: app.slug, clientId: app.clientId, by, secretPath };
   }
+  // WHY: everything secret GitHub returned goes straight to the coordinator's own 0400 files, beside the key, the
+  // way credentials.sh stores the key; the coordinator works with the key alone, the other two are kept so nobody
+  // has to regenerate them on GitHub later. Only their paths are ever logged.
   let keyPath: string;
+  const keyDir = agentKeyDir(userHome, o.instance);
   try {
-    keyPath = install(user, agentKeyDir(userHome, o.instance), 'private-key.pem', app.pem);
+    keyPath = install(user, keyDir, AGENT_SECRET_FILES.key, app.pem);
+    install(user, keyDir, AGENT_SECRET_FILES.clientSecret, app.clientSecret);
+    if (app.webhookSecret) install(user, keyDir, AGENT_SECRET_FILES.webhookSecret, app.webhookSecret);
   } catch (e) {
     return fail('store the App key', String((e as Error).message).split('\n')[0]!);
   }
-  log(`installed the App's private key for ${user} only (${keyPath}, 0400)`);
+  log(`installed the App's private key, client secret${app.webhookSecret ? ' and webhook secret' : ''} for ${user} only (${keyDir}, each 0400)`);
 
   // 3. The install, on exactly the instance's repo.
   const [owner] = o.repo.split('/') as [string, string];

@@ -890,6 +890,20 @@ export function openUrl(url: string): void {
   }
 }
 
+/**
+ * A browser opener that opens nothing: it writes the URL it is given to `urlFile` (this user's only), so a program
+ * that opens a browser through $BROWSER (claude auth login) hands its URL to the dashboard instead. Written into
+ * `dir` (a 0700 directory of this user's), 0700. Null where $BROWSER can't name such a script (Windows): there the
+ * program opens the browser itself.
+ */
+export function browserRelay(dir: string, urlFile: string): string | null {
+  if (process.platform === 'win32') return null;
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const file = join(dir, 'browser-relay');
+  writeExecutable(file, `#!/bin/sh\numask 077\nprintf '%s\\n' "$1" > ${q(urlFile)}\n`, 0o700);
+  return file;
+}
+
 /** A native executable's file name on this OS. */
 export function executableName(base: string): string {
   return process.platform === 'win32' ? `${base}.exe` : base;

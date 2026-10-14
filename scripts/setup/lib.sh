@@ -81,19 +81,42 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 28
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 34
 # allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8, claude-account status,
-# claude-account switch) as root, and nothing else.
+# claude-account switch, install-updater, set-update-channel release, tailscale install, tailscale up, tailscale serve,
+# tailscale public-url) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
 #
 # And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
 # two arguments of those shapes (sudo's anchored regular expression, sudo 1.9.10 or later; an older sudo matches it
 # literally, so never), which the helper checks again, strictly, before it runs add-project.sh.
+#
+# And `stage-update-signer <principal> ssh-ed25519 <public key>` (and `discard-update-signer`, the same arguments), the
+# same way: one principal of an email's shape and one ed25519 public key in its fixed encoding (68 base64 characters
+# after the type), which the helper checks again (it decodes the key). Staging writes only the helper's pending list:
+# no rule here lets a coordinator write the updater's allowed signers file, or follow main instead of releases.
+# Those two, and add-project, are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
+# older sudo would take a pattern as literal text, so they are left out there, the rule says so in a comment, and
+# machine-helper.sh records it in HELPER_RULES for the dashboard (which then shows the root command instead).
+HELPER_RULES=/etc/worklane/helper-rules.json
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
 ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
+SIGNER_SUDOERS_ARGS='[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
+# Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
+# expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
+SUDO_REGEX_MIN=1.9.10
+sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
+sudo_regex_ok() {
+  local v a b c
+  v="$(sudo_version)"
+  [ -n "$v" ] || return 1
+  IFS=. read -r a b c <<< "$v"
+  (( a > 1 || (a == 1 && (b > 9 || (b == 9 && c >= 10))) ))
+}
+
 machine_sudoers() {
-  local u n cmds=()
+  local u n cmds=() signer_rules=1
   [ "$#" -ge 1 ] || { echo "machine_sudoers: no users" >&2; return 1; }
   for u in "$@"; do
     [[ "$u" =~ ^wl-[a-z][a-z0-9-]{0,20}$ && "$u" != wl-dash ]] || { echo "machine_sudoers: $u is not a coordinator user" >&2; return 1; }
@@ -102,8 +125,18 @@ machine_sudoers() {
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
   cmds+=("$MACHINE_HELPER claude-account status" "$MACHINE_HELPER claude-account switch")
-  cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
-  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, and add a project, through one validating helper.\n'
+  cmds+=("$MACHINE_HELPER install-updater" "$MACHINE_HELPER set-update-channel release")
+  # Tailscale (tailscale.sh): four fixed commands. sudo matches a listed command's arguments exactly, so none takes an
+  # auth key, a flag, a URL or a port.
+  cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
+  if sudo_regex_ok; then
+    cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
+    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+  else
+    signer_rules=0
+  fi
+  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
+  [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -115,6 +148,46 @@ machine_sudoers() {
 helper_instances() {
   [ -f "$MACHINE_SUDOERS" ] || return 0
   sed -n 's/^\(wl-[-a-z0-9, ]*\) ALL=(root) NOPASSWD: WORKLANE_MACHINE$/\1/p' "$MACHINE_SUDOERS" | tr ',' '\n' | sed -e 's/^ *wl-//' -e 's/ *$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true
+}
+
+# Tailscale for the dashboard hub (tailscale.sh). The install is pinned: Tailscale's own apt repository for this
+# distribution, every package checked by apt against the one signing key whose fingerprint is here, and this version.
+# Change the version and the fingerprint only in a reviewed commit, the fingerprint only to one Tailscale publishes.
+#   fingerprint: the primary key of https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg ("Tailscale Inc. (Package
+#   repository signing key)"), as fetched 2026-10-13: the same key file (sha256
+#   3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39) for ubuntu jammy and noble and debian bookworm.
+#   version: the newest in that repository's Packages index (dists/noble/main/binary-amd64) on the same day.
+TAILSCALE_VERSION=1.104.1
+TAILSCALE_SIGNER_FPR=2596A99EAAB33821893C0A79458CA832957F5868
+TAILSCALE_REPO=https://pkgs.tailscale.com/stable
+TAILSCALE_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
+TAILSCALE_LIST=/etc/apt/sources.list.d/tailscale.list
+TAILSCALE_BIN=/usr/bin/tailscale
+OS_RELEASE=/etc/os-release
+# What the steps leave for the dashboard: steps.jsonl (root's, 0644: one JSON line per step change, never a link or a
+# key) and, while `up` waits, login-url (0400, the asking coordinator's user alone: the dashboard shows it to a machine
+# owner and to nobody else).
+TAILSCALE_DIR=/var/lib/worklane/tailscale
+TAILSCALE_LOCK=/run/lock/worklane-tailscale.lock
+# The hub's sign-in port, the only one tailscale serve may forward to (dashboards.sh; never 4398, the break-glass).
+HUB_PORT=4399
+BREAK_GLASS_PORT=4398
+# How long `tailscale up` waits for the owner to log in, and `tailscale serve` for tailscaled, in seconds.
+TAILSCALE_UP_SECONDS=600 TAILSCALE_SERVE_SECONDS=30
+# The login link `tailscale up` prints, strictly: Tailscale's own login host and a short id. Anything else is not
+# relayed (and a key is not a link: one is never asked for, taken or printed).
+tailscale_login_url_ok() { [[ "$1" =~ ^https://login\.tailscale\.com/a/[A-Za-z0-9]{6,64}$ ]]; }
+# A line of tailscale's output with every link and key taken out, for the journal and steps.jsonl.
+tailscale_redact() { sed -E -e 's#https?://[^[:space:]"]+#[a link, not logged]#g' -e 's#tskey-[A-Za-z0-9_-]+#[a key, not logged]#g'; }
+# stdin to a file of this owner, group and mode: a dotted temp name next to it, made empty with that owner and mode
+# first, then moved into place.
+put_file() {
+  local owner="$1" group="$2" mode="$3" file="$4" tmp
+  tmp="$(dirname "$file")/.$(basename "$file").tmp"
+  rm -f "$tmp"
+  install -o "$owner" -g "$group" -m "$mode" /dev/null "$tmp"
+  cat > "$tmp"
+  mv -f "$tmp" "$file"
 }
 
 # The dashboard hub's unit, as dashboards.sh writes it, and one option of its ExecStart (nothing when it has none).
@@ -234,11 +307,11 @@ unit_start() { systemctl start "$1"; }
 
 # The engine repo's checks on main, one name per element (names hold commas, so never a joined string): the fast
 # ones every push to main runs (ci.yml, gitleaks.yml) and the slow ones (ci-slow.yml: bootstrap on each OS, the real
-# systemd and real users jobs), which run on main in batches, on the newest commit, one batch at a time
+# systemd and real users jobs, the wizard end to end), which run on main in batches, on the newest commit, one batch at a time
 # (ci-batch.yml). A pull request needn't run the slow ones, so main is where they gate, and only a batched commit
 # can be installed. Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the updater
 # refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)")
+UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {

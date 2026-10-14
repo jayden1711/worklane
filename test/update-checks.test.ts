@@ -149,11 +149,11 @@ const batchChecks = () => checks().filter((c) => c.batch).map((c) => c.name).sor
 /** Every check run every pull request creates, but the shards (their summary jobs gate them). */
 const prChecks = () => checks().filter((c) => c.pr && c.tier !== 'slow' && !(c.key in SHARDS)).map((c) => c.name).sort();
 
-const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)'];
+const SLOW_CHECKS = ['bootstrap (macos-latest)', 'bootstrap (ubuntu-latest)', 'bootstrap (windows-wsl)', 'test-run sandbox (real systemd)', 'add-project (real systemd)', 'Claude sign-in probe (real users)', 'wizard end to end (real systemd)'];
 
 test('the updater\'s default required checks are exactly what a batched main commit gets: every push\'s checks and the batch\'s', () => {
   assert.deepEqual([...defaults()].sort(), [...pushChecks(), ...batchChecks()].sort());
-  assert.equal(defaults().length, 13);
+  assert.equal(defaults().length, 14);
   assert.deepEqual(batchChecks(), [...SLOW_CHECKS].sort(), 'a batch runs every slow job, and only those');
   for (const x of SLOW_CHECKS) {
     assert.ok(!pushChecks().includes(x), `${x}: not on every push to main, only in a batch`);

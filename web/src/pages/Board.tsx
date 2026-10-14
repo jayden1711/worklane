@@ -6,8 +6,9 @@
 // and each goes to that instance's existing routes (decide, the console), which check the role again.
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
-import { instanceScope, instanceStream, onInstance, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
+import { instanceScope, instanceStream, liveStream, onInstance, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
+import type { Stream } from '../sse';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
 import { TestRunsPanel } from '../components/TestRuns';
@@ -77,20 +78,21 @@ function WatchFeed({ instance, run }: { instance: string | null; run: string }) 
   const [ended, setEnded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    let es: EventSource | null = null;
+    let es: Stream | null = null;
     let closed = false;
     void onInstance<{ items: FeedItem[] }>(instance, `/api/board/watch/${encodeURIComponent(run)}`)
       .then(() => instanceStream(instance, `/api/runs/${encodeURIComponent(run)}/live`))
       .then((u) => {
         if (closed) return;
-        es = new EventSource(u);
-        es.addEventListener('item', (e) => {
-          const it = JSON.parse((e as MessageEvent).data as string) as FeedItem;
-          setItems((xs) => (xs.some((x) => x.seq === it.seq) ? xs : [...xs, it]));
-        });
-        es.addEventListener('end', () => {
-          setEnded(true);
-          es?.close();
+        es = liveStream(u, {
+          item: (e) => {
+            const it = JSON.parse(e.data) as FeedItem;
+            setItems((xs) => (xs.some((x) => x.seq === it.seq) ? xs : [...xs, it]));
+          },
+          end: () => {
+            setEnded(true);
+            es?.close();
+          },
         });
       })
       .catch((e: Error) => setError(e.message));
@@ -398,18 +400,22 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
   // Live: the page's own stream (pulse) covers the selected instance; with All instances, each other one gets its own stream.
   // Elapsed times and resource use are refreshed every 15 s besides.
   useEffect(() => {
-    const streams: EventSource[] = [];
+    const streams: Stream[] = [];
     let closed = false;
     let timer: number | undefined;
     void instanceScope.then(async (s) => {
       for (const name of s.instances) {
         if (closed || name === null || name === s.current) continue;
-        const es = new EventSource(await instanceStream(name, '/api/stream'));
-        es.addEventListener('change', () => {
-          window.clearTimeout(timer);
-          timer = window.setTimeout(() => setTick((t) => t + 1), 200);
-        });
-        streams.push(es);
+        const path = await instanceStream(name, '/api/stream');
+        if (closed) return;
+        streams.push(
+          liveStream(path, {
+            change: () => {
+              window.clearTimeout(timer);
+              timer = window.setTimeout(() => setTick((t) => t + 1), 200);
+            },
+          }),
+        );
       }
     });
     const t = setInterval(() => {

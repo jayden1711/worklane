@@ -18,6 +18,7 @@ import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
 import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
+import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
 import { lingerEnabled, serviceRunning, systemUnitActive } from './os/index.js';
@@ -71,6 +72,8 @@ export interface MachinePaths {
   allowedSigners: string;
   hubUnitFile: string;
   fullRunLock: string;
+  /** claude-account.sh's status.json: each agent user's stored login and `claude auth status`, never the token. */
+  claudeAccountDir: string;
 }
 export const MACHINE_PATHS: MachinePaths = {
   enginePackage: fileURLToPath(new URL('../../package.json', import.meta.url)),
@@ -81,8 +84,11 @@ export const MACHINE_PATHS: MachinePaths = {
   allowedSigners: `/etc/${BRAND.cli}/allowed_signers`,
   hubUnitFile: `/etc/systemd/system/${BRAND.cli}-dashboard-hub.service`,
   fullRunLock: FULL_RUN_LOCK,
+  claudeAccountDir: CLAUDE_ACCOUNT_DIR,
 };
 export const HUB_UNIT = `${BRAND.cli}-dashboard-hub.service`;
+/** The hub in setup mode (src/hub-setup.ts; dashboards.sh --setup): before the sign-in App exists. */
+export const HUB_SETUP_UNIT = `${BRAND.cli}-dashboard-hub-setup.service`;
 
 /** What a server instance's steps read from it: its credentials and its home. */
 export interface InstanceFacts {
@@ -118,6 +124,8 @@ export interface SetupContext {
   machine?: Partial<MachinePaths>;
   /** A server instance's credentials and home; loadInstance when unset. */
   instanceFacts?: () => InstanceFacts | { error: string };
+  /** Steps skipped on the first-run page (src/dashboard.ts). */
+  skipped?: readonly string[];
 }
 
 export interface Detected {
@@ -138,7 +146,15 @@ export type Fix =
   /** The Start button: the coordinator's service. */
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
+  | { kind: 'signin'; label: string }
+  /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  /** WHY: Connect GitHub (src/gh-login.ts): gh's device login run for the person, its one-time code relayed to the page. */
+  | { kind: 'gh-login'; label: string; command: string }
+  /** WHY: the Discord step (src/intake/discord-setup.ts): token, invite, channel picks, intake.yaml after a shown diff. */
+  | { kind: 'discord'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -190,6 +206,8 @@ export interface SetupStep {
   /** What a person does about it today, without a screen. */
   today: string;
   fix: Fix;
+  /** WHY: every screen has a way to do the same without the page (a command or a config key), shown on it and in docs/dashboard.md. */
+  automation?: string;
   /** It asks GitHub (or another service) over the network: checked less often, to spare the API's rate limit. */
   network?: boolean;
   detect: (c: Checking) => Detected | null;
@@ -205,6 +223,16 @@ export interface Checking {
 }
 
 const ok = (detail: string): Detected => ({ done: true, detail });
+/** Server mode: the instance's agent user's login, as claude-account.sh status (or add-project, credentials.sh) last found it; null when it has no record. */
+function agentLogin(k: Checking): Detected | null {
+  if (!k.c.instance) return null;
+  const s = readAccountStatus(k.m.claudeAccountDir);
+  const u = s?.users.find((x) => x.instance === k.c.instance && x.kind === 'agent');
+  if (!s || !u) return null;
+  const when = s.at ? ` at ${s.at}` : '';
+  if (u.loggedIn) return ok(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ''}, per claude auth status as that user${when}${u.tokenId ? `; token ${u.tokenId}` : ''}`);
+  return no(`${u.user}: ${u.error ?? 'not signed in'}, per claude auth status as that user${when}`);
+}
 /** Server mode: a step this user can't check for itself, done as init recorded add-project's step; null when not recorded done. */
 const recorded = (k: Checking, step: string, what: string): Detected | null => (k.c.handoff?.[step] === 'done' ? ok(`${what}: done, as init recorded it (add-project: ${step}); not visible to this user to check again`) : null);
 const no = (detail: string): Detected => ({ done: false, detail });
@@ -279,6 +307,9 @@ export function detectTailscale(p: Pick<SetupProbe, 'which' | 'run'>): (Detected
     return null;
   }
 }
+
+/** WHY: what the Repo config form does, by hand (the owners, required checks and budget steps). */
+const REPO_CONFIG_BY_HAND = `a reviewed commit (PR) to ${BRAND.configDir}/config.yaml (owners.writers, required_checks) and ${BRAND.configDir}/agents.yaml (daily_budget_usd, roles.workers count and model)`;
 
 const placeholderOwners = (cfg: Config) => /your-github-handle|owner\/repo/.test(JSON.stringify(cfg.project.owners)) || /^owner\/repo$/.test(cfg.project.project.repo);
 
@@ -369,6 +400,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `\`${BRAND.cli} init --yes\` installs a missing gitleaks, gh or claude from pinned, checksummed downloads; or install them yourself. On a server, tools.sh (bootstrap) does it.`,
     fix: { kind: 'action', action: 'install-tools', label: 'Install' },
+    automation: `${BRAND.cli} init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened`,
     detect: (k) => detectTools(k.c.mode, k.p),
   },
   {
@@ -397,7 +429,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'all',
     today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here).`,
-    fix: { kind: 'outside', url: null, label: "Anthropic's sign-in", why: "Anthropic's own login and consent page", command: 'claude auth login' },
+    fix: { kind: 'signin', label: 'Sign in' },
+    automation: 'claude auth login (in a terminal, as this user)',
     detect: (k) => detectClaudeLogin(k.p),
   },
   {
@@ -409,10 +442,16 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: 'add-project asks you to run `claude setup-token` on a machine signed in to Anthropic and paste the token it prints (or credentials.sh <name> claude).',
-    fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (its paste box)" },
+    today: "Run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints: in Add project's paste box, or at credentials.sh <name> claude's hidden prompt (as root).",
+    fix: { kind: 'signin', label: 'Paste the token' },
+    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step)',
     detect: (k) => {
       const i = k.inst();
+      // WHY: add-project and credentials.sh keep the login in the agent user's own home, out of this user's sight;
+      // what claude auth status said there, as root found it (claude-account status.json), is the real state. A switch
+      // rewrites it. Signed in or not only: never the cached account email (#341), never the token.
+      const login = agentLogin(k);
+      if (login) return login;
       if (isErr(i)) return recorded(k, 'claude-token', "the agents' Claude login") ?? no(i.error);
       if (i.credentials.claude) return existsSync(i.credentials.claude.config_dir) ? ok(`the agents' Claude login is stored (${i.credentials.claude.config_dir})`) : (recorded(k, 'claude-token', "the agents' Claude login") ?? no(`Claude config dir ${i.credentials.claude.config_dir} not found`));
       if (i.credentials.agent_api_key) return ok('the agents bill to an API key (credentials.yaml agent_api_key)');
@@ -431,7 +470,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Run \`gh auth login\` in a terminal, then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'outside', url: 'https://github.com/login/device', label: "GitHub's device login", why: "GitHub's own login page", command: 'gh auth login --web' },
+    fix: { kind: 'gh-login', label: 'Connect GitHub', command: 'gh auth login --web' },
+    automation: 'gh auth login --web (in a terminal, as this user)',
     network: true,
     detect: (k) => detectGithubLogin(k.p, k.c.repo),
   },
@@ -444,7 +484,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'few',
     today: 'git remote add origin https://github.com/<owner>/<name>.git',
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'setup-origin', label: 'Pick' },
+    automation: 'git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin',
     detect: (k) => {
       const url = k.p.run('git', ['remote', 'get-url', 'origin'], { cwd: k.c.root });
       const r = url.status === 0 ? githubRepoOf(url.stdout) : null;
@@ -459,12 +500,14 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: 'Make a GitHub App by hand (Settings, Developer settings, GitHub Apps, New), then `credentials.sh dashboard-signin` and `dashboards.sh --client-id <id> --public-url <url> <name>`; before that, reach the dashboard through `ssh -N -L 4398:127.0.0.1:4398 <you>@<host>`.',
-    fix: { kind: 'outside', url: 'https://github.com/settings/apps/new', label: "GitHub's new-App page", why: "GitHub's create-App consent page" },
+    today: '`dashboards.sh --setup --public-url <url>` starts the hub in setup mode: open the URL, paste the one-time setup token from the file it names, and make the sign-in App through GitHub\'s manifest flow; setup mode then turns itself off, and `dashboards.sh <name>...` starts the hub with it. By hand instead: make the App on GitHub, `credentials.sh dashboard-signin`, then `dashboards.sh --client-id <id> --public-url <url> <name>`.',
+    fix: { kind: 'terminal', command: 'sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net', why: "root makes the hub's user and its setup-mode service; the page it serves, behind a one-time setup token from a root-only file, makes the sign-in App on GitHub" },
     detect: (k) => {
       const up = k.p.systemUnitActive(HUB_UNIT);
       if (up === null) return no('no systemd here to ask about the dashboard hub');
-      return up ? ok(`the dashboard hub (${HUB_UNIT}) is running with its sign-in App`) : no(`the dashboard hub (${HUB_UNIT}) isn't running`);
+      if (up) return ok(`the dashboard hub (${HUB_UNIT}) is running with its sign-in App`);
+      if (k.p.systemUnitActive(HUB_SETUP_UNIT)) return no(`the hub is in setup mode (${HUB_SETUP_UNIT}): open it and make the sign-in App`);
+      return no(`the dashboard hub (${HUB_UNIT}) isn't running`);
     },
   },
   {
@@ -476,8 +519,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: 'Create the App on github.com by hand, download its .pem to the server, then `credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>`.',
-    fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (the App through GitHub's manifest flow)" },
+    today: "The Setup console's Add project, or at a root shell `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`: the App is made through GitHub's manifest flow (two clicks on GitHub, nothing copied by hand) and installed on the one repo picked.",
+    fix: { kind: 'screen', path: '/setup', label: "the Setup console's Add project (pick the repo; the App through GitHub's manifest flow)" },
+    automation: 'sudo bash scripts/setup/add-project.sh <name> <owner/repo> (its app step: the App through the manifest flow, installed on that one repo)',
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return recorded(k, 'app', "the agents' GitHub App") ?? no(i.error);
@@ -496,7 +540,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'few',
     today: `\`git remote set-head origin --auto\`, then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'default-branch', label: 'Set' },
+    automation: 'git fetch origin <branch>, then git remote set-head origin --auto',
     detect: (k) => {
       const b = defaultBranch(k);
       if (!b) return no("can't tell the default branch: origin/HEAD isn't set and there's no config yet");
@@ -512,7 +557,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'some',
     today: `Answer them in the terminal (\`${BRAND.cli} init\` asks), or \`${BRAND.cli} init --answer <id>=<choice>\`.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'setup-config', label: 'Answer' },
+    automation: `${BRAND.cli} init --answer <id>=<choice> (or answer init's questions in a terminal)`,
     detect: (k) => {
       if (existsSync(join(k.c.root, BRAND.configDir, 'config.yaml'))) return ok(`${BRAND.configDir}/ is here: nothing to ask`);
       return k.c.openQuestions ? no(`${k.c.openQuestions} question${k.c.openQuestions === 1 ? '' : 's'} open (shown below)`) : ok('none open');
@@ -528,7 +574,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Review and merge the setup PR init proposed (local), or edit and merge the ${BRAND.cli}/setup branch's PR by hand (server); then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'setup-config', label: 'Open' },
+    automation: `${BRAND.cli} init (drafts the config and proposes it as a PR), then gh pr merge <number>, then ${BRAND.cli} init again (it fast-forwards)`,
     detect: (k) => {
       // Server mode: add-project leaves the service waiting until its setup PR merges; that wait is this step's.
       if (k.c.handoff?.service === 'waiting') return no(`${k.c.handoffDetail?.service || 'waiting for the setup PR to merge'} (add-project: service)`);
@@ -553,6 +600,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `\`${BRAND.cli} install\` (init runs it once the config is on the default branch).`,
     fix: { kind: 'action', action: 'local-hooks', label: 'Install' },
+    automation: `${BRAND.cli} install`,
     detect: (k) => {
       const file = join(k.c.root, '.claude', 'settings.json');
       if (!existsSync(file)) return no('the hooks for local runs are not installed (.claude/settings.json)');
@@ -573,7 +621,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Edit owners in ${BRAND.configDir}/config.yaml (the template's your-github-handle) and merge it through a PR.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -589,7 +638,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `List your CI checks in ${BRAND.configDir}/config.yaml required_checks (empty: nothing is ever marked ready).`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -607,7 +657,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Review agents.yaml (budget, models), guardrails.yaml and review.yaml in ${BRAND.configDir}/: they start from the templates.`,
-    fix: { kind: 'screen', path: '/settings', label: 'Settings (read-only here: changed through a reviewed commit)' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -624,6 +675,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: `\`${BRAND.cli} install --git-hooks\``,
     fix: { kind: 'action', action: 'git-hooks', label: 'Install' },
+    automation: `${BRAND.cli} install --git-hooks`,
     detect: (k) => {
       const common = k.p.run('git', ['rev-parse', '--git-common-dir'], { cwd: k.c.root });
       if (common.status !== 0) return no('not a git repository');
@@ -642,6 +694,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'some',
     today: `\`${BRAND.cli} guardrails refresh\``,
     fix: { kind: 'action', action: 'fingerprints', label: 'Fetch' },
+    automation: `${BRAND.cli} guardrails refresh`,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -662,7 +715,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: true,
     reach: 'most',
     today: "On github.com, the repo's Settings, Rules (or Branches): protect the default branch and require your checks. Needed for land_mode direct.",
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'protection', label: 'Protect' },
+    automation: 'gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)',
     network: true,
     detect: (k) => {
       const b = defaultBranch(k) ?? 'main';
@@ -687,7 +741,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page changes workers and budget.",
-    fix: { kind: 'screen', path: '/settings', label: 'Settings (workers, budget and the other instance settings)' },
+    fix: { kind: 'form', form: 'policy', label: 'Review' },
+    automation: "the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch",
     detect: (k) => {
       if (!k.c.policyFile) return no('no policy file for this instance');
       const r = readPolicy(k.c.policyFile);
@@ -704,8 +759,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'some',
-    today: "Create the app and bot in Discord's developer portal, turn on the message-content intent, invite it, `credentials.sh <name> intake-discord`, then write intake.yaml by hand (guild, channels, owners, people) and restart the instance.",
-    fix: { kind: 'outside', url: 'https://discord.com/developers/applications', label: "Discord's developer portal", why: "creating the bot and its intent toggle exist only there" },
+    today: `Create the app and bot in Discord's developer portal and turn on the message-content intent (only there). Then here, or in a terminal: the token (\`credentials.sh <name> intake-discord\`, as root), the invite link, the bot's channels (\`${BRAND.cli} discord channels\`, as the instance's user), and intake.yaml's discord and superfan channel keys; who may send, people and owners stay in intake.yaml by hand. Restart the instance.`,
+    fix: { kind: 'discord', label: 'Set up' },
+    automation: 'sudo bash scripts/setup/credentials.sh <name> intake-discord (the bot token), then intake.yaml in the instance home (guild, channels, owners, people; docs/intake.md) and a restart of the instance',
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return no(i.error);
@@ -722,8 +778,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'most',
-    today: 'Install Tailscale and log in; in the admin console turn on MagicDNS and HTTPS certificates; `tailscale serve --bg --https=443 http://127.0.0.1:4399`; pass --public-url to dashboards.sh.',
-    fix: { kind: 'outside', url: 'https://login.tailscale.com/admin/dns', label: "Tailscale's DNS settings", why: "Tailscale's login and admin-console toggles are its own pages" },
+    today: "The Machine page's Tailscale and HTTPS panel walks it (a machine owner's): install, log in, serve, the hub's URL. Without the dashboard, as root: `scripts/setup/tailscale.sh install`, `up`, `serve`, then `public-url` (dashboards.sh --public-url). MagicDNS and HTTPS certificates are turned on in Tailscale's admin console. Skipping it changes nothing: the hub keeps its URL.",
+    fix: { kind: 'screen', path: '/machine#tailscale', label: "the Machine page's Tailscale and HTTPS panel" },
+    automation: 'sudo bash scripts/setup/tailscale.sh install, then up, serve and public-url (one step each; status reads only)',
     detect: (k) => detectTailscale(k.p) ?? no('not on a tailnet: the dashboard stays on this machine'),
   },
   {
@@ -756,8 +813,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'most',
-    today: '`bash scripts/setup/updates.sh` as root; write the release signer into /etc/<cli>/allowed_signers by hand; then turn updates on from the Machine page.',
-    fix: { kind: 'coming' },
+    today: '`sudo bash scripts/setup/updates.sh` installs it (off); `--signer <principal> ssh-ed25519 <public key>` adds a release signer to /etc/<cli>/allowed_signers (or `--confirm-signer <fingerprint>` for one staged on the Machine page), and `--channel release|main` picks what it follows; then turn updates on from the Machine page.',
+    fix: { kind: 'screen', path: '/machine', label: "the Machine page's Updater setup" },
+    automation: `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/${BRAND.cli}-machine set-updates on`,
     detect: (k) => {
       if (!existsSync(k.m.updatesConfig)) return no(`the updater isn't set up (no ${k.m.updatesConfig})`);
       return existsSync(k.m.allowedSigners) ? ok(`set up (${k.m.updatesConfig}); release signers listed`) : no(`set up, but no ${k.m.allowedSigners}: the release channel installs nothing until it lists the signing key`);
@@ -842,6 +900,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'all',
     today: `\`sudo ${BRAND.cli} init --mode server <owner/repo> --instance <name> [--timeout <minutes>]\` hands off to add-project.sh, whose last steps (service, test-user, machine-helper, dashboards) install and start ${BRAND.cli}-<name>.service; --timeout is how long it waits for a GitHub click or the setup PR's merge (default 15).`,
     fix: { kind: 'start' },
+    automation: 'sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)',
     detect: (k) => {
       const unit = instanceUnit(k.c.instance ?? '<name>');
       const up = k.p.systemUnitActive(unit);
@@ -863,6 +922,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'all',
     today: `\`${BRAND.cli} up\` installs and starts it as your own service.`,
     fix: { kind: 'start' },
+    automation: `${BRAND.cli} up`,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet: the coordinator needs one');
@@ -903,6 +963,9 @@ export interface StepView {
   detail: string;
   today: string;
   fix: Fix;
+  automation: string | null;
+  /** The person skipped it on the first-run page: shown as skipped, not counted as left; doctor and init still check it. */
+  skipped: boolean;
   network: boolean;
   checkedAt: string;
 }
@@ -988,16 +1051,16 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       o.cache?.set(s.id, { at: t, key, r });
     }
     if (!r) continue;
-    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, network: !!s.network, checkedAt: new Date(at).toISOString() });
+    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
   }
   const groups: GroupView[] = GROUPS.filter((g) => g.modes.includes(c.mode))
     .map((g) => {
       const mine = steps.filter((s) => s.group === g.id);
       const required = mine.filter((s) => !s.optional);
-      return { id: g.id, title: g.title, optional: g.optional || !required.length, done: (required.length ? required : mine).every((s) => s.done), ready: mine.filter((s) => s.walk).every((s) => s.done), steps: mine };
+      return { id: g.id, title: g.title, optional: g.optional || !required.length, done: (required.length ? required : mine).every((s) => s.done || s.skipped), ready: mine.filter((s) => s.walk).every((s) => s.done), steps: mine };
     })
     .filter((g) => g.steps.length);
-  return { mode: c.mode, groups, done: steps.filter((s) => s.done).length, total: steps.length, requiredLeft: steps.filter((s) => !s.optional && !s.done).length };
+  return { mode: c.mode, groups, done: steps.filter((s) => s.done).length, total: steps.length, requiredLeft: steps.filter((s) => !s.optional && !s.done && !s.skipped).length };
 }
 
 /** The level doctor shows a step's own line at: ok when done, as the page shows it; a warning when not. */

@@ -353,7 +353,10 @@ async function checkRunsOf(deps, api, sha) {
 
 /** `a0685ce: required check "push-gate" ended failure; …` */
 const skippedText = (skipped) => skipped.map((s) => `${short(s.sha)}: ${s.reason}`).join('; ');
-const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`;
+// A hold is released only at a root shell (updates.sh --release-hold) or by a newer commit: never by updates.json
+// changing, which any coordinator can make happen through the machine helper (the on/off switch, the channel).
+const RELEASE_HOLD = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold';
+const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until an admin releases it at a root shell: ${RELEASE_HOLD}`;
 
 /**
  * Which candidate (firstParentLine, newest first) to install: the newest one that isn't held and whose checks are
@@ -380,7 +383,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
   for (let i = 0; i < cands.length && !out; i++) {
     const c = cands[i];
     let v;
-    if (held && held.sha === c.sha && !(deps.configChangedAt() > Date.parse(held.at))) v = { ok: false, final: true, held: true, reason: heldReason(held) };
+    if (held && held.sha === c.sha) v = { ok: false, final: true, held: true, reason: heldReason(held) };
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
@@ -910,6 +913,7 @@ async function run(deps) {
 
 async function runOnce(deps, seen) {
   const cfg = deps.config();
+  watchSigners(deps, cfg);
   if (!cfg || cfg.enabled !== true) {
     stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
     return 'disabled';
@@ -959,16 +963,20 @@ async function update(deps, cfg, seen = {}) {
     seen.head = head;
     if (head === current) return 'current';
   }
-  // A commit that was rolled back is never retried by itself: only a newer commit, or the owner turning
-  // updates off and on again after the rollback (updates.json written later), releases it.
+  // A commit that was rolled back is never retried by itself: only a newer commit, or an admin at a root shell
+  // (updates.sh --release-hold, which moves the hold file aside), releases it. Nothing a coordinator can do through
+  // the machine helper does: updates.json changing (on/off, the channel) is not read here.
   // (On main, a held commit is passed over for an older one; see chooseCommit.)
   const held = deps.held();
   const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
   // On main: the newer commits passed over for the one installed, and why.
   let skipped = [];
   if (release) {
-    if (held && held.sha === head && !(deps.configChangedAt() > Date.parse(held.at))) return deps.note('held', head, heldReason(held), true);
+    if (held && held.sha === head) return deps.note('held', head, heldReason(held), true);
     // The commit whose checks count: the main commit the release was cut from.
+    // The signers file changed outside updates.sh and nobody has acknowledged it: no release is installed on its say-so.
+    const signersHeld = typeof deps.signersHold === 'function' ? deps.signersHold() : null;
+    if (signersHeld) return deps.note('held', head, `the signers file changed outside updates.sh at ${signersHeld.at} and hasn't been acknowledged (${signersChangeText(signersHeld)}); no release is installed until an admin runs: ${SIGNERS_ACK}`, true);
     const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
     if (!v.ok) return deps.note('refused', head, v.reason, true);
     const checks = evaluateChecks(((await checkRunsOf(deps, api, v.base)) || {}).check_runs, cfg.required_checks);
@@ -1271,7 +1279,7 @@ function logCanary(deps, pending, v, extra = {}) {
 function raise(deps, pending, v) {
   if (typeof deps.raiseIncident !== 'function') return;
   const what = pending.update ? `the canary after installing ${String(pending.update.to).slice(0, 12)} failed: ${v.reason}; rolled back and held` : `the daily canary failed: ${v.reason}`;
-  const fix = pending.update ? 'look at the canary issue and its PR; turning updates off and on again retries the held commit' : 'look at the canary issue and its PR';
+  const fix = pending.update ? `look at the canary issue and its PR; an admin retries the held commit with: ${RELEASE_HOLD}` : 'look at the canary issue and its PR';
   try {
     deps.raiseIncident('canary_failed', 'canary', what, fix);
   } catch {
@@ -1335,6 +1343,169 @@ async function rollbackAfterCanary(deps, pending, v) {
 
 /** [file, args] of an argv. */
 const splitCmd = (argv) => [argv[0], argv.slice(1)];
+
+// ---------- the signers file, watched ----------
+//
+// /etc/worklane/allowed_signers is the root of trust for the release channel, and the only expected way it changes is
+// scripts/setup/updates.sh --signer or --confirm-signer (scripts/setup/updates-root.cjs), at a root shell. So every
+// run, on or off, the updater hashes the file it verifies releases against and compares it with the hash recorded in
+// SIGNERS_STATE (root-owned, 0644, written atomically). updates-root.cjs records the new hash in the same step it
+// appends, so its own change is expected. Any other change (a hand edit, another tool, a tampered or missing file)
+// is reported once: a `signers_changed` line in the update log, a line on stderr (the journal), and a red incident,
+// each with the old and new hash, the line counts and the key fingerprints added and removed (public data). The new
+// hash is then adopted, so the next change is caught too. It needs no coordinator: the incident store is written here.
+//
+// An unexplained change also HOLDS the release channel: nothing is installed from a release tag until an admin has
+// looked and acknowledged it at a root shell (updates.sh --acknowledge-signers). The signature check itself is as
+// strict as ever; the hold is one more refusal in front of it, never a way around it.
+const SIGNERS_STATE = '/var/lib/worklane/signers-state.json';
+const SIGNERS_INCIDENT = 'update_signers_changed';
+
+/** A signers file as it is now: its sha256 ("absent" when there is none), its signer lines, and each key's fingerprint. */
+function signersDigest(file) {
+  let bytes;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch {
+    return { file, hash: 'absent', lines: 0, fingerprints: [] };
+  }
+  const crypto = require('node:crypto');
+  const fingerprints = new Set();
+  let lines = 0;
+  for (const raw of bytes.toString('utf8').split('\n')) {
+    const w = raw.trim().split(/\s+/);
+    if (!w[0] || w[0].startsWith('#')) continue;
+    lines++;
+    const t = w.findIndex((x, i) => i > 0 && /^(ssh-|ecdsa-|sk-)[A-Za-z0-9@.-]+$/.test(x));
+    if (t > 0 && /^[A-Za-z0-9+/]+=*$/.test(w[t + 1] || '')) fingerprints.add(`SHA256:${crypto.createHash('sha256').update(Buffer.from(w[t + 1], 'base64')).digest('base64').replace(/=+$/, '')}`);
+  }
+  return { file, hash: `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`, lines, fingerprints: [...fingerprints].sort() };
+}
+
+/** The recorded state, or null when nothing is recorded yet (or it can't be read). */
+function readSignersState(stateFile = SIGNERS_STATE) {
+  try {
+    const j = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    return j && typeof j.hash === 'string' && typeof j.file === 'string' ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+const saveSignersState = (stateFile, cur, at, hold, extra = {}) => saveJson(stateFile, { file: cur.file, hash: cur.hash, lines: cur.lines, fingerprints: cur.fingerprints, at, hold: hold || null, ...extra }, 0o644);
+
+/**
+ * Compare the signers file with what is recorded. Returns null when it is as recorded, when nothing was recorded
+ * yet (recorded now, silently), or when it is the change updates-root.cjs said it was about to make. Otherwise the
+ * change { from, to, linesBefore, linesAfter, added, removed, at }: recorded as adopted, and held until acknowledged.
+ */
+function checkSigners(file, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const cur = signersDigest(file);
+  const st = readSignersState(stateFile);
+  const at = new Date(now).toISOString();
+  if (!st) {
+    saveSignersState(stateFile, cur, at, null);
+    return null;
+  }
+  if (st.file === cur.file && st.hash === cur.hash) return null;
+  if (st.file === cur.file && st.expected && st.expected === cur.hash) {
+    saveSignersState(stateFile, cur, at, st.hold);
+    return null;
+  }
+  const before = Array.isArray(st.fingerprints) ? st.fingerprints : [];
+  const change = {
+    at,
+    file: cur.file,
+    ...(st.file !== cur.file ? { fileBefore: st.file } : {}),
+    from: st.hash,
+    to: cur.hash,
+    linesBefore: Number(st.lines) || 0,
+    linesAfter: cur.lines,
+    added: cur.fingerprints.filter((f) => !before.includes(f)),
+    removed: before.filter((f) => !cur.fingerprints.includes(f)),
+  };
+  // An earlier change nobody acknowledged stays the hold's start: the newest one is what it now describes.
+  saveSignersState(stateFile, cur, at, { ...change, since: st.hold && st.hold.since ? st.hold.since : at });
+  return change;
+}
+
+/**
+ * For updates-root.cjs, around its own append. Before: `expectSigners(file, hashItWillHave)` when the file is as
+ * recorded (or nothing is recorded), so the append is expected; false when the file already differs from the record,
+ * in which case nothing is recorded and the updater's next run reports the whole change. After: recordSigners(file).
+ */
+function expectSigners(file, nextHash, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const cur = signersDigest(file);
+  const st = readSignersState(stateFile);
+  if (st && !(st.file === cur.file && st.hash === cur.hash)) return false;
+  saveSignersState(stateFile, cur, st ? st.at : new Date(now).toISOString(), st ? st.hold : null, { expected: nextHash });
+  return true;
+}
+function recordSigners(file, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const st = readSignersState(stateFile);
+  saveSignersState(stateFile, signersDigest(file), new Date(now).toISOString(), st ? st.hold : null);
+}
+
+/** The unexplained change the release channel is held for, or null. */
+const signersHold = (stateFile = SIGNERS_STATE) => (readSignersState(stateFile) || {}).hold || null;
+
+/** An admin has looked at the file as it is now: it is the record, and nothing is held. Returns what was held (or null). */
+function acknowledgeSigners(file, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const held = signersHold(stateFile);
+  // acknowledged: for the updater's next run to close the incident, once.
+  saveSignersState(stateFile, signersDigest(file), new Date(now).toISOString(), null, held ? { acknowledged: new Date(now).toISOString() } : {});
+  return held;
+}
+
+/** Whether an acknowledgement is waiting to be told to the incident store; true once, then forgotten. */
+function takeAcknowledged(stateFile = SIGNERS_STATE) {
+  const st = readSignersState(stateFile);
+  if (!st || !st.acknowledged || st.hold) return false;
+  saveSignersState(stateFile, st, st.at, null);
+  return true;
+}
+
+const shortHash = (h) => (String(h).startsWith('sha256:') ? `sha256:${String(h).slice(7, 19)}` : String(h));
+/** One line saying what changed, for the log, the journal and the incident. */
+function signersChangeText(c) {
+  const what = c.to === 'absent' ? `${c.file} is gone` : c.from === 'absent' ? `${c.file} appeared` : `${c.file} changed`;
+  const keys = [c.added.length ? `added ${c.added.join(', ')}` : '', c.removed.length ? `removed ${c.removed.join(', ')}` : ''].filter(Boolean).join('; ') || 'no key added or removed';
+  return `${what} outside updates.sh --signer or --confirm-signer${c.fileBefore ? ` (the updater read ${c.fileBefore} before)` : ''}: ${shortHash(c.from)} -> ${shortHash(c.to)}, ${c.linesBefore} signer line${c.linesBefore === 1 ? '' : 's'} before, ${c.linesAfter} after; key fingerprints: ${keys}`;
+}
+const SIGNERS_ACK = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers';
+
+/** Every run, before anything else: the signers file against its record. A change is logged, said on stderr, and raised. */
+function watchSigners(deps, cfg) {
+  if (typeof deps.signersCheck !== 'function') return;
+  let change;
+  try {
+    change = deps.signersCheck((cfg && typeof cfg.allowed_signers === 'string' && cfg.allowed_signers) || ALLOWED_SIGNERS);
+  } catch (e) {
+    deps.log({ event: 'error', reason: `couldn't check the signers file: ${String((e && e.message) || e).slice(0, 300)}` });
+    return;
+  }
+  if (!change) {
+    // Acknowledged at a root shell since the last run: the incident is closed, once.
+    if (typeof deps.signersAcknowledged === 'function' && deps.signersAcknowledged() && typeof deps.resolveIncident === 'function') {
+      try {
+        deps.resolveIncident(SIGNERS_INCIDENT, 'allowed_signers');
+      } catch {
+        // nothing to resolve
+      }
+    }
+    return;
+  }
+  const reason = signersChangeText(change);
+  deps.log({ event: 'signers_changed', reason, signers: change, held: true });
+  if (typeof deps.warn === 'function') deps.warn(`signers_changed: ${reason}; release installs are held until: ${SIGNERS_ACK}`);
+  if (typeof deps.raiseIncident === 'function') {
+    try {
+      deps.raiseIncident(SIGNERS_INCIDENT, 'allowed_signers', `${reason}. Release-channel installs are held`, `Look at the file. If the change is yours, acknowledge it at a root shell: ${SIGNERS_ACK}. If not, put the file right first, then acknowledge`);
+    } catch {
+      // the log line and the journal are the record
+    }
+  }
+}
 
 // ---------- the machine (real effects) ----------
 
@@ -1432,13 +1603,11 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     resolveIncident: (kind, key) => void watchdog().then((w) => w && typeof w.resolveIncident === 'function' && w.resolveIncident(kind, key)).catch(() => {}),
     // The hold is read back by sha and time only; its reasons are for people, so redacting them changes no decision.
     hold: (entry) => writeRedacted(files.held, entry),
-    configChangedAt: () => {
-      try {
-        return fs.statSync(CONFIG).mtimeMs;
-      } catch {
-        return 0;
-      }
-    },
+    signersCheck: (file) => checkSigners(file),
+    signersHold: () => signersHold(),
+    signersAcknowledged: () => takeAcknowledged(),
+    // stderr is the unit's journal: a line there needs neither the dashboard nor a coordinator.
+    warn: (line) => process.stderr.write(`${line}\n`),
     switchTo: (sha) => {
       const link = path.join(OPT, '.current.new');
       fs.rmSync(link, { force: true });
@@ -1473,3 +1642,4 @@ if (require.main === module) {
   );
 }
 module.exports = { drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });

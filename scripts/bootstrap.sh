@@ -26,8 +26,11 @@
 #                                                 scripts/setup/, in order, each printed for review first.
 #                                                 You become the machine's first owner (your GitHub login:
 #                                                 asked, or read from gh and confirmed); it ends with one URL,
-#                                                 the dashboard hub's first-run wizard, where everything after
-#                                                 this happens (no key in it; the page asks for the hub's key).
+#                                                 checked to answer first: on a fresh machine the hub's setup
+#                                                 mode (it makes the sign-in App; needs the https origin, from
+#                                                 Tailscale or --public-url), then the hub's first-run wizard.
+#                                                 No key or token in it: the page asks, from a 0600 file.
+#                                                 When nothing answers yet, no URL: the reason, the fix, exit 4.
 #                                                 This is server mode (--mode server alone points here).
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
@@ -184,44 +187,95 @@ first_owner() {
   ok "first machine owner: @$OWNER"
 }
 
-# The hub's break-glass port (src/dashboard-hub.ts HUB_BREAK_GLASS_PORT): loopback only, the owner's key.
+# The hub's ports (src/dashboard-hub.ts): its sign-in port (tailscale serve forwards the https origin to it; setup mode
+# serves there too) and the owner's break-glass, loopback only. Its units are dashboards.sh's.
+HUB_PORT=4399
 HUB_BREAK_GLASS_PORT=4398
+HUB_UNIT=worklane-dashboard-hub.service
+HUB_SETUP_UNIT=worklane-dashboard-hub-setup.service
 
-# The dashboard hub: everything after this first install happens in its first-run wizard.
-# INVARIANT: the output ends with one URL, the only one in this block, and no key in it. Signed-in people reach the
-# hub's public origin once the sign-in App is set up; until then, the owner's break-glass on this machine (the
-# page asks for the hub's key, which stays in its file).
+# One scripts/setup step as root: printed for review and confirmed first, unless --yes (or a dry run).
+setup_step() {
+  local step="$1" script="${1%% *}" answer
+  say "scripts/setup/$step"
+  [ -f "$setup/$script" ] || die "no $setup/$script"
+  if [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
+    ${PAGER:-less} "$setup/$script" </dev/tty || cat "$setup/$script"
+    printf 'Run scripts/setup/%s as root now? [y/N] ' "$step"
+    read -r answer </dev/tty
+    [ "$answer" = y ] || die "stopped before $script; nothing after it ran"
+  fi
+  # shellcheck disable=SC2086 # the step's arguments are words
+  run bash "$setup/$script" ${step#"$script"}
+}
+
+# WHY: a printed URL that answers nothing (HTTP 000 on a fresh server, #393) is worse than none: each is asked first.
+answers() { [ "$DRY" = 1 ] || [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null || true)" = 200 ]; }
+unit_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+# No URL this time: why, and the command that fixes it. Exit 4: installed, but nothing to open yet.
+no_url() {
+  if [ "$DRY" = 1 ]; then printf '   would end with no URL: %s (fix: %s)\n' "$1" "$2"; exit 0; fi
+  echo
+  echo "no URL to open yet: $1."
+  echo "   fix: $2"
+  exit 4
+}
+
+# The dashboard hub: everything after this first install happens there.
+# INVARIANT: the output ends with one URL that answered 200 just now, the only URL in this block, with no key or
+# token in it; or with no URL at all, the reason and the fix (no_url). Rerun, it changes nothing that's running.
+#   - no sign-in App yet: the hub's setup mode (dashboards.sh --setup) at the hub's https origin; it asks for its
+#     one-time setup token, from a 0600 file of the hub's user.
+#   - the sign-in App made, no hub yet: the hub alone (dashboards.sh --no-instances, with what setup mode stored).
+#   - a hub: its https origin's /first-run, else the owner's break-glass on this machine (it asks for the hub's key).
 dashboard_next() {
-  local url="$PUBLIC_URL" viewer_home="" dns="" signin=0 hub_key final
+  local url="$PUBLIC_URL" viewer_home="" dns="" signin_dir hub_state final="" c
   if [ -z "$url" ] && command -v tailscale >/dev/null 2>&1; then
     # The first DNSName in `tailscale status --json` is this machine's (Self comes before the peers).
     dns="$(tailscale status --json 2>/dev/null | sed -n 's/^ *"DNSName": *"\([a-z0-9.-]*[a-z0-9]\)\.\{0,1\}",\{0,1\} *$/\1/p' | head -1 || true)"
     [ -z "$dns" ] || url="https://$dns"
   fi
   if command -v getent >/dev/null 2>&1; then viewer_home="$(getent passwd wl-dash | cut -d: -f6 || true)"; fi
-  hub_key="${viewer_home:-~wl-dash}/.local/state/$CLI/dashboard-hub/dashboard-token"
-  if [ -n "$viewer_home" ] && [ -f "$viewer_home/.config/dashboard-signin/client-secret" ]; then
-    signin=1
-  elif [ -n "$viewer_home" ] && [ -s "$hub_key" ] && [ -n "$url" ]; then
-    say "the sign-in App, through GitHub's manifest flow (open the link it prints, approve on GitHub)"
-    run "$CLI" app-manifest "$NAME" "$GITHUB" --signin --public-url "$url" || echo "   that didn't finish: run it again, or make the App by hand (bash scripts/setup/credentials.sh dashboard-signin)"
-  fi
-  say "the dashboard: everything after this first install happens in its first-run wizard"
-  if [ "$signin" = 1 ] && [ -n "$url" ]; then
-    ok "the sign-in App is set up: sign in with GitHub as @$OWNER"
-    final="$url/first-run"
+  signin_dir="${viewer_home:-~wl-dash}/.config/dashboard-signin"
+  hub_state="${viewer_home:-~wl-dash}/.local/state/$CLI/dashboard-hub"
+  # What setup mode stored, when not given: the hub's https origin.
+  if [ -z "$url" ] && [ -s "$signin_dir/public-url" ]; then url="$(cat "$signin_dir/public-url")"; fi
+
+  if [ ! -f "$signin_dir/client-secret" ]; then
+    [ -n "$url" ] || no_url "the sign-in App is made through the hub's setup mode, which needs this machine's https origin, and there is none yet" \
+      "turn on Tailscale with MagicDNS and HTTPS certificates (docs/dashboard.md), then run this again; or give the origin: sudo bash scripts/bootstrap.sh --hardened --public-url https://<machine>.<tailnet>.ts.net $NAME $GITHUB"
+    unit_active "$HUB_SETUP_UNIT" || setup_step "dashboards.sh --setup --public-url $url"
+    say "the dashboard: everything after this first install happens there"
+    echo "   No sign-in App yet: the hub's setup mode makes it with GitHub (Connect GitHub), then turns itself off."
+    echo "   The page asks for a one-time setup token: sudo cat $hub_state/setup-token on this machine (it is never"
+    echo "   printed, logged or put in a link)."
+    final="$url/"
+    answers "$final" || no_url "the hub's setup mode runs on this machine (port $HUB_PORT), but $url doesn't reach it" \
+      "sudo tailscale serve --bg --https=443 http://127.0.0.1:$HUB_PORT, then run this again"
   else
-    if [ "$signin" = 1 ]; then
-      echo "   the sign-in App is set up, but this machine has no public name yet (Tailscale with MagicDNS and HTTPS"
-      echo "   certificates, or --public-url): until then, the owner's way in, on this machine only."
-    else
-      echo "   no sign-in App yet (people sign in with GitHub through it; make it once: sudo $CLI app-manifest $NAME $GITHUB"
-      echo "   --signin --public-url <the hub's https origin>, or by hand: credentials.sh dashboard-signin, then dashboards.sh)."
-      echo "   Until then, the owner's way in, on this machine only."
+    if ! unit_active "$HUB_UNIT"; then
+      [ ! -f "/etc/systemd/system/$HUB_UNIT" ] || no_url "the hub is installed but not running" "sudo systemctl start $HUB_UNIT (journalctl -u $HUB_UNIT says why it stopped), then run this again"
+      [ -s "$signin_dir/client-id" ] && [ -n "$url" ] || no_url "the sign-in App is set up, but the hub has no client id or https origin on file" \
+        "sudo bash scripts/setup/dashboards.sh --no-instances --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net, then run this again"
+      setup_step "dashboards.sh --no-instances"
     fi
-    echo "   From your laptop, first: ssh -N -L $HUB_BREAK_GLASS_PORT:127.0.0.1:$HUB_BREAK_GLASS_PORT <you>@<this-host>"
-    echo "   The page asks once for the hub's key: it is in $hub_key (root and the hub's user only)."
-    final="http://127.0.0.1:$HUB_BREAK_GLASS_PORT/first-run"
+    say "the dashboard: everything after this first install happens there"
+    for c in ${url:+"$url/first-run"} "http://127.0.0.1:$HUB_BREAK_GLASS_PORT/first-run"; do
+      if answers "$c"; then final="$c"; break; fi
+    done
+    [ -n "$final" ] || no_url "the hub doesn't answer on this machine" "sudo systemctl status $HUB_UNIT; then sudo bash scripts/setup/dashboards.sh <name>... (or --no-instances before the first project)"
+    if [ "$final" != "http://127.0.0.1:$HUB_BREAK_GLASS_PORT/first-run" ]; then
+      ok "sign in with GitHub as @$OWNER"
+    else
+      if [ -n "$url" ]; then
+        echo "   The hub's https origin doesn't reach it yet (tailscale serve on port 443 to the hub's port $HUB_PORT: docs/dashboard.md);"
+      else
+        echo "   This machine has no https origin yet (Tailscale with MagicDNS and HTTPS certificates, or --public-url);"
+      fi
+      echo "   until then, the owner's way in, on this machine only."
+      echo "   From your laptop, first: ssh -N -L $HUB_BREAK_GLASS_PORT:127.0.0.1:$HUB_BREAK_GLASS_PORT <you>@<this-host>"
+      echo "   The page asks once for the hub's key: it is in $hub_state/dashboard-token (root and the hub's user only)."
+    fi
   fi
   echo "   The same steps from a terminal: sudo $CLI init --mode server <owner/repo> --instance $NAME"
   echo "$final"
@@ -266,17 +320,8 @@ if [ "$HARDENED" = 1 ]; then
   [ "$AFTER_CREDENTIALS" = 1 ] && steps=("checkout.sh $NAME $GITHUB" "service.sh $NAME" "check.sh $NAME")
   for step in "${steps[@]}"; do
     script="${step%% *}"
-    say "scripts/setup/$step"
-    [ -f "$setup/$script" ] || die "no $setup/$script"
-    if [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
-      ${PAGER:-less} "$setup/$script" </dev/tty || cat "$setup/$script"
-      printf 'Run scripts/setup/%s as root now? [y/N] ' "$step"
-      read -r answer </dev/tty
-      [ "$answer" = y ] || die "stopped before $script; nothing after it ran"
-    fi
     rc=0
-    # shellcheck disable=SC2086 # the step's arguments are words
-    run bash "$setup/$script" ${step#"$script"} || rc=$?
+    setup_step "$step" || rc=$?
     # 3 is a setup script's "waiting" (service.sh: the repo's setup PR isn't merged yet): not done, and not a failure.
     if [ "$rc" = 3 ]; then
       echo
@@ -289,7 +334,8 @@ if [ "$HARDENED" = 1 ]; then
   if [ "$AFTER_CREDENTIALS" = 0 ]; then
     say "next, by hand: the instance's credentials"
     echo "   bash scripts/setup/credentials.sh $NAME github-app <app-id> <installation-id> <key.pem> $GITHUB"
-    echo "   bash scripts/setup/credentials.sh $NAME claude"
+    echo "   claude setup-token   (on a machine signed in to the Claude account the agents should use), then"
+    echo "   bash scripts/setup/credentials.sh $NAME claude   (paste the token it printed; it is not shown)"
     echo "   then: sudo bash scripts/bootstrap.sh --hardened --after-credentials $NAME $GITHUB"
     echo "   (docs/separate-users.md has the details)"
   fi

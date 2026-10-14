@@ -3,7 +3,8 @@
 // the instance's own server, and, for the owner, the console: a message for the agent
 // (held until its current turn ends) and Stop. Everything arrives redacted and capped.
 import { useEffect, useRef, useState } from 'react';
-import { api, apiPath, streamUrl } from '../api';
+import { api, apiPath, liveStream } from '../api';
+import type { Stream } from '../sse';
 import { Loading, StatusMark, ToolRow } from './patterns';
 import { ago, Badge, Button, Card, cx, EST_NOTE, estUsd } from './ui';
 
@@ -254,7 +255,7 @@ export function LiveRun({ run, onEnded }: { run: string; onEnded: () => void }) 
       .then(setCon)
       .catch(() => {});
   useEffect(() => {
-    let es: EventSource | null = null;
+    let es: Stream | null = null;
     let closed = false;
     void loadConsole();
     // The first read says why, when the live view isn't this user's (owner only) or there's no such run.
@@ -262,16 +263,17 @@ export function LiveRun({ run, onEnded }: { run: string; onEnded: () => void }) 
       .then(() => apiPath(`/api/runs/${encodeURIComponent(run)}/live`))
       .then((p) => {
         if (closed) return;
-        es = new EventSource(streamUrl(p));
-        es.addEventListener('item', (e) => {
-          const it = JSON.parse((e as MessageEvent).data as string) as FeedItem;
-          setItems((xs) => (xs.some((x) => x.seq === it.seq) ? xs : [...xs, it]));
-          if (it.kind === 'message') void loadConsole();
-        });
-        es.addEventListener('end', () => {
-          setEnded(true);
-          es?.close();
-          ref.current();
+        es = liveStream(p, {
+          item: (e) => {
+            const it = JSON.parse(e.data) as FeedItem;
+            setItems((xs) => (xs.some((x) => x.seq === it.seq) ? xs : [...xs, it]));
+            if (it.kind === 'message') void loadConsole();
+          },
+          end: () => {
+            setEnded(true);
+            es?.close();
+            ref.current();
+          },
         });
       })
       .catch((e: Error) => setError(e.message));

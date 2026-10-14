@@ -6,7 +6,7 @@
 //
 //   node scripts/dev/signin-fake.mjs <demo root> <owner|writer|viewer> <built engine> <hub state dir>
 //
-// Prints `hub <url>` (sign in at <url>/auth/login) and `instance <url with token>`, then serves until killed.
+// Prints `hub <url>` (sign in at <url>/auth/login) and `instance <url> (... it is in <key file>)`, then serves until killed.
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -73,7 +73,8 @@ const h = await startHub({
   port: hubPort,
   signIn: { clientId: 'Iv1.devfakeclient', clientSecret: 'dev-fake-client-secret', sessionSecret: randomBytes(32).toString('hex'), publicUrl, web: ghUrl, api: ghUrl },
 });
-process.stdout.write(`hub ${publicUrl}\ninstance ${d.url}\nas ${login} (${role})\n`);
+// The instance's URL carries no key; its file is named, as `dashboard` prints it.
+process.stdout.write(`hub ${publicUrl}\ninstance ${d.url} (the page asks for the key once: it is in ${join(site.stateDir, 'dashboard-token')})\nas ${login} (${role})\n`);
 const stop = async () => {
   await h.close();
   await d.close();

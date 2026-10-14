@@ -11,6 +11,7 @@ import { openTerminal, type AuditSink, type Exec, type SpawnPty, type TerminalCo
 import type { SessionOf } from './session.js';
 import { deviceRefusal, type DeviceOptions } from './terminal-devices.js';
 import { TERMINAL_PROTOCOL } from '../dashboard-auth.js';
+import { keyInUrl } from '../dashboard-key-url.js';
 
 export interface TerminalServerOptions {
   config: TerminalConfig;
@@ -48,6 +49,11 @@ export function attachTerminal(server: Server, o: TerminalServerOptions): () => 
   const open = new Set<TerminalHandle>();
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    // A key in the URL is refused here too, before anything else is read or recorded from it.
+    if (keyInUrl(url)) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n');
+      return;
+    }
     const instance = url.searchParams.get('instance') ?? '';
     const refused = (why: string) => o.audit.record({ at: new Date((o.now ?? Date.now)()).toISOString(), login: '', instance, kind: 'refused', why });
     if (url.pathname !== TERMINAL_PATH || !sameOrigin(req)) {

@@ -66,7 +66,7 @@ test('every owner-held state still open, from the event that opened it; none tha
   // The machine's update log: an engine update rolled back and held (a failed migration).
   const updates = [{ at: h(7), event: 'rolled_back' as const, from: sha('b'), to: sha('a'), reason: 'rollback: migration failed: alice: disk full', held: true }];
   const d = waitingOnYou(log(), NOW, { updates });
-  assert.equal(d.items.find((i) => i.kind === 'update_held')!.detail, 'rollback: migration failed: alice: disk full; the commit is held until a newer one, or until you turn updates off and on');
+  assert.equal(d.items.find((i) => i.kind === 'update_held')!.detail, 'rollback: migration failed: alice: disk full; the commit is held until a newer one, or until an admin releases it at a root shell: sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold');
   assert.deepEqual(d.items.map((i) => [i.kind, i.issue, i.pr]), [
     ['emergency_halt', null, null],
     ['merge_stopped', 3, 31],

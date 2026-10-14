@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, streamUrl, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAddProjectRepos, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView, type RepoPickerData } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { navigate } from '../App';
 import { Header } from './Overview';
@@ -16,7 +16,7 @@ function Status({ a }: { a: Ask }) {
  * The secret's input is uncontrolled: its value lives only in the field, goes straight to the server, and the
  * field is cleared after sending. It is never put in state, shown, or logged.
  */
-function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; onDone: (err: string | null) => void }) {
+export function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; onDone: (err: string | null) => void }) {
   const field = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const send = async () => {
@@ -198,15 +198,78 @@ function AddProjectRunCard({ run, onChanged }: { run: AddProjectRun; onChanged?:
 }
 
 /**
- * Add project: a name and an owner/repo, checked here and again on the server, recorded as a machine request that
- * the coordinator runs as root through the machine helper. Enabled only when the server says this person may (a
- * machine owner, on an allowed device); otherwise it says why.
+ * The repo picker (wizard screen 5): an account's repos the agents' App can be installed on, picked instead of typed.
+ * Picking one fills the repo; a private repo (GitHub lists only public ones without a token) is typed as owner/name.
+ * The App's install link then preselects the repo picked, and the installation is checked to reach it alone.
  */
-export function AddProjectView({ data, onChanged }: { data: AddProjectData; onChanged?: () => void }) {
+function RepoPicker({ picker, repo, disabled, onPick, onAccount }: { picker: RepoPickerData | null; repo: string; disabled: boolean; onPick: (fullName: string) => void; onAccount: (owner: string) => void }) {
+  const select = 'h-8 rounded-control bg-field px-2 text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+  const [account, setAccount] = useState(picker?.owner ?? '');
+  useEffect(() => setAccount(picker?.owner ?? ''), [picker?.owner]);
+  if (!picker) return <p className="text-[12px] text-ink-3" data-testid="add-project-picker-loading">Listing your repos on GitHub…</p>;
+  const picked = picker.repos.some((r) => r.fullName === repo) ? repo : '';
+  return (
+    <div className="space-y-1.5" data-testid="add-project-picker" data-owner={picker.owner}>
+      <div className="flex flex-wrap items-center gap-2">
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const v = account.trim();
+            if (v) onAccount(v);
+          }}
+        >
+          <input value={account} onChange={(e) => setAccount(e.target.value)} disabled={disabled} list="add-project-accounts" aria-label="GitHub account" placeholder="GitHub account" spellCheck={false} autoComplete="off" className={cx(select, 'w-40 font-mono')} data-testid="add-project-account" />
+          <datalist id="add-project-accounts">
+            {picker.accounts.map((a) => (
+              <option key={a} value={a} />
+            ))}
+          </datalist>
+          <Button type="submit" size="sm" variant="outline" disabled={disabled || !account.trim()} data-testid="add-project-account-list">
+            List repos
+          </Button>
+        </form>
+        <select value={picked} disabled={disabled || !picker.repos.length} onChange={(e) => e.target.value && onPick(e.target.value)} aria-label="Pick a repo" className={cx(select, 'min-w-56 flex-1')} data-testid="add-project-repo-pick">
+          <option value="">{picker.repos.length ? `Pick one of ${picker.owner}'s repos (${picker.repos.filter((r) => r.installable).length})` : picker.owner ? `No repos listed for ${picker.owner}` : 'Name an account to list its repos'}</option>
+          {picker.repos.map((r) => (
+            <option key={r.fullName} value={r.fullName} disabled={!r.installable} data-testid="add-project-repo-option" data-installable={r.installable ? 'yes' : 'no'}>
+              {r.fullName}
+              {r.installable ? '' : ` (${r.why})`}
+            </option>
+          ))}
+        </select>
+      </div>
+      {picker.error ? (
+        <p className="text-[12px] text-red" data-testid="add-project-picker-error">
+          {picker.error}
+        </p>
+      ) : (
+        <p className="text-[12px] text-ink-3" data-testid="add-project-picker-note">
+          {picker.note}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Add project: a name and a repo (picked, or typed as owner/repo), checked here and again on the server, recorded as
+ * a machine request that the coordinator runs as root through the machine helper. Enabled only when the server says
+ * this person may (a machine owner, on an allowed device); otherwise it says why. `picker` is the repo list to start
+ * with (the render checks pass one); otherwise it is fetched.
+ */
+export function AddProjectView({ data, onChanged, picker: initialPicker }: { data: AddProjectData; onChanged?: () => void; picker?: RepoPickerData | null }) {
   const [name, setName] = useState('');
   const [repo, setRepo] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [picker, setPicker] = useState<RepoPickerData | null>(initialPicker ?? null);
+  const listFor = (owner?: string) => {
+    void getAddProjectRepos(owner).then(setPicker, (e: Error) => setPicker({ owner: owner ?? '', ownerType: null, accounts: picker?.accounts ?? [], repos: [], note: '', error: `couldn't list repos: ${e.message}; type owner/name` }));
+  };
+  useEffect(() => {
+    if (initialPicker === undefined && data.allowed) listFor();
+  }, [data.allowed]);
   const submit = async () => {
     const bad = addProjectInvalid(name.trim(), repo.trim());
     if (bad) return setErr(bad);
@@ -229,7 +292,10 @@ export function AddProjectView({ data, onChanged }: { data: AddProjectData; onCh
       <div>
         <div className="text-[14px] font-medium text-ink">Add project</div>
         <p className="text-[12px] text-ink-3">
-          A new instance for a GitHub repo on this machine: its users, its GitHub App (two clicks on GitHub), the agent's Claude token, the checkout, a default policy (auto-merge off, $20 a day, 2 workers) and its services. It runs as root through the machine helper, step by step below, and every step is recorded.
+          A new instance for a GitHub repo on this machine: its users, its GitHub App (made through GitHub's manifest flow: two clicks on GitHub, nothing to copy), the agent's Claude token, the checkout, a default policy (auto-merge off, $20 a day, 2 workers) and its services. It runs as root through the machine helper, step by step below, and every step is recorded.
+        </p>
+        <p className="mt-1 text-[12px] text-ink-3" data-testid="add-project-script">
+          Optional here: the same steps run at a root shell as <code className="font-mono">sudo bash scripts/setup/add-project.sh &lt;name&gt; &lt;owner/repo&gt;</code>, and adding the same project again picks up where it stopped. The App's key, client secret and webhook secret go straight to the coordinator's own 0400 files: never shown, logged or sent anywhere.
         </p>
       </div>
       <form
@@ -239,13 +305,27 @@ export function AddProjectView({ data, onChanged }: { data: AddProjectData; onCh
           void submit();
         }}
       >
-        <input value={name} onChange={(e) => (setName(e.target.value), setErr(null))} disabled={!data.allowed || busy} aria-label="Project name" placeholder="name (e.g. shop)" spellCheck={false} autoComplete="off" className={cx(field, 'w-40')} data-testid="add-project-name" />
-        <input value={repo} onChange={(e) => (setRepo(e.target.value), setErr(null))} disabled={!data.allowed || busy} aria-label="GitHub repo" placeholder="owner/repo" spellCheck={false} autoComplete="off" className={cx(field, 'min-w-56 flex-1')} data-testid="add-project-repo" />
-        <Button type="submit" size="sm" disabled={!data.allowed || busy} data-testid="add-project-submit">
-          {busy ? 'Adding…' : 'Add project'}
-        </Button>
+        <input value={name} onChange={(e) => (setName(e.target.value), setErr(null))} disabled={(!data.allowed && !data.manual) || busy} aria-label="Project name" placeholder="name (e.g. shop)" spellCheck={false} autoComplete="off" className={cx(field, 'w-40')} data-testid="add-project-name" />
+        <input value={repo} onChange={(e) => (setRepo(e.target.value), setErr(null))} disabled={(!data.allowed && !data.manual) || busy} aria-label="GitHub repo" placeholder="owner/repo (picked below, or typed)" spellCheck={false} autoComplete="off" className={cx(field, 'min-w-56 flex-1')} data-testid="add-project-repo" />
+        {!data.manual && (
+          <Button type="submit" size="sm" disabled={!data.allowed || busy} data-testid="add-project-submit">
+            {busy ? 'Adding…' : 'Add project'}
+          </Button>
+        )}
       </form>
-      {!data.allowed && data.why && (
+      {data.manual && (
+        <div className="space-y-1.5 rounded-lg bg-orange-tint p-3" data-testid="add-project-manual">
+          <p className="text-[12.5px] text-ink">
+            Not from this page here: {data.manual.why}. With the name and repo above filled in, run:
+          </p>
+          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline" data-testid="add-project-manual-command">
+            {`sudo bash ${data.manual.script} ${name.trim() || '<name>'} ${repo.trim() || '<owner/repo>'}`}
+          </code>
+          <p className="text-[12px] text-ink-3">It asks for the agents' Claude token itself, and prints each step; this page shows the project once its services run.</p>
+        </div>
+      )}
+      {data.allowed && <RepoPicker picker={picker} repo={repo} disabled={busy} onPick={(r) => (setRepo(r), setErr(null))} onAccount={(o) => (setPicker(picker && { ...picker, owner: o, repos: [], error: null }), listFor(o))} />}
+      {!data.allowed && !data.manual && data.why && (
         <p className="text-[12.5px] text-ink-2" data-testid="add-project-disabled">
           Not available: {data.why}.
           {/* The machine owners, unless the reason already names them. */}
@@ -406,23 +486,18 @@ export function SetupPage() {
         .then((r) => setFocus(r.ask))
         .catch((e: Error) => setLinkErr(e.message));
     // Live: each new event (an add-project step, an ask) reloads the console, debounced.
-    let es: EventSource | null = null;
-    let closed = false;
     let timer: number | undefined;
-    void apiPath('/api/stream').then((p) => {
-      if (closed) return;
-      es = new EventSource(streamUrl(p));
-      es.addEventListener('change', (m) => {
-        const types = ((JSON.parse(String((m as MessageEvent).data || '{}')) as { types?: string[] }).types ?? []);
+    const es = liveStream(apiPath('/api/stream'), {
+      change: (m) => {
+        const types = (JSON.parse(m.data || '{}') as { types?: string[] }).types ?? [];
         if (types.length && !types.some((t) => /^(ask|machine|add_project)\./.test(t))) return;
         window.clearTimeout(timer);
         timer = window.setTimeout(load, 150);
-      });
+      },
     });
     return () => {
-      closed = true;
       window.clearTimeout(timer);
-      es?.close();
+      es.close();
     };
   }, []);
   const shown = new Set((adding?.runs ?? []).flatMap((r) => r.asks.map((a) => a.id)));

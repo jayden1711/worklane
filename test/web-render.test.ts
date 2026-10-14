@@ -3,7 +3,7 @@
 // data; decisions are still answerable only where the server says so.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,11 +16,12 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
+import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
 import { deliveryMetrics } from '../src/merge-metrics.js';
@@ -51,11 +52,20 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean }): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
+  renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
+  renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
   renderFirstRunPage(state: unknown): string;
+  renderSetupScreens(steps: unknown[]): string;
+  renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
-  renderAddProject(data: unknown): string;
+  renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
+  renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
+  tailscaleBusy(d: unknown, now?: number): boolean;
+  tailscaleStepEnded(prev: unknown, next: unknown): boolean;
+  accountBusy(d: unknown, now?: number): boolean;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
@@ -720,6 +730,71 @@ test('the Updates panel: the engine installed, the last update, a rollback held 
   assert.deepEqual([r.duration(42_000), r.duration(17 * 60_000), r.duration(65 * 60_000), r.duration(null)], ['42s', '17 min', '1 h 05 min', '–']);
 });
 
+test('the updater setup: the three steps; signers and staged signers with the root command that confirms each; no way to add a signer or pick main; read-only for anyone else', () => {
+  const key = `AAAAC3NzaC1lZDI1NTE5AAAAI${'A'.repeat(43)}`; // made up: the shape of a public key, no real one
+  const key2 = `AAAAC3NzaC1lZDI1NTE5AAAAI${'B'.repeat(43)}`;
+  const rootCommand = 'sudo bash /opt/harness/current/scripts/setup/updates.sh --confirm-signer SHA256:secondfingerprint';
+  const updater = {
+    installed: true,
+    enabled: false,
+    channel: 'release',
+    channelWhat: 'the newest release tag vX.Y.Z, only when its signature verifies',
+    signersFile: '/etc/harness/allowed_signers',
+    updaterReads: null,
+    signers: [{ principal: 'first@example.com', options: 'namespaces="git"', keyType: 'ssh-ed25519', key, fingerprint: 'SHA256:firstfingerprint' }],
+    pending: [{ principal: 'second@example.com', key: key2, fingerprint: 'SHA256:secondfingerprint', by: 'wl-site', at: new Date(Date.now() - 3_600_000).toISOString(), expiresAt: new Date(Date.now() + 23 * 3_600_000).toISOString(), confirm: rootCommand }],
+    pendingMax: 4,
+    script: { install: 'sudo bash scripts/setup/updates.sh', signer: 'sudo bash scripts/setup/updates.sh --signer <principal> ssh-ed25519 <public key>', confirm: 'sudo bash scripts/setup/updates.sh --confirm-signer <SHA256 fingerprint of a staged signer>', release: 'sudo bash scripts/setup/updates.sh --channel release', main: 'sudo bash scripts/setup/updates.sh --channel main' },
+  };
+  const data = { owner: 'example-owner', user: 'example-owner', canChange: true, helper: '/usr/local/libexec/harness-machine', slots: { cap: 3, running: 1, min: 1, max: 16 }, updates: { configured: true, enabled: false, branch: 'main', requiredChecks: ['test'] }, updater, changes: [], history: [] };
+  const html = r.renderUpdaterSetup(data);
+  for (const id of ['updater-setup', 'updater-nothing-changes', 'updater-step', 'updater-install', 'updater-signers', 'updater-signer', 'updater-stage-only', 'updater-pending', 'updater-pending-fingerprint', 'updater-pending-command', 'updater-pending-discard', 'updater-signer-form', 'updater-signer-principal', 'updater-signer-key', 'updater-signer-review', 'updater-channel', 'updater-main-root-only', 'updater-script']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="updater-nothing-changes"[^>]*>Nothing changes until you review a step and confirm it\. Skip any of them, or all: the machine stays as it is\./);
+  assert.match(html, /data-step="1"[\s\S]*?installed, updates off[\s\S]*?Install again…/);
+  assert.match(html, /data-step="2"[\s\S]*?1 listed, 1 staged/);
+  assert.match(html, /data-testid="updater-signer"[\s\S]*?first@example\.com[\s\S]*?ssh-ed25519[\s\S]*?namespaces=(&quot;|")git(&quot;|")[\s\S]*?SHA256:firstfingerprint/);
+  assert.match(html, /data-testid="updater-stage-only"[^>]*>This page can(&#x27;|')t add a signer, and it can(&#x27;|')t remove or replace one\. It can stage a key; an admin then confirms it with one command at a root shell on the machine\./);
+  // The staged signer: marked as not a signer, its key and fingerprint, and the exact root command that confirms it.
+  assert.match(html, new RegExp(`data-testid="updater-pending" data-fingerprint="SHA256:secondfingerprint"[\\s\\S]*?staged, not a signer[\\s\\S]*?second@example\\.com[\\s\\S]*?by (<!-- -->)?wl-site[\\s\\S]*?${key2}[\\s\\S]*?data-testid="updater-pending-fingerprint"[^>]*>SHA256:secondfingerprint<[\\s\\S]*?data-testid="updater-pending-command"[^>]*>sudo bash /opt/harness/current/scripts/setup/updates\\.sh --confirm-signer SHA256:secondfingerprint<`));
+  // The channel: where it is; no picker, no main to choose; on release there is nothing to press.
+  assert.match(html, /data-testid="updater-channel" data-channel="release"/);
+  assert.doesNotMatch(html, /data-channel="main"|type="radio"|data-testid="updater-release"/, 'no channel picker, and no main');
+  assert.match(html, /data-testid="updater-main-root-only"[^>]*>The page only ever moves a machine to release\. Following main instead is set at a root shell: <span[^>]*>sudo bash scripts\/setup\/updates\.sh --channel main</);
+  assert.match(html, /data-testid="updater-script"[\s\S]*?sudo bash scripts\/setup\/updates\.sh\nsudo bash scripts\/setup\/updates\.sh --signer &lt;principal&gt; ssh-ed25519 &lt;public key&gt;\nsudo bash scripts\/setup\/updates\.sh --confirm-signer &lt;SHA256 fingerprint of a staged signer&gt;\nsudo bash scripts\/setup\/updates\.sh --channel release</);
+  // Nothing is confirmable until a step has been reviewed, and nothing on the page says "add".
+  assert.doesNotMatch(html, /data-testid="updater-(review|confirm)"|Add this signer|Add signer/);
+  // A signer under review to stage: the principal, the whole key, its fingerprint, the root command, and a button that says stage.
+  const key3 = `AAAAC3NzaC1lZDI1NTE5AAAAI${'C'.repeat(43)}`;
+  const plan = { step: 'stage', args: ['stage-update-signer', 'third@example.com', 'ssh-ed25519', key3], command: `/usr/local/libexec/harness-machine stage-update-signer third@example.com ssh-ed25519 ${key3}`, changes: ['stages this principal and key in /var/lib/harness/pending-signers.json, for 24 hours', 'changes nothing in /etc/harness/allowed_signers: a staged key is trusted for nothing'], script: '', signer: { principal: 'third@example.com', key: key3, fingerprint: 'SHA256:thirdfingerprint', line: `third@example.com ssh-ed25519 ${key3}`, confirm: 'sudo bash /opt/harness/current/scripts/setup/updates.sh --confirm-signer SHA256:thirdfingerprint', file: '/etc/harness/allowed_signers' } };
+  const reviewing = r.renderUpdaterSetup(data, { input: { step: 'stage', principal: 'third@example.com', key: key3 }, plan });
+  assert.match(reviewing, new RegExp(`data-testid="updater-review" data-step="stage"[\\s\\S]*?Staging adds nothing to the keys this machine trusts[\\s\\S]*?data-testid="updater-review-principal"[^>]*>third@example\\.com<[\\s\\S]*?data-testid="updater-review-key"[^>]*>${key3}<[\\s\\S]*?data-testid="updater-review-fingerprint"[^>]*>SHA256:thirdfingerprint<[\\s\\S]*?data-testid="updater-review-root-command"[^>]*>sudo bash /opt/harness/current/scripts/setup/updates\\.sh --confirm-signer SHA256:thirdfingerprint<[\\s\\S]*?data-testid="updater-review-command"[^>]*>/usr/local/libexec/harness-machine stage-update-signer [\\s\\S]*?a staged key is trusted for nothing[\\s\\S]*?data-testid="updater-confirm"[^>]*>Stage this signer<`));
+  assert.doesNotMatch(reviewing, /data-testid="updater-signer-form"/, 'the form gives way to what was entered, until confirmed or cancelled');
+  // A discard under review opens in its own staged entry.
+  const discarding = r.renderUpdaterSetup(data, { input: { step: 'discard', principal: 'second@example.com', key: key2 }, plan: { step: 'discard', args: [], command: '/usr/local/libexec/harness-machine discard-update-signer second@example.com ssh-ed25519 x', changes: ['takes it out'], script: '' } });
+  assert.match(discarding, /data-testid="updater-pending"[\s\S]*?data-testid="updater-review" data-step="discard"[\s\S]*?data-testid="updater-confirm"[^>]*>Discard it</);
+  // On main: the one channel change the page offers is back to release.
+  const onMain = r.renderUpdaterSetup({ ...data, updater: { ...updater, channel: 'main', channelWhat: "main's newest commit whose checks are all green. There is no release tag on this channel, so no tag signature is checked" } });
+  assert.match(onMain, /data-testid="updater-channel" data-channel="main"[\s\S]*?no tag signature is checked[\s\S]*?data-testid="updater-release"[^>]*>Follow releases…</);
+  // Four staged: no room for another, so no form.
+  assert.doesNotMatch(r.renderUpdaterSetup({ ...data, updater: { ...updater, pending: Array.from({ length: 4 }, (_, i) => ({ ...updater.pending[0]!, principal: `s${i}@example.com`, key: `${key2.slice(0, -1)}${i}` })) } }), /data-testid="updater-signer-form"/);
+  // Not installed: the channel waits for the install; no signers yet.
+  const bare = r.renderUpdaterSetup({ ...data, updater: { ...updater, installed: false, enabled: null, channel: null, channelWhat: null, signers: null, pending: [] } });
+  assert.match(bare, /data-step="1"[\s\S]*?not installed[\s\S]*?Install the updater…/);
+  assert.match(bare, /data-step="2"[\s\S]*?none listed/);
+  assert.match(bare, /Install the updater first: it starts on release/);
+  assert.doesNotMatch(bare, /data-testid="updater-release"|data-testid="updater-signers"|data-testid="updater-pending"/);
+  // A config that names another signers file: said, in the signers step.
+  assert.match(r.renderUpdaterSetup({ ...data, updater: { ...updater, updaterReads: '/root/signers' } }), /data-testid="updater-reads-elsewhere"[^>]*>[\s\S]*?\/root\/signers/);
+  // Anyone who can't change the machine sees the state, the staged signer and its command, and nothing to press.
+  const theirs = r.renderUpdaterSetup({ ...data, user: 'example-collaborator', canChange: false });
+  assert.match(theirs, /data-testid="updater-signer"[\s\S]*data-testid="updater-pending-command"/);
+  assert.doesNotMatch(theirs, /data-testid="updater-(install|signer-form|signer-review|pending-discard|release|confirm)"/);
+  // An older server sends no updater: the section isn't there, and the machine settings still render.
+  const { updater: _none, ...older } = data;
+  assert.equal(r.renderUpdaterSetup(older), '');
+  assert.match(r.renderMachine(data), /data-testid="updater-setup"[\s\S]*data-testid="machine-setting-row"/, 'above the settings table, on the Machine page');
+});
+
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {
   const data = {
     owner: 'example-owner',
@@ -1259,7 +1334,7 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   assert.match(html, /data-testid="first-run-recheck"[^>]*>Re-check/);
   assert.match(html, /data-testid="first-run-checked"/);
   // Each not-done step has a Fix of its kind; a done one has none.
-  assert.match(html, /data-step="claude-login" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="outside"/);
+  assert.match(html, /data-step="claude-login" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="signin"[^>]*>Sign in</);
   assert.match(html, /data-step="service" data-status="todo"[\s\S]*?data-fix="start"[^>]*>Start</);
   const tools = html.slice(html.indexOf('data-step="tools"'), html.indexOf('</li>', html.indexOf('data-step="tools"')));
   assert.doesNotMatch(tools, /first-run-fix/);
@@ -1268,11 +1343,27 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   assert.match(html, /data-testid="first-run-resume"[\s\S]*?init last stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
   assert.match(html, /data-testid="first-run-unavailable"[\s\S]*?Not available in local mode[\s\S]*?separate OS users[\s\S]*?root-run add-project[\s\S]*?test sandbox[\s\S]*?needs Docker/);
   assert.doesNotMatch(html, /first-run-none/);
-  // Fix, a provider's login: the command, and that the page notices when it's done.
-  const claude = r.renderFirstRun(f, { open: 'claude-login' });
-  assert.match(claude, /data-testid="first-run-outside"[\s\S]*?Anthropic(&#x27;|')s own login and consent page[\s\S]*?checks again every 15 s and marks it done[\s\S]*?<code[^>]*>claude auth login<\/code>/);
-  // ... and with a direct link where the provider has one (GitHub's device login).
-  assert.match(r.renderFirstRun(f, { open: 'gh-login' }), /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="first-run-outside-link"[^>]*>Open GitHub(&#x27;|')s device login/);
+  // Fix, Sign in to Claude: its panel opens in the step (rendered from its data; the page loads it).
+  const claude = r.renderFirstRun(f, { open: 'claude-login', signin: { mode: 'local', canAct: true, state: 'idle', url: null, detail: 'not started', startedAt: null, endedAt: null, status: null } });
+  assert.match(claude, /data-testid="first-run-fix-panel"[\s\S]*?data-testid="claude-signin" data-mode="local" data-state="idle"[\s\S]*?data-testid="claude-signin-button"/);
+  // ... and it runs again once done (another account, an expired login).
+  const signedIn = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((x) => (x.id === 'claude-login' ? { ...x, done: true } : x)) })) } };
+  assert.match(r.renderFirstRun(signedIn), /data-step="claude-login" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="signin"[^>]*>Again</);
+  // Connect GitHub (src/gh-login.ts): the command it runs for you; owners get the button, writers are told why not.
+  const ghFix = (canAct: boolean, ghLogin?: unknown) => r.renderFirstRun({ ...f, canAct }, { open: 'gh-login', ...(ghLogin ? { ghLogin } : {}) });
+  const gh0 = { state: 'idle', code: null, url: null, startedAt: null, expiresAt: null, detail: null, installed: true };
+  assert.match(ghFix(true, gh0), /data-fix="gh-login"[^>]*>Connect GitHub<[\s\S]*?data-testid="gh-login" data-state="idle"[\s\S]*?<code[^>]*>gh auth login --web<\/code>[\s\S]*?never sees the token[\s\S]*?data-testid="gh-login-start"[^>]*>Connect GitHub</);
+  assert.match(ghFix(false), /data-testid="gh-login-refused"/);
+  assert.doesNotMatch(ghFix(false), /gh-login-start/);
+  // Waiting: the one-time code, GitHub's device page, Cancel.
+  const waiting = ghFix(true, { ...gh0, state: 'waiting', code: 'E286-95A6', url: 'https://github.com/login/device', startedAt: '2026-10-13T00:00:00Z', expiresAt: '2026-10-13T00:15:00Z' });
+  assert.match(waiting, /data-testid="gh-login-code"[^>]*>E286-95A6</);
+  assert.match(waiting, /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="gh-login-link"/);
+  assert.match(waiting, /data-testid="gh-login-cancel"/);
+  // Failed: why, and Try again; no gh: the Tools step.
+  assert.match(ghFix(true, { ...gh0, state: 'failed', detail: 'gh stopped (exit 1)' }), /data-testid="gh-login-detail"[^>]*>gh stopped \(exit 1\)<[\s\S]*?data-testid="gh-login-start"[^>]*>Try again</);
+  assert.match(ghFix(true, { ...gh0, installed: false }), /data-testid="gh-login-no-gh"/);
+  assert.match(ghFix(true, { ...gh0, state: 'done', detail: 'signed in' }), /data-testid="gh-login-done"/);
   // Fix with no screen yet: what a person does today, and that a screen is coming.
   const coming = f.setup!.groups.flatMap((g) => g.steps).find((s) => !s.done && s.fix.kind === 'coming')!;
   const comingHtml = r.renderFirstRun(f, { open: coming.id });
@@ -1323,6 +1414,122 @@ test("the first-run page, a Fix the dashboard does itself: its plan shown first,
   const unavailable = r.renderFirstRun({ ...withPlans, actions: { 'git-hooks': { ...plans['git-hooks'], available: false, why: 'nothing is missing', changes: [], commands: [] } } }, { open: 'pre-commit' });
   assert.match(unavailable, /data-testid="first-run-action-unavailable"[^>]*>Not from here: nothing is missing\./);
   assert.doesNotMatch(unavailable, /first-run-action-button/);
+});
+
+test("the first-run page, Sign in to Claude: local relays claude auth login (the link for owners, nothing pasted); a server pastes a setup token; a cached account is labelled cached", () => {
+  const local = { mode: 'local', canAct: true, state: 'idle', url: null, detail: 'not started', startedAt: null, endedAt: null, status: null };
+  const idle = r.renderClaudeSignin(local);
+  assert.match(idle, /data-testid="claude-signin" data-mode="local" data-state="idle"[\s\S]*?claude auth login[\s\S]*?Nothing is pasted[\s\S]*?never sees, logs or stores a token/);
+  assert.match(idle, /data-testid="claude-signin-button"[^>]*>Sign in…/);
+  assert.doesNotMatch(idle, /claude-signin-confirm"/, 'no confirmation until Sign in is pressed');
+  assert.match(r.renderClaudeSignin(local, { confirming: true }), /data-testid="claude-signin-confirming"[\s\S]*?Run claude auth login now\?[\s\S]*?data-testid="claude-signin-confirm"/);
+  assert.match(r.renderClaudeSignin({ ...local, canAct: false }), /data-testid="claude-signin-refused"[^>]*>Only the instance(&#x27;|')s owners can start it/);
+  const url = 'https://claude.com/cai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback&state=s';
+  const waiting = r.renderClaudeSignin({ ...local, state: 'waiting', url, detail: 'open it', startedAt: '2026-10-13T10:00:00.000Z' });
+  assert.ok(waiting.includes(`href="${url.replace('&', '&amp;')}"`), waiting);
+  assert.match(waiting, /data-testid="claude-signin-link"[^>]*>Open Anthropic(&#x27;|')s sign-in/);
+  assert.match(waiting, /data-testid="claude-signin-cancel"/);
+  assert.doesNotMatch(waiting, /claude-signin-button/);
+  assert.match(r.renderClaudeSignin({ ...local, canAct: false, state: 'waiting', detail: 'open it' }), /shown to the instance(&#x27;|')s owners only/);
+  const done = r.renderClaudeSignin({ ...local, state: 'done', detail: 'signed in (claude.ai)', status: { loggedIn: true, method: 'claude.ai', cachedAccount: 'someone@example.com' } });
+  assert.match(done, /data-testid="claude-signin-cached-account"[^>]*>Account: someone@example\.com \(cached by Claude Code; it may predate a later token change\)/);
+
+  const server = { mode: 'server', canAct: true, agentUser: 'wl-example-agent', ask: null, status: null, command: 'claude setup-token\nsudo bash /opt/engine/scripts/setup/credentials.sh example claude', script: 'sudo bash /opt/engine/scripts/setup/credentials.sh example claude' };
+  const none = r.renderClaudeSignin(server);
+  assert.match(none, /data-testid="claude-signin" data-mode="server"[\s\S]*?wl-example-agent only \(0600\), never shown or logged[\s\S]*?data-testid="claude-signin-no-ask"[\s\S]*?data-testid="claude-signin-setup"[\s\S]*?data-testid="claude-signin-command"[^>]*>claude setup-token\nsudo bash \/opt\/engine\/scripts\/setup\/credentials\.sh example claude/);
+  assert.doesNotMatch(none, /\/login/, 'no /login session any more');
+  const ask = { id: 'a1', instance: 'example', title: "The Claude login for example's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-13T10:00:00.000Z', createdBy: 'add-project', status: 'open', answer: null, cancelled: null, kind: 'paste_secret', credential: 'claude-token', where: 'x' };
+  const box = r.renderClaudeSignin({ ...server, ask: { ...ask, canAnswer: true }, status: { at: '2026-10-13T10:00:00.000Z', loggedIn: true, method: 'claude.ai', cachedAccount: 'previous@example.com', installedAt: '2026-10-13T11:00:00.000Z' } });
+  assert.match(box, /data-testid="claude-signin-ask"[\s\S]*?type="password"[^>]*data-testid="ask-secret"/);
+  assert.match(box, /data-testid="claude-signin-status"[\s\S]*?signed in \(claude\.ai\)[\s\S]*?data-testid="claude-signin-cached-account"[^>]*>Account: previous@example\.com \(cached/);
+  assert.match(r.renderClaudeSignin({ ...server, ask: { ...ask, canAnswer: false } }), /data-testid="claude-signin-refused"[^>]*>Only the instance(&#x27;|')s owners can paste it/);
+});
+
+test("the first-run page, Policy form: each key with its bounds and why, the isolation keys read-only, Review then the change and Confirm; writers can't edit", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop' });
+  const policy = {
+    fields: [
+      { key: 'budget.daily_usd', value: 20, kind: 'number', min: 1, max: 100, step: 1, why: "the instance's daily spend ceiling" },
+      { key: 'land_mode', value: 'pr', kind: 'choice', choices: ['pr', 'direct'], why: 'pr: every change lands through a PR' },
+      { key: 'auto_merge', value: false, kind: 'boolean', why: 'on: the harness merges its own PRs' },
+    ],
+    fixed: [{ key: 'sandbox', value: true }, { key: 'lanes', value: ['default'] }],
+    error: null,
+  };
+  const html = r.renderFirstRun({ ...f, policy, canAct: true }, { open: 'policy' });
+  assert.match(html, /data-step="policy"[\s\S]*?data-testid="first-run-fix" data-fix="form"[^>]*>Review</);
+  assert.match(html, /data-testid="policy-form"[\s\S]*?data-key="budget\.daily_usd"[\s\S]*?type="number"[^>]*min="1"[^>]*max="100"[\s\S]*?1–100[\s\S]*?daily spend ceiling[\s\S]*?data-key="land_mode"[\s\S]*?<select[\s\S]*?direct[\s\S]*?data-key="auto_merge"[\s\S]*?type="checkbox"/);
+  assert.match(html, /data-testid="policy-fixed"[^>]*>Not changed here \(isolation; set at a root shell\): sandbox true · lanes default/);
+  assert.match(html, /data-testid="policy-review"[^>]*>Review the change/);
+  assert.doesNotMatch(html, /policy-confirm"/);
+  const confirming = r.renderFirstRun({ ...f, policy, canAct: true }, { open: 'policy', policyChanges: [{ key: 'auto_merge', from: false, to: true }] });
+  assert.match(confirming, /data-testid="policy-confirming"[\s\S]*?data-testid="policy-change"[^>]*>auto_merge: false → true[\s\S]*?data-testid="policy-confirm"[^>]*>Confirm/);
+  const writer = r.renderFirstRun({ ...f, policy, canAct: false }, { open: 'policy' });
+  assert.match(writer, /data-testid="policy-refused"[^>]*>Only the instance(&#x27;|')s owners can change its policy/);
+  assert.match(writer, /type="number"[^>]*disabled=""/);
+});
+
+test("the first-run page, Repo config form: writers, required checks, budget and workers from the default branch's config; Review then the change and Propose as a PR; writers can't; why not when the config isn't on the default branch", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const repoConfig = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const html = r.renderFirstRun({ ...f, repoConfig, canAct: true }, { open: 'required-checks' });
+  assert.match(html, /data-step="required-checks"[\s\S]*?data-testid="first-run-fix" data-fix="form"[^>]*>Change</);
+  assert.match(html, /data-testid="repo-config-form"[\s\S]*?proposed as a PR against main; nothing changes until it merges[\s\S]*?data-testid="repo-config-writers"[^>]*value="example-owner"[\s\S]*?data-testid="repo-config-check" data-check="test"[\s\S]*?checked=""[\s\S]*?data-testid="repo-config-budget"[^>]*value="40"[\s\S]*?data-testid="repo-config-review"[^>]*>Review the change/);
+  const confirming = r.renderFirstRun({ ...f, repoConfig, canAct: true }, { open: 'required-checks', configChanges: [{ file: '.worklane/config.yaml', key: 'required_checks', from: ['test'], to: ['test', 'lint'] }] });
+  assert.match(confirming, /data-testid="repo-config-change"[^>]*>\.worklane\/config\.yaml required_checks: test → test, lint[\s\S]*?data-testid="repo-config-propose"[^>]*>Propose as a PR/);
+  const writer = r.renderFirstRun({ ...f, repoConfig, canAct: false }, { open: 'required-checks' });
+  assert.match(writer, /data-testid="repo-config-refused"[^>]*>Only the instance(&#x27;|')s owners can propose a config change/);
+  assert.doesNotMatch(writer, /repo-config-review|repo-config-check-name/);
+  assert.match(html, /placeholder="another check, as GitHub names it"[^>]*data-testid="repo-config-check-name"[\s\S]*?data-testid="repo-config-check-add"/);
+  assert.match(r.renderFirstRun({ ...f, repoConfig: { error: '.worklane/ missing at origin/main' }, canAct: true }, { open: 'required-checks' }), /data-testid="repo-config-error"[^>]*>Not from here yet: \.worklane\/ missing at origin\/main/);
+});
+
+test("the first-run page in setup mode: the banner; the origin picker; auto-config's questions as choices, the draft confirmed first and its log; the setup PR with Merge; outside setup mode, today's way", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const autoConfig = { questions: [{ id: 'package-manager', ask: 'which package manager runs it?', choices: [{ id: 'npm', label: 'npm' }, { id: 'pnpm', label: 'pnpm' }], custom: false }], verified: [], pr: null, answer: 'worklane init /r --answer <id>=<choice>' };
+  const draft = { running: false, startedAt: '2026-10-13T10:00:00.000Z', finishedAt: '2026-10-13T10:00:05.000Z', lines: ['   running runner.full on main (abcdef12): npm test'], result: { status: 'failed', detail: '1 question to answer' } };
+  // The questions step as setup mode finds it: not done while auto-config waits on an answer.
+  const open = { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'questions' ? { ...s, done: false, detail: '1 question open (shown below)' } : s)) })) };
+  const setup = { ...f, setup: open, setupMode: true, configReady: false, autoConfig, draft, canAct: true };
+  const html = r.renderFirstRun(setup);
+  assert.match(html, /data-testid="first-run-setup-mode"[\s\S]*?Setup mode: this checkout has no config yet/);
+  assert.doesNotMatch(html, /data-testid="first-run-auto-config"/, 'the read-only view gives way to the panels');
+  assert.match(r.renderFirstRun(setup, { open: 'origin' }), /data-step="origin" data-status="todo"[\s\S]*?data-fix="form"[^>]*>Pick[\s\S]*?data-testid="setup-origin"[\s\S]*?placeholder="owner\/name"[^>]*data-testid="setup-origin-repo"[\s\S]*?data-testid="setup-origin-review"/);
+  const questions = r.renderFirstRun(setup, { open: 'questions' });
+  assert.match(questions, /data-testid="setup-question" data-question="package-manager"[\s\S]*?which package manager runs it\?[\s\S]*?type="radio"[\s\S]*?npm[\s\S]*?pnpm[\s\S]*?data-testid="setup-save-answers"/);
+  assert.match(questions, /data-testid="setup-draft-log"[\s\S]*?Finished: 1 question to answer[\s\S]*?running runner\.full on main/);
+  const drafting = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [] } }, { open: 'questions', draftConfirming: true });
+  assert.match(drafting, /data-testid="setup-draft"[\s\S]*?runs each on a scratch copy of the default branch[\s\S]*?data-testid="setup-draft-confirming"[\s\S]*?Run your project(&#x27;|')s commands to draft it\?[\s\S]*?data-testid="setup-draft-confirm"/);
+  const pr = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [], pr: { number: 7, url: 'https://github.com/example-org/example-shop/pull/7' } } }, { open: 'questions' });
+  assert.match(pr, /data-testid="setup-pr"[\s\S]*?href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"[^>]*>PR #7[\s\S]*?data-testid="setup-merge-review"[^>]*>Merge…/);
+  assert.doesNotMatch(pr, /setup-draft-button/);
+  assert.match(r.renderFirstRun({ ...setup, canAct: false }, { open: 'questions' }), /Only the owners can set this checkout up/);
+  assert.match(r.renderFirstRun({ ...setup, configReady: true }), /The config is here: opening the dashboard…/);
+  const normal = r.renderFirstRun({ ...f, setup: open, autoConfig, canAct: true }, { open: 'questions' });
+  assert.match(normal, /data-testid="first-run-coming"/, 'outside setup mode: what to do today');
+  assert.doesNotMatch(normal, /setup-question/);
+});
+
+test('the first-run page: Skip on a step not done (owners), skipped shown and Undo; each screen names its command; a done step opened from Settings runs again; Settings lists every screen', () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const owner = { ...f, canAct: true, actions: { 'git-hooks': { id: 'git-hooks', step: 'pre-commit', label: 'Install the git hooks', available: true, changes: ['hooks'], commands: [] } } };
+  const html = r.renderFirstRun(owner);
+  assert.match(html, /data-step="pre-commit" data-status="todo"[\s\S]*?data-testid="first-run-skip" data-skipped="false"[^>]*>Skip</);
+  assert.doesNotMatch(r.renderFirstRun({ ...owner, canAct: false }), /first-run-skip"/, 'writers: no Skip');
+  const skipped = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, skipped: true } : s)) })) } };
+  const sk = r.renderFirstRun(skipped, { open: 'pre-commit' });
+  assert.match(sk, /data-step="pre-commit" data-status="skipped"[\s\S]*?>skipped<[\s\S]*?data-testid="first-run-skip" data-skipped="true"[^>]*>Undo skip</);
+  assert.doesNotMatch(sk.slice(sk.indexOf('data-step="pre-commit"'), sk.indexOf('</li>', sk.indexOf('data-step="pre-commit"'))), /first-run-fix-panel/, 'a skipped step stays closed');
+  const open = r.renderFirstRun(owner, { open: 'pre-commit' });
+  assert.match(open, /data-testid="first-run-automation"[^>]*>Without this page: <code[^>]*>worklane install --git-hooks<\/code>/);
+  const done = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, done: true } : s)) })) } };
+  assert.doesNotMatch(r.renderFirstRun(done).match(/data-step="pre-commit"[\s\S]*?<\/li>/)![0], /first-run-fix"/, 'done: no Fix on the checklist');
+  assert.match(r.renderFirstRun(done, { open: 'pre-commit', rerun: 'pre-commit' }), /data-step="pre-commit" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="action"[^>]*>Run again[\s\S]*?data-testid="first-run-action" data-action="git-hooks"/);
+  const settings = r.renderSetupScreens(done.setup!.groups.flatMap((g) => g.steps));
+  assert.match(settings, /data-testid="setup-screens"[\s\S]*?Setup screens/);
+  assert.match(settings, /data-step="pre-commit"[\s\S]*?>done<[\s\S]*?worklane install --git-hooks[\s\S]*?href="\/first-run\?step=pre-commit"[^>]*>Run again/);
+  assert.match(settings, /data-step="service"[\s\S]*?worklane up[\s\S]*?href="\/first-run\?step=service"[^>]*>Open/);
+  assert.doesNotMatch(settings, /data-step="docker"/, 'a step done on the vendor\'s own page has no screen here');
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {
@@ -1512,6 +1719,67 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
     assert.equal((said.match(/[Mm]achine owners: @ada, @olu/g) ?? []).length, 1, `${who}: names the machine owners, once: ${said}`);
   }
   assert.match(view(ownerRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
+});
+
+test('Add project on an older sudo: no submit, why, and the root command to run instead; the name and repo fields still there to fill it', () => {
+  const ownersFile = machineOwnersFile('ada');
+  const f = join(mkdtempSync(join(tmpdir(), 'helper-rules-')), 'helper-rules.json');
+  writeFileSync(f, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer'] }));
+  const html = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile, helperRulesFile: f }));
+  assert.match(html, /data-testid="add-project" data-enabled="no"/);
+  assert.doesNotMatch(html, /data-testid="add-project-submit"|data-testid="add-project-disabled"/, 'no button that could only fail, and no bare refusal');
+  assert.match(html, /data-testid="add-project-manual"[\s\S]*?this machine(&#x27;|')s sudo \(1\.9\.9\) is older than 1\.9\.10[\s\S]*?data-testid="add-project-manual-command"[^>]*>sudo bash \/opt\/worklane\/current\/scripts\/setup\/add-project\.sh &lt;name&gt; &lt;owner\/repo&gt;</);
+  for (const id of ['add-project-name', 'add-project-repo']) assert.doesNotMatch(html.match(new RegExp(`<input[^>]*data-testid="${id}"[^>]*>`))![0], /disabled=""/, `${id} can be filled in`);
+  // On 1.9.10 or later, as before.
+  const g = join(mkdtempSync(join(tmpdir(), 'helper-rules-')), 'helper-rules.json');
+  writeFileSync(g, JSON.stringify({ sudo: '1.9.15', patterns_min: '1.9.10', left_out: [] }));
+  const ok = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile, helperRulesFile: g }), null);
+  assert.match(ok, /data-testid="add-project-submit"/);
+  assert.doesNotMatch(ok, /data-testid="add-project-manual"/);
+});
+
+test("Add project's repo picker: the account's repos to pick from, the ones the App can't work on shown disabled with why; the script it stands for; hidden when adding isn't allowed", () => {
+  const ownersFile = machineOwnersFile('ada');
+  const data = addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile });
+  const picker = {
+    owner: 'ada',
+    ownerType: 'User',
+    accounts: ['ada', 'example-org'],
+    repos: [
+      { fullName: 'ada/shop', private: false, installable: true, why: null, pushedAt: null },
+      { fullName: 'ada/old-site', private: false, installable: false, why: 'archived: read-only, so the agents could never push to it', pushedAt: null },
+    ],
+    note: 'GitHub lists only public repos here: type a private repo as owner/name.',
+    error: null,
+  };
+  const html = r.renderAddProject(data, picker);
+  assert.match(html, /data-testid="add-project-picker" data-owner="ada"/);
+  const account = html.match(/<input[^>]*data-testid="add-project-account"[^>]*>/)![0];
+  assert.match(account, /value="ada"/, 'the account listed');
+  assert.doesNotMatch(account, /disabled=""/, 'and editable: an organization GitHub does not show publicly is typed');
+  const accounts = html.match(/<datalist id="add-project-accounts">[\s\S]*?<\/datalist>/)![0];
+  assert.deepEqual([...accounts.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]), ['ada', 'example-org']);
+  assert.match(html, /data-testid="add-project-account-list"/);
+  const options = [...html.matchAll(/<option value="([^"]*)"( disabled="")? data-testid="add-project-repo-option" data-installable="(yes|no)">([^<]*)</g)].map((m) => [m[1], m[3], !!m[2]]);
+  assert.deepEqual(options, [
+    ['ada/shop', 'yes', false],
+    ['ada/old-site', 'no', true],
+  ]);
+  assert.match(html, /ada\/old-site \(archived: read-only/);
+  assert.match(html, /data-testid="add-project-picker-note"[^>]*>GitHub lists only public repos here/);
+  // The script the screen stands for, and where the App's secrets go.
+  const script = html.match(/data-testid="add-project-script"[\s\S]*?<\/p>/)![0];
+  assert.match(script, /sudo bash scripts\/setup\/add-project\.sh &lt;name&gt; &lt;owner\/repo&gt;/);
+  assert.match(script, /0400 files: never shown, logged or sent anywhere/);
+  // GitHub's refusal: the message instead of the note; the typed field still there.
+  const failed = r.renderAddProject(data, { ...picker, repos: [], error: "GitHub's limit is reached: type owner/name" });
+  assert.match(failed, /data-testid="add-project-picker-error"[^>]*>GitHub(&#x27;|')s limit is reached/);
+  assert.doesNotMatch(failed, /data-testid="add-project-picker-note"/);
+  assert.match(failed, /data-testid="add-project-repo"/);
+  // Not yet listed, and not allowed.
+  assert.match(r.renderAddProject(data), /data-testid="add-project-picker-loading"/);
+  const refused = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ivy') }, { ownersFile }), picker);
+  assert.doesNotMatch(refused, /data-testid="add-project-picker/, 'no picker for someone who may not add a project');
 });
 
 test('Add project: the steps show in the script order as they arrive, and its asks (GitHub links, the Claude token) appear in the same view', () => {
@@ -1888,6 +2156,250 @@ test('learnings: each cause with its sightings and stages; Promote only for an o
   const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
   assert.doesNotMatch(writer, /learning-promote/);
   assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
+});
+
+test('Tailscale and HTTPS: a machine owner sees the state, the four steps with what each changes and its script, and the login link only while up waits; anyone else nothing', () => {
+  const ownersFile = machineOwnersFile('ada');
+  // Put together here so the repo holds no tailnet name, even a made-up one (the denylist's rule).
+  const name = ['box', 'tail0example', 'ts', 'net'].join('.');
+  const link = 'https://login.tailscale.com/a/0123456789abcdef';
+  const st = (over: Partial<TailscaleStatus> = {}): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: true, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test', ...over });
+  const none = st({ installed: false, version: null, state: null, name: null, https: false, serve: false });
+  const dirOf = (lines: object[], url?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'tailscale-render-'));
+    if (lines.length) writeFileSync(join(dir, 'steps.jsonl'), lines.map((l) => JSON.stringify({ at: new Date().toISOString(), ...l })).join('\n') + '\n');
+    if (url) writeFileSync(join(dir, 'login-url'), `${url}\n`);
+    return dir;
+  };
+  const view = (login: string, status: TailscaleStatus | null, dir = dirOf([])) => tailscaleView({ status, dir, events: [], who: { role: 'owner', requester: ownerRequester(login) }, instance: 'shop', ownersFile });
+  const steps = (html: string) => [...html.matchAll(/data-testid="tailscale-step" data-step="([a-z-]+)" data-done="(true|false)" data-next="(true|false)"/g)].map((m) => `${m[1]}:${m[2] === 'true' ? 'done' : m[3] === 'true' ? 'next' : 'later'}`);
+
+  // No tailscale: says so, offers the install, and nothing else can be run yet.
+  const fresh = r.renderTailscaleSetup(view('ada', none));
+  assert.match(fresh, /data-testid="tailscale-setup" data-next="install"/);
+  assert.match(fresh, /Tailscale is not installed on this machine\. It is optional: without it the hub stays where it is\./);
+  assert.match(fresh, /Nothing here runs until you confirm a step; leave it alone and the hub keeps its URL\./);
+  assert.match(fresh, /data-testid="tailscale-hub-url"[^>]*>The hub&#x27;s URL now: <span[^>]*>https:\/\/hub\.example\.test</);
+  assert.deepEqual(steps(fresh), ['install:next', 'up:later', 'serve:later', 'public-url:later']);
+  assert.equal([...fresh.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 3, 'only the install can be asked for');
+  assert.equal([...fresh.matchAll(/data-testid="tailscale-step-command"/g)].length, 4, 'each step names its script');
+  assert.match(fresh, /sudo bash scripts\/setup\/tailscale\.sh install/);
+  assert.match(fresh, /data-testid="tailscale-script"/);
+  assert.doesNotMatch(fresh, /data-testid="tailscale-login"|data-testid="tailscale-step-confirm"|data-testid="tailscale-run"/);
+
+  // Asked for: what it changes, as root, before a second click.
+  const confirming = r.renderTailscaleSetup(view('ada', none), { confirming: 'install' });
+  assert.match(confirming, /data-testid="tailscale-step-confirm"[\s\S]*As root, through the machine helper[\s\S]*signing key[\s\S]*version 1\.104\.1 \(pinned\)[\s\S]*no install script[\s\S]*data-testid="tailscale-step-confirm-run"/);
+
+  // up is waiting: the login page is a button, for the owner.
+  const waitingLines = [{ step: 'up', state: 'started', detail: '' }, { step: 'up', state: 'running', detail: 'tailscale up (no auth key): it prints a login link and waits' }, { step: 'up', state: 'waiting', detail: 'the login link is in shop\'s dashboard, shown to machine owners only' }];
+  const needsLogin = st({ state: 'NeedsLogin', name: null, https: false, serve: false });
+  const waiting = r.renderTailscaleSetup(view('ada', needsLogin, dirOf(waitingLines, link)));
+  assert.match(waiting, /data-testid="tailscale-run" data-step="up" data-status="waiting"/);
+  assert.match(waiting, new RegExp(`<a href="${link.replace(/[/.]/g, '\\$&')}" target="_blank" rel="noreferrer" referrerPolicy="no-referrer"[^>]*data-testid="tailscale-login-link">Open Tailscale&#x27;s login page</a>`));
+  assert.equal([...waiting.matchAll(/login\.tailscale\.com/g)].length, 1, 'the link is the button and nothing else');
+  assert.equal([...waiting.matchAll(/data-testid="tailscale-step-run"/g)].length, 3, 'the running step has no button');
+  assert.doesNotMatch(waiting, /<button(?![^>]*disabled="")[^>]*data-testid="tailscale-step-run"/, 'no second step while one runs');
+  // Anyone who isn't a machine owner: nothing at all, the link included.
+  assert.equal(r.renderTailscaleSetup(view('ivy', needsLogin, dirOf(waitingLines, link))), '');
+
+  // On the tailnet without HTTPS certificates: serve waits, with Tailscale's own page to turn them on.
+  const noCert = r.renderTailscaleSetup(view('ada', st({ https: false, serve: false })));
+  assert.deepEqual(steps(noCert), ['install:done', 'up:done', 'serve:next', 'public-url:later']);
+  assert.match(noCert, /data-testid="tailscale-step-blocked"[^>]*>Not yet: your tailnet doesn&#x27;t issue an HTTPS certificate/);
+  assert.match(noCert, /<a href="https:\/\/login\.tailscale\.com\/admin\/dns"[^>]*data-testid="tailscale-step-link">Open Tailscale&#x27;s DNS settings<\/a>/);
+
+  // Served: the URL step says what the new URL is, what restarts, and the callback to set on GitHub.
+  const url = r.renderTailscaleSetup(view('ada', st()), { confirming: 'public-url' });
+  assert.deepEqual(steps(url), ['install:done', 'up:done', 'serve:done', 'public-url:next']);
+  assert.match(url, new RegExp(`the hub&#x27;s URL becomes https://${name.replace(/\./g, '\\.')} \\(now https://hub\\.example\\.test\\), through dashboards\\.sh`));
+  assert.match(url, new RegExp(`callback URL to exactly https://${name.replace(/\./g, '\\.')}/auth/callback`));
+  assert.match(url, /dashboards\.sh --client-id/);
+  // All done: nothing is next; each step can be run again.
+  const done = r.renderTailscaleSetup(view('ada', st({ hubUrl: `https://${name}` })));
+  assert.match(done, /data-testid="tailscale-setup" data-next="none"/);
+  assert.equal([...done.matchAll(/Run again…/g)].length, 4);
+  // Off an allowed device: read-only, and it says why.
+  const away = r.renderTailscaleSetup(tailscaleView({ status: none, dir: dirOf([]), events: [], who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, instance: 'shop', ownersFile }));
+  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the console&#x27;s allowed devices/);
+  assert.equal([...away.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 4);
+  // Funnel: shown read-only. Off: it says nothing here turns it on. Already on: said in red, and neither later step can be asked for.
+  assert.match(done, /data-testid="tailscale-funnel" data-funnel="off"[^>]*>Funnel \(the public internet\): off\. Nothing here turns it on/);
+  const funnel = r.renderTailscaleSetup(view('ada', st({ funnel: true, serve: false })));
+  assert.match(funnel, /data-testid="tailscale-funnel" data-funnel="on"[^>]*>Funnel \(the public internet\): ON\. Nothing here turns it on or off/);
+  assert.equal([...funnel.matchAll(/data-testid="tailscale-step-blocked"[^>]*>Not yet: Tailscale Funnel is on for this machine/g)].length, 2);
+  assert.match(funnel, /data-step="serve"[\s\S]*?<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"[\s\S]*?data-step="public-url"[\s\S]*?<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/);
+  assert.doesNotMatch(fresh, /data-testid="tailscale-funnel"/, 'nothing to say about Funnel before tailscale is installed');
+  // The engine has no setup script: it says so and offers no step.
+  const old = r.renderTailscaleSetup(view('ada', null));
+  assert.match(old, /no Tailscale setup script yet/);
+  assert.doesNotMatch(old, /data-testid="tailscale-steps"/);
+});
+
+test("the first-run page's Discord step: the token's place and a paste box, the invite link, pickers from the bot's list, the exact diff before Confirm; the script equivalents; no token anywhere", () => {
+  const keys = ['discord.enabled', 'discord.guild', 'discord.channels', 'discord.asks_channel', 'discord.ops_channel', 'discord.chat_channels', 'discord.dashboard_url', 'superfan.enabled', 'superfan.channel', 'superfan.machine_channel'];
+  const kinds: Record<string, string> = { 'discord.enabled': 'boolean', 'discord.guild': 'guild', 'discord.channels': 'ids', 'discord.chat_channels': 'ids', 'discord.dashboard_url': 'url', 'superfan.enabled': 'boolean' };
+  const v = {
+    available: true,
+    instance: 'shop',
+    canAct: true,
+    portal: 'https://discord.com/developers/applications',
+    token: { configured: false, file: null, present: false, error: null },
+    ask: null,
+    invite: { integer: '309237648384', permissions: [{ name: 'View Channels', bit: 10, why: 'see the channels' }, { name: 'Send Messages', bit: 11, why: 'reply' }, { name: 'Create Public Threads', bit: 35, why: 'open threads' }, { name: 'Send Messages in Threads', bit: 38, why: 'answer in them' }] },
+    intake: { file: '/home/example/.local/state/worklane/instances/shop/intake.yaml', exists: false, error: null, values: { 'discord.enabled': false, 'discord.guild': null, 'discord.channels': [], 'discord.asks_channel': null, 'discord.ops_channel': null, 'discord.chat_channels': [], 'discord.dashboard_url': null, 'superfan.enabled': false, 'superfan.channel': null, 'superfan.machine_channel': null }, warnings: [] },
+    form: keys.map((key) => ({ key, kind: kinds[key] ?? 'id', what: `what ${key} is` })),
+    automation: { token: 'sudo bash /opt/worklane/current/scripts/setup/credentials.sh shop intake-discord', channels: 'sudo -H -u wl-shop worklane discord channels --instance shop', file: '/home/example/.local/state/worklane/instances/shop/intake.yaml', keys, restart: 'sudo systemctl restart worklane-shop.service' },
+  };
+  // Nothing stored yet: the portal link, Paste the token, the permissions, and no picker before the bot's list is loaded.
+  const fresh = r.renderDiscordSetup(v);
+  assert.match(fresh, /data-testid="discord-setup" data-instance="shop"[\s\S]*?Nothing here changes until you confirm it/);
+  assert.match(fresh, /href="https:\/\/discord\.com\/developers\/applications"[^>]*data-testid="discord-portal-link"/);
+  assert.match(fresh, /data-testid="discord-token-state" data-stored="false"[\s\S]*?not stored[\s\S]*?names no bot token yet/);
+  assert.match(fresh, /data-testid="discord-token-button"[^>]*>Paste the token…/);
+  assert.match(fresh, /data-testid="discord-invite-integer">309237648384</);
+  assert.equal((fresh.match(/<li><span[^>]*>(View Channels|Send Messages|Create Public Threads|Send Messages in Threads)<\/span>/g) ?? []).length, 4);
+  assert.match(fresh, /data-testid="discord-invite-waiting"[^>]*>[^<]*store the token first/);
+  assert.doesNotMatch(fresh, /discord-load"|discord-form|discord-invite-link|discord-confirm"/, 'no listing without a token, no form without the list');
+  // The script equivalents, named on the screen.
+  assert.match(fresh, /data-testid="discord-automation"[\s\S]*?credentials\.sh shop intake-discord\nsudo -H -u wl-shop worklane discord channels --instance shop\n# intake\.yaml: discord\.enabled, discord\.guild,[\s\S]*?superfan\.machine_channel\nsudo systemctl restart worklane-shop\.service/);
+  // Paste the token asks first; the paste box is the setup console's own, a password field never prefilled.
+  assert.match(r.renderDiscordSetup(v, { tokenConfirming: true }), /data-testid="discord-token-confirming"[\s\S]*?records an ask[\s\S]*?data-testid="discord-token-confirm"[\s\S]*?data-testid="discord-token-cancel"/);
+  const ask = { id: 'ask-0000000000aa', instance: 'shop', title: 'Paste the Discord bot token', detail: 'From the portal.', createdAt: '2026-10-13T10:00:00Z', createdBy: 'olive', status: 'open', answer: null, cancelled: null, canAnswer: true, kind: 'paste_secret', credential: 'intake-discord', where: 'credentials.yaml intake.discord_token' };
+  const asking = r.renderDiscordSetup({ ...v, ask });
+  const box = asking.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
+  assert.match(box, /type="password"/);
+  assert.doesNotMatch(box, /value=/);
+  assert.doesNotMatch(asking, /discord-token-button/);
+  // Stored, the bot's view loaded: the invite link, the intent, and pickers offering only the bot's own channels.
+  const stored = { ...v, token: { configured: true, file: '/home/example/.config/shop-secrets/intake-discord', present: true, error: null } };
+  assert.match(r.renderDiscordSetup(stored), /data-stored="true"[\s\S]*?stored[\s\S]*?shop-secrets\/intake-discord[\s\S]*?data-testid="discord-token-button"[^>]*>Replace the token…[\s\S]*?data-testid="discord-load"[^>]*>Load the bot(&#x27;|')s view/);
+  const bot = {
+    application: { id: '700000000000000001', name: 'Example Bot', message_content: false },
+    invite: 'https://discord.com/oauth2/authorize?client_id=700000000000000001&scope=bot&permissions=309237648384',
+    channels: [
+      { guild_id: '900000000000000001', guild: 'Alpha Server', id: '100000000000000011', name: 'general', type: 0 },
+      { guild_id: '900000000000000001', guild: 'Alpha Server', id: '100000000000000017', name: 'superfan-shop', type: 0 },
+      { guild_id: '900000000000000002', guild: 'Zeta Server', id: '100000000000000021', name: 'ideas', type: 0 },
+    ],
+    at: new Date().toISOString(),
+  };
+  const values = { ...v.intake.values, 'discord.guild': '900000000000000001', 'discord.channels': ['100000000000000011'] };
+  const loaded = r.renderDiscordSetup(stored, { bot, values });
+  assert.match(loaded, /href="https:\/\/discord\.com\/oauth2\/authorize\?client_id=700000000000000001&amp;scope=bot&amp;permissions=309237648384"[^>]*data-testid="discord-invite-link"[^>]*>Open Discord(&#x27;|')s invite page for Example Bot/);
+  assert.match(loaded, /data-testid="discord-intent" data-on="false"[\s\S]*?off\. Turn it on/);
+  assert.match(loaded, /data-testid="discord-loaded"[^>]*>3 channels the bot can see/);
+  assert.deepEqual([...loaded.matchAll(/data-testid="discord-field" data-key="([a-z_.]+)"/g)].map((m) => m[1]), keys);
+  const fieldOf = (key: string) => {
+    const from = loaded.indexOf(`data-key="${key}"`);
+    const next = loaded.indexOf('data-testid="discord-field"', from);
+    return loaded.slice(from, next < 0 ? undefined : next);
+  };
+  // The channels the bot reads are offered from the chosen server only; a post-only one from any server, named with it.
+  assert.match(fieldOf('discord.channels'), /#general[\s\S]*#superfan-shop/);
+  assert.doesNotMatch(fieldOf('discord.channels'), /ideas/);
+  assert.match(fieldOf('discord.channels'), /<input type="checkbox"[^>]*checked=""[^>]*\/>#general/);
+  assert.match(fieldOf('superfan.channel'), /<option value="100000000000000021">Zeta Server \/ #ideas<\/option>/);
+  assert.match(fieldOf('discord.guild'), /<option value="900000000000000001" selected="">Alpha Server<\/option>/);
+  assert.match(loaded, /data-testid="discord-review"[^>]*>Review the change/);
+  assert.doesNotMatch(loaded, /discord-confirm"/, 'no Confirm before the diff is shown');
+  // Reviewed: the exact diff and the warning, then Confirm and write, or Cancel.
+  const plan = { ok: true, confirmed: false, file: v.intake.file, creates: true, changes: [], hash: 'h', warnings: ['discord is on but discord.allowed_senders is empty: no Discord message will be accepted'], diff: '--- (no intake.yaml yet)\n+++ intake.yaml\n+version: 1\n+discord:\n+  guild: "900000000000000001"' };
+  const reviewed = r.renderDiscordSetup(stored, { bot, values, plan });
+  assert.match(reviewed, /data-testid="discord-plan"[\s\S]*?This creates [^<]*intake\.yaml \(0600\):[\s\S]*?data-testid="discord-diff">--- \(no intake\.yaml yet\)\n\+\+\+ intake\.yaml\n\+version: 1\n\+discord:\n\+  guild: &quot;900000000000000001&quot;<\/pre>[\s\S]*?data-testid="discord-warning"[^>]*>discord is on but[\s\S]*?Write exactly this change\?[\s\S]*?data-testid="discord-confirm"[^>]*>Confirm and write<[\s\S]*?data-testid="discord-cancel"/);
+  assert.doesNotMatch(reviewed, /data-testid="discord-review"/);
+  // A failed listing says why; a writer reads where it stands and gets no button.
+  assert.match(r.renderDiscordSetup(stored, { botError: 'Discord refused the bot token (401 on GET /applications/@me)' }), /data-testid="discord-load-error"[^>]*>Discord refused the bot token/);
+  const writer = r.renderDiscordSetup({ ...stored, canAct: false }, { bot, values });
+  assert.match(writer, /data-testid="discord-setup-refused"/);
+  assert.doesNotMatch(writer, /discord-token-button|discord-load"|discord-review|discord-confirm"/);
+  // A checkout: why there is no step. And on the first-run page, the step opens it, on a done step too.
+  assert.match(r.renderDiscordSetup({ available: false, why: "Discord intake is a server instance's" }), /data-testid="discord-setup-unavailable"[^>]*>Discord intake is a server instance(&#x27;|')s\./);
+  const file = join(mkdtempSync(join(tmpdir(), 'web-render-discord-')), 'init.json');
+  const f = firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: 'shop', start: { kind: 'unsupported', why: 'a stand-in' } });
+  const step = f.setup!.groups.flatMap((g) => g.steps).find((s) => s.id === 'discord')!;
+  assert.deepEqual(step.fix, { kind: 'discord', label: 'Set up' });
+  assert.match(r.renderFirstRun(f), /data-step="discord" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="discord"[^>]*>Set up</);
+  assert.match(r.renderFirstRun(f, { open: 'discord', discord: stored }), /data-step="discord"[\s\S]*?data-testid="first-run-fix-panel"[\s\S]*?data-testid="discord-setup"/);
+  const done = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'discord' ? { ...s, done: true } : s)) })) } };
+  assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
+});
+
+test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  assert.doesNotMatch(r.renderRepoConfigForm(c), /repo-config-merge/, 'nothing to merge before a PR is proposed');
+  const proposed = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7' });
+  assert.match(proposed, /data-testid="repo-config-result"[^>]*>proposed: merge the PR to apply it/);
+  assert.match(proposed, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"/);
+  assert.match(proposed, /data-testid="repo-config-merge-review"[^>]*>Merge PR #(<!-- -->)?7(<!-- -->)? here…/);
+  const confirming = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7', mergePlan: { command: 'gh pr merge 7 --repo example-org/example-shop --squash', then: "then this checkout's main is fast-forwarded to origin's" } });
+  assert.match(confirming, /data-testid="repo-config-merge-confirming"[\s\S]*?gh pr merge 7 --repo example-org\/example-shop --squash[\s\S]*?fast-forwarded to origin(&#x27;|')s\.[\s\S]*?data-testid="repo-config-merge-confirm"[^>]*>Confirm merge[\s\S]*?data-testid="repo-config-merge-cancel"/);
+});
+
+test('Tailscale: the read that shows a step ended offers the next step at once, from the status after it, with no wait for the idle poll', { skip: process.platform === 'win32' }, async () => {
+  // Put together here so the repo holds no tailnet name, even a made-up one (the denylist's rule).
+  const name = ['box', 'tail0example', 'ts', 'net'].join('.');
+  const st = (over: Partial<TailscaleStatus>): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: false, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test', ...over });
+  let tailscale = st({ state: 'NeedsLogin', name: null, https: false });
+  const tsDir = mkdtempSync(join(tmpdir(), 'tailscale-ended-'));
+  const at = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  const line = (state: string, detail: string) => `${JSON.stringify({ at: at(), step: 'up', state, detail })}\n`;
+  writeFileSync(join(tsDir, 'steps.jsonl'), line('started', '') + line('running', 'tailscale up (no auth key)') + line('waiting', 'the login link is in alpha\'s dashboard'));
+  const dir = mkdtempSync(join(tmpdir(), 'tailscale-ended-dash-'));
+  const { dir: root } = exampleProject();
+  const eventsDb = join(dir, 'events.db');
+  new EventLog(eventsDb).close();
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'alpha', machineOwnersFile: machineOwnersFile('example-owner'), tailscaleDir: tsDir, tailscaleStatus: async () => tailscale, slotsDir: join(dir, 'slots') });
+  const read = async () => {
+    const res = await fetch(`${d.url.split('/?')[0]!}/api/tailscale`, { headers: { authorization: `Bearer ${d.token}`, ...asDevicePerson('example-owner') } });
+    assert.equal(res.status, 200);
+    return (await res.json()) as { next: string | null; run: { status: string }; busy: string | null; steps: { id: string; blocked: string | null }[] };
+  };
+  const serveButton = (html: string) => /data-step="serve"[^]*?<button([^>]*)data-testid="tailscale-step-run"/.exec(html)![1]!;
+  try {
+    // up is waiting on the owner: the card polls at its busy pace, and serve can't be asked for yet.
+    const waiting = await read();
+    assert.deepEqual([waiting.run.status, waiting.next], ['waiting', 'up']);
+    assert.ok(r.tailscaleBusy(waiting));
+    assert.match(serveButton(r.renderTailscaleSetup(waiting)), /disabled=""/);
+    // The owner logs in: tailscale is up, and the step's last line is written, all within the status cache's 3 s.
+    tailscale = st({});
+    appendFileSync(join(tsDir, 'steps.jsonl'), line('done', `on the tailnet as ${name}`));
+    // The very next read, with no wait: the step is done, Tailscale's status is the one after it, and serve is offered.
+    const ended = await read();
+    assert.deepEqual([ended.run.status, ended.next, ended.busy], ['done', 'serve', null]);
+    assert.equal(ended.steps.find((s) => s.id === 'serve')!.blocked, null);
+    assert.doesNotMatch(serveButton(r.renderTailscaleSetup(ended)), /disabled/, 'the Serve button is enabled on the render after that read');
+    // And the card sees the step end, so it reads again at once (fresh) rather than at its idle pace.
+    assert.ok(r.tailscaleStepEnded(waiting, ended));
+    assert.ok(!r.tailscaleStepEnded(ended, ended), 'only once');
+    assert.ok(!r.tailscaleBusy(ended), 'then idle: nothing left running');
+  } finally {
+    await d.close();
+  }
+});
+
+test('Tailscale and Claude account: a request handed to its own unit keeps the card at its busy pace until the unit writes its first line', () => {
+  const now = Date.parse('2026-10-14T12:00:30Z');
+  const req = (over: Record<string, unknown> = {}) => ({ id: 'mr-1', args: ['tailscale', 'serve'], by: 'ada', at: '2026-10-14T12:00:20.500Z', status: 'done', detail: 'started', finishedAt: '2026-10-14T12:00:22Z', ...over });
+  const run = (startedAt: string, status = 'done') => ({ step: 'up', startedAt, status, detail: '', lines: [] });
+  // The request is done (the unit was started), but the progress file still shows the step before: keep looking.
+  assert.ok(r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now));
+  assert.ok(r.tailscaleBusy({ run: null, requests: [req()] }, now));
+  // The unit's first line is there: from now on its own status decides.
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:21Z'), requests: [req()] }, now));
+  assert.ok(r.tailscaleBusy({ run: run('2026-10-14T12:00:21Z', 'running'), requests: [req()] }, now));
+  // A refused or failed request starts no unit; and after a minute the unit is taken not to have started.
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req({ status: 'refused' })] }, now));
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now + 120_000));
+  // The Claude account switch is started the same way (its own unit): the panel used to stop looking entirely.
+  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', tokenFrom: 'alpha', waitingForToken: false, token: null, instances: [] });
+  const account = req({ args: ['claude-account', 'switch'] });
+  assert.ok(r.accountBusy({ switch: sw('2026-10-13T09:00:00Z'), requests: [account] }, now));
+  assert.ok(r.accountBusy({ switch: null, requests: [account] }, now));
+  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [account] }, now));
+  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [account] }, now));
+  assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
 });
 
 // Voice dictation in the Ask panel (web/src/voice/): owners only, off until turned on, on-device only by default,
@@ -2329,6 +2841,51 @@ test("no effect in the web app returns a member call's value: React calls it as 
     for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
   }
   assert.deepEqual(bad, []);
+});
+
+/** The markup with each reserved slot's contents taken out (its own tag, and so its fixed size, kept). */
+function withoutReserved(html: string): string {
+  let out = html;
+  for (;;) {
+    const at = out.search(/<(\w+)[^>]*data-reserved="[^"]*"[^>]*>/);
+    if (at < 0) return out;
+    const open = /<(\w+)[^>]*>/.exec(out.slice(at))!;
+    const tag = open[1]!;
+    let depth = 0;
+    const re = new RegExp(`<(/?)${tag}\\b[^>]*>`, 'g');
+    re.lastIndex = at;
+    let end = -1;
+    for (let m; (m = re.exec(out)); ) {
+      depth += m[1] ? -1 : 1;
+      if (depth === 0) {
+        end = m.index;
+        break;
+      }
+    }
+    assert.ok(end > 0, `unclosed reserved <${tag}>`);
+    out = `${out.slice(0, at)}${open[0].replace('data-reserved', 'data-was-reserved')}${out.slice(end)}`;
+  }
+}
+
+test("the Repo config form: no input moves when GitHub's checks answer arrives after mount", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const loading = r.renderRepoConfigForm(c);
+  assert.match(loading, /data-testid="repo-config-checks-status"[^>]*>checking GitHub…</);
+  const states = {
+    'checks arrived': r.renderRepoConfigForm(c, { seenLoaded: true, seen: ['ci/test', 'ci/lint', 'ci/e2e', 'ci/docs', 'ci/build', 'ci/typecheck'] }),
+    'no checks ran': r.renderRepoConfigForm(c, { seenLoaded: true, seenNote: 'GitHub ran no checks on its tip' }),
+    'GitHub refused': r.renderRepoConfigForm(c, { seenLoaded: true, seenNote: "GitHub didn't answer: HTTP 502" }),
+  };
+  assert.match(states['no checks ran'], /data-testid="repo-config-checks-status"[^>]*>GitHub ran no checks on its tip</);
+  assert.match(states['checks arrived'], /data-check="ci\/typecheck"/);
+  // Everything above each field is the same markup before and after, apart from what is inside the reserved slots.
+  const inputs = [...loading.matchAll(/<input[^>]*data-testid="([a-z-]+)"/g)].map((m) => m[1]!);
+  assert.ok(inputs.includes('repo-config-check-name') && inputs.includes('repo-config-budget'), inputs.join(', '));
+  const above = (html: string, id: string) => withoutReserved(html.slice(0, html.indexOf(`data-testid="${id}"`)));
+  for (const [what, html] of Object.entries(states)) for (const id of inputs) assert.equal(above(html, id), above(loading, id), `${id} moves once ${what}`);
+  // And the slots are of a fixed size: one truncated line, and a list that scrolls in its own height.
+  assert.match(loading, /class="block h-5 truncate[^"]*" data-reserved="status"/);
+  assert.match(loading, /class="h-\[4\.75rem\] overflow-y-auto[^"]*" data-reserved="checks"/);
 });
 
 /** A goal's graph as GET /api/goal-graph serves it (src/goal-graph.ts): 11 first, 12 and 14 after it, 13 after 12. */
