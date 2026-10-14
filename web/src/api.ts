@@ -1065,6 +1065,28 @@ export interface Flaky {
 }
 export const clearFlaky = (test: string) => api<{ ok: boolean }>('/api/flaky/clear', { method: 'POST', body: JSON.stringify({ test }) });
 
+/** WHY: item 33; mirrors LearningsView in src/learnings.ts (GET /api/learnings, owners and writers). */
+export interface LearningGroup {
+  fingerprint: string;
+  root: string;
+  outcome: string;
+  cause: string;
+  count: number;
+  issues: number[];
+  stages: { stage: string; count: number }[];
+  first: string;
+  last: string;
+  ready: boolean;
+  line: string;
+  promotion: { state: 'requested' | 'filed' | 'failed'; by: string; line: string; pr: string | null; detail: string } | null;
+}
+export interface Learnings {
+  minSightings: number;
+  groups: LearningGroup[];
+  canPromote: boolean;
+}
+export const promoteLearning = (fingerprint: string, line: string) => api<{ ok: boolean }>('/api/learnings/promote', { method: 'POST', body: JSON.stringify({ fingerprint, line }) });
+
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */
 export type WaitKind = 'emergency_halt' | 'merge_stopped' | 'main_checks_timed_out' | 'awaiting_decision' | 'plan_held' | 'needs_owner' | 'ci_fix_gave_up' | 'blocked' | 'landing_failed' | 'deploy_failed' | 'check_held' | 'hotspot_held' | 'update_held';
 export interface WaitItem {

@@ -308,6 +308,22 @@ export const EventSchemas = {
   'correction.grouped': z.strictObject({ key: z.string(), same_as: z.string(), how: z.enum(['same words', 'the agent']) }),
   /** No durable fix: the agent found none (why), or the run failed (failed: true; it isn't retried). */
   'correction.no_fix': z.strictObject({ key: z.string(), why: z.string(), failed: z.boolean() }),
+  /** WHY: item 33 (src/learnings.ts). `stage` null: code couldn't tell; the weekly judge's label joins by `run`. */
+  'learning.noted': z.strictObject({
+    key: z.string(),
+    issue,
+    role: z.string(),
+    attempt: z.number().int().nullable(),
+    run: z.string().nullable(),
+    outcome: z.string(),
+    stage: z.enum(['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness']).nullable(),
+    cause: z.string(),
+    fingerprint: z.string(),
+    same_as: z.string().nullable(),
+  }),
+  'learning.promote_requested': z.strictObject({ fingerprint: z.string(), line: z.string(), by: z.string() }),
+  /** WHY: `pr` null: nothing was filed, and `detail` says why (the owner may promote again). */
+  'learning.promoted': z.strictObject({ fingerprint: z.string(), line: z.string(), by: z.string(), pr: z.string().nullable(), number: z.number().int().positive().nullable(), detail: z.string() }),
   /** Gradual delegation: a harness PR merged; its review categories and whether it merged as proposed (no writer correction on it, no one else's push). */
   'delegation.observed': z.strictObject({ pr: z.number().int().positive(), issue, categories: z.array(z.string()), unchanged: z.boolean() }),
   /** A category put to the owner: loosen (a clean record) or tighten (loosened, then a revert, red main or later fix). */

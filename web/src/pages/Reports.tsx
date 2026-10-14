@@ -4,6 +4,7 @@ import { MetricsPanel } from '../components/MetricsPanel';
 import { ThroughputPanel } from '../components/ThroughputPanel';
 import { TrustPanel } from '../components/TrustPanel';
 import { FlakyPanel } from '../components/FlakyPanel';
+import { LearningsPanel } from '../components/LearningsPanel';
 import { Card } from '../components/ui';
 import { Header } from './Overview';
 
@@ -26,6 +27,7 @@ export function Reports({ state, pulse }: { state: State; pulse: number }) {
       <div className="px-6 pt-6">
         <MetricsPanel state={state} />
         <FlakyPanel state={state} />
+        <LearningsPanel state={state} />
       </div>
       <div className="px-6 pt-6">
         <ThroughputPanel state={state} />
