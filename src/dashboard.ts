@@ -60,6 +60,7 @@ import { learningsView, promoteRefusal } from './learnings.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
+import { listInstallableRepos } from './setup/repo-picker.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
@@ -1320,6 +1321,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
           const requester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
           return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}));
+        }
+        // Add project's repo picker (src/setup/repo-picker.ts): an account's repos the agents' App can be installed on,
+        // the signed-in person's own account by default. Read-only: it starts nothing, and the start checks it all again.
+        if (url.pathname === `/api/${DEVICE_VIEWS.addProject}/repos` && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
+          const login = who.via === 'break-glass' ? null : who.login;
+          return json(res, 200, await listInstallableRepos({ owner: url.searchParams.get('owner') || login || '', login }));
         }
         // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
         // instance's owner who is also a machine owner, on an allowed device (or the break-glass),
