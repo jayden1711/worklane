@@ -31,6 +31,9 @@ const MEASURE = `(() => {
   return { innerWidth, scrollWidth: document.documentElement.scrollWidth, mainScrollWidth: main ? main.scrollWidth : 0, mainWidth: main ? main.clientWidth : 0, small };
 })()`;
 
+/** The status dot in the open drawer: this instance's (off a hub) or each instance's (on a hub). */
+const STATUS_DOT = '#nav-drawer [data-testid="instance-status-dot"], #nav-drawer [data-testid="instance-dot"]';
+
 /** The drawer, open: its links, where focus is, the button's state, and that it fits the screen. */
 const DRAWER = `(() => {
   const d = document.getElementById('nav-drawer');
@@ -44,7 +47,7 @@ const DRAWER = `(() => {
     expanded: b && b.getAttribute('aria-expanded'),
     controls: b && b.getAttribute('aria-controls'),
     fits: !!r && r.left >= 0 && r.right <= innerWidth + 0.5 && r.top >= 0 && r.bottom <= innerHeight + 0.5,
-    statusDot: !!d && !!d.querySelector('[data-testid="instance-status-dot"], [data-testid="instance-dot"]'),
+    statusDot: !!document.querySelector(${JSON.stringify(STATUS_DOT)}),
   };
 })()`;
 
@@ -68,6 +71,10 @@ test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, an
     add(p.id, 'settle', { op: 'wait', ms: 250 });
     add(p.id, 'measure', { op: 'eval', expr: MEASURE });
     add(p.id, 'menu', { op: 'click', target: 'testid:nav-menu' });
+    // WHY: the status dot is drawn once the page's first health read (/api/health/incidents) answers, which the page's
+    // heading (all 'open' waits for) doesn't wait on: on a loaded runner it answered after the drawer was read. Waited
+    // for here (up to 10 s, then this step fails), so the drawer is read, and its tap targets measured, with the dot in it.
+    add(p.id, 'status-dot', { op: 'wait', target: STATUS_DOT });
     add(p.id, 'drawer', { op: 'eval', expr: DRAWER });
     add(p.id, 'drawer-measure', { op: 'eval', expr: MEASURE });
     add(p.id, 'escape', { op: 'key', key: 'Escape' });
