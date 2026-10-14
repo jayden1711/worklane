@@ -302,13 +302,21 @@ export function trustMetrics(events: MetricEvent[], o: { now?: Date } = {}): Tru
     return (files.get(b) ?? []).some((f) => fa.has(f));
   };
   // The default branch back to normal after `from`: green again, or auto-merge resumed.
+  // WHY: the times it can be, sorted once, so each failure finds its first by bisection rather than a pass over the log.
+  const backs = evs
+    .filter((e) => e.type === 'merge.resumed' || (e.type === 'merge.main_result' && P(e).outcome === 'green'))
+    .map((e) => Date.parse(e.ts))
+    .filter((t) => !Number.isNaN(t))
+    .sort((a, b) => a - b);
   const backAt = (from: number) => {
-    let first: number | null = null;
-    for (const e of evs) {
-      const t = Date.parse(e.ts);
-      if (t > from && (first === null || t < first) && (e.type === 'merge.resumed' || (e.type === 'merge.main_result' && P(e).outcome === 'green'))) first = t;
+    let lo = 0;
+    let hi = backs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (backs[mid]! > from) hi = mid;
+      else lo = mid + 1;
     }
-    return first;
+    return lo < backs.length ? backs[lo]! : null;
   };
 
   // Each merge's failure: the first that shows.
