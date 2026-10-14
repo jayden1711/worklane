@@ -612,6 +612,8 @@ export const EventSchemas = {
   'ownership.deadlock': z.strictObject({ issue, cycle: z.array(issue), files: z.array(z.string()), proceeds: issue }),
   /** WHY: a file claim outlived its task; dropped so no task waits on it forever. */
   'ownership.stale': z.strictObject({ issue, files: z.array(z.string()) }),
+  /** WHY: a goal split into child issues (src/goal-split.ts); `body_hash` lets dispatch trust a child only while its body is as filed. */
+  'goal.split': z.strictObject({ issue, summary: z.string(), children: z.array(z.strictObject({ number: issue, key: z.string(), depends_on: z.array(issue), body_hash: z.string() })) }),
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
   // test runs (src/testrun/): a project's CI run by the coordinator, as the sandboxed test user
   'testrun.queued': z.strictObject({ id: z.string(), sha, kind: z.enum(['fast', 'full']), prs: z.array(z.number().int().positive()), shard: z.strictObject({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable() }),
