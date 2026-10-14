@@ -629,7 +629,7 @@ export interface FirstRunLive {
   fresh?: boolean;
   localMs?: number;
   netMs?: number;
-  context?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
+  context?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts' | 'skipped'>>;
 }
 
 /** The setup context for a checkout or an instance, with what init recorded (auto-config's questions and PR). */
@@ -658,7 +658,7 @@ export async function firstRunLiveView(file: string, o: { root: string; repo: st
   const mode: Mode = state?.mode ?? (o.instance ? 'server' : 'local');
   const ctx = setupContext(state, { mode, root: o.root, repo: o.repo, instance: o.instance, stateDir: o.live.stateDir, policyFile: o.live.policyFile });
   const opts = { cache: o.live.cache ?? new Map(), fresh: !!o.live.fresh, localMs: o.live.localMs ?? 0, netMs: o.live.netMs ?? 0 };
-  const setup = o.live.probe ? checkSetup({ ...ctx, ...o.live.context }, o.live.probe, opts) : await checkSetupOffThread({ ...ctx, ...(o.live.context?.machine ? { machine: o.live.context.machine } : {}) }, opts);
+  const setup = o.live.probe ? checkSetup({ ...ctx, ...o.live.context }, o.live.probe, opts) : await checkSetupOffThread({ ...ctx, ...(o.live.context?.machine ? { machine: o.live.context.machine } : {}), ...(o.live.context?.skipped ? { skipped: o.live.context.skipped } : {}) }, opts);
   return firstRunView(file, { root: o.root, repo: o.repo, instance: o.instance, ...(o.has ? { has: o.has } : {}), setup });
 }
 

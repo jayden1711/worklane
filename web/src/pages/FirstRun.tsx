@@ -4,11 +4,12 @@
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State, type ClaudeSigninData } from '../api';
+import { getFirstRun, runFirstRunAction, skipStep, startCoordinator, type FirstRun, type FirstRunActionPlan, type PolicyChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State, type ClaudeSigninData } from '../api';
 import { navigate } from '../App';
 import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
+import { PolicyForm } from '../components/PolicyForm';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -188,10 +189,15 @@ function FixPanel({ s }: { s: SetupStepView }) {
   );
 }
 
-function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'signin' ? s.fix.label : 'Fix';
+function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; onSkip?: (skip: boolean) => void }) {
+  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' ? s.fix.label : 'Fix';
+  // WHY: a form's values can be reviewed and changed whether or not the step is done (the policy starts valid), and a
+  // sign-in is rerunnable (another account, an expired login); any step opened from Settings' Setup list can be run
+  // again; a skipped step stays closed until the skip is undone.
+  const offered = rerun || (!s.skipped && (!s.done || s.fix.kind === 'form' || s.fix.kind === 'signin'));
   return (
-    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
+    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : s.skipped ? 'skipped' : 'todo'}>
       <div className="flex gap-3">
         <span className={cx('mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold', s.done ? 'bg-green-tint text-green' : s.optional ? 'bg-inset text-ink-3 shadow-hairline' : 'bg-red-tint text-red')} aria-hidden>
           {s.done ? '✓' : ''}
@@ -200,20 +206,31 @@ function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; 
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-[13px] font-medium text-ink">{s.title}</span>
             {s.optional && <span className="text-[11.5px] text-ink-3">optional</span>}
-            <Badge tone={s.done ? 'ok' : s.optional ? 'neutral' : 'warn'}>{s.done ? 'done' : 'not done'}</Badge>
+            <Badge tone={s.done ? 'ok' : s.optional || s.skipped ? 'neutral' : 'warn'}>{s.done ? 'done' : s.skipped ? 'skipped' : 'not done'}</Badge>
           </div>
           <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
         </div>
-        {(!s.done || s.fix.kind === 'signin') && (
-          <Button size="sm" variant={open || s.done ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
-            {s.done ? 'Again' : label}
-          </Button>
-        )}
+        <div className="flex shrink-0 flex-wrap items-start justify-end gap-1.5 self-start">
+          {onSkip && !s.done && (
+            <Button size="sm" variant="ghost" onClick={() => onSkip(!s.skipped)} data-testid="first-run-skip" data-skipped={s.skipped}>
+              {s.skipped ? 'Undo skip' : 'Skip'}
+            </Button>
+          )}
+          {offered && (
+            <Button size="sm" variant={open || (s.done && s.fix.kind === 'signin') ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : 'Run again') : label}
+            </Button>
+          )}
+        </div>
       </div>
-      {/* WHY: a sign-in is rerunnable (another account, an expired login), so its panel opens on a done step too. */}
-      {open && (!s.done || s.fix.kind === 'signin') && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
+      {open && offered && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          {s.fix.kind === 'action' || s.fix.kind === 'signin' ? action : <FixPanel s={s} />}
+          {panel ? action : <FixPanel s={s} />}
+          {s.automation && (
+            <p className="mt-2.5 break-words border-t border-line pt-2 text-[12px] text-ink-3" data-testid="first-run-automation">
+              Without this page: <code className="font-mono text-[11.5px] text-ink-2">{s.automation}</code>
+            </p>
+          )}
         </div>
       )}
     </li>
@@ -297,7 +314,14 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, signin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; signin?: ClaudeSigninData | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, rerun = null, signin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; rerun?: string | null; signin?: ClaudeSigninData | null }) {
+  const [skipError, setSkipError] = useState<string | null>(null);
+  const skip = (id: string, on: boolean) => {
+    setSkipError(null);
+    skipStep(id, on)
+      .then(() => onRecheck?.())
+      .catch((e: Error) => setSkipError(e.message));
+  };
   const [open, setOpen] = useState<string | null>(initialOpen);
   const recheck = useCallback(() => onRecheck?.(), [onRecheck]);
   const [confirming, setConfirming] = useState(initialConfirming);
@@ -315,6 +339,11 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
   };
   return (
     <div className="space-y-5">
+      {skipError && (
+        <p className="break-words text-[12.5px] text-red" data-testid="first-run-skip-error">
+          {skipError}
+        </p>
+      )}
       {f.mode && (
         <p className="text-[12.5px] text-ink-2" data-testid="first-run-mode" data-mode={f.mode}>
           {MODE_LINE[f.mode]}
@@ -361,11 +390,15 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   s={s}
                   open={open === s.id}
                   onFix={() => fix(s)}
+                  rerun={rerun === s.id}
+                  {...(f.canAct ? { onSkip: (on: boolean) => skip(s.id, on) } : {})}
                   action={
                     s.fix.kind === 'action' ? (
                       <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'signin' ? (
                       signin ? <ClaudeSigninView v={signin} onChanged={() => onRecheck?.()} /> : <ClaudeSigninPanel onDone={recheck} />
+                    ) : s.fix.kind === 'form' && f.policy ? (
+                      <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
                     ) : undefined
                   }
                 />
@@ -415,6 +448,8 @@ export const firstRunRefusal = (state: Pick<State, 'canReadDigest' | 'user' | 'r
 
 export function FirstRunPage({ state }: { state: State }) {
   const refused = firstRunRefusal(state);
+  // WHY: Settings' Setup list opens one step here (?step=<id>), done or not, to run it again.
+  const [rerun] = useState(() => new URLSearchParams(window.location.search).get('step'));
   const [f, setF] = useState<FirstRun | { error: string } | null>(null);
   const [checking, setChecking] = useState(false);
   const load = useCallback(
@@ -446,7 +481,7 @@ export function FirstRunPage({ state }: { state: State }) {
         ) : !f ? null : 'error' in f ? (
           <div className="text-[13px] text-red">Can't load the checklist: {f.error}</div>
         ) : (
-          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} />
+          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={rerun} rerun={rerun} />
         )}
       </div>
     </div>

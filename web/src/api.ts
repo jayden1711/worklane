@@ -763,7 +763,31 @@ export interface FirstRun {
   actions?: Record<string, FirstRunActionPlan>;
   /** Whether this viewer may run a Fix action (the instance's owners). */
   canAct?: boolean;
+  /** A server instance's policy form (src/policy-edit.ts); null for a checkout. */
+  policy?: FirstRunPolicy | null;
 }
+export interface FirstRunPolicyField {
+  key: string;
+  value: number | boolean | string;
+  kind: 'number' | 'boolean' | 'choice';
+  min?: number;
+  max?: number;
+  step?: number;
+  choices?: string[];
+  why: string;
+}
+export interface FirstRunPolicy {
+  fields: FirstRunPolicyField[];
+  fixed: { key: string; value: unknown }[];
+  error: string | null;
+}
+export interface PolicyChange {
+  key: string;
+  from: unknown;
+  to: unknown;
+}
+/** Preview (confirm false: nothing written) or write the policy change these values make. */
+export const changePolicy = (values: Record<string, unknown>, confirm: boolean) => api<{ ok: boolean; changes: PolicyChange[]; confirmed: boolean }>('/api/first-run/policy', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunActionPlan {
   id: string;
   step: string;
@@ -781,7 +805,8 @@ export type SetupFix =
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
-  | { kind: 'signin'; label: string };
+  | { kind: 'signin'; label: string }
+  | { kind: 'form'; form: 'policy'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -795,6 +820,10 @@ export interface SetupStepView {
   detail: string;
   today: string;
   fix: SetupFix;
+  /** The command or config key that does the same without the page. */
+  automation: string | null;
+  /** Skipped on the first-run page (not counted as left). */
+  skipped: boolean;
   network: boolean;
   checkedAt: string;
 }
@@ -879,6 +908,8 @@ export const getClaudeSignin = () => api<ClaudeSigninData>('/api/first-run/claud
 /** Start the relayed `claude auth login` (local mode), after the person confirmed what it does. */
 export const startClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const cancelClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin/cancel', { method: 'POST', body: '{}' });
+/** Skip a setup step on the first-run page, or undo the skip. */
+export const skipStep = (step: string, skip: boolean) => api<{ ok: boolean; skipped: string[] }>('/api/first-run/skip', { method: 'POST', body: JSON.stringify({ step, skip }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
