@@ -130,6 +130,7 @@ export class Coordinator extends HarnessEvals {
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('harness evals', () => this.checkHarnessEvals(), undefined);
+    await step('learnings', () => this.promoteLearnings(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -552,6 +553,12 @@ export class Coordinator extends HarnessEvals {
           slot.release();
           this.active.delete(issue.number);
           this.taskHotspots.delete(issue.number);
+          // WHY: item 33; a note is a side record, so a problem writing it never touches the task's own outcome.
+          try {
+            this.noteLearnings(issue.number, doneWhenCommands(localDoneWhen(contract.done_when, this.d.cfg.tests), this.d.cfg.tests.runner));
+          } catch (e) {
+            this.emit('coordinator.error', { instance: this.d.instance, where: `learnings #${issue.number}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
+          }
         });
       this.active.set(issue.number, p);
       started++;

@@ -11,12 +11,12 @@ import { agentWritableDir } from '../os/index.js';
 import { baselineFor, commentMarkdown, evalRuns } from '../harness-evals/score.js';
 import { engineSha, ENGINE_ROOT, harnessEvalDue, srcChanged } from '../harness-evals/schedule.js';
 import { engineRepo, heldOutTasksDir, loadSuite, PUBLIC_TASKS_DIR, type LoadedTask } from '../harness-evals/tasks.js';
-import { ChecksFromFeedback } from './checks-from-feedback.js';
+import { Learnings } from './learnings.js';
 
 /** Under this much budget left, a run can't replay anything: it is recorded as not run. */
 export const MIN_EVAL_USD = 0.5;
 
-export abstract class HarnessEvals extends ChecksFromFeedback {
+export abstract class HarnessEvals extends Learnings {
   /** The harness eval run in flight. */
   protected harnessEvalRun: Promise<void> = Promise.resolve();
   private harnessEvalBusy = false;

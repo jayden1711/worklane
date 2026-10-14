@@ -250,6 +250,12 @@ flake rate, flaky re-runs over red runs, over 7 and 30 days. An owner's **Clear*
 once (`POST /api/flaky/clear`, audited). Quarantine changes only the harness's own red/green decisions after a merge;
 the updater still installs only a commit with every check green.
 
+Under it, **Learnings** (owners and writers; `GET /api/learnings`, src/learnings.ts): the notes finished tasks left for
+their failed runs (earliest failed stage, normalized cause), grouped by cause, with sightings, stages, issues and when
+last seen. For a cause seen 3 times or more, an owner may edit the suggested line and **Promote** it
+(`POST /api/learnings/promote`, owners only, audited): the coordinator opens a PR adding the line to `AGENTS.md`,
+labelled `review:L3`, which waits for the owner. Agents never write `AGENTS.md` themselves.
+
 - **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
   on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
   issue, or a title starting "fix") changed one of its files; or a production report was traced to it.

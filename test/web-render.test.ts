@@ -47,6 +47,7 @@ interface Render {
   renderMetricsPanel(state: unknown): string;
   renderFlaky(f: unknown): string;
   renderHarnessEvals(h: unknown): string;
+  renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean }): string;
@@ -1768,4 +1769,17 @@ test('harness evals: one row per run, newest first, with success, its change fro
   assert.match(html, /data-run="r2"[\s\S]*?data-testid="harness-eval-success"[^>]*>50% \(1\/2\)[\s\S]*?−50 pts[\s\S]*?~\$1\.50[\s\S]*?\+\$0\.50[\s\S]*?2\.0 min[\s\S]*?0\.50/);
   assert.match(html, /data-testid="harness-evals-tasks"[\s\S]*?repo-1: 1\/2/);
   assert.match(r.renderHarnessEvals({ enabled: false, runs: [], latest: [] }), /No runs yet/);
+});
+
+test('learnings: each cause with its sightings and stages; Promote only for an owner on a ready cause not promoted yet', () => {
+  const g = (count: number, fp: string, promotion: unknown = null) => ({ fingerprint: fp, root: `k-${fp}`, outcome: 'failed', cause: `cause ${fp}`, count, issues: [7, 8], stages: [{ stage: 'environment/harness', count }], first: '2026-10-12T00:00:00Z', last: '2026-10-13T00:00:00Z', ready: count >= 3, line: `- Seen ${count} times (failed): cause ${fp}`, promotion });
+  const owner = r.renderLearnings({ minSightings: 3, canPromote: true, groups: [g(3, 'a'), g(1, 'b'), g(4, 'c', { state: 'filed', by: 'example-owner', line: '- x', pr: 'https://github.com/example/repo/pull/9', detail: '' })] });
+  assert.match(owner, /data-testid="learnings-count">3</);
+  assert.match(owner, /data-fingerprint="a"[\s\S]*?learning-sightings"[^>]*>3<[\s\S]*?cause a[\s\S]*?environment\/harness 3 · issues #7, #8[\s\S]*?value="- Seen 3 times \(failed\): cause a"[\s\S]*?Promote to AGENTS\.md/);
+  assert.match(owner, /data-fingerprint="b"[\s\S]*?promotable from 3/);
+  assert.equal(owner.match(/data-testid="learning-promote"/g)?.length, 1, 'not for b (seen once) nor c (promoted)');
+  assert.match(owner, /Promoted by @example-owner:[\s\S]*?pull\/9[\s\S]*?\(L3, waits for the owner\)/);
+  const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
+  assert.doesNotMatch(writer, /learning-promote/);
+  assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
 });
