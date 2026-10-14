@@ -46,7 +46,7 @@ interface Render {
   renderFlaky(f: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[] }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; draftConfirming?: boolean }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1272,6 +1272,32 @@ test("the first-run page, Repo config form: writers, required checks, budget and
   assert.doesNotMatch(writer, /repo-config-review|repo-config-check-name/);
   assert.match(html, /placeholder="another check, as GitHub names it"[^>]*data-testid="repo-config-check-name"[\s\S]*?data-testid="repo-config-check-add"/);
   assert.match(r.renderFirstRun({ ...f, repoConfig: { error: '.worklane/ missing at origin/main' }, canAct: true }, { open: 'required-checks' }), /data-testid="repo-config-error"[^>]*>Not from here yet: \.worklane\/ missing at origin\/main/);
+});
+
+test("the first-run page in setup mode: the banner; the origin picker; auto-config's questions as choices, the draft confirmed first and its log; the setup PR with Merge; outside setup mode, today's way", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const autoConfig = { questions: [{ id: 'package-manager', ask: 'which package manager runs it?', choices: [{ id: 'npm', label: 'npm' }, { id: 'pnpm', label: 'pnpm' }], custom: false }], verified: [], pr: null, answer: 'worklane init /r --answer <id>=<choice>' };
+  const draft = { running: false, startedAt: '2026-10-13T10:00:00.000Z', finishedAt: '2026-10-13T10:00:05.000Z', lines: ['   running runner.full on main (abcdef12): npm test'], result: { status: 'failed', detail: '1 question to answer' } };
+  // The questions step as setup mode finds it: not done while auto-config waits on an answer.
+  const open = { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'questions' ? { ...s, done: false, detail: '1 question open (shown below)' } : s)) })) };
+  const setup = { ...f, setup: open, setupMode: true, configReady: false, autoConfig, draft, canAct: true };
+  const html = r.renderFirstRun(setup);
+  assert.match(html, /data-testid="first-run-setup-mode"[\s\S]*?Setup mode: this checkout has no config yet/);
+  assert.doesNotMatch(html, /data-testid="first-run-auto-config"/, 'the read-only view gives way to the panels');
+  assert.match(r.renderFirstRun(setup, { open: 'origin' }), /data-step="origin" data-status="todo"[\s\S]*?data-fix="form"[^>]*>Pick[\s\S]*?data-testid="setup-origin"[\s\S]*?placeholder="owner\/name"[^>]*data-testid="setup-origin-repo"[\s\S]*?data-testid="setup-origin-review"/);
+  const questions = r.renderFirstRun(setup, { open: 'questions' });
+  assert.match(questions, /data-testid="setup-question" data-question="package-manager"[\s\S]*?which package manager runs it\?[\s\S]*?type="radio"[\s\S]*?npm[\s\S]*?pnpm[\s\S]*?data-testid="setup-save-answers"/);
+  assert.match(questions, /data-testid="setup-draft-log"[\s\S]*?Finished: 1 question to answer[\s\S]*?running runner\.full on main/);
+  const drafting = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [] } }, { open: 'questions', draftConfirming: true });
+  assert.match(drafting, /data-testid="setup-draft"[\s\S]*?runs each on a scratch copy of the default branch[\s\S]*?data-testid="setup-draft-confirming"[\s\S]*?Run your project(&#x27;|')s commands to draft it\?[\s\S]*?data-testid="setup-draft-confirm"/);
+  const pr = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [], pr: { number: 7, url: 'https://github.com/example-org/example-shop/pull/7' } } }, { open: 'questions' });
+  assert.match(pr, /data-testid="setup-pr"[\s\S]*?href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"[^>]*>PR #7[\s\S]*?data-testid="setup-merge-review"[^>]*>Merge…/);
+  assert.doesNotMatch(pr, /setup-draft-button/);
+  assert.match(r.renderFirstRun({ ...setup, canAct: false }, { open: 'questions' }), /Only the owners can set this checkout up/);
+  assert.match(r.renderFirstRun({ ...setup, configReady: true }), /The config is here: opening the dashboard…/);
+  const normal = r.renderFirstRun({ ...f, setup: open, autoConfig, canAct: true }, { open: 'questions' });
+  assert.match(normal, /data-testid="first-run-coming"/, 'outside setup mode: what to do today');
+  assert.doesNotMatch(normal, /setup-question/);
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

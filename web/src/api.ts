@@ -188,6 +188,8 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Setup mode (src/setup-mode.ts): no config yet; the first-run page is the whole dashboard. */
+  setupMode?: boolean;
   /** Whether this viewer may read intake reports (the owner or a writer); absent from an older server: yes. */
   canReadIntake?: boolean;
   /** Whether this viewer may read the throughput panel (the owner or a writer); absent from an older server: yes. */
@@ -745,7 +747,24 @@ export interface FirstRun {
   policy?: FirstRunPolicy | null;
   /** A checkout's Repo config form, from the default branch's config (src/config-change.ts); null on a server. */
   repoConfig?: FirstRunRepoConfig | { error: string } | null;
+  /** Setup mode (src/setup-mode.ts): the checkout has no config yet; this page is the whole dashboard. */
+  setupMode?: boolean;
+  /** Setup mode: the checkout's own config loads now (the dashboard takes over shortly). */
+  configReady?: boolean;
+  draft?: DraftJob;
 }
+export interface DraftJob {
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lines: string[];
+  result: { status: string; detail: string } | null;
+}
+export const getSetupRepos = () => api<{ repos: string[]; error?: string }>('/api/first-run/setup/repos');
+export const setupOrigin = (repo: string, confirm: boolean) => api<{ ok: boolean; commands?: string[]; repo?: string; confirmed: boolean }>('/api/first-run/setup/origin', { method: 'POST', body: JSON.stringify({ repo, confirm }) });
+export const setupAnswers = (answers: Record<string, string>) => api<{ ok: boolean; saved: string[] }>('/api/first-run/setup/answers', { method: 'POST', body: JSON.stringify({ answers }) });
+export const setupDraft = () => api<{ ok: boolean; draft: DraftJob }>('/api/first-run/setup/draft', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+export const setupMerge = (confirm: boolean) => api<{ ok: boolean; number: number; url?: string; command?: string; confirmed: boolean }>('/api/first-run/setup/merge', { method: 'POST', body: JSON.stringify({ confirm }) });
 export interface RepoConfigValues {
   writers: string[];
   required_checks: string[];
@@ -808,7 +827,7 @@ export type SetupFix =
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
-  | { kind: 'form'; form: 'policy' | 'repo-config'; label: string };
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;

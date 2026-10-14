@@ -107,7 +107,7 @@ export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
 export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(<WaitingView w={w} {...(now !== undefined ? { now } : {})} />);
 export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);
-export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: PolicyChange[]; configChanges?: ConfigChange[] } = {}) => renderToStaticMarkup(<FirstRunView f={f} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} initialPolicyChanges={o.policyChanges ?? null} initialConfigChanges={o.configChanges ?? null} onRecheck={() => {}} />);
+export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: PolicyChange[]; configChanges?: ConfigChange[]; draftConfirming?: boolean } = {}) => renderToStaticMarkup(<FirstRunView f={f} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} initialPolicyChanges={o.policyChanges ?? null} initialConfigChanges={o.configChanges ?? null} initialDraftConfirming={!!o.draftConfirming} onRecheck={() => {}} />);
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
 export const renderSignIn = () => renderToStaticMarkup(<SignInPage />);
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
