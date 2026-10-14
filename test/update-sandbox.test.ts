@@ -357,6 +357,8 @@ test('the sandbox rollback\'s hold survives set-update-channel and set-updates o
   mkdirSync(join(root, 'scripts', 'setup'), { recursive: true });
   const helper = join(root, 'scripts', 'machine', 'worklane-machine.cjs');
   writeFileSync(helper, fix(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs'), 'utf8')));
+  // updates-root.cjs loads the updater beside it (#384's signers watch), so the engine's copy goes there too.
+  writeFileSync(join(root, 'scripts', 'machine', 'worklane-update.cjs'), fix(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs'), 'utf8')));
   const rootSteps = join(root, 'scripts', 'setup', 'updates-root.cjs');
   writeFileSync(rootSteps, fix(readFileSync(join(repoRoot, 'scripts', 'setup', 'updates-root.cjs'), 'utf8')));
   writeFileSync(join(etc, 'updates.json'), `${JSON.stringify({ enabled: true, channel: 'main' })}\n`);

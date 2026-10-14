@@ -14,7 +14,8 @@ export const ENGINE_CURRENT = `/opt/${BRAND.cli}/current`;
 /** The root command that releases a hold; nothing a coordinator or the dashboard can do releases one. */
 export const RELEASE_HOLD = `sudo bash /opt/${BRAND.cli}/current/scripts/setup/updates.sh --release-hold`;
 /** chose: an older commit than main's tip is being installed (the tip, and every newer one, failed or held). */
-export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | CanaryEvent;
+/** signers_changed: the release signers file changed outside updates.sh --signer or --confirm-signer; release installs are held until acknowledged. */
+export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | 'signers_changed' | CanaryEvent;
 /** The canary (docs/canary.md): filed, then passed or failed. */
 export type CanaryEvent = 'canary_filed' | 'canary_passed' | 'canary_failed';
 export interface UpdateEntry {
@@ -68,7 +69,7 @@ export function heldUpdate(log: UpdateEntry[]): HeldUpdate | null {
   return { at: last.at, sha: last.from ?? null, reason, migration: !!last.migration || /migration failed/.test(reason) };
 }
 
-const EVENTS = new Set<string>(['attempt', 'chose', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error', 'canary_filed', 'canary_passed', 'canary_failed']);
+const EVENTS = new Set<string>(['attempt', 'chose', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error', 'signers_changed', 'canary_filed', 'canary_passed', 'canary_failed']);
 
 /** What the updater follows: signed release tags, or main's tip. */
 export type UpdateChannel = 'release' | 'main';

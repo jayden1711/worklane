@@ -365,6 +365,16 @@ The on/off switch is the **Engine updates** row in the table below, as before.
 
 Staging a signer raises its own incident ("A release signer was staged for engine updates"), with the principal, the fingerprint, and the coordinator user and instance that staged it, so an owner hears of a request before anyone is asked to confirm it. Whenever a signer is added, by this route or by `updates.sh --signer`, the watchdog raises an incident ("A release signer was added for engine updates") with the principal and the key's fingerprint: it shows on the Health page and is posted once to the ops channel. It closes by itself a day later. If you didn't add it, turn engine updates off, remove its line at a root shell, and find out who did.
 
+**The signers file is watched.** On every run (every 10 minutes, whether updates are on or off) the updater hashes the signers file and compares it with the hash it last recorded in `/var/lib/worklane/signers-state.json`. `updates.sh --signer` and `--confirm-signer` record the new hash as they append, so their change is expected. Any other change (a hand edit, another tool, a file that was tampered with or deleted) is reported once: a `signers_changed` line in the update log (the Machine page's Engine updates table), a line in the unit's journal (`journalctl -u worklane-update.service`), and a red incident, "The release signers file changed outside updates.sh", each with the old and new hash, the number of signer lines before and after, and the key fingerprints added and removed. It needs no coordinator to notice or record; the post to the ops channel is made by a coordinator's watchdog, like every incident.
+
+While such a change is unacknowledged, **no release is installed**: the release channel is held (the main channel checks no tag signature, so it is not). Look at the file, put it right if the change isn't yours, then acknowledge it as root on the machine:
+
+```bash
+sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers
+```
+
+It prints the file's hash and every key fingerprint it now holds, records them, and lifts the hold; the updater's next run closes the incident. The first run on a machine with nothing recorded just records the file, with no alert.
+
 What the page can change, and as whom: each confirmed step is one command of the root-owned machine helper (`install-updater`, `set-update-channel release`, `stage-update-signer` or `discard-update-signer <principal> ssh-ed25519 <public key>`), recorded by this instance's dashboard and run by its coordinator through `sudo -n`. Only an owner of the instance who is also a machine owner, on an allowed device, can confirm one. The dashboard itself never runs sudo and never writes these files.
 
 **Holds.** A commit the updater rolled back is held: it is not tried again until a newer commit lands, or until an admin releases it at a root shell with `sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold`, which shows what was held and why, moves the hold aside and logs it. Nothing on this page releases a hold: neither the channel nor the on/off switch, nor anything else a coordinator can run through the machine helper.

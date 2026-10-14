@@ -5,6 +5,7 @@
 //   updates-root.cjs channel release|main                               updates.sh --channel
 //   updates-root.cjs add-signer <principal> ssh-ed25519 <public key>    updates.sh --signer
 //   updates-root.cjs confirm-signer SHA256:<fingerprint>                updates.sh --confirm-signer
+//   updates-root.cjs acknowledge-signers                                updates.sh --acknowledge-signers
 //   updates-root.cjs release-hold                                       updates.sh --release-hold
 //   updates-root.cjs check <one of the above...>                        whether it would be accepted; changes nothing
 //
@@ -19,6 +20,11 @@
 // fingerprint, staged less than 24 hours ago; it prints the principal and the key first; and it takes the entry out
 // of the pending list. A fingerprint that matches nothing staged changes nothing.
 //
+// The updater hashes the signers file on every run and reports any change it wasn't told about
+// (scripts/machine/worklane-update.cjs, "the signers file, watched"). So an append here records the file's new hash
+// in the same step, which makes it the one expected kind of change; and acknowledge-signers is how an admin says an
+// unexplained change has been looked at, which lifts the hold on release installs.
+//
 // release-hold is the one way to release a hold the updater put on an engine commit (it was rolled back): it shows
 // what was held and why, moves the hold file aside (update-held.released.json, kept), and logs it. Nothing a
 // coordinator or the dashboard can run releases a hold: not set-updates, not set-update-channel.
@@ -30,15 +36,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const helper = require('../machine/worklane-machine.cjs');
+const watch = require('../machine/worklane-update.cjs');
 
 // Fixed paths: none comes from the caller.
 const ETC = '/etc/worklane';
 const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const SIGNERS = 'allowed_signers'; // in ETC
 const PENDING = helper.PENDING;
+const SIGNERS_STATE = watch.SIGNERS_STATE; // the updater's record of the signers file's hash
 const HELD = '/var/lib/worklane/update-held.json'; // the updater's: the rolled-back commit it won't retry
 
-const USAGE = 'usage: updates-root.cjs [check] channel release|main | add-signer <principal> ssh-ed25519 <public key> | confirm-signer SHA256:<fingerprint> | release-hold';
+const USAGE = 'usage: updates-root.cjs [check] channel release|main | add-signer <principal> ssh-ed25519 <public key> | confirm-signer SHA256:<fingerprint> | acknowledge-signers | release-hold';
 
 /** A SHA256 fingerprint as ssh-keygen prints it: SHA256: and 43 base64 characters. */
 const fingerprintShape = (s) => typeof s === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/.test(s);
@@ -62,6 +70,7 @@ function parse(args) {
     return s ? { kind: 'add', ...s } : null;
   }
   if (args.length === 2 && args[0] === 'confirm-signer' && fingerprintShape(args[1])) return { kind: 'confirm', fingerprint: args[1] };
+  if (args.length === 1 && args[0] === 'acknowledge-signers') return { kind: 'acknowledge' };
   if (args.length === 1 && args[0] === 'release-hold') return { kind: 'release-hold' };
   return null;
 }
@@ -94,10 +103,16 @@ function addSigner(s, how) {
     process.stdout.write(`${file}: ${line} (${fp}) is already listed; nothing changed\n`);
     return 0;
   }
+  const next = `${before}${before && !before.endsWith('\n') ? '\n' : ''}${line}\n`;
+  // The updater is told the hash the file is about to have, but only when the file is as it last recorded it: a
+  // change it hasn't been told about is never covered by this one, and it reports the whole of it on its next run.
+  const expected = watch.expectSigners(file, `sha256:${require('node:crypto').createHash('sha256').update(next).digest('hex')}`, SIGNERS_STATE);
   const tmp = path.join(ETC, `.${SIGNERS}.tmp-${process.pid}`);
-  fs.writeFileSync(tmp, `${before}${before && !before.endsWith('\n') ? '\n' : ''}${line}\n`, { mode: 0o644 });
+  fs.writeFileSync(tmp, next, { mode: 0o644 });
   fs.chmodSync(tmp, 0o644);
   fs.renameSync(tmp, file);
+  if (expected) watch.recordSigners(file, SIGNERS_STATE);
+  else process.stderr.write(`note: ${file} had already changed since the updater last recorded it; the updater will report that on its next run\n`);
   logLine('updates.allowed_signers', null, `added ${line} (${fp})`, { principal: s.principal, fingerprint: fp, how });
   process.stdout.write(`${file}: added ${line} (${fp})\n`);
   return 0;
@@ -188,6 +203,21 @@ function setChannel(channel) {
   return 0;
 }
 
+/** An admin has looked at the signers file as it is: it becomes the updater's record, and release installs are no longer held. */
+function acknowledgeSigners() {
+  const file = path.join(ETC, SIGNERS);
+  const now = watch.signersDigest(file);
+  process.stdout.write(`${file} as it is now: ${now.hash}, ${now.lines} signer line${now.lines === 1 ? '' : 's'}\n${now.fingerprints.map((f) => `  ${f}\n`).join('')}`);
+  const held = watch.acknowledgeSigners(file, SIGNERS_STATE);
+  if (!held) {
+    process.stdout.write('nothing was held; recorded as it is\n');
+    return 0;
+  }
+  logLine('updates.signers_acknowledged', watch.signersChangeText(held), now.hash);
+  process.stdout.write(`acknowledged: ${watch.signersChangeText(held)}\nrelease installs are no longer held\n`);
+  return 0;
+}
+
 function main(args) {
   const check = args[0] === 'check';
   const p = parse(check ? args.slice(1) : args);
@@ -202,6 +232,7 @@ function main(args) {
     if (s.error) process.stderr.write(`${s.error}\n`);
     return s.error ? 1 : 0;
   }
+  if (p.kind === 'acknowledge') return acknowledgeSigners();
   if (p.kind === 'release-hold') return releaseHold();
   if (p.kind === 'channel') return setChannel(p.channel);
   if (p.kind === 'add') return addSigner(p, 'updates.sh --signer');

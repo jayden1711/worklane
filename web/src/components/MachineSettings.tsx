@@ -50,7 +50,7 @@ const REQUEST_TONE: Record<MachineRequestRow['status'], 'green' | 'red' | 'orang
 const REQUEST_LABEL: Record<MachineRequestRow['status'], string> = { pending: 'waiting for the coordinator', running: 'running', done: 'done', failed: 'failed', refused: 'refused', interrupted: 'interrupted' };
 export const anyPending = (d: MachineData) => (d.requests ?? []).some((r) => r.status === 'pending' || r.status === 'running');
 
-const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink', canary_passed: 'green', canary_failed: 'red', canary_filed: 'ink' };
+const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', signers_changed: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink', canary_passed: 'green', canary_failed: 'red', canary_filed: 'ink' };
 const short = (s?: string | null) => (s ? s.slice(0, 8) : '–');
 const val = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : v === null || v === undefined ? '–' : String(v));
 
