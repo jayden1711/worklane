@@ -83,7 +83,7 @@ import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSet
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
-import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
+import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -896,12 +896,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   });
   /** Connect GitHub's device login (local mode): made on first use, one at a time. */
   let ghLogin: GhLogin | null = null;
-  // What tailscale.sh status says (src/tailscale-setup.ts), kept 3 s (it runs tailscale twice); asked afresh before a step is recorded.
-  let tailscaleCache: { at: number; status: TailscaleStatus | null } | null = null;
+  // What tailscale.sh status says (src/tailscale-setup.ts), kept 3 s (it runs tailscale twice); asked afresh before a step is
+  // recorded, and whenever the step's progress file has changed since: a step that just ended is shown with the status
+  // it left behind, never one read before it, so the next step is offered on the same read that shows it done.
+  let tailscaleCache: { at: number; stamp: string; status: TailscaleStatus | null } | null = null;
   const tailscaleNow = async (fresh = false) => {
-    if (!fresh && tailscaleCache && Date.now() - tailscaleCache.at < 3_000) return tailscaleCache.status;
+    const stamp = stepsStamp(opts.tailscaleDir ?? TAILSCALE_DIR);
+    if (!fresh && tailscaleCache && tailscaleCache.stamp === stamp && Date.now() - tailscaleCache.at < 3_000) return tailscaleCache.status;
     const status = await (opts.tailscaleStatus ?? tailscaleStatus)();
-    tailscaleCache = { at: Date.now(), status };
+    tailscaleCache = { at: Date.now(), stamp, status };
     return status;
   };
   // The first-run page's Discord step (src/intake/discord-setup.ts), a server instance's only. The bot's own view
@@ -1870,7 +1873,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // Machine page asks on every visit, so this is an answer, not an error).
           if (!opts.instance || !mayViewTailscale(accountRequester, opts.machineOwnersFile)) return json(res, 200, noTailscaleView(who.login, opts.instance ?? null));
           const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
-          return json(res, 200, tailscaleView({ status: await tailscaleNow(), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
+          return json(res, 200, tailscaleView({ status: await tailscaleNow(url.searchParams.get('fresh') === '1'), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
         }
         // Run one step: a machine request (`tailscale <step>`, two fixed words) that the coordinator runs through the
         // machine helper, after the owner confirmed what the screen showed. Every request and refusal is audited.

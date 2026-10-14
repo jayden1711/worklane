@@ -51,6 +51,8 @@ import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
 import { ClaudeAccountView } from './components/ClaudeAccount';
 import { TailscaleSetupView } from './components/TailscaleSetup';
+export { tailscaleBusy, tailscaleStepEnded } from './components/TailscaleSetup';
+export { accountBusy } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
