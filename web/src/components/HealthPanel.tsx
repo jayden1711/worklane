@@ -147,19 +147,29 @@ export interface InstanceHealth {
 }
 
 /**
- * The machine's outbound proxy, read-only: set by root in network.json (docs/network.md), never from the page. A
- * refused file is said in red: children then go direct.
+ * The machine's outbound proxy and custom CA, read-only: set by root in network.json (docs/network.md), never from the
+ * page. A refused file is said in red: children then go direct and trust only their own stores.
  */
 export function OutboundProxy({ network: n }: { network: NonNullable<HealthView['network']> }) {
-  if (n.proxy)
+  if (n.error)
     return (
-      <div className="text-[12.5px] text-ink-2" data-testid="health-network">
-        Outbound proxy: <code className="font-mono text-[12px]">{n.proxy}</code> (from <code className="font-mono text-[12px]">{n.file}</code>)
+      <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-network-refused">
+        <span className="font-medium text-red">Outbound proxy and custom CA refused:</span> <span className="break-all">{n.error}</span>
       </div>
     );
   return (
-    <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-network-refused">
-      <span className="font-medium text-red">Outbound proxy refused:</span> <span className="break-all">{n.error}</span>
+    <div className="space-y-0.5 text-[12.5px] text-ink-2">
+      {n.proxy && (
+        <div data-testid="health-network">
+          Outbound proxy: <code className="font-mono text-[12px]">{n.proxy}</code> (from <code className="font-mono text-[12px]">{n.file}</code>)
+        </div>
+      )}
+      {n.ca && (
+        <div data-testid="health-network-ca">
+          Custom CA: <code className="font-mono text-[12px] break-all">{n.ca.path}</code>, {n.ca.count} {n.ca.count === 1 ? 'certificate' : 'certificates'}, {n.ca.fingerprints.length === 1 ? 'fingerprint' : 'fingerprints'}{' '}
+          <code className="font-mono text-[12px]">{n.ca.fingerprints.map((f) => `sha256:${f}`).join(', ')}</code> (from <code className="font-mono text-[12px]">{n.file}</code>)
+        </div>
+      )}
     </div>
   );
 }

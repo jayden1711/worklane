@@ -11,7 +11,7 @@ import { mergeMetrics, type MergeMetrics } from './merge-metrics.js';
 import { heldUpdate, updateLog, type HeldUpdate, type UpdateEntry } from './updates.js';
 import { testRunStatus, type TestRunStatus } from './testrun/status.js';
 import { directLandProblem } from './direct-land.js';
-import { networkHealth } from './network.js';
+import { networkHealth, type NetworkHealth } from './network.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -63,7 +63,7 @@ export interface HealthView {
   /** The coordinator's test runs (src/testrun/): queue, runs, per-tier figures, and what keeps them from working. */
   testRuns: TestRunStatus;
   /** The machine's outbound proxy from root's network.json (src/network.ts), or why that file was refused; null when none is set. Read-only. */
-  network: { proxy: string | null; file: string; error: string | null } | null;
+  network: NetworkHealth | null;
   suggestions: string[];
 }
 

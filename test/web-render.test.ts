@@ -531,11 +531,17 @@ test('the off-machine backup on the health panel: not set up with the docs link;
   assert.match(r.renderHealth({ ...base, offsiteBackup: null, updateHold }), /role="alert"[^>]*data-testid="health-update-held"[\s\S]*?Engine update rolled back: a migration failed[\s\S]*?2026-10-12 03:00 UTC, bbbbbbbbbbbb[\s\S]*?rollback: migration failed: bob: disk full/);
   assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, updateHold: null }), /health-update-held/);
   // The machine's outbound proxy (root's network.json), read-only: the host and its file, or the refusal in red.
-  const proxied = r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: 'proxy.internal:3128', file: '/etc/x/network.json', error: null } });
+  const proxied = r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: 'proxy.internal:3128', file: '/etc/x/network.json', ca: null, error: null } });
   assert.match(proxied, /data-testid="health-network"[^>]*>Outbound proxy: <code[^>]*>proxy\.internal:3128<\/code> \(from <code[^>]*>\/etc\/x\/network\.json<\/code>\)/);
   assert.doesNotMatch(proxied, /<(?:input|button|form)[^>]*network/i, 'nothing on the page changes it');
-  assert.match(r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', error: '/etc/x/network.json: proxy must not carry a user or password; no outbound proxy is set' } }), /role="alert"[^>]*data-testid="health-network-refused"[\s\S]*?Outbound proxy refused:[\s\S]*?must not carry a user or password/);
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', ca: null, error: '/etc/x/network.json: proxy must not carry a user or password; no outbound proxy or custom CA is set' } }), /role="alert"[^>]*data-testid="health-network-refused"[\s\S]*?Outbound proxy and custom CA refused:[\s\S]*?must not carry a user or password/);
   assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, network: null }), /health-network/);
+  assert.doesNotMatch(proxied, /health-network-ca/, 'no CA line without a CA');
+  // The custom CA (root's ca_file): its path, how many certificates, each one's short SHA-256 fingerprint.
+  const ca = r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', ca: { path: '/etc/x/ca/corp.pem', count: 2, fingerprints: ['0123456789abcdef', 'fedcba9876543210'] }, error: null } });
+  assert.match(ca, /data-testid="health-network-ca"[^>]*>Custom CA: <code[^>]*>\/etc\/x\/ca\/corp\.pem<\/code>, 2 certificates, fingerprints <code[^>]*>sha256:0123456789abcdef, sha256:fedcba9876543210<\/code> \(from <code[^>]*>\/etc\/x\/network\.json<\/code>\)/);
+  assert.doesNotMatch(ca, /data-testid="health-network"[^-]/, 'no proxy line without a proxy');
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', ca: { path: '/etc/x/ca.pem', count: 1, fingerprints: ['0123456789abcdef'] }, error: null } }), /1 certificate, fingerprint <code/);
   const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
   const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
   const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });

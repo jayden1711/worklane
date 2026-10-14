@@ -142,8 +142,8 @@ export interface HealthView {
   } | null;
   /** An engine update this machine rolled back and holds (src/updates.ts heldUpdate); null when none. */
   updateHold?: { at: string; sha: string | null; reason: string; migration: boolean } | null;
-  /** The machine's outbound proxy from root's network.json (src/network.ts), or why the file was refused; null when none (or for a viewer). */
-  network?: { proxy: string | null; file: string; error: string | null } | null;
+  /** The machine's outbound proxy and custom CA from root's network.json (src/network.ts), or why the file was refused; null when neither (or for a viewer). */
+  network?: { proxy: string | null; file: string; ca: { path: string; count: number; fingerprints: string[] } | null; error: string | null } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
