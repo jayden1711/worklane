@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// INVARIANT: first, so node:sqlite's experimental warning never reaches stderr (quiet-sqlite.ts). Every node process
+// the engine starts with engine code in it (the coordinator service, the dashboard, queued jobs, hooks) is this file.
+import './quiet-sqlite.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
