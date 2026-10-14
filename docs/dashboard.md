@@ -201,7 +201,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 - **Run it again later.** Settings has a **Setup screens** list with each screen's state. Its link opens that step on the first-run page (`/first-run?step=<id>`), even when the step is done, so it can be run again.
 - **Do it without the page.** Each screen names the command or config key that does the same thing, and the table below lists them all. The test `test/setup-automation.test.ts` checks that the table and the page agree.
 
-**Before the config exists (setup mode).** A checkout with no `.worklane/` yet has no config for the dashboard to load. In that case `worklane dashboard --root <repo>` starts in setup mode and prints `http://127.0.0.1:<port>/first-run?t=<token>`. `worklane init` offers to open the same page when it stops at the repo config. Setup mode works like this:
+**Before the config exists (setup mode).** A checkout with no `.worklane/` yet has no config for the dashboard to load. In that case `worklane dashboard --root <repo>` starts in setup mode and prints `http://127.0.0.1:<port>/first-run`, with no key in it, and the path of the dashboard key file (only you can read it). The page asks for the key once, in a hidden field or by choosing that file, sends it as a header and keeps it in that tab only. `worklane init` offers to open the same page when it stops at the repo config. Setup mode works like this:
 
 - The first-run page is the whole dashboard, and every address shows it.
 - From the page you can:
@@ -210,7 +210,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
   - draft the config, which runs the project's commands on a scratch copy of the default branch, so it asks for a confirmation first;
   - merge the setup PR that the draft opens.
 - Start is refused until the config exists.
-- Once the merged config is in the checkout, the normal dashboard takes over at the same address with the same token, and the page reloads.
+- Once the merged config is in the checkout, the normal dashboard takes over at the same address with the same key, and the page reloads.
 
 | step | mode | without the page |
 |---|---|---|
