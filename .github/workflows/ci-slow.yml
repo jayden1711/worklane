@@ -1948,8 +1948,9 @@ jobs:
     # command, the one URL it prints, that URL in headless Chrome (scripts/ci/wizard-e2e.mjs: real clicks, the key page
     # given the key file), each screen in order with its effect on the machine checked, one screen skipped, one rerun
     # from Settings, every screen's "Without this page" line, and the project's dashboard at the end. Local mode first
-    # (as the runner user, systemd --user), then server mode (bootstrap --hardened as root, the first project through
-    # add-project.sh, then the hub's break-glass). Outside services are stand-ins, never a host override: gh, claude and
+    # (as the runner user, systemd --user), then server mode (bootstrap --hardened as root: with no https origin, setup
+    # mode on loopback and the ssh -L line, its App step pointing to screen 7; then the origin, the sign-in App, the first
+    # project through add-project.sh, then the hub's break-glass). Outside services are stand-ins, never a host override: gh, claude and
     # git's ssh to github.com (scripts/ci/wizard-stand-ins/), the fake GitHub behind the loopback stand-in, the hub
     # stand-in for the App's approval, and the tailscale CLI after its real install. Last, no secret in any URL the
     # browser asked for, any log, the journal, or any process's arguments.
@@ -2036,7 +2037,7 @@ jobs:
           if systemctl --user is-active -q "$label"; then echo "down left $label running" >&2; exit 1; fi
           pkill -f "dashboard --service --root $RUNNER_TEMP/alpha" || true
       # ---------------------------------------------------------------- server mode
-      - name: "server mode: the one command (bootstrap --hardened, as root) with this commit's engine; with no https origin yet, no URL: the reason and the fix, exit 4"
+      - name: "server mode: the one command (bootstrap --hardened, as root) with this commit's engine; with no https origin yet, it still ends with one URL that answers: setup mode on 127.0.0.1 only, the ssh -L line, no token in the URL or the log"
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q acl
           sha="$(git rev-parse HEAD)"
@@ -2058,14 +2059,41 @@ jobs:
           [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
           id wl-ci && id wl-ci-agent
           jq -e '.owners == ["ci-owner"]' /etc/worklane/machine-owners.json
-          # No https origin (no Tailscale here, no --public-url): a URL here would answer nothing (#393, #402). So no URL
-          # at all: the reason and the fix, exit 4, and nothing started.
-          [ "$rc" = 4 ] || { echo "expected exit 4 with no origin, got $rc" >&2; exit 1; }
-          grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/server-install.log"
-          if tail -n 1 "$F/server-install.log" | grep -qE '^https?://'; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
-          if systemctl is-active -q worklane-dashboard-hub-setup.service; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
+          # No https origin (no Tailscale here, no --public-url). Until 2026-10-14 this was exit 4 with no URL (#402); the
+          # owner changed the product: the one command always ends with a working URL. Setup mode on loopback only, its
+          # URL last (checked to answer 200 first), and above it the ssh -L line to run from the owner's own computer.
+          [ "$rc" = 0 ] || { echo "expected exit 0 with no origin (setup mode on loopback), got $rc" >&2; exit 1; }
+          u="$(tail -n 1 "$F/server-install.log")"
+          [ "$u" = http://127.0.0.1:4399/ ] || { echo "the install's last line: $u" >&2; exit 1; }
+          closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/server-install.log")"
+          [ "$(grep -c '://' <<< "$closing")" = 1 ] || { echo "more than one URL in: $closing" >&2; exit 1; }
+          # Who ran sudo (the runner's user) at this machine's name.
+          grep -qxF "   From your own computer, first: ssh -L 4399:127.0.0.1:4399 $USER@$(hostname)" "$F/server-install.log"
+          grep -qF 'the page shows Tailscale and HTTPS (screen 7)' "$F/server-install.log"
+          systemctl is-active worklane-dashboard-hub-setup.service
+          systemctl show -p ExecStart --value worklane-dashboard-hub-setup.service | grep -qF ' --loopback '
+          [ "$(curl -s -o "$F/loopback-page.html" -w '%{http_code}' "$u")" = 200 ]
+          grep -q 'This hub is in setup mode' "$F/loopback-page.html"
+          # Loopback only: nothing listens on 4399 but 127.0.0.1, and the runner's other address doesn't reach it.
+          ss -ltnH 'sport = :4399' | tee "$F/loopback-listen.txt"
+          [ "$(awk '{print $4}' "$F/loopback-listen.txt" | sort -u)" = 127.0.0.1:4399 ]
+          ip4="$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | grep -v '^127\.' | head -1)"
+          [ -n "$ip4" ] || { echo "no other IPv4 address on this runner to try" >&2; exit 1; }
+          other="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$ip4:4399/" || true)"
+          [ "$other" = 000 ] || { echo "http://$ip4:4399/ answered $other: setup mode reached off loopback" >&2; exit 1; }
+          # A proxied request (tailscale serve's headers) is refused, as on the break-glass.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 192.0.2.9' "$u")" = 403 ]
+          # The token: in its 0600 file of the hub's user, never in the URL or the log (a pattern file, never an argument).
+          tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
+          [ "$(sudo stat -c '%U %a' "$tf")" = "wl-dash 600" ]
+          (umask 077; sudo cat "$tf" > "$F/setup-token-loopback")
+          echo "::add-mask::$(cat "$F/setup-token-loopback")"
+          if grep -qFf "$F/setup-token-loopback" "$F/server-install.log" || printf '%s\n' "$u" | grep -qFf "$F/setup-token-loopback"; then echo "the setup token was printed or is in the URL" >&2; exit 1; fi
+          echo "LOOPBACK_URL=$u" >> "$GITHUB_ENV"
           # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token).
           sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
+      - name: "server, screen 3 with no origin, in the browser at the loopback URL: the one-time token from its file, then the App step says https first and points to screen 7; GitHub never asked"
+        run: node scripts/ci/wizard-e2e.mjs setup-loopback "$GITHUB_WORKSPACE/dist" "$LOOPBACK_URL" "$F/setup-token-loopback" "$F/browser" - | tee "$F/walk-setup-loopback.jsonl"
       - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
         run: |
           f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
@@ -2090,7 +2118,7 @@ jobs:
       # The hub's https origin, as tailscale serve gives it, played on this runner the way #402's proof does: the name
       # hub.example.test on this machine, real TLS from a CA the system trusts, forwarded to the hub's port 4399. It
       # carries nothing to GitHub or any outside service (those stay the fake's, through the loopback stand-in).
-      - name: "server mode: the install command again with the origin given and served: it starts setup mode and ends with one URL that answers 200, no token in it or the log"
+      - name: "server mode: the install command again with the origin given and served: it moves setup mode to the origin and ends with one URL that answers 200, no token in it or the log"
         run: |
           pub=https://hub.example.test
           sudo apt-get install -y -q socat > /dev/null
@@ -2107,6 +2135,8 @@ jobs:
           tail -n 15 "$F/server-install-setup.log"
           [ "$rc" = 0 ] || { echo "exit $rc" >&2; exit 1; }
           systemctl is-active worklane-dashboard-hub-setup.service
+          # The origin exists now: setup mode moved from loopback to it, with a new token (the App step goes on there).
+          systemctl show -p ExecStart --value worklane-dashboard-hub-setup.service | grep -qF " --public-url $pub "
           u="$(tail -n 1 "$F/server-install-setup.log")"
           [ "$u" = "$pub/" ] || { echo "the install's last line: $u" >&2; exit 1; }
           closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/server-install-setup.log")"
@@ -2209,6 +2239,7 @@ jobs:
             one "the local dashboard key" "$LOCAL_KEY"
             one "the hub's key" "$F/hub-key"
             one "the setup token" "$F/setup-token"
+            one "the loopback setup token" "$F/setup-token-loopback"
             one "the sign-in App's client secret" "$F/client-secret"
             one "the Claude token" "$F/claude-token"
             printf 'the App client secret\t'; sed -n 1p "$F/app-secrets"
@@ -2219,9 +2250,9 @@ jobs:
             printf "the instance's dashboard key\t"; sudo cat "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state/dashboard-token" | tr -d '\n'; echo
           ) | awk -F'\t' '$2 != ""' > "$F/never-named"
           (umask 077; cut -f2- "$F/never-named" > "$F/never")
-          # The local key, the hub's key, the setup token, the sign-in secret, the Claude token, the App's two secrets,
-          # the one-time code, the login link's id, a line of the App's key, the instance's own key.
-          [ "$(wc -l < "$F/never")" = 11 ] || { echo "expected 11 secrets, have $(wc -l < "$F/never")" >&2; exit 1; }
+          # The local key, the hub's key, the two setup tokens (loopback, then the origin's), the sign-in secret, the Claude
+          # token, the App's two secrets, the one-time code, the login link's id, a line of the App's key, the instance's own key.
+          [ "$(wc -l < "$F/never")" = 12 ] || { echo "expected 12 secrets, have $(wc -l < "$F/never")" >&2; exit 1; }
           sudo journalctl --no-pager > "$F/journal.txt" 2>&1
           journalctl --user --no-pager > "$F/journal-user.txt" 2>&1 || true
           leaks=0

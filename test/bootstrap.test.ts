@@ -251,14 +251,15 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   const r = m.run('--hardened', '--dry-run', 'shop', 'acme/shop');
   assert.equal(r.code, 0, r.out);
   const steps = [...r.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim());
-  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
+  // With no https origin: setup mode on loopback, so the run ends with a URL (owner, 2026-10-14).
+  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop', 'dashboards.sh --setup --loopback']);
   assert.match(r.out, /credentials\.sh shop github-app/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
-  assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop']);
+  assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop', 'dashboards.sh --setup --loopback']);
   assert.match(m.run('--hardened', 'shop', 'acme/shop').out, /run it with sudo|y\/N/, 'a real run needs root (or asks before each script)');
 });
 
-test('bootstrap --hardened, the first install: the person installing becomes the first machine owner (from gh, or given), and it ends with one URL that answers, or none, the reason and the fix', { skip }, () => {
+test('bootstrap --hardened, the first install: the person installing becomes the first machine owner (from gh, or given), and it ends with one URL that answers (with no https origin, setup mode on loopback and the ssh -L line), or none, the reason and the fix', { skip }, () => {
   // A stand-in root: `id -u` says 0 and chown does nothing. Tailscale names the machine (its own name comes first)
   // only once its status is written; systemctl, curl and dashboards.sh are stand-ins with state in files.
   const net = ['tail1234', 'ts', 'net'].join('.');
@@ -270,7 +271,14 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   writeFileSync(active, '');
   writeFileSync(answering, '');
   m.stub('tailscale', `[ -f "${ts}" ] && cat "${ts}"`);
-  m.stub('systemctl', `[ "$1" = is-active ] && grep -qxF "$3" "${active}"`);
+  // systemctl show: the setup unit's ExecStart, as the stand-in dashboards.sh last wrote it.
+  const execStart = join(m.dir, 'exec-start');
+  m.stub('systemctl', `case "$1" in is-active) grep -qxF "$3" "${active}" ;; show) cat "${execStart}" 2>/dev/null ;; *) exit 1 ;; esac`);
+  const host = join(m.dir, 'hostname');
+  writeFileSync(host, 'box1');
+  m.stub('hostname', `cat "${host}"`);
+  // gh is asked as the user who ran sudo (sudo -H -u <them> gh ...): the stand-in sudo runs it as is.
+  m.stub('sudo', '[ "$1" = -H ] && [ "$2" = -u ] && shift 3 && exec "$@"');
   // WHY: the printed URL must answer: curl says 200 only for a URL listed as answering, else 000 (nothing listening).
   m.stub('curl', `for u; do :; done; if grep -qxF "$u" "${answering}"; then printf 200; else printf 000; fi`);
   const viewer = join(m.dir, 'viewer');
@@ -292,9 +300,11 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   writeFileSync(join(setup, 'lib.sh'), lib.replace(/^MACHINE_OWNERS=.*$/m, `MACHINE_OWNERS=${owners}`));
   const ran = join(m.dir, 'steps.log');
   for (const s of ['node.sh', 'machine.sh', 'tools.sh', 'instance.sh', 'engine.sh']) writeFileSync(join(setup, s), `echo "${s} $*" >> "${ran}"\n`);
-  writeFileSync(join(setup, 'dashboards.sh'), `echo "dashboards.sh $*" >> "${ran}"\ncase "$1" in --setup) echo worklane-dashboard-hub-setup.service >> "${active}" ;; --no-instances) echo worklane-dashboard-hub.service >> "${active}" ;; esac\n`);
+  writeFileSync(join(setup, 'dashboards.sh'), `echo "dashboards.sh $*" >> "${ran}"\ncase "$1" in --setup) echo worklane-dashboard-hub-setup.service >> "${active}"; echo "{ path=/usr/local/bin/worklane ; argv[]=/usr/local/bin/worklane dashboard --hub-setup --service $2 $3 --signin-dir /x ; }" > "${execStart}" ;; --no-instances) echo worklane-dashboard-hub.service >> "${active}" ;; esac\n`);
+  // As `sudo bash scripts/bootstrap.sh` runs it: SUDO_USER is who ran sudo.
+  let sudoUser: string | undefined = 'ada';
   const run = (...args: string[]) => {
-    const r = spawnSync(join(m.bin, 'bash'), [join(eng, 'bootstrap.sh'), '--hardened', '--yes', ...args], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir } });
+    const r = spawnSync(join(m.bin, 'bash'), [join(eng, 'bootstrap.sh'), '--hardened', '--yes', ...args], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir, ...(sudoUser ? { SUDO_USER: sudoUser } : {}) } });
     return { code: r.status, out: r.stdout + r.stderr };
   };
   const steps = () => readFileSync(ran, 'utf8').trim().split('\n').map((l) => l.trim());
@@ -303,21 +313,43 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   const urls = (out: string) => end(out).filter((l) => /:\/\//.test(l));
   const answer = (...u: string[]) => writeFileSync(answering, u.map((x) => `${x}\n`).join(''));
 
-  // A fresh machine with no https origin (no Tailscale yet, no --public-url): installed, but no URL: why, and the fix.
+  // A fresh machine with no https origin (no Tailscale yet, no --public-url): setup mode on loopback only. Until its
+  // URL answers, no URL (never one that answers nothing): why, and the fix.
   const r = run('shop', 'acme/shop');
   assert.equal(r.code, 4, r.out);
   assert.match(m.calls().join('\n'), /gh api user --jq \.login/, 'the login, from gh');
   assert.match(r.out, /first machine owner: @ada-lovelace/);
   assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n', 'written as the first machine owner');
-  assert.deepEqual(steps(), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
-  assert.match(r.out, /no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin, and there is none yet\.\n {3}fix: turn on Tailscale[\s\S]*--public-url https:\/\/<machine>\.<tailnet>\.ts\.net shop acme\/shop\n?$/);
+  assert.deepEqual(steps(), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop', 'dashboards.sh --setup --loopback']);
+  assert.match(r.out, /no URL to open yet: the hub's setup mode doesn't answer on this machine \(port 4399\)\.\n {3}fix: sudo systemctl status worklane-dashboard-hub-setup\.service/);
   assert.doesNotMatch(r.out, /\n(https?:\/\/\S+)\n?$/, 'no URL last');
 
-  // Tailscale names it: the hub's setup mode starts (dashboards.sh --setup), but tailscale serve doesn't reach it yet.
+  // It answers: the loopback URL, last and the only one, no token in it; above it the ssh -L line from the owner's own
+  // computer (who ran sudo, at this machine's name), the token's 0600 file, and the App step's https-first (screen 7).
+  answer('http://127.0.0.1:4399/');
+  for (let i = 0; i < 2; i++) {
+    const s = run('shop', 'acme/shop');
+    assert.equal(s.code, 0, s.out);
+    assert.equal(end(s.out).at(-1), 'http://127.0.0.1:4399/');
+    assert.deepEqual(urls(s.out), ['http://127.0.0.1:4399/'], 'the only URL it ends with');
+    assert.match(s.out, /\n {3}From your own computer, first: ssh -L 4399:127\.0\.0\.1:4399 ada@box1\n/);
+    assert.match(s.out, /one-time setup token: sudo cat \S+\/\.local\/state\/worklane\/dashboard-hub\/setup-token/);
+    assert.match(s.out, /needs the https origin first: the page shows Tailscale and HTTPS \(screen 7\)/);
+  }
+  assert.deepEqual(dash(), ['dashboards.sh --setup --loopback'], 'a rerun leaves the running loopback setup mode (and its token) alone');
+  // Nobody named by sudo, and a host name that isn't a plain name: placeholders, never the raw value.
+  sudoUser = undefined;
+  writeFileSync(host, 'box;touch pwned');
+  assert.match(run('shop', 'acme/shop').out, /ssh -L 4399:127\.0\.0\.1:4399 <you>@<this machine>\n/);
+  sudoUser = 'ada';
+  writeFileSync(host, 'box1');
+
+  // Tailscale names it: setup mode moves from loopback to the origin (dashboards.sh --setup --public-url, a new
+  // token), but tailscale serve doesn't reach it yet.
   writeFileSync(ts, `{\n  "Self": {\n    "DNSName": "${box}.",\n  },\n  "Peer": {\n    "k": {\n      "DNSName": "other.${net}.",\n    }\n  }\n}\n`);
   const unserved = run('shop', 'acme/shop');
   assert.equal(unserved.code, 4, unserved.out);
-  assert.deepEqual(dash(), [`dashboards.sh --setup --public-url https://${box}`]);
+  assert.deepEqual(dash(), ['dashboards.sh --setup --loopback', `dashboards.sh --setup --public-url https://${box}`]);
   assert.match(unserved.out, new RegExp(`no URL to open yet: the hub's setup mode runs on this machine \\(port 4399\\), but https://${esc(box)} doesn't reach it\\.\\n {3}fix: sudo tailscale serve --bg --https=443 http://127\\.0\\.0\\.1:4399, then run this again`));
 
   // Served: the setup-mode hub's URL, checked first, the only one; its token from a 0600 file, never in the URL.
@@ -329,7 +361,7 @@ test('bootstrap --hardened, the first install: the person installing becomes the
     assert.deepEqual(urls(s.out), [`https://${box}/`], 'the only URL it ends with');
     assert.match(s.out, /one-time setup token: sudo cat \S+\/\.local\/state\/worklane\/dashboard-hub\/setup-token/);
   }
-  assert.equal(dash().length, 1, 'a rerun leaves the running setup mode (and its token) alone');
+  assert.equal(dash().length, 2, 'a rerun leaves the running setup mode (and its token) alone');
 
   // A rerun with someone else keeps the list as it is.
   const again = run('--machine-owner', 'grace', 'shop', 'acme/shop');
@@ -350,7 +382,7 @@ test('bootstrap --hardened, the first install: the person installing becomes the
     assert.equal(urls(s.out).length, 1);
     assert.match(s.out, /sign in with GitHub as @ada-lovelace/);
   }
-  assert.deepEqual(dash().slice(1), ['dashboards.sh --no-instances'], 'started once');
+  assert.deepEqual(dash().slice(2), ['dashboards.sh --no-instances'], 'started once');
 
   // The origin doesn't reach the hub: the owner's break-glass, which answers; the hub's key stays in its file.
   answer('http://127.0.0.1:4398/first-run');
@@ -358,7 +390,7 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   assert.equal(glass.code, 0, glass.out);
   assert.equal(end(glass.out).at(-1), 'http://127.0.0.1:4398/first-run');
   assert.equal(urls(glass.out).length, 1, 'the only URL, though the origin is named');
-  assert.match(glass.out, /ssh -N -L 4398:127\.0\.0\.1:4398 <you>@<this-host>/);
+  assert.match(glass.out, /ssh -L 4398:127\.0\.0\.1:4398 ada@box1\n/);
   assert.match(glass.out, /asks once for the hub's key: it is in \S+\/\.local\/state\/worklane\/dashboard-hub\/dashboard-token/);
 
   // Nothing answers: no URL, never one that answers nothing.
