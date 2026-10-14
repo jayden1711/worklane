@@ -279,3 +279,13 @@ test('the reset removes the last job\'s containers before it remakes the runner,
   // all of /usr/local (a reset that never ended, on a real runner).
   assert.match(sh, /\[\[ "\$node" =~ \^\/opt\/node-v/);
 });
+
+test('the stand-in runner\'s probes reach the internet without a rate-limited API: a container and a docker build each fetch https://github.com/', () => {
+  const dir = join(repoRoot, 'scripts', 'ci', 'runner-stand-in');
+  // GitHub's unauthenticated API answers 403 once the runner's shared outbound address is over its hourly quota.
+  for (const f of ['job.sh', 'run.sh', 'config.sh']) assert.doesNotMatch(readFileSync(join(dir, f), 'utf8'), /api\.github\.com/, `${f} calls GitHub's unauthenticated API`);
+  const job = readFileSync(join(dir, 'job.sh'), 'utf8');
+  assert.match(job, /docker run --rm "\$img" wget -q -T 10 -O \/dev\/null https:\/\/github\.com\/ 2>&1\)"; then ok "a container reaches the internet/);
+  assert.match(job, /printf 'FROM %s\\nRUN wget -q -T 10 -O \/dev\/null https:\/\/github\.com\/\\n' "\$img" > "\$b\/Dockerfile"/);
+  assert.match(job, /docker build -q -t ci-probe "\$b" 2>&1\)"; then ok "docker build, with the network"/);
+});
