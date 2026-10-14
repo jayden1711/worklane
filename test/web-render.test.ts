@@ -50,7 +50,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1217,6 +1217,26 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   // Anyone but the owner and the writers: told, not asked.
   assert.match(r.renderFirstRunPage(asOther), /data-testid="first-run-refused"[^>]*>The first-run checklist is for the instance(&#x27;|')s owners and writers/);
   assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
+});
+
+test("the first-run page, a Fix the dashboard does itself: its plan shown first, then a confirmation; the owners only; why not, where it can't run", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const plans = {
+    'git-hooks': { id: 'git-hooks', step: 'pre-commit', label: 'Install the git hooks', available: true, changes: ['/r/.git/hooks/pre-commit: a gitleaks secret scan on every commit'], commands: ['worklane install --git-hooks'] },
+  };
+  const withPlans = { ...f, actions: plans, canAct: true };
+  const html = r.renderFirstRun(withPlans);
+  assert.match(html, /data-step="pre-commit" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="action"[^>]*>Install</);
+  const open = r.renderFirstRun(withPlans, { open: 'pre-commit' });
+  assert.match(open, /data-testid="first-run-action" data-action="git-hooks"[\s\S]*?data-testid="first-run-action-plan"[\s\S]*?Install the git hooks changes:[\s\S]*?\/r\/\.git\/hooks\/pre-commit: a gitleaks secret scan[\s\S]*?It runs:[\s\S]*?<code[^>]*>worklane install --git-hooks<\/code>[\s\S]*?data-testid="first-run-action-button"[^>]*>Install the git hooks…/);
+  assert.doesNotMatch(open, /first-run-action-confirm"/, 'no confirmation until the button is pressed');
+  assert.match(r.renderFirstRun(withPlans, { open: 'pre-commit', actionConfirming: true }), /data-testid="first-run-action-confirming"[\s\S]*?Make the change above\?[\s\S]*?data-testid="first-run-action-confirm"[^>]*>Confirm[\s\S]*?data-testid="first-run-action-cancel"/);
+  const writer = r.renderFirstRun({ ...withPlans, canAct: false }, { open: 'pre-commit' });
+  assert.match(writer, /data-testid="first-run-action-plan"[\s\S]*?data-testid="first-run-action-refused"[^>]*>Only the instance(&#x27;|')s owners can run it/);
+  assert.doesNotMatch(writer, /first-run-action-button/);
+  const unavailable = r.renderFirstRun({ ...withPlans, actions: { 'git-hooks': { ...plans['git-hooks'], available: false, why: 'nothing is missing', changes: [], commands: [] } } }, { open: 'pre-commit' });
+  assert.match(unavailable, /data-testid="first-run-action-unavailable"[^>]*>Not from here: nothing is missing\./);
+  assert.doesNotMatch(unavailable, /first-run-action-button/);
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

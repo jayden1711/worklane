@@ -136,7 +136,9 @@ export type Fix =
   /** Only in a terminal (root consent, sudo, a shell profile): the command, and why it can't be a button. */
   | { kind: 'terminal'; command: string; why: string }
   /** The Start button: the coordinator's service. */
-  | { kind: 'start' };
+  | { kind: 'start' }
+  /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
+  | { kind: 'action'; action: string; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -366,7 +368,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `\`${BRAND.cli} init --yes\` installs a missing gitleaks, gh or claude from pinned, checksummed downloads; or install them yourself. On a server, tools.sh (bootstrap) does it.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'install-tools', label: 'Install' },
     detect: (k) => detectTools(k.c.mode, k.p),
   },
   {
@@ -550,7 +552,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `\`${BRAND.cli} install\` (init runs it once the config is on the default branch).`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'local-hooks', label: 'Install' },
     detect: (k) => {
       const file = join(k.c.root, '.claude', 'settings.json');
       if (!existsSync(file)) return no('the hooks for local runs are not installed (.claude/settings.json)');
@@ -621,7 +623,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: true,
     reach: 'most',
     today: `\`${BRAND.cli} install --git-hooks\``,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'git-hooks', label: 'Install' },
     detect: (k) => {
       const common = k.p.run('git', ['rev-parse', '--git-common-dir'], { cwd: k.c.root });
       if (common.status !== 0) return no('not a git repository');
@@ -639,7 +641,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: true,
     reach: 'some',
     today: `\`${BRAND.cli} guardrails refresh\``,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'fingerprints', label: 'Fetch' },
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');

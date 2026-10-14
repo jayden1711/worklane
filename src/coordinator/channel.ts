@@ -500,8 +500,13 @@ export abstract class Channel extends ResearchOnDemand {
     // Who may talk in a thread at all: an admin or a writer (a question, a pick); anyone else's reply is a comment.
     if (who.role !== 'owner' && who.role !== 'writer') return comment();
     // Exact option words answer directly, as before.
-    const choice = parseChoice(r.text, t.options);
+    // A held plan's thread also takes "approve plan <n>"; one naming another number answers nothing.
+    const choice = parseChoice(r.text, t.options, t.kind === 'plan' && t.issue !== null ? { plan: t.issue } : {});
     if ('answer' in choice) return t.mayAnswer(who.role) ? answer(choice.answer) : comment();
+    if (choice.wrongNumber !== undefined && t.issue !== null) {
+      record('ambiguous');
+      return reply(wrongNumberText(t.issue, choice.wrongNumber));
+    }
     // A bare yes or ok with nothing to confirm names no option: asked back, with no run.
     if (c !== 'change') {
       record('ambiguous');

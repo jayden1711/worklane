@@ -106,7 +106,7 @@ test('reflection: a read-only run on the cheap tier before retry 2 (not before a
 
 test('3 identical failures in a row: reassigned to a fresh worktree on the escalated model; 3 more after that: blocked', { skip }, async () => {
   const f = fixture();
-  f.cfg.agents.model_routing = { ...f.cfg.agents.model_routing, escalate_after: 5 };
+  f.cfg.agents.routing = { ...f.cfg.agents.routing, escalate_after: 5 };
   const seen: { k: number; leftover: boolean; head: string }[] = [];
   const runner = stuckAgents((k) => `Bash \`npm test\` failed after ${k * 7}s in /tmp/run-${k}/x`, {
     worker: (req, k) => {

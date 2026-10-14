@@ -251,6 +251,14 @@ test("channel: an ambiguous reply answers nothing; the bot asks back with the ex
   assert.deepEqual(parseChoice('**Approve**, looks good', ['approve', 'reject']), { answer: 'approve' });
 });
 
+test('channel: on a held plan, "approve plan <n>" is approve when n is its issue, and answers nothing when it names another', () => {
+  const opts = ['approve', 'revise', 'reject'];
+  for (const text of ['approve plan 12', 'Approve plan #12.', '/wl approve plan 12 looks good']) assert.deepEqual(parseChoice(text, opts, { plan: 12 }), { answer: 'approve' }, text);
+  assert.deepEqual(parseChoice('approve plan 13', opts, { plan: 12 }), { ambiguous: true, wrongNumber: 13 });
+  assert.deepEqual(parseChoice('reject plan 12', opts, { plan: 12 }), { answer: 'reject' });
+  assert.deepEqual(parseChoice('approve plan 12 or reject', opts, { plan: 12 }), { ambiguous: true });
+});
+
 test("channel: a high-risk merge approval can't come from Discord: a notice with links only, and no reply approves it", async () => {
   const t = setup();
   ask(t.log, 'd-land', 'land', 7);

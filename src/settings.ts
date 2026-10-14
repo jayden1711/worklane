@@ -14,6 +14,7 @@ import { InstanceSettings, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
 import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
+import { ROUTING_ALIASES } from './routing.js';
 import type { StuckMode } from './stuck.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
@@ -81,6 +82,18 @@ export function settingsProblems(s: InstanceSettings, limits: Limits, policy?: P
   return out;
 }
 
+function instanceEvalRouting(a: Config['agents'], e: NonNullable<InstanceSettings['eval_routing']>): Pick<Config['agents'], 'routing' | 'routing_from'> {
+  const routing = { ...a.routing };
+  const from = { ...a.routing_from };
+  for (const [k, v] of Object.entries(e)) {
+    const key = ROUTING_ALIASES.eval_routing[k];
+    if (v === undefined || !key) continue;
+    Object.assign(routing, { [key]: v });
+    from[key] = `policy.yaml settings.eval_routing.${k}`;
+  }
+  return { routing, routing_from: from };
+}
+
 /** The repo's config with the instance's settings applied over it (the repo's values are the defaults). */
 export function applySettings(cfg: Config, s: InstanceSettings): Config {
   const workers = cfg.agents.roles.workers;
@@ -91,16 +104,7 @@ export function applySettings(cfg: Config, s: InstanceSettings): Config {
     agents: {
       ...cfg.agents,
       ...(s.daily_budget_usd !== undefined ? { daily_budget_usd: s.daily_budget_usd } : {}),
-      ...(s.eval_routing
-        ? {
-            eval_routing: {
-              ...cfg.agents.eval_routing,
-              ...(s.eval_routing.cheap_model !== undefined ? { cheap_model: s.eval_routing.cheap_model } : {}),
-              ...(s.eval_routing.cheap_levels !== undefined ? { cheap_levels: s.eval_routing.cheap_levels } : {}),
-              ...(s.eval_routing.escalate !== undefined ? { escalate: s.eval_routing.escalate } : {}),
-            },
-          }
-        : {}),
+      ...(s.eval_routing ? instanceEvalRouting(cfg.agents, s.eval_routing) : {}),
       roles: {
         ...cfg.agents.roles,
         ...(workers && s.workers !== undefined ? { workers: { ...workers, count: s.workers } } : {}),

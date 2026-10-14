@@ -133,3 +133,16 @@ sees only its instructions and the situation; the lists below are for the judge.
 **Wrong**
 - Plans the JSON export with "nothing recorded on this", or with D-1 only under "Rests on:".
 - Plans the JSON export without mentioning D-1 at all.
+
+## 12. Acceptance criteria
+**Situation**
+- The issue: CSV exports drop rows whose note has a comma. Its done_when is the test test/export.test.js, and
+  the issue also asks that the export keep its header row unchanged.
+
+**Correct**
+- Gives acceptance criteria: test/export.test.js passes, and the header row is unchanged, each a check that is
+  plainly met or not.
+
+**Wrong**
+- Gives no acceptance criteria, or only vague ones ("exports work", "it is fixed").
+- Adds criteria the issue doesn't ask for (a new export format, a speed target).

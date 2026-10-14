@@ -141,6 +141,9 @@ the same audit entry with `via: discord`. Who may answer from a thread is one fu
 
 - A reply chooses an option only when its first word is that option and it names no other ("approve",
   "Reject."). That answers at once, as before.
+- **Held plans** (the plan gate, `plan_gate` in config.yaml): the thread shows the plan's acceptance criteria and
+  links the issue with the full plan. "approve plan <n>" (n: the issue's number) is the same as "approve"; one
+  naming another number answers nothing. Only an admin's reply answers it; a writer's is a comment.
 - **Plain-language picks.** A reply from an admin or writer that clearly means one option ("yeah approve it",
   "go with a") is read by the `intake-thread` role, and the bot asks back "Confirm: approve?". Only that same
   person's following "yes" records it (through the same decide path, role check and audit); another person's yes
@@ -169,7 +172,7 @@ adds the issue's and the dashboard's links itself). Anything else, a run that en
 spend cap reached, posts the fixed template and the dashboard's link instead; which was used and why is recorded
 (`discord.explained`), once per thread.
 
-Summaries and thread runs are short runs on the routed models (`model_routing.intake_summary`, haiku, and
+Summaries and thread runs are short runs on the routed models (`routing.intake_summary`, haiku, and
 `intake_thread`, sonnet: on haiku its held-out eval score dropped), each counted against `intake.max_usd_per_day` and the daily budget. Over the cap, a summary is
 the template, and a reply that isn't an exact option is asked back without a run.
 
