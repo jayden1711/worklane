@@ -67,6 +67,9 @@ export function discordSource(bot: DiscordIntake): IntakeSource {
   };
 }
 
+/** The instance's bot token, from the file credentials.yaml intake.discord_token names (the bot and `discord channels` both read it here). */
+export const readDiscordToken = (tokenFile: string): string => readFileSync(tokenFile, 'utf8').trim();
+
 /**
  * The intake deps for one instance, or null when it has no intake.yaml (intake off). A config that is refused
  * (unsafe permissions, invalid) is reported and leaves intake off. Discord connects only on start(), when its
@@ -123,7 +126,7 @@ export function intakeForInstance(o: {
   if (d.enabled && d.guild) {
     if (!o.tokenFile) say('intake: discord is on but credentials.yaml has no intake.discord_token; the bot is not connected');
     else {
-      const token = readFileSync(o.tokenFile, 'utf8').trim();
+      const token = readDiscordToken(o.tokenFile);
       const machine = o.machineDir ?? slotsDir();
       const f = o.discord?.fetch;
       const { now: _now, sleep: _sleep, alive: _alive, ...adapter } = o.discord ?? {};

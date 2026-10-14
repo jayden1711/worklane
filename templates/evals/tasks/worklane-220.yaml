@@ -1,0 +1,27 @@
+id: worklane-220
+base: 0ec3225cff78f2fb1a3fad54d71bf1136cfc0532
+title: "Runner: role prompt file readable by the agent user under the service umask"
+body: >-
+  Every worker run with a role prompt fails at start on a machine where agents
+  run as their own user:
+
+
+  ```
+
+  claude exited 1 without a result: Error reading append system prompt file:
+  EACCES: permission denied, open /tmp/<run dir>/system-prompt.md
+
+  ```
+
+
+  The instance services run with `UMask=0007`, so the role prompt file the
+  runner writes for `--append-system-prompt-file` ends up unreadable by the
+  agent user. The file must be readable by the agent user whatever the umask.
+done_when:
+  - test: test/runner-prompt.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 220
+  merge: 395bd0204e0f3e622b28ec257c2a0b74de4bdb0c

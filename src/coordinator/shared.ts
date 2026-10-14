@@ -6,6 +6,7 @@ import { type Backlog, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
+import type { SuiteOptions } from '../harness-evals/replay.js';
 import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
 import { type AgentRunner, type CommitIdentity, type RunAs, type RunControl } from '../runner.js';
 import { type PendingMessage } from '../console.js';
@@ -92,6 +93,14 @@ export interface CoordinatorDeps {
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
+  /**
+   * The harness eval suite (src/harness-evals/; tests inject these): the suite run itself, the engine commit running
+   * here, and whether src/ changed between two engine commits. Absent: the real ones.
+   */
+  harnessEvals?: {
+    /** This coordinator is itself a replay's scratch instance: it never runs harness evals (no recursion), whatever its config says. */
+    replay?: true;
+    suite?: (o: SuiteOptions) => Promise<EventPayload<'harness_eval.run'>>; engine?: () => string | null; changed?: (from: string, to: string) => boolean | null };
   /** How the machine helper is run for the dashboard's machine requests (sudo -n; tests inject it). */
   machineExec?: (file: string, args: string[]) => string;
   /**
