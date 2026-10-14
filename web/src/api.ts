@@ -765,7 +765,32 @@ export interface FirstRun {
   canAct?: boolean;
   /** A server instance's policy form (src/policy-edit.ts); null for a checkout. */
   policy?: FirstRunPolicy | null;
+  /** A checkout's Repo config form, from the default branch's config (src/config-change.ts); null on a server. */
+  repoConfig?: FirstRunRepoConfig | { error: string } | null;
 }
+export interface RepoConfigValues {
+  writers: string[];
+  required_checks: string[];
+  daily_budget_usd: number;
+  workers_count: number;
+  workers_model: string;
+}
+export interface FirstRunRepoConfig {
+  values: RepoConfigValues;
+  owner: string;
+  branch: string;
+  repo: string;
+}
+export interface ConfigChange {
+  file: string;
+  key: string;
+  from: unknown;
+  to: unknown;
+}
+/** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
+export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+/** Preview (nothing written) or propose as a PR the config change these values make. */
+export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
   key: string;
   value: number | boolean | string;
@@ -805,7 +830,7 @@ export type SetupFix =
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
-  | { kind: 'form'; form: 'policy'; label: string };
+  | { kind: 'form'; form: 'policy' | 'repo-config'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;

@@ -50,7 +50,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; rerun?: string }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetupScreens(steps: unknown[]): string;
   renderSetup(data: unknown): string;
@@ -1296,6 +1296,21 @@ test("the first-run page, Policy form: each key with its bounds and why, the iso
   const writer = r.renderFirstRun({ ...f, policy, canAct: false }, { open: 'policy' });
   assert.match(writer, /data-testid="policy-refused"[^>]*>Only the instance(&#x27;|')s owners can change its policy/);
   assert.match(writer, /type="number"[^>]*disabled=""/);
+});
+
+test("the first-run page, Repo config form: writers, required checks, budget and workers from the default branch's config; Review then the change and Propose as a PR; writers can't; why not when the config isn't on the default branch", () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const repoConfig = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const html = r.renderFirstRun({ ...f, repoConfig, canAct: true }, { open: 'required-checks' });
+  assert.match(html, /data-step="required-checks"[\s\S]*?data-testid="first-run-fix" data-fix="form"[^>]*>Change</);
+  assert.match(html, /data-testid="repo-config-form"[\s\S]*?proposed as a PR against main; nothing changes until it merges[\s\S]*?data-testid="repo-config-writers"[^>]*value="example-owner"[\s\S]*?data-testid="repo-config-check" data-check="test"[\s\S]*?checked=""[\s\S]*?data-testid="repo-config-budget"[^>]*value="40"[\s\S]*?data-testid="repo-config-review"[^>]*>Review the change/);
+  const confirming = r.renderFirstRun({ ...f, repoConfig, canAct: true }, { open: 'required-checks', configChanges: [{ file: '.worklane/config.yaml', key: 'required_checks', from: ['test'], to: ['test', 'lint'] }] });
+  assert.match(confirming, /data-testid="repo-config-change"[^>]*>\.worklane\/config\.yaml required_checks: test → test, lint[\s\S]*?data-testid="repo-config-propose"[^>]*>Propose as a PR/);
+  const writer = r.renderFirstRun({ ...f, repoConfig, canAct: false }, { open: 'required-checks' });
+  assert.match(writer, /data-testid="repo-config-refused"[^>]*>Only the instance(&#x27;|')s owners can propose a config change/);
+  assert.doesNotMatch(writer, /repo-config-review|repo-config-check-name/);
+  assert.match(html, /placeholder="another check, as GitHub names it"[^>]*data-testid="repo-config-check-name"[\s\S]*?data-testid="repo-config-check-add"/);
+  assert.match(r.renderFirstRun({ ...f, repoConfig: { error: '.worklane/ missing at origin/main' }, canAct: true }, { open: 'required-checks' }), /data-testid="repo-config-error"[^>]*>Not from here yet: \.worklane\/ missing at origin\/main/);
 });
 
 test('the first-run page: Skip on a step not done (owners), skipped shown and Undo; each screen names its command; a done step opened from Settings runs again; Settings lists every screen', () => {

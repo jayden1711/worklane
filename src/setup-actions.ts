@@ -11,7 +11,7 @@ import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, t
 import { findTool, toolPrefix, withToolPath } from './tool-path.js';
 import { classicChecks } from './branch-protection.js';
 
-export const ACTION_IDS = ['install-tools', 'local-hooks', 'git-hooks', 'fingerprints', 'protection'] as const;
+export const ACTION_IDS = ['install-tools', 'local-hooks', 'git-hooks', 'fingerprints', 'protection', 'default-branch'] as const;
 export type ActionId = (typeof ACTION_IDS)[number];
 export const isActionId = (s: unknown): s is ActionId => typeof s === 'string' && (ACTION_IDS as readonly string[]).includes(s);
 
@@ -136,6 +136,23 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
       return { ok: true, detail: `pre-commit secret scan at ${r.gitHook}${r.prePushHook ? `; pre-push guard at ${r.prePushHook}` : ''}` };
     },
   },
+  'default-branch': {
+    step: 'default-branch',
+    label: 'Fetch the default branch',
+    plan: (c) => ({
+      available: c.mode === 'local',
+      ...(c.mode === 'local' ? {} : { why: "an instance's checkout is set up by checkout.sh" }),
+      changes: [`this checkout's origin/${c.cfg.project.project.default_branch} and origin/HEAD, from origin (no local branch moves, no files change)`],
+      commands: defaultBranchCommands(c).map((x) => x.join(' ')),
+    }),
+    run: async (c) => {
+      for (const cmd of defaultBranchCommands(c)) {
+        const r = spawnSync(cmd[0]!, cmd.slice(1), { cwd: c.root, encoding: 'utf8', timeout: 120_000, env: withToolPath() });
+        if (r.status !== 0) return { ok: false, detail: `${cmd.join(' ')} failed: ${(r.stderr || r.error?.message || '').trim().split('\n')[0]}` };
+      }
+      return { ok: true, detail: `fetched origin/${c.cfg.project.project.default_branch}; origin/HEAD set` };
+    },
+  },
   protection: {
     step: 'protection',
     label: 'Protect the default branch',
@@ -174,6 +191,11 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     },
   },
 };
+
+const defaultBranchCommands = (c: ActionContext) => [
+  ['git', 'fetch', '-q', 'origin', c.cfg.project.project.default_branch],
+  ['git', 'remote', 'set-head', 'origin', '--auto'],
+];
 
 /** WHY: classic protection, not a ruleset: the main watch and direct landing read the branch protection API. */
 export function protectionBody(cfg: Config) {

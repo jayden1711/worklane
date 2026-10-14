@@ -4,11 +4,12 @@
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getFirstRun, runFirstRunAction, skipStep, startCoordinator, type FirstRun, type FirstRunActionPlan, type PolicyChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
+import { getFirstRun, runFirstRunAction, skipStep, startCoordinator, type FirstRun, type FirstRunActionPlan, type PolicyChange, type ConfigChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
 import { PolicyForm } from '../components/PolicyForm';
+import { RepoConfigForm } from '../components/RepoConfigForm';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -311,7 +312,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, rerun = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; rerun?: string | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, rerun = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; rerun?: string | null }) {
   const [skipError, setSkipError] = useState<string | null>(null);
   const skip = (id: string, on: boolean) => {
     setSkipError(null);
@@ -391,8 +392,16 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   action={
                     s.fix.kind === 'action' ? (
                       <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
-                    ) : s.fix.kind === 'form' && f.policy ? (
+                    ) : s.fix.kind === 'form' && s.fix.form === 'policy' && f.policy ? (
                       <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && s.fix.form === 'repo-config' && f.repoConfig ? (
+                      'error' in f.repoConfig ? (
+                        <p className="break-words text-[12.5px] text-ink-2" data-testid="repo-config-error">
+                          Not from here yet: {f.repoConfig.error}
+                        </p>
+                      ) : (
+                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} />
+                      )
                     ) : undefined
                   }
                 />

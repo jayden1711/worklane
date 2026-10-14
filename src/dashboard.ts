@@ -15,7 +15,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { BRAND } from './brand.js';
-import type { Config } from './config/load.js';
+import { loadConfigAt, type Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -67,6 +67,7 @@ import { SETUP_STEPS, type DetectCache, type SetupContext, type SetupProbe } fro
 /** The steps skipped on the first-run page, in the dashboard's state dir. */
 export const SKIPS_FILE = 'first-run-skips.json';
 import { applyPolicy, planPolicy, policyForm, PolicyEditError } from './policy-edit.js';
+import { ConfigChangeError, planConfigChange, proposeConfigChange, repoConfigForm } from './config-change.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
@@ -1291,7 +1292,51 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // WHY: a done step's fix can be run again (from Settings' Setup list), so every action's plan is here.
           for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = actionPlan(s.fix.action, actionContext(), actionDeps());
           const policy = opts.policyFile ? policyForm(opts.policyFile, opts.limitsPath) : null;
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy });
+          // A checkout's config as the default branch has it (what a change is proposed against); a server's is add-project's.
+          let repoConfig: ReturnType<typeof repoConfigForm> | { error: string } | null = null;
+          if (!opts.instance) {
+            try {
+              repoConfig = repoConfigForm(loadConfigAt(opts.root, `origin/${opts.cfg.project.project.default_branch}`));
+            } catch (e) {
+              repoConfig = { error: (e as Error).message.split('\n').slice(0, 2).join(' ') };
+            }
+          }
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig });
+        }
+        // The checks GitHub ran on the default branch's tip: what the Repo config form offers as required checks.
+        if (url.pathname === '/api/first-run/checks-seen' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          const branch = opts.cfg.project.project.default_branch;
+          const sha = spawnSync('git', ['rev-parse', `origin/${branch}`], { cwd: opts.root, encoding: 'utf8' }).stdout.trim();
+          if (!/^[0-9a-f]{40}$/.test(sha)) return json(res, 200, { checks: [], error: `origin/${branch} isn't fetched here` });
+          const gh = actionDeps().gh;
+          const runs = gh(['api', `repos/${repo}/commits/${sha}/check-runs`, '--jq', '.check_runs[].name']);
+          const statuses = gh(['api', `repos/${repo}/commits/${sha}/status`, '--jq', '.statuses[].context']);
+          if (runs.status !== 0 && statuses.status !== 0) return json(res, 200, { checks: [], error: `GitHub didn't answer: ${runs.stderr.trim().split('\n')[0] ?? ''}` });
+          const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
+          return json(res, 200, { checks, sha });
+        }
+        // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
+        // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.
+        if (url.pathname === '/api/first-run/repo-config' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown };
+          const values = body.values && typeof body.values === 'object' ? (body.values as Record<string, unknown>) : {};
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.config_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (opts.instance) return refused(400, "a server instance's config changes through its repo's PRs, not this form");
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may propose a config change; @${who.login} is a ${who.role}`);
+          try {
+            if (body.confirm !== true) return json(res, 200, { ok: true, changes: planConfigChange({ root: opts.root, cfg: opts.cfg, values }), confirmed: false });
+            const gh = actionDeps().gh;
+            const r = proposeConfigChange({ root: opts.root, cfg: opts.cfg, values, by: who.login, io: { gh: (args) => gh(args) } });
+            audit(who, 'first_run.config_proposed', { changes: r.changes, branch: r.branch, url: r.url });
+            return json(res, 200, { ok: true, ...r, confirmed: true });
+          } catch (e) {
+            if (e instanceof ConfigChangeError) return refused(400, e.message);
+            return refused(500, (e as Error).message.split('\n')[0] ?? 'failed');
+          }
         }
         // The Policy form (src/policy-edit.ts): without confirm, the change these values would make (nothing written);
         // with it, that change written. The owners only; refusals and writes audited.

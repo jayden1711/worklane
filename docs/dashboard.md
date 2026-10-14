@@ -206,8 +206,11 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Tools: git, gitleaks, claude (and gh, locally) | local, server | `worklane init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened` |
 | The agents' Claude login | server | `scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step), or scripts/setup/credentials.sh <name> claude` |
 | The agents' GitHub App | server | `scripts/setup/add-project.sh <name> <owner/repo> (its app step), or scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>` |
+| Default branch known | local | `git fetch origin <branch>, then git remote set-head origin --auto` |
 | Hooks for local runs installed | local | `worklane install` |
-| Budget, models, guardrails, review levels | local, server | `a reviewed commit to .worklane/agents.yaml (daily_budget_usd, roles), guardrails.yaml and review.yaml` |
+| Owners and writers set | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Required checks named | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Budget, models, guardrails, review levels | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
 | Pre-commit secret scan | local | `worklane install --git-hooks` |
 | Guardrail fingerprints fetched | local, server | `worklane guardrails refresh` |
 | Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
