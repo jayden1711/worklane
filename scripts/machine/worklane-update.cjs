@@ -34,6 +34,22 @@
 // backups, starts the services again on the old engine and holds the commit. Otherwise it switches
 // /opt/worklane/current and restarts the instance and dashboard services, and if any of them isn't active and
 // steady within 2 minutes, it restores the migration backups, switches back and restarts again.
+// The test sandbox, after the restart: an engine can come up "active and steady" and still have lost its test runs (a
+// helper change once made every coordinator's startup sandbox check fail from inside its unit, while it passed from
+// a shell). So before switching, the updater asks each instance for its last startup verdict (`sandbox-status
+// --instance <name> --json`, the new engine's, run as the instance's user like migrate: root never opens an
+// instance's event log), and after the restart it waits, updates.json "sandbox_wait_minutes" at most (default 10),
+// for a verdict newer than the restart. An instance that passed before and fails after rolls the update back as an
+// unhealthy service does (backups, helpers, the old engine, restart) and holds the commit; the rollback's reason
+// names the instance and the check's own words, redacted. That rollback's order: stop the services, put the
+// migrations' backups back, put the old engine's root helpers back (each one the new engine replaced, byte for byte,
+// owner and mode kept), switch /opt/worklane/current back, and only then restart, so the old engine never starts
+// beside a helper of another protocol. A helper that can't be put back is the first thing the reason says.
+// An instance with no test runs, with no verdict before, or
+// already failing before, is never waited for and never rolls anything back. No verdict in time from one that
+// passed before: rolled back and held too (updates.json "sandbox_on_timeout": "hold", the default: an engine whose
+// test runs can't be shown to work isn't kept). "sandbox_on_timeout": "stand" keeps the install instead and raises
+// an incident that says the check couldn't be confirmed.
 // The canary (updates.json "canary": { "instance", "repo", "time_limit_minutes" }, docs/canary.md): a scratch-repo
 // instance that gets a tiny issue each day and after every install, filed and read with the engine's `canary` command
 // as that instance's user. It must go issue -> plan -> PR -> green checks -> merged within the time limit (default
@@ -91,6 +107,9 @@ const LOOKBACK_MAX = 100;
 const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
 const STUCK_ALERT_MIN = 120; // updates.json stuck_alert_minutes
 const STUCK_INCIDENT = 'update_stuck'; // the watchdog incident's kind (src/watchdog/incidents.ts KINDS); its key is 'engine'
+const SANDBOX_WAIT_MIN = 10; // updates.json sandbox_wait_minutes: how long a restarted instance has to say its sandbox check's result
+const SANDBOX_POLL_MS = 10_000;
+const SANDBOX_INCIDENT = 'update_sandbox_unconfirmed'; // the watchdog incident for a verdict that never came (key: the instance)
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
 const CHECK_PAGES_MAX = 10; // pages of 100 check runs read for one commit
 const IDLE_AFTER_MS = 10 * 60_000; // WHY: a commit's checks take a moment to appear; before this, "nothing running" isn't idle
@@ -583,6 +602,78 @@ function migrateCommand(inst, sha, opt = OPT) {
   return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'migrate', '--instance', inst.name, '--json']);
 }
 
+/** The new engine's `sandbox-status` for one instance, run as its coordinator user (read-only: its own event log). */
+function sandboxCommand(inst, sha, opt = OPT) {
+  return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'sandbox-status', '--instance', inst.name, '--json']);
+}
+
+/**
+ * `sandbox-status --json`'s answer as { configured, last: { ok, detail, at } | null }, or null when it gave none
+ * (an unknown state is never a verdict).
+ */
+function parseSandbox(out) {
+  const line = String(out || '').trim().split('\n').filter(Boolean).pop() || '';
+  let j;
+  try {
+    j = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!j || j.ok !== true) return null;
+  const l = j.last;
+  const last = l && typeof l.ok === 'boolean' && typeof l.at === 'string' && Number.isFinite(Date.parse(l.at)) ? { ok: l.ok, detail: String(l.detail || ''), at: l.at } : null;
+  return { configured: j.configured === true, last };
+}
+
+/** updates.json sandbox_on_timeout: "stand" only when it says so; anything else, and unset, is "hold". */
+const sandboxOnTimeout = (cfg) => (cfg && cfg.sandbox_on_timeout === 'stand' ? 'stand' : 'hold');
+
+/** updates.json sandbox_wait_minutes, in ms: a number above 0, else 10 minutes. */
+function sandboxWaitMs(cfg) {
+  const n = cfg && cfg.sandbox_wait_minutes;
+  return (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : SANDBOX_WAIT_MIN) * 60_000;
+}
+
+/**
+ * One instance's sandbox verdict across an update, from its status before the switch and now (parseSandbox's, or
+ * null), and when the restart began:
+ *   skip  nothing to compare: no test runs configured, no verdict before, or it was already failing before;
+ *   wait  it passed before, and the restarted process hasn't said yet (the last verdict is from before the restart);
+ *   pass / fail  it passed before, and the restarted process's own check passed / failed.
+ */
+function sandboxVerdict(before, after, restartedAt) {
+  if (!before || !before.configured || !before.last || before.last.ok !== true) return 'skip';
+  if (!after || !after.last || !(Date.parse(after.last.at) >= restartedAt)) return 'wait';
+  return after.last.ok ? 'pass' : 'fail';
+}
+
+/**
+ * After the restart: each instance that passed before, asked until its restarted process has said (sandboxVerdict),
+ * every SANDBOX_POLL_MS, sandboxWaitMs at most; it stops at the first failure (the update rolls back either way).
+ * Returns { passed, failed: [{ instance, detail }], unconfirmed } (instance names; detail redacted, one line).
+ */
+async function verifySandbox(deps, cfg, instances, before, sha, restartedAt) {
+  const out = { passed: [], failed: [], unconfirmed: [] };
+  if (typeof deps.sandboxStatus !== 'function') return out;
+  let left = instances.filter((i) => sandboxVerdict(before[i.name], null, restartedAt) === 'wait');
+  const deadline = deps.now() + sandboxWaitMs(cfg);
+  while (left.length) {
+    const still = [];
+    for (const inst of left) {
+      const after = deps.sandboxStatus(inst, sha);
+      const v = sandboxVerdict(before[inst.name], after, restartedAt);
+      if (v === 'fail') out.failed.push({ instance: inst.name, detail: redact(after.last.detail).replace(/\s+/g, ' ').trim().slice(0, 500) });
+      else if (v === 'pass') out.passed.push(inst.name);
+      else still.push(inst);
+    }
+    left = still;
+    if (!left.length || out.failed.length || deps.now() >= deadline) break;
+    await deps.sleep(SANDBOX_POLL_MS);
+  }
+  out.unconfirmed = left.map((i) => i.name);
+  return out;
+}
+
 /** Put one backup back, as the instance's user (the files are its own): a log loses the migrated one's WAL files. */
 function restoreCommand(inst, b) {
   return asInstance(inst, ['/bin/sh', '-c', 'cp -p -- "$1" "$2" && rm -f -- "$2-wal" "$2-shm"', '_', b.backup, b.path]);
@@ -799,6 +890,9 @@ async function update(deps, cfg, seen = {}) {
       migrated.push({ inst, made: r.made, applied: r.applied });
     }
   }
+  // Each instance's sandbox verdict as the old engine left it, read while nothing runs (verifySandbox compares).
+  const sandboxBefore = {};
+  if (typeof deps.sandboxStatus === 'function') for (const inst of instances) sandboxBefore[inst.name] = deps.sandboxStatus(inst, head);
   // The root helpers from the new engine, before it starts: it never runs with a helper of another protocol.
   let helpers;
   try {
@@ -813,10 +907,41 @@ async function update(deps, cfg, seen = {}) {
     deps.log({ event: 'rolled_back', from: head, to: current, units, reason, ...back, back: settled.h, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
     return 'rolled_back';
   }
+  const restartedAt = deps.now();
   deps.switchTo(head);
   const after = await settle();
   if (after.h === 'healthy') {
-    deps.log({ event: 'installed', from: current, to: head, units, ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
+    // Up and steady isn't working: an instance whose test sandbox check passed before must pass it again.
+    const sandbox = await verifySandbox(deps, cfg, instances, sandboxBefore, head, restartedAt);
+    const onTimeout = sandboxOnTimeout(cfg);
+    if (sandbox.failed.length || (sandbox.unconfirmed.length && onTimeout === 'hold')) {
+      const failed = [
+        ...sandbox.failed.map((f) => `rollback: the test sandbox check passed before the update and fails after it: ${f.instance}: ${f.detail}`),
+        ...(sandbox.failed.length ? [] : sandbox.unconfirmed.map((i) => `rollback: no test sandbox result from ${i} within ${Math.round(sandboxWaitMs(cfg) / 60_000)} minutes of the restart (sandbox_on_timeout: hold)`)),
+      ];
+      // As for a service that didn't come up: the migrations' backups, the old engine's helpers, the old engine.
+      if (instances.length) deps.exec('systemctl', ['stop', ...units]);
+      const unrestored = restoreAll();
+      const hb = current ? helpersBack(deps, current) : {};
+      if (current) deps.switchTo(current);
+      const back = current ? await settle() : { h: 'failed' };
+      // WHY: an old engine left with the new one's helpers has no test runs either (another protocol): that is not a
+      // clean rollback, and it goes first in the reason so the incident says it before anything else.
+      if (hb.helpers_error) failed.unshift(`rollback: the old engine's root helpers could NOT be put back (${hb.helpers_error}); its test runs are off until they are: sudo bash /opt/worklane/current/scripts/setup/test-user.sh update-helper`);
+      deps.hold({ sha: head, at: new Date(deps.now()).toISOString(), failed });
+      // INVARIANT: the reason names the instance and what its check said: the watchdog's update_rollback incident quotes it.
+      deps.log({ event: 'rolled_back', from: head, to: current, units, reason: failed.join('; '), sandbox, back: back.h, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+      return 'rolled_back';
+    }
+    try {
+      for (const i of sandbox.passed) if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SANDBOX_INCIDENT, i);
+      for (const i of sandbox.unconfirmed) {
+        if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SANDBOX_INCIDENT, i, `after the update to ${short(head)}, ${i} gave no test sandbox result within ${Math.round(sandboxWaitMs(cfg) / 60_000)} minutes of its restart; its test runs passed that check before the update`, `look at ${i}'s log for testrun.sandbox and its coordinator's journal; the update was kept (sandbox_on_timeout in updates.json)`);
+      }
+    } catch {
+      // the installed line below is the record
+    }
+    deps.log({ event: 'installed', from: current, to: head, units, ...(sandbox.passed.length || sandbox.unconfirmed.length ? { sandbox: { passed: sandbox.passed, unconfirmed: sandbox.unconfirmed } } : {}), ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
     if (!cfg.canary) return 'installed';
     // The install stands only once the canary passes: until then the backups and the old engine are kept to go back to.
     const filed = startCanary(deps, cfg, 'update', { from: current, to: head, migrated: migrated.map((m) => ({ inst: m.inst, made: m.made })) });
@@ -1089,6 +1214,13 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     syncHelpers: (sha) => syncHelpers(path.join(OPT, sha)),
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
+    sandboxStatus: (inst, sha) => {
+      try {
+        return parseSandbox(execFileSync(...splitCmd(sandboxCommand(inst, sha)), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
+      } catch (e) {
+        return parseSandbox(e && e.stdout); // WHY: a failing command still prints its answer; none is "unknown", never a verdict
+      }
+    },
     held: () => readJson(HELD),
     verdicts: () => readJson(VERDICTS),
     saveVerdicts: (map) => saveJson(VERDICTS, map, 0o644),
@@ -1150,4 +1282,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

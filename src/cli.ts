@@ -45,6 +45,7 @@ import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
+import { sandboxVerdict } from './testrun/status.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
@@ -157,9 +158,18 @@ usage: ${BRAND.cli} <command> [options]
   canary file|check --instance name --repo owner/repo [--reason update|daily] [--issue n] --json
                                    (the engine updater runs these as the canary instance's user) file the
                                    canary issue on the scratch repo, or say how far it got (docs/canary.md)
+  sandbox-status --instance name --json
+                                   (the engine updater runs this as the instance's user) whether test runs are
+                                   configured, and the test sandbox check's last result at a coordinator start
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
                                    (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
+  testrun measure --instance name --tier t[,t...] --set KEY=V1,V2,... [--sha commit] [--json]
+                                   (as the instance's coordinator user) one sandboxed test run per value of a
+                                   key tests.yaml test_run env already has, in sequence, through the same
+                                   helper, slots, lock and limits as a PR's run; prints each value's wall time,
+                                   the tiers' status, CPU and memory, and their suites' durations. Posts no
+                                   check; refused while the machine has a test run or full run going
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
@@ -417,6 +427,26 @@ async function main(argv: string[]): Promise<number> {
         const log = new EventLog(join(i.stateDir, 'events.db'));
         try {
           return out({ ok: true, ...(await checkCanary(backlog, repo, issue, log.read(0, ['issue.seen', 'issue.claimed', 'plan.posted', 'pr.opened', 'pr.closed']))) });
+        } finally {
+          log.close();
+        }
+      } catch (e) {
+        return (out({ ok: false, error: String((e as Error).message ?? e).split('\n')[0]!.slice(0, 500) }), 1);
+      }
+    }
+
+    case 'sandbox-status': {
+      // Read-only, for the engine updater: it compares the answer before and after an update (never root on the log).
+      const out = (j: unknown) => (console.log(JSON.stringify(j)), 0);
+      if (!instanceOpt) {
+        console.error(`usage: ${BRAND.cli} sandbox-status --instance <name> --json`);
+        return 2;
+      }
+      try {
+        const i = loadInstance(instanceOpt);
+        const log = new EventLog(join(i.stateDir, 'events.db'));
+        try {
+          return out({ ok: true, configured: !!i.config.tests.test_run, last: sandboxVerdict(log.read(0, ['testrun.sandbox', 'testrun.helper'])) });
         } finally {
           log.close();
         }
@@ -860,6 +890,11 @@ async function main(argv: string[]): Promise<number> {
         log.close();
       }
       return 0;
+    }
+
+    case 'testrun': {
+      const m = await import('./testrun/measure-cli.js');
+      return m.measureCommand(instanceOpt, sub, rest);
     }
 
     case 'stuck-scan': {
