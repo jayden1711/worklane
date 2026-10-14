@@ -335,14 +335,19 @@ superfan:
 
 `intake.yaml` is read again on every pass: no restart. It needs `discord.enabled`.
 
-**Owner setup.** No developer-portal step beyond the bot invite already done. There is no channel listing in the
-bot or the CLI yet, so the channel ids come from the Discord client:
+**Owner setup.** No developer-portal step beyond the bot invite already done.
 
-1. In Discord, User Settings → Advanced → turn on **Developer Mode** (once; it only adds "Copy ID" to menus).
-2. In the instance's server, create a text channel per instance (for example `#superfan-<name>`) and one for the
+1. In the instance's server, create a text channel per instance (for example `#superfan-<name>`) and one for the
    engine (`#superfan-engine`). If the server's default permissions don't let the bot's role post there, add it
    in the channel's Permissions with **View Channel** and **Send Messages**.
-3. Right-click each channel → **Copy Channel ID**.
+2. List the channel ids the bot can see, as the instance's coordinator user (it reads that instance's own bot
+   token, the one intake uses):
+   `sudo -H -u wl-<name> /usr/local/bin/<cli> discord channels --instance <name>`
+   It prints one `<server> / #<channel> <id>` line per text and announcement channel, sorted, and nothing else.
+   It is read-only: GET requests to Discord's REST API, no file, event or log written, and the token never
+   printed. Being listed doesn't mean the bot may post there: that is the permissions in step 1.
+3. (Or, without the command: in Discord, User Settings → Advanced → **Developer Mode**, then right-click each
+   channel → **Copy Channel ID**.)
 4. Add the lines above to each instance's `intake.yaml`, as its coordinator user, keeping its owner and mode:
    `sudoedit -u wl-<name> "$(getent passwd wl-<name> | cut -d: -f6)/.local/state/<cli>/instances/<name>/intake.yaml"`
    (`<cli>` is the engine's command name).

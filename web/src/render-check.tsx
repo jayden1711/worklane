@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -18,6 +18,7 @@ import { TrustView } from './components/TrustPanel';
 import { ConstraintsPanel, ConstraintsView } from './components/ConstraintsPanel';
 import { MetricsPanel, MetricsView } from './components/MetricsPanel';
 import { FlakyView } from './components/FlakyPanel';
+import { HarnessEvalsView } from './components/HarnessEvalsPanel';
 import { LearningsView } from './components/LearningsPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
@@ -28,6 +29,7 @@ import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { KeyForm, KeyPage } from './components/DashboardKey';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
@@ -106,6 +108,7 @@ export const renderConstraintsPanel = (state: State) => renderToStaticMarkup(<Co
 export const renderMetrics = (m: Metrics) => renderToStaticMarkup(<MetricsView m={m} />);
 export const renderMetricsPanel = (state: State) => renderToStaticMarkup(<MetricsPanel state={state} />);
 export const renderFlaky = (f: Flaky) => renderToStaticMarkup(<FlakyView f={f} />);
+export const renderHarnessEvals = (h: HarnessEvals) => renderToStaticMarkup(<HarnessEvalsView h={h} />);
 export const renderLearnings = (l: Learnings) => renderToStaticMarkup(<LearningsView l={l} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
@@ -114,7 +117,10 @@ export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(
 export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);
 export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean } = {}) => renderToStaticMarkup(<FirstRunView f={f} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} onRecheck={() => {}} />);
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
-export const renderSignIn = () => renderToStaticMarkup(<SignInPage />);
+export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage local={local} />);
+export const renderKeyPage = () => renderToStaticMarkup(<KeyPage />);
+export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
+export { needsKey, tryKey } from './api';
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';

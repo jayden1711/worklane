@@ -28,9 +28,10 @@ import { runMachineRequests } from './coordinator/machine-requests.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
-import { needsPlan, planBrief, type Plan } from './plan-mode.js';
+import { needsPlan, PLAN_DISALLOWED, PLAN_TOOLS, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
 import { TaskGraph } from './coordinator/task-graph.js';
+import { bodyHash, childBody, GOAL_LABEL, GOAL_SPLIT_LABEL, GOAL_SPLIT_SCHEMA, readGoalSplit, splitComment } from './goal-split.js';
 import { changedFiles } from './merge-base.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
@@ -50,9 +51,9 @@ import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
-import { hostedChangeRefusal } from './coordinator/providers.js';
+import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { SuperfanWatch } from './coordinator/superfan.js';
+import { HarnessEvals } from './coordinator/harness-evals.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
@@ -77,7 +78,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends SuperfanWatch {
+export class Coordinator extends HarnessEvals {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -131,6 +132,7 @@ export class Coordinator extends SuperfanWatch {
     await step('gardener', () => this.checkGardener(), undefined);
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
+    await step('harness evals', () => this.checkHarnessEvals(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -154,6 +156,7 @@ export class Coordinator extends SuperfanWatch {
     await this.feedbackChecksRun;
     await this.optimizeRun;
     await this.superfanRun;
+    await this.harnessEvalRun;
     await this.prBatchIdle();
   }
 
@@ -507,7 +510,7 @@ export class Coordinator extends SuperfanWatch {
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
       // Fix-forward's fix task: this instance filed it (its own event log says so), so it is worked whoever the tracker says opened it.
       const fixTask = issue.state === 'open' && issue.labels.includes('ready') && this.fixForward.isFixTask(issue.number) ? { actionable: true, why: 'fix-forward: the fix task for a red default branch' } : null;
-      const act = fixTask ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      const act = fixTask ?? this.goalChild(issue) ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
@@ -583,6 +586,72 @@ export class Coordinator extends SuperfanWatch {
 
   protected get graph(): TaskGraph {
     return (this.graph_ ??= new TaskGraph({ backlog: this.d.backlog, emit: (t, p) => this.emit(t, p), read: (types) => this.d.log.read(0, types), now: () => this.nowMs(), ...(this.d.ownershipPollMs ? { pollMs: this.d.ownershipPollMs } : {}) }));
+  }
+
+  /**
+   * WHY: a child this instance filed from a writer's goal is worked though the tracker names the bot as its author;
+   * only while it is open, labelled ready and its body is exactly as filed (an edit makes it a writer's call again).
+   */
+  private goalChild(issue: Issue): { actionable: true; why: string } | null {
+    if (issue.state !== 'open' || !issue.labels.includes('ready')) return null;
+    for (const e of this.d.log.read(0, ['goal.split'])) {
+      const p = e.payload as EventPayload<'goal.split'>;
+      const c = p.children.find((x) => x.number === issue.number);
+      if (c && c.body_hash === bodyHash(issue.body)) return { actionable: true, why: `a child of goal #${p.issue}, filed by this instance` };
+    }
+    return null;
+  }
+
+  /** INVARIANT: a goal is split once; the split is checked whole (src/goal-split.ts) before any child is filed. */
+  private async splitGoal(issue: Issue, doneWhen: DoneWhenList, path: string, owner: string): Promise<void> {
+    const n = issue.number;
+    const done = async (why: string) => {
+      await this.d.backlog.removeLabel(n, 'agent:working');
+      await this.d.backlog.addLabels(n, [GOAL_SPLIT_LABEL]);
+      this.releaseClaim(n, why);
+    };
+    if (this.d.log.read(0, ['goal.split']).some((e) => (e.payload as { issue: number }).issue === n)) {
+      await this.d.backlog.comment(n, `[${BRAND.cli}] This goal was already split; its child issues are listed above. Nothing filed again.`);
+      return await done('goal already split');
+    }
+    const workers = this.d.cfg.agents.roles.workers!;
+    const model = routeRun(this.d.cfg, 'planner');
+    const r = await this.d.runner.run({
+      env: this.projectEnv(),
+      role: 'goal-planner',
+      ...laneOf(issue),
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'goal-planner'),
+      cwd: path,
+      model,
+      allowedTools: PLAN_TOOLS,
+      disallowedTools: PLAN_DISALLOWED,
+      maxTurns: 60,
+      maxBudgetUsd: Math.min(workers.budget_usd ?? 10, Math.max(0.5, this.d.cfg.agents.daily_budget_usd - this.spentToday())),
+      jsonSchema: GOAL_SPLIT_SCHEMA,
+      stallMs: 20 * 60_000,
+      timeoutMs: this.commandTimeoutMs,
+      onStart: (p) => this.emit('run.started', { issue: n, role: 'goal-planner', model, worktree: path, pid: p, pgid: p, attempt: 1 }),
+    });
+    this.cost(n, 'goal-planner', r);
+    this.emit('run.finished', { issue: n, role: 'goal-planner', reason: r.reason, detail: r.detail.slice(0, 1000) });
+    if (r.reason !== 'succeeded') return await this.block(n, owner, `the goal split run ended: ${r.reason} (${r.detail.slice(0, 300)})`);
+    const split = readGoalSplit(r.structured);
+    if ('invalid' in split) return await this.block(n, owner, `the goal split was refused: ${split.invalid}`);
+    if ('notSplittable' in split) return await this.block(n, owner, `the goal planner did not split it: ${split.notSplittable}`);
+    const numbers = new Map<string, number>();
+    const filed: { number: number; key: string; title: string; deps: number[]; body_hash: string }[] = [];
+    for (const c of split.children) {
+      const deps = c.depends_on.map((k) => numbers.get(k)!);
+      const body = childBody(c, n, deps);
+      const num = await this.d.backlog.createIssue(c.title, body, ['ready']);
+      numbers.set(c.key, num);
+      filed.push({ number: num, key: c.key, title: c.title, deps, body_hash: bodyHash((await this.d.backlog.get(num)).body) });
+    }
+    this.emit('goal.split', { issue: n, summary: split.summary.slice(0, 2000), children: filed.map((f) => ({ number: f.number, key: f.key, depends_on: f.deps, body_hash: f.body_hash })) });
+    await this.d.backlog.comment(n, splitComment(BRAND.cli, split.summary, filed));
+    await done(`goal split into ${filed.length} child issues`);
   }
 
   /** WHY: an issue planned before (a held plan approved, a requeue) is judged by its plan's files too. */
@@ -715,6 +784,7 @@ export class Coordinator extends SuperfanWatch {
       }
 
       if (issue.labels.includes('type:investigation')) return await this.investigate(issue, doneWhen, path, taskFile, base, owner);
+      if (issue.labels.includes(GOAL_LABEL)) return await this.splitGoal(issue, doneWhen, path, owner);
 
       // size:M/L: a read-only plan first. One that touches high-risk or design-level areas waits for the owner's
       // approval (the task stops here and resumes on the answer); any other is posted and built at once.
@@ -812,7 +882,9 @@ export class Coordinator extends SuperfanWatch {
         refused = 'rejected' in change ? (change.refused ?? null) : null;
         // A hosted open model never builds L3, money-path or agent-instructions work: such a change is refused, and the
         // task goes on with the next attempt on the build's Anthropic model.
-        const hostedWhy = !('rejected' in change) && out.provider?.startsWith('hosted:') ? hostedChangeRefusal({ files: change.files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW }) : null;
+        // WHY: item 38. A cli: build rejected for any reason (a protected path among them) still moves the task to Anthropic.
+        const built = 'rejected' in change ? (out.provider?.startsWith('cli:') ? this.changeFiles(path, base, head) : null) : change.files;
+        const hostedWhy = built ? builtChangeRefusal(out.provider, { files: built, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, guardrails: this.d.cfg.guardrails }) : null;
         if (hostedWhy) {
           noOpenModel = true;
           this.emit('provider.fallback', { issue: n, role: 'worker', provider: out.provider!, reason: hostedWhy, model: buildRoute(this.d.cfg, issue.labels, attempt + 1, true).model });

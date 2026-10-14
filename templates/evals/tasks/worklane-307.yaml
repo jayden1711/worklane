@@ -1,0 +1,14 @@
+id: worklane-307
+base: 92032e6096ef703bb3220cb128583d4ed405196b
+title: "Tests: example repos run no background git maintenance"
+body: "Stop a flaky race in the test fixtures: exampleProject's repos no longer
+  start detached git maintenance or auto-gc, so a test that walks the tree can't
+  hit a lock file that vanishes mid-walk."
+done_when:
+  - test: test/helpers-marks.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 307
+  merge: 09f60340cda6c02b54d847cec43ed3202b99a32a
