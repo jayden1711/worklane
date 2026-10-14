@@ -3,6 +3,9 @@
 // Discord's Developer Mode. With --json: one JSON line with the same channels (each with its server's id) and the
 // bot's application (its id, for the invite link; whether its message-content intent is on), which is what the
 // dashboard's Discord setup reads from a child process run as the instance's user (src/intake/discord-setup.ts).
+// INVARIANT: every request goes to Discord's own REST base, the constant API (src/intake/discord.ts): no option,
+// argument, environment variable or file can name another host, because the bot token is sent there. Tests stand
+// in for Discord by injecting `fetch` in code.
 // Read-only by construction: the only request this module can make is a GET (getJson
 // takes no method), and it writes no file, event or log. The token is the instance's own (credentials.yaml
 // intake.discord_token, read by readDiscordToken as the bot reads it); it goes only into the Authorization header,
@@ -22,9 +25,8 @@ export class DiscordChannelsError extends Error {}
 
 export interface ListOptions {
   token: string;
+  /** Tests stand in for Discord here, in code. */
   fetch?: typeof fetch;
-  /** Discord's REST base; tests point it at a fake server. */
-  api?: string;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -52,7 +54,7 @@ async function getJson<T>(path: string, o: ListOptions): Promise<T> {
     let r: Response;
     try {
       // INVARIANT: method is GET and the token is in a header only, never in the URL.
-      r = await f(`${o.api ?? API}${path}`, { method: 'GET', headers: { authorization: `Bot ${o.token}`, 'user-agent': `${BRAND.cli} discord-channels` }, signal: AbortSignal.timeout(15_000) });
+      r = await f(`${API}${path}`, { method: 'GET', headers: { authorization: `Bot ${o.token}`, 'user-agent': `${BRAND.cli} discord-channels` }, signal: AbortSignal.timeout(15_000) });
     } catch (e) {
       throw fail(`could not reach Discord (GET ${path}): ${(e as Error).message}`);
     }
@@ -141,7 +143,6 @@ export interface CommandOptions {
   instance?: string | undefined;
   dir?: string;
   fetch?: typeof fetch;
-  api?: string;
   sleep?: (ms: number) => Promise<void>;
   out?: (line: string) => void;
   err?: (line: string) => void;
@@ -186,7 +187,7 @@ export async function discordChannelsCommand(o: CommandOptions = {}): Promise<nu
       err(`instance ${name}: its bot token file ${file} is empty`);
       return 1;
     }
-    const list: ListOptions = { token, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.api ? { api: o.api } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) };
+    const list: ListOptions = { token, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) };
     if (o.json) {
       const json: ChannelsJson = { application: await discordApplication(list), channels: await listDiscordChannelRows(list) };
       // INVARIANT: nothing Discord sent leaves with the token in it, a channel or application name included.

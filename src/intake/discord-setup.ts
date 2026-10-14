@@ -24,6 +24,7 @@ import type { EventLog } from '../events/log.js';
 import { CredentialsFile, setDiscordToken } from '../instance.js';
 import { currentUser, replaceFileAtomically } from '../os/index.js';
 import { instanceUnit } from '../service.js';
+import { findTool } from '../tool-path.js';
 import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import type { BotApplication, ChannelRow } from './discord-channels.js';
 import { IntakeConfig, intakeWarnings } from './report.js';
@@ -68,11 +69,18 @@ export type RunCli = (args: string[]) => Promise<{ status: number | null; stdout
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
-/** This engine's CLI, run as this process's user (an instance's dashboard runs as its coordinator user). */
-export function systemRunCli(cli = fileURLToPath(new URL('../cli.js', import.meta.url)), env: NodeJS.ProcessEnv = process.env): RunCli {
+/**
+ * The engine's CLI as a child process, run as this process's user (an instance's dashboard runs as its coordinator
+ * user): the command on this process's PATH (as `claude` and `gh` are found; on a server, the unit's PATH, which root
+ * sets, names the installed engine), else this engine's own cli.js. It is given no setting that says where to ask.
+ */
+export function systemRunCli(o: { which?: (cmd: string) => string | null; env?: NodeJS.ProcessEnv } = {}): RunCli {
+  const own = fileURLToPath(new URL('../cli.js', import.meta.url));
+  const which = o.which ?? ((cmd: string) => findTool(cmd));
   return (args) =>
     new Promise((resolve) => {
-      const p = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000, env });
+      const onPath = which(BRAND.cli);
+      const p = onPath ? spawn(onPath, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000, env: o.env ?? process.env }) : spawn(process.execPath, [own, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90_000, env: o.env ?? process.env });
       let stdout = '';
       let stderr = '';
       p.stdout.on('data', (c: Buffer) => {

@@ -564,6 +564,10 @@ test with an injection-style report.
     way. A value that isn't token-shaped is refused and nothing is stored.
   The token is in no log, event, URL, argument or response, and the dashboard's own process never opens the file:
   what needs it runs in a child process (`<cli> discord channels`), as the coordinator user.
+- Where the listing sends the token: Discord's REST API, and nowhere else. Its base URL is a constant in the code
+  (`src/intake/discord.ts`): no argument, environment variable, request, signed-in user or `intake.yaml` key can
+  name another host, and a test holds that. The dashboard runs the listing as the `<cli>` on its unit's PATH (which
+  root sets), as it finds `claude` and `gh`.
 - A project's production read credentials stay on the production service, as with `prod-read` today.
 
 ## 7. Caps (instance settings)

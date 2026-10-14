@@ -335,6 +335,8 @@ export interface Run {
 }
 
 export interface Settings {
+  /** Whether this dashboard has the First run page's Discord step (a server instance's). */
+  discordSetup?: boolean;
   configDir: string;
   project: { name: string; repo: string; landMode: string; runtime: unknown };
   owners: State['owners'];

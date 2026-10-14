@@ -1009,7 +1009,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
         // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg, routingInEffect(opts)) : settingsForViewer(opts.cfg));
+        // discordSetup: whether this dashboard has the First run page's Discord step (a server instance's only).
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome } : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
           const all = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.

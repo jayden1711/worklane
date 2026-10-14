@@ -18,7 +18,9 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { setDiscordToken } from '../src/instance.js';
 import { INTAKE_FILE, loadIntakeConfig } from '../src/intake/config.js';
-import { discordChannelsCommand, type ChannelRow } from '../src/intake/discord-channels.js';
+import { spawnSync } from 'node:child_process';
+import { discordChannelsCommand, listDiscordChannelRows, type ChannelRow } from '../src/intake/discord-channels.js';
+import { API } from '../src/intake/discord.js';
 import { applyIntake, botView, DiscordSetupError, discordSetupView, INVITE_PERMISSION_INTEGER, INVITE_PERMISSIONS, inviteUrl, lineDiff, planIntake, systemRunCli, tokenState, type RunCli } from '../src/intake/discord-setup.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
@@ -52,12 +54,19 @@ function instance(o: { token?: boolean } = {}) {
   return { dir, home, tokenFile, intake: join(home, INTAKE_FILE), credentials: join(home, 'credentials.yaml') };
 }
 
+/** Discord stood in for, in code: what the listing asks of its constant base goes to the fake server instead. */
+const toFake = (api: string): typeof fetch =>
+  ((url: string | URL | Request, init?: RequestInit) => {
+    assert.ok(String(url).startsWith(`${API}/`), `the listing asked ${String(url)}`);
+    return fetch(`${api}${String(url).slice(API.length)}`, init);
+  }) as typeof fetch;
+
 /** The child process's stand-in: the same command, in this process, against the fake Discord. */
 const cliAgainst = (api: string, dir: string): RunCli => async (args) => {
   assert.deepEqual(args, ['discord', 'channels', '--instance', 'shop', '--json']);
   const out: string[] = [];
   const err: string[] = [];
-  const status = await discordChannelsCommand({ instance: 'shop', dir, api, json: true, out: (l) => out.push(l), err: (l) => err.push(l), sleep: async () => {} });
+  const status = await discordChannelsCommand({ instance: 'shop', dir, fetch: toFake(api), json: true, out: (l) => out.push(l), err: (l) => err.push(l), sleep: async () => {} });
   return { status, stdout: out.join('\n'), stderr: err.join('\n') };
 };
 
@@ -138,10 +147,89 @@ test('discord channels --json: the application and each channel with its server 
 test('the bot view through the real child process: a failure is the command\'s own line, and bad output is refused', async () => {
   const i = instance();
   // The engine's own CLI, as the dashboard runs it; this instance has no token, so nothing reaches Discord.
-  const run = systemRunCli(engineCli, { ...process.env, [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir });
+  const env = { ...process.env, [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir };
+  const run = systemRunCli({ which: () => null, env });
   await assert.rejects(botView('shop', run), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && /instance shop has no bot token/.test(e.message));
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: '{"application":{"id":"x"},"channels":[]}', stderr: '' })), /could not be read/);
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: 'not json', stderr: '' })), /could not be read/);
+  // The command on PATH is the one run (as claude and gh are found), with exactly the listing's arguments.
+  if (posix) {
+    const bin = mkdtempSync(join(tmpdir(), 'dsetup-bin-'));
+    const tool = join(bin, BRAND.cli);
+    writeFileSync(tool, `#!/bin/sh\n[ "$*" = "discord channels --instance shop --json" ] || { echo "asked: $*" >&2; exit 64; }\nprintf '%s\\n' '{"application":{"id":"700000000000000001","name":"on PATH","message_content":true},"channels":[]}'\n`, { mode: 0o755 });
+    const b = await botView('shop', systemRunCli({ which: (c) => (c === BRAND.cli ? tool : null), env }));
+    assert.equal(b.application.name, 'on PATH');
+  }
+});
+
+test("the listing has no way to change its host: Discord's REST base is a constant, whatever the options, the arguments or the environment say", { skip: !posix && 'POSIX modes' }, async () => {
+  assert.equal(API, 'https://discord.com/api/v10');
+  const i = instance({ token: true });
+  const elsewhere = 'http://discord.example';
+  const envName = `${BRAND.envPrefix}_DISCORD_API`;
+  // Every request, with every setting someone might try (options no code path reads, environment variables):
+  // the URL asked is under the constant, and the token goes only there.
+  const asked: string[] = [];
+  const recording = (async (url: string | URL | Request, init?: RequestInit) => {
+    asked.push(String(url));
+    assert.equal((init?.headers as Record<string, string>).authorization, `Bot ${TOKEN}`);
+    const path = String(url).slice(API.length).split('?')[0];
+    const body = path === '/applications/@me' ? { id: '700000000000000001', name: 'Example Bot', flags: 0 } : path === '/users/@me/guilds' ? [{ id: ALPHA, name: 'Alpha Server' }] : [{ id: GENERAL, name: 'general', type: 0 }];
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const saved = { a: process.env[envName], b: process.env.DISCORD_API, c: process.env.DISCORD_API_BASE };
+  process.env[envName] = process.env.DISCORD_API = process.env.DISCORD_API_BASE = elsewhere;
+  try {
+    const tried = { api: elsewhere, base: elsewhere, baseUrl: elsewhere, host: 'discord.example', url: elsewhere, env: { [envName]: elsewhere } };
+    const out: string[] = [];
+    assert.equal(await discordChannelsCommand({ instance: 'shop', dir: i.dir, json: true, fetch: recording, out: (l) => out.push(l), err: (l) => assert.fail(l), ...tried } as Parameters<typeof discordChannelsCommand>[0]), 0);
+    await listDiscordChannelRows({ token: TOKEN, fetch: recording, ...tried } as Parameters<typeof listDiscordChannelRows>[0]);
+    assert.ok(asked.length >= 5);
+    for (const u of asked) assert.ok(u.startsWith('https://discord.com/api/v10/') && new URL(u).host === 'discord.com', u);
+    assert.ok(!out.join('\n').includes('discord.example'));
+  } finally {
+    for (const [k, v] of [[envName, saved.a], ['DISCORD_API', saved.b], ['DISCORD_API_BASE', saved.c]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  // No argument: the CLI takes no base in any spelling (usage, exit 2, before the token is read or anything asked).
+  for (const extra of [['--api', elsewhere], [`--api=${elsewhere}`], ['--base', elsewhere], ['--host', 'discord.example'], [elsewhere]]) {
+    const r = spawnSync(process.execPath, [engineCli, 'discord', 'channels', '--instance', 'shop', '--json', ...extra], { encoding: 'utf8', env: { ...process.env, [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir } });
+    assert.equal(r.status, 2, `${extra.join(' ')}: ${r.stderr}`);
+    assert.equal(r.stdout, '');
+  }
+  // intake.yaml can't: its schema refuses a key it doesn't know, at the service's own load and in this step.
+  for (const yaml of [`version: 1\ndiscord:\n  api: ${elsewhere}\n`, `version: 1\ndiscord_api: ${elsewhere}\n`, `version: 1\nsuperfan:\n  api: ${elsewhere}\n`]) {
+    writeFileSync(i.intake, yaml, { mode: 0o600 });
+    const loaded = loadIntakeConfig(i.intake);
+    assert.ok(loaded && 'error' in loaded, yaml);
+  }
+  fs.rmSync(i.intake);
+  assert.throws(() => planIntake({ path: i.intake, values: { 'discord.api': elsewhere }, channels: [] }), /not set here: discord\.api/);
+  // In the source: the listing builds its one URL from the constant, reads no environment and takes no base; the
+  // constant is a literal; and the dashboard's side passes the child nothing but the fixed arguments.
+  const listing = readFileSync(join(repoRoot, 'src', 'intake', 'discord-channels.ts'), 'utf8');
+  const code = listing.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.deepEqual(code.match(/\bf\(`[^`]*`/g), ['f(`${API}${path}`'], 'one request site, on the constant');
+  assert.equal((code.match(/\bfetch\(/g) ?? []).length, 0, 'no other request');
+  assert.doesNotMatch(code, /process\.env|\benv\b|\bapi\??:|o\.api|baseUrl|https?:\/\//);
+  assert.match(code, /import \{ API \} from '\.\/discord\.js';/);
+  assert.match(readFileSync(join(repoRoot, 'src', 'intake', 'discord.ts'), 'utf8'), /^export const API = 'https:\/\/discord\.com\/api\/v10';$/m);
+  const setup = readFileSync(join(repoRoot, 'src', 'intake', 'discord-setup.ts'), 'utf8');
+  assert.match(setup, /run\(\['discord', 'channels', '--instance', instance, '--json'\]\)/);
+  for (const dir of ['src', join('web', 'src')]) {
+    const hits: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const f = join(d, e.name);
+        if (e.isDirectory()) walk(f);
+        else if (/\.tsx?$/.test(e.name) && /DISCORD_API|discordApiBase/.test(readFileSync(f, 'utf8'))) hits.push(f);
+      }
+    };
+    walk(join(repoRoot, dir));
+    assert.deepEqual(hits, [], 'nothing names a Discord base setting');
+  }
 });
 
 test('setDiscordToken: credentials.yaml names the file, the rest kept, 0600; a token file others can read is refused', { skip: !posix && 'POSIX modes' }, () => {
@@ -334,6 +422,9 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
       restart: `sudo systemctl restart ${BRAND.cli}-shop.service`,
     });
     assert.equal((await call('/api/first-run/discord', writer)).json.canAct, false);
+    // Settings links to the step only where it exists: here, for the owner and writers.
+    assert.equal((await call('/api/settings', owner)).json.discordSetup, true);
+    assert.equal((await call('/api/settings', 'someone-else')).json.discordSetup, undefined);
     assert.equal((await call('/api/first-run/discord', 'someone-else')).status, 403);
     // Only the owners act: a writer can't open the paste box, list the bot's channels or change intake.yaml.
     assert.equal((await call('/api/first-run/discord/token-ask', writer, { confirm: true })).status, 403);
@@ -382,7 +473,13 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
     assert.equal((bot.json.channels as unknown[]).length, 7);
     await call('/api/first-run/discord/channels', owner);
     assert.equal(listings, 1);
-    assert.ok(d.seen.every((s) => s.method === 'GET' && s.authorized && !s.tokenInUrl));
+    // A request can't say where the listing asks: the child's arguments are fixed (the stand-in asserts them), whatever
+    // the query, a header or a body carries.
+    await new Promise((r) => setTimeout(r, 5_100));
+    const steered = await fetch(`${base}/api/first-run/discord/channels?fresh=1&api=http://discord.example&base=http://discord.example`, { headers: { authorization: `Bearer ${dash.token}`, 'x-discord-api': 'http://discord.example', ...asPerson(owner) } });
+    assert.equal(steered.status, 200);
+    assert.equal(listings, 2);
+    assert.equal((await call('/api/first-run/discord/intake', owner, { api: 'http://discord.example', values: { 'discord.api': 'http://discord.example' } })).status, 400);
 
     // intake.yaml: the review shows the diff and writes nothing; refusals write nothing.
     const values = { 'discord.enabled': true, 'discord.guild': ALPHA, 'discord.channels': [GENERAL], 'discord.asks_channel': ASKS, 'discord.dashboard_url': 'https://hub.example.test', 'superfan.channel': SUPERFAN };
@@ -437,6 +534,7 @@ test("a checkout's dashboard has no Discord step: it says why and refuses the re
     const v = (await (await fetch(`${base}/api/first-run/discord`, { headers: h })).json()) as { available: boolean; why: string };
     assert.equal(v.available, false);
     assert.match(v.why, /server instance's/);
+    assert.equal(((await (await fetch(`${base}/api/settings`, { headers: h })).json()) as { discordSetup: boolean }).discordSetup, false, 'Settings shows no Discord link on a checkout');
     assert.equal((await fetch(`${base}/api/first-run/discord/channels`, { headers: h })).status, 400);
     assert.equal((await fetch(`${base}/api/first-run/discord/intake`, { method: 'POST', headers: h, body: '{"values":{}}' })).status, 400);
   } finally {

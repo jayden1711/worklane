@@ -654,9 +654,11 @@ jobs:
           if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
       # Wizard screen 11's terminal half and its server path, on the instance add-project made (ci): credentials.sh
       # intake-discord installs the bot token for the coordinator only and writes credentials.yaml itself; the engine's
-      # own listing, run as the coordinator, reads that token and asks a fake Discord (scripts/ci/fake-discord.mjs);
-      # the real hub (wl-dash) forwards the Discord step to the instance's dashboard (wl-ci), which starts the listing
-      # as a child process of its own. Not a real token.
+      # own listing code, run as the coordinator, reads that token and asks a fake Discord (scripts/ci/fake-discord.mjs,
+      # through an injected fetch: the listing has no setting for its host); the real hub (wl-dash) forwards the Discord
+      # step to the instance's dashboard (wl-ci), which runs the listing as a child process: the CLI on its unit's PATH,
+      # here a stand-in that answers with canned JSON (scripts/ci/discord-cli-stand-in.cjs). Not a real token, and
+      # nothing in this step asks discord.com.
       - name: "credentials.sh intake-discord: the bot token on stdin, 0400 for the coordinator only, credentials.yaml written; the bot's channels as the coordinator; the Discord step through the hub"
         run: |
           h="$(getent passwd wl-ci | cut -d: -f6)"
@@ -693,15 +695,15 @@ jobs:
           nohup node scripts/ci/fake-discord.mjs 8997 "$F/discord-token" "$F/discord-requests.log" > "$F/fake-discord.log" 2>&1 &
           for _ in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8997/ && break; sleep 1; done
           : > "$F/discord-requests.log"
-          list='const m = await import("/opt/worklane/current/dist/src/intake/discord-channels.js"); process.exit(await m.discordChannelsCommand({ instance: "ci", json: true, api: "http://127.0.0.1:8997" }));'
-          (cd / && sudo -H -u wl-ci /usr/local/bin/node --input-type=module -e "$list") > "$F/channels.json"
+          list() { (cd / && sudo -H -u "$1" /usr/local/bin/node /opt/worklane/current/scripts/ci/discord-listing-fake.mjs /opt/worklane/current/dist ci http://127.0.0.1:8997); }
+          list wl-ci > "$F/channels.json"
           cat "$F/channels.json"
           jq -e '.application == {"id":"700000000000000001","name":"Example Bot","message_content":true} and (.channels | length) == 7 and (.channels | all(has("guild_id") and has("id") and has("name")))' "$F/channels.json"
           cat "$F/discord-requests.log"
           [ "$(grep -c '^GET /guilds/[0-9]*/channels authorized$' "$F/discord-requests.log")" = 2 ]
           if grep -v '^GET .* authorized$' "$F/discord-requests.log"; then echo "a request that isn't an authorized GET" >&2; exit 1; fi
           # The agent user has no instance and no token: the same listing, as it, lists nothing.
-          if (cd / && sudo -H -u wl-ci-agent /usr/local/bin/node --input-type=module -e "$list") > "$F/channels-agent.json" 2> "$F/channels-agent.err"; then echo "the agent user listed the bot's channels" >&2; exit 1; fi
+          if list wl-ci-agent > "$F/channels-agent.json" 2> "$F/channels-agent.err"; then echo "the agent user listed the bot's channels" >&2; exit 1; fi
           [ ! -s "$F/channels-agent.json" ]
           # The Discord step, through the real hub (wl-dash, break-glass) to the instance's dashboard (wl-ci): where the
           # token is, never what it is.
@@ -711,13 +713,29 @@ jobs:
           jq . "$F/discord-step.json"
           jq -e --arg tf "$tf" '.available and .canAct and .token == {"configured":true,"file":$tf,"present":true,"error":null} and .invite.integer == "309237648384" and .intake.exists == false' "$F/discord-step.json"
           jq -e '(.automation.token | test("^sudo bash /opt/worklane/[^ ]+/scripts/setup/credentials\\.sh ci intake-discord$")) and .automation.channels == "sudo -H -u wl-ci worklane discord channels --instance ci"' "$F/discord-step.json"
-          # Its listing is the engine's CLI as a child of the instance's dashboard. No fake behind the CLI (it has no
-          # switch for one), so this one asks the real Discord with a token that isn't one: whatever Discord answers, the
-          # error is the CLI's own line about Discord, which shows the child ran, as wl-ci, and read the token itself.
+          # Its listing is a child process of the instance's dashboard: the CLI on the unit's PATH, as claude and gh
+          # are found. A stand-in there (as claude's is) answers with canned JSON naming the user it ran as, so this
+          # shows the hub, the instance's dashboard and its child process wired together, as wl-ci, without the token
+          # being read and without any request to Discord.
+          n="$(wc -l < "$F/discord-requests.log")"
+          restart_dashboard() {
+            sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-ci.service
+            for _ in $(seq 1 30); do curl -sf -o /dev/null -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord && return 0; sleep 1; done
+            echo "the instance's dashboard didn't come back" >&2; return 1
+          }
+          sudo install -d -m 0755 /usr/local/lib/ci-discord
+          sudo install -m 0755 scripts/ci/discord-cli-stand-in.cjs /usr/local/lib/ci-discord/worklane
+          sudo install -d /etc/systemd/system/worklane-dashboard-ci.service.d
+          printf '[Service]\nEnvironment=PATH=/usr/local/lib/ci-discord:/usr/local/bin:/usr/bin:/bin\n' | sudo tee /etc/systemd/system/worklane-dashboard-ci.service.d/ci-discord.conf > /dev/null
+          restart_dashboard
           code="$(curl -sS -o "$F/discord-list.json" -w '%{http_code}' -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord/channels)"
           cat "$F/discord-list.json"; echo
-          [ "$code" = 502 ]
-          jq -e '.error | test("Discord")' "$F/discord-list.json"
+          [ "$code" = 200 ]
+          jq -e '.application.name == "stand-in for ci, run as wl-ci" and .invite == "https://discord.com/oauth2/authorize?client_id=700000000000000001&scope=bot&permissions=309237648384" and ([.channels[].name] == ["general","superfan-shop"])' "$F/discord-list.json"
+          [ "$(wc -l < "$F/discord-requests.log")" = "$n" ]
+          # The stand-in is taken away again: the later steps run the dashboard as it is installed.
+          sudo rm -rf /etc/systemd/system/worklane-dashboard-ci.service.d/ci-discord.conf /usr/local/lib/ci-discord
+          restart_dashboard
           # Nothing was written by looking: no intake.yaml, and the instance's log has no ask.
           sudo test ! -e "$h/.local/state/worklane/instances/ci/intake.yaml"
           # Never echoed: not in any output, the fake's log, a response, or any unit's journal.
