@@ -384,18 +384,21 @@ async function server() {
     await open('/first-run?step=policy');
     const p = `${row('policy')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('policy-form')}`);
-    await type(`${p} [data-testid="policy-field"][data-key="budget.daily_usd"] input`, '15');
+    const budget = `${p} [data-testid="policy-field"][data-key="budget.daily_usd"] input`;
+    const file = `${home(`wl-${instance}`)}/.local/state/worklane/instances/${instance}/policy.yaml`;
+    const before = sudoOk('cat', file);
+    // Below the repo's own agents.yaml budget ($20): refused at review, nothing written.
+    await type(budget, '15');
     await click(`${p} ${tid('policy-review')}`);
-    await until('the policy change shown (or a refusal)', () => evaluate(`!!${q(`${p} ${tid('policy-confirming')}`)} || !!${q(`${p} ${tid('policy-result')}`)}`), 30_000, 300);
-    const refused = await text(`${p} ${tid('policy-result')}`);
-    assert.ok(!refused, `the review: ${refused}`);
+    const no = await waitText(`${p} ${tid('policy-result')}`, /exceeds the policy budget 15; a repo can only tighten/);
+    assert.equal(sudoOk('cat', file), before, 'a refused review wrote nothing');
+    await type(budget, '30');
+    await click(`${p} ${tid('policy-review')}`);
     const change = await waitText(`${p} ${tid('policy-confirming')}`, /budget\.daily_usd/);
     await click(`${p} ${tid('policy-confirm')}`);
-    await waitText(`${p} ${tid('policy-result')}`, /./);
-    const file = `${home(`wl-${instance}`)}/.local/state/worklane/instances/${instance}/policy.yaml`;
+    await until('the policy written', () => /daily_usd: 30\b/.test(sudoOk('cat', file)), 30_000, 500);
     assert.equal(stat(file), `wl-${instance} 600`);
-    assert.match(sh('sudo', ['cat', file]).out, /daily_usd: 15\b/);
-    return { change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
+    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
   });
 
   await screen('screen 11: Discord skipped (Skip on the page; the step reads skipped)', async () => {
