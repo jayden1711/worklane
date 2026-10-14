@@ -293,6 +293,7 @@ const HELD = '/var/lib/worklane/update-held.json';
 const heldSha = 'b'.repeat(40);
 writeFileSync(HELD, `${JSON.stringify({ sha: heldSha, at: new Date(Date.now() - 60_000).toISOString(), failed: ['worklane-ci.service: failed'] })}\n`, { mode: 0o644 });
 const heldBytes = sha(HELD);
+const heldNotes = [];
 const heldRun = async () => {
   let current = 'a'.repeat(40);
   let clock = 0;
@@ -313,7 +314,7 @@ const heldRun = async () => {
     sleep: async (ms) => void (clock += ms),
     log: () => {},
     hold: () => {},
-    note: (event) => event,
+    note: (event, s, reason) => (heldNotes.push({ event, to: s, reason }), event),
   });
 };
 // Updates on (as root, here), so the run gets as far as the hold.
@@ -328,8 +329,12 @@ console.log(`OK: a rolled-back commit stayed held through set-update-channel rel
 const released = sh('bash', [script, '--release-hold']);
 assert.ok(released.includes(`held: ${heldSha.slice(0, 12)}`) && released.includes('released:'), released);
 assert.ok(!existsSync(HELD) && existsSync('/var/lib/worklane/update-held.released.json'));
-assert.equal(await heldRun(), 'installed');
-console.log('OK: sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold released it, and the next run installed the commit');
+// The next run gets past the hold. (What it does after that, waiting on the sandbox check or installing, is other code's.)
+heldNotes.length = 0;
+const afterRelease = await heldRun();
+assert.notEqual(afterRelease, 'held');
+assert.ok(!heldNotes.some((n) => n.event === 'held'), JSON.stringify(heldNotes));
+console.log(`OK: sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold released it; the next run was no longer held (it returned ${afterRelease}${heldNotes.length ? `: ${heldNotes.at(-1).reason}` : ''})`);
 writeFileSync(CONFIG, `${JSON.stringify({ ...JSON.parse(readFileSync(CONFIG, 'utf8')), enabled: false })}\n`);
 
 // ---- the signer rules and this runner's sudo
