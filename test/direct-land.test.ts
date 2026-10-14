@@ -1,6 +1,5 @@
 // land_mode direct only on a protected default branch (src/direct-land.ts): refused at start-up when GitHub doesn't
 // protect it or can't say, allowed when it does, and never a direct push once protection goes away at runtime.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';

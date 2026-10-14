@@ -1,7 +1,6 @@
 // WHY: Connect GitHub (src/gh-login.ts) runs gh's device login for the person and relays its one-time code. It must
 // show only that code and GitHub's device page, never anything token-shaped; count as done only once `gh auth status`
 // agrees; and through the dashboard, run for the owners only, audited without the code.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';

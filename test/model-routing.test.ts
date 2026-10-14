@@ -1,6 +1,5 @@
 // Model routing: which model each kind of run uses, decided in code, overridable in agents.yaml, capped by the
 // instance; a build escalates to the high-risk model after two failed attempts.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

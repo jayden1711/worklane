@@ -3,7 +3,6 @@
 // in memory), before it records or touches anything; no other code starts a run around it. The paths that start runs
 // hold a refused one and run it once there is room: PR runs here; the flaky re-run, fix-forward's probes, the deploy
 // gate, previews and batches in their own test files.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';

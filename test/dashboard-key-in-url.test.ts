@@ -1,7 +1,6 @@
 // A dashboard key never travels in a URL (src/dashboard-key-url.ts): every route of the local dashboard, the hub's
 // sign-in port, its break-glass port and the terminal's upgrade refuses a request whose query carries one, with a
 // 401 that never repeats it, even when the right key is in the header too. The printed URLs carry no key.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

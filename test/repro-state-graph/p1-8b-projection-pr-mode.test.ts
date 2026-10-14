@@ -1,5 +1,4 @@
 // P1 item 8b: the projection must not show a PR-mode task whose PR was opened as "blocked".
-import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { project } from '../../src/projection.js';

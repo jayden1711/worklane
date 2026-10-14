@@ -1,6 +1,5 @@
 // Intake per instance, off by default (src/intake/wire.ts): no intake.yaml, no intake; Discord off or no token,
 // no connection; each instance reads only its own home. Discord is a fake socket; nothing reaches the network.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';

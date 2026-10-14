@@ -1,6 +1,5 @@
 // src/tool-path.ts: a tool local init installed under the prefix (<prefix>/bin) is found there even when that folder
 // isn't on PATH, by doctor, init's checklist, the secret scans and the pre-commit hook; PATH still comes first.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

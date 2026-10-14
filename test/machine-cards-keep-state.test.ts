@@ -3,7 +3,6 @@
 // the cards, never a remount that wipes the inputs and the message. Checked in a real Chrome, against a real
 // dashboard, by typing and then logging one more machine change. And a look that fails (the network, a 5xx) keeps
 // the last good data on screen with a note, while a refusal (401, 403) still hides the panel (web/src/refresh.tsx).
-import './isolate.js';
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';

@@ -1,7 +1,6 @@
 // The config follows the default branch (src/config/live.ts): a config change merged to main reaches the running
 // coordinator on its next tick, read from git and never from its checkout's working tree; an invalid one is never
 // applied (the last good one stays, and why is recorded); a restart-only setting keeps its running value.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

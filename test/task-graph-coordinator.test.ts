@@ -1,6 +1,5 @@
 // The coordinator's dependency holds ("Depends on #n") and per-task file ownership (plan files), end to end
 // over a real git remote and a file backlog.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

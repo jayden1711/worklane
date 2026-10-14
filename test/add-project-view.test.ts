@@ -1,7 +1,6 @@
 // The setup console's Add project, on the server (src/console/add-project.ts, POST /api/machine/add-project): who
 // may submit, what is checked, that a submit only records a machine request (and the audit), and that the view
 // follows the real run: the coordinator's add_project.step events and asks, in the script's order.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

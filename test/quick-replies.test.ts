@@ -2,7 +2,6 @@
 // or a decision-thread question wakes a pass at once (no tick, no intake pull), a burst makes one pass at a time,
 // typing shows from accept until the reply, and the caps still hold. Discord is the real adapter on a fake socket
 // and fetch; the model is a FakeRunner. The login locks are in test/login-start-lock.test.ts.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

@@ -1,6 +1,5 @@
 // test_run.select (src/testrun/select.ts): repo keeps a project's own planner as it was, imports runs the engine's
 // import graph over a JS/TS repo and hands {tests} only the test files the change can affect, off selects nothing.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

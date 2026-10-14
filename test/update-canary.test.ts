@@ -2,7 +2,6 @@
 // on a scratch-repo instance, and it must go issue -> plan -> PR -> green checks -> merged within the time limit.
 // After an install, a canary that fails or runs out of time rolls the engine back (the migrations' backups, the old
 // engine, the services restarted), holds the commit and raises a watchdog incident; one that passes keeps the update.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';

@@ -1,6 +1,5 @@
 // CHANGELOG.md from the PRs merged between releases: grouped as features, fixes, security and guardrails, with a
 // separate "Guardrail changes" section listing every PR that changed a guardrail file.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';

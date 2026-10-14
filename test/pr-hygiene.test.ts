@@ -1,5 +1,4 @@
 // Stale PR hygiene: the pure decisions (src/pr-hygiene.ts).
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { abandoned, carriedHead, countsOf, heldReasons, HYGIENE_MARKER, hygieneDue, hygieneLine, hygieneWeek, isStale, lastActivity, mergeInBase, supersededBy } from '../src/pr-hygiene.js';

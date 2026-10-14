@@ -1,7 +1,6 @@
 // `intake check` (src/intake/check.ts) and doctor's intake line: an instance's intake.yaml is validated with the
 // coordinator's own loader, on demand. Valid: what is on, and nothing else from the file. Invalid: every schema
 // error with its path, exit 1 (doctor: a failing line). No file: intake is off, exit 0.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';

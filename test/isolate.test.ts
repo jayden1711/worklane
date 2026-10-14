@@ -1,14 +1,15 @@
 // The suite runs clean on a machine that already runs the engine (issue #312): every test process has a temporary
 // home, state dir and slot directory (test/isolate.ts), and a server a test stops keeps its port held by the test
-// (test/held-port.ts). Checked here end to end, with a live machine's environment and its fixed ports taken.
-import { homeMoved, isolatedEnv, testMachine } from './isolate.js';
+// (test/held-port.ts). Checked here end to end, with a live machine's environment and its fixed ports taken. The
+// isolation is preloaded by every runner, never imported per file: a new test file gets it without doing anything.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT } from '../src/dashboard-hub.js';
 import { LOCAL_DASHBOARD_PORT } from '../src/dashboard.js';
@@ -17,19 +18,95 @@ import { instancesDir } from '../src/instance.js';
 import { childEnv, slotsDir, stateDir } from '../src/os/index.js';
 import { toolPrefix } from '../src/tool-path.js';
 import { repoRoot } from './helpers.js';
+import { homeMoved, isolatedEnv, TEST_PRELOAD, testMachine } from './isolate.js';
 
 const testDir = join(repoRoot, 'test');
 const walk = (d: string): string[] => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
 const testFiles = walk(testDir).filter((f) => f.endsWith('.test.ts'));
 const inside = (p: string) => !relative(testMachine, p).startsWith('..');
 
-test('every test file imports the isolation before anything else', () => {
-  assert.ok(testFiles.length > 100);
-  const missing = testFiles.filter((f) => {
-    const first = readFileSync(f, 'utf8').split('\n').find((l) => /^import\b/.test(l)) ?? '';
-    return !/^import (\{[^}]*\} from )?'(\.\/|(\.\.\/)+)isolate\.js';$/.test(first);
-  });
-  assert.deepEqual(missing.map((f) => relative(repoRoot, f)), [], "start each with import './isolate.js'; (test/isolate.ts)");
+/** Every file a runner of the suite can live in: the npm scripts, the workflows, the scripts, the project's checks. */
+function runnerFiles(): string[] {
+  const under = (d: string) => (existsSync(join(repoRoot, d)) ? walk(join(repoRoot, d)) : []);
+  return [join(repoRoot, 'package.json'), ...under('.github/workflows'), ...under('scripts'), ...under('.worklane/checks')].filter((f) => /\.(json|ya?ml|mjs|cjs|js|sh)$/.test(f));
+}
+
+test('every way the suite runs preloads the isolation: npm test, the CI shards, the touched-tests check', () => {
+  // `node [flags] --test` in a shell line or an npm script: the flags must hold the preload.
+  const shell = /\bnode((?:\s+--?[\w-]+(?:=\S+|\s+\.\/\S+)?)*)\s+--test(?=[\s"'\\]|$)/g;
+  const preload = TEST_PRELOAD.join(' ');
+  const seen: string[] = [];
+  const bad: string[] = [];
+  for (const f of runnerFiles()) {
+    const text = readFileSync(f, 'utf8');
+    const rel = relative(repoRoot, f).split(sep).join('/');
+    // Not in a comment (`// … node --test runs`, `# …`, ` * …`): only what runs.
+    for (const line of text.split('\n').filter((l) => !/^\s*(\/\/|\/?\*|#)/.test(l))) {
+      for (const m of line.matchAll(shell)) {
+        seen.push(rel);
+        if (!m[1]!.includes(preload)) bad.push(`${rel}: ${m[0]}`);
+      }
+    }
+    // A runner in JavaScript: node's argv with '--test' in it, right after the preload.
+    for (const line of text.split('\n').filter((l) => /['"]--test['"]/.test(l))) {
+      seen.push(rel);
+      const declared = text.includes(`const PRELOAD = ['--import', './dist/test/isolate.js'];`);
+      if (!(declared && /\.\.\.PRELOAD,\s*['"]--test['"]/.test(line))) bad.push(`${rel}: ${line.trim()}`);
+    }
+  }
+  for (const want of ['package.json', '.github/workflows/ci.yml', '.worklane/checks/touched-tests.mjs']) assert.ok(seen.includes(want), `found the runner in ${want}`);
+  assert.deepEqual(bad, [], `run the suite as node ${preload} --test (test/isolate.ts)`);
+});
+
+/** A test file of its own, in a directory of its own, as a new test file would be. */
+function fixtureTest(name: string, body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'isolate-fixture-'));
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
+  writeFileSync(join(dir, name), body);
+  return join(dir, name);
+}
+
+async function runTests(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }> {
+  const p = spawn(process.execPath, args, { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d: Buffer) => (out += d.toString()));
+  p.stderr.on('data', (d: Buffer) => (out += d.toString()));
+  const code = await new Promise<number | null>((ok) => p.on('close', (c) => ok(c)));
+  return { code, out };
+}
+
+test('a new test file that imports nothing of ours still runs on a temporary home, state and slots', async () => {
+  const live = { home: mkdtempSync(join(tmpdir(), 'live-home-')), state: mkdtempSync(join(tmpdir(), 'live-state-')), slots: mkdtempSync(join(tmpdir(), 'live-slots-')) };
+  const file = fixtureTest(
+    'new.test.js',
+    [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "import { homedir } from 'node:os';",
+      "test('isolated', () => {",
+      `  assert.notEqual(process.env[${JSON.stringify(`${BRAND.envPrefix}_STATE_DIR`)}], ${JSON.stringify(live.state)}, 'state dir');`,
+      `  assert.notEqual(process.env.AGENT_SLOTS_DIR, ${JSON.stringify(live.slots)}, 'slots');`,
+      `  assert.equal(process.env[${JSON.stringify(`${BRAND.envPrefix}_INSTANCE`)}], undefined, 'instance');`,
+      ...(homeMoved ? [`  assert.notEqual(homedir(), ${JSON.stringify(live.home)}, 'home');`] : []),
+      '});',
+    ].join('\n'),
+  );
+  const env = { ...childEnv(), HOME: live.home, AGENT_SLOTS_DIR: live.slots, [`${BRAND.envPrefix}_STATE_DIR`]: live.state, [`${BRAND.envPrefix}_INSTANCE`]: 'shop' };
+  const preloaded = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', file], env);
+  assert.equal(preloaded.code, 0, preloaded.out);
+  const bare = await runTests(['--test', '--test-reporter=tap', file], env);
+  assert.notEqual(bare.code, 0, `the same file without the preload sees the machine (so the check above means something):\n${bare.out}`);
+});
+
+test('a test file run without the isolation stops at once, before any test', async () => {
+  const helpers = pathToFileURL(join(repoRoot, 'dist', 'test', 'helpers.js')).href;
+  const file = fixtureTest('forgot.test.js', [`import { repoRoot } from ${JSON.stringify(helpers)};`, "import { test } from 'node:test';", "test('ran', () => { console.log('TEST BODY RAN', repoRoot.length); });"].join('\n'));
+  const bare = await runTests(['--test', '--test-reporter=tap', file], childEnv());
+  assert.notEqual(bare.code, 0);
+  assert.match(bare.out, /ran without the test isolation: run it as node --import \.\/dist\/test\/isolate\.js --test/);
+  assert.doesNotMatch(bare.out, /TEST BODY RAN/);
+  const preloaded = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', file], childEnv());
+  assert.equal(preloaded.code, 0, preloaded.out);
 });
 
 /** The bodies of a file's finally blocks: where a test puts things back. */
@@ -111,11 +188,8 @@ test(
     const servers = await holdPorts([LOCAL_DASHBOARD_PORT, HUB_PORT, HUB_BREAK_GLASS_PORT, ...Array.from({ length: 500 }, (_, i) => 4400 + i)]);
     try {
       const files = ['dashboard-hub', 'push-hook-guard', 'frozen-guard'].map((n) => join(repoRoot, 'dist', 'test', `${n}.test.js`));
-      const p = spawn(process.execPath, ['--test', '--test-reporter=tap', ...files], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
-      let out = '';
-      p.stdout.on('data', (d: Buffer) => (out += d.toString()));
-      p.stderr.on('data', (d: Buffer) => (out += d.toString()));
-      const code = await new Promise<number | null>((ok) => p.on('close', (c) => ok(c)));
+      // As npm test and CI run them: with the preload.
+      const { code, out } = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', ...files], env);
       const failed = out.split('\n').filter((l) => /^\s*not ok\b/.test(l));
       assert.equal(code, 0, `${failed.join('\n')}\n${out.slice(-4000)}`);
       assert.match(out, /^# fail 0$/m);

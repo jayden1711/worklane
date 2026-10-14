@@ -1,7 +1,6 @@
 // An unattended engine update never leaves instances down: the updater migrates every instance with the new
 // engine (as its coordinator user, after a backup) between the build and the restart; a failed migration rolls
 // everything back (old engine, restored files, services up), is recorded, held, and shown to the owner.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';

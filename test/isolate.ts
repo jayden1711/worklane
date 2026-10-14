@@ -1,6 +1,8 @@
 // Every test process gets a machine of its own: a temporary home, state dir and agent-slot directory, and none of
-// the machine's own engine settings (issue #312). Each *.test.ts imports this first (test/isolate.test.ts checks), so
-// it runs before any other module reads the environment.
+// the machine's own engine settings (issue #312). Every way the suite runs preloads it (TEST_PRELOAD below: npm test,
+// the CI shards, the touched-tests check; test/isolate.test.ts checks each), so a test file gets it without importing
+// anything, before any of its modules reads the environment. A test file's process without it stops at once
+// (test/helpers.ts).
 //
 // WHY: the suite runs on machines that already run the engine (the release runs `npm test` on one). Through the
 // defaults, a test read and wrote the person's own state dir (~/.local/state/<cli>, ~/Library/Application Support/<cli>),
@@ -64,3 +66,10 @@ process.on('exit', () => {
     // best effort: a temporary directory left behind is harmless
   }
 });
+
+/** How a runner loads this: node's own flags, before --test (relative to the repo root, where every runner runs). */
+export const TEST_PRELOAD = ['--import', './dist/test/isolate.js'] as const;
+
+/** Set in this process once the isolation ran; test/helpers.ts refuses to load in a test file's process without it. */
+export const ISOLATED = Symbol.for('test-isolation');
+(globalThis as Record<symbol, unknown>)[ISOLATED] = testMachine;

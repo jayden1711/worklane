@@ -2,7 +2,6 @@
 // wait for the host's deploy of that commit, smoke-test production, and on a failed check roll the host back to the
 // previous deploy-branch commit's deployment, raise an incident, post to ops, and never move to that commit again.
 // Real git (a bare remote and a clone); the host's GraphQL API and production are fake HTTP servers on this machine.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

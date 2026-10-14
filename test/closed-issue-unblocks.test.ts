@@ -1,6 +1,5 @@
 // An owner-held issue closed by hand on GitHub (no event of the loop's own) drops out of "Waiting on you", the
 // projection's blocked list and the board: the coordinator records the close when its reconcile step sees it.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeRunner, type RunRequest } from '../src/runner.js';

@@ -1,7 +1,6 @@
 // Research on demand, wired: a worker or evaluator that returns a research request gets the researcher's cited
 // answer (within the day's caps and the per-task limit) and its task resumes with it; the asking agent never
 // gets web access, and a resumed run is not another attempt.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

@@ -1,7 +1,6 @@
 // Render checks for the web UI: every page, rendered on the server from the
 // state a real dashboard serves for the seeded demo project, still shows its
 // data; decisions are still answerable only where the server says so.
-import './isolate.js';
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';

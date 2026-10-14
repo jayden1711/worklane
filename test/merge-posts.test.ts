@@ -3,7 +3,6 @@
 // intent, redacted. A direct push (no PR) gets no post from it; intake.yaml discord.post_merges: false turns it off.
 // Discord and GitHub are never called: a fake chat source records each post, a fake API answers for GitHub, and the
 // default branch is a real git remote.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';

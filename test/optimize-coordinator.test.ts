@@ -1,6 +1,5 @@
 // The weekly optimization pass, wired end to end: a baseline on main, a normal task on the strongest model, the
 // benchmark again on its change, and a PR only for a median better than main's by more than the noise.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

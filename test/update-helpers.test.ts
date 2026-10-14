@@ -1,6 +1,5 @@
 // The updater keeps the root helpers (scripts/machine/, installed by the setup scripts) in step with each engine it
 // installs: a differing one is replaced atomically with the installed file's owner and mode; sudoers is never touched.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';

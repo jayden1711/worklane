@@ -2,7 +2,6 @@
 // run holds the login's run lock, agent runs still go one at a time, and no two claude starts on one login (the auth
 // check and claude's start, where a due token is refreshed) ever overlap. A stand-in claude through the real
 // CliRunner.
-import './isolate.js';
 import { STDIN_LINE } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,7 +1,6 @@
 // Voice intake and spoken approvals, on the server (src/voice.ts, src/intake/voice.ts, the dashboard's routes and the
 // one decide path): owners only, from a focused and visible tab, approvals only and never of an exclusion, audited
 // "by voice", off by default, and a spoken idea taken through the very intake function a Discord message goes through.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

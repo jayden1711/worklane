@@ -2,7 +2,6 @@
 // harness's own green, non-protected PRs merge in one pass of the PR watch, up to tests.yaml land.parallel_merges;
 // protected paths still wait for the owner; a moved head is never merged; GitHub's "not up to date" refusal (strict
 // protection) is put off with a backoff, never retried in a loop; merge subjects carry no handle.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';

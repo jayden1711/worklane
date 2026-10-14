@@ -1,6 +1,5 @@
 // WHY: item 38. Through the build loop's real call site (src/coordinator.ts): a cli:codex build whose change is above
 // L1, touches a protected path, a money path or agent instructions is thrown out, and the next attempt runs on Anthropic.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

@@ -1,6 +1,5 @@
 // Feedback routing: CI failures, conflicts and writers' reviews on the harness's own PR go back to the session that
 // wrote the change (claude --resume), with a fresh session only when that one is gone. src/coordinator/fix-runs.ts.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

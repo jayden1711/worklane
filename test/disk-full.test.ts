@@ -1,7 +1,6 @@
 // A full disk never kills the coordinator (src/events/log.ts buffer, src/disk-guard.ts). The "full disk" here is
 // SQLite's own: PRAGMA max_page_count at the database's size makes every write that grows it fail with the same error
 // the machine saw (ERR_SQLITE_ERROR, errcode 13, "database or disk is full").
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';

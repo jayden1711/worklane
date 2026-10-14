@@ -1,7 +1,6 @@
 // What a viewer (read on the instance's repo) gets of the event log and the settings: an allowlist of event
 // types and fields on /api/events, the Activity feed and the live stream; the project part of /api/settings.
 // Writers and the owner get everything.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';

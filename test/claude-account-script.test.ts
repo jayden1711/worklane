@@ -4,7 +4,6 @@
 // install_claude_token writes each user's login. Checked: the pause and the wait with its timeout, the token for every
 // agent and eval user at 0600 and in no output, `claude auth status` as each user, an instance whose check fails left
 // paused, the rerun, the token from a dashboard, and status.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

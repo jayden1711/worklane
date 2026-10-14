@@ -1,6 +1,5 @@
 // PR batches in the reports: the projection's batches, the Board's Landing column and cards, the digest, and what a
 // viewer sees of them (their status only, src/viewer-events.ts).
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

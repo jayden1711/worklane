@@ -1,7 +1,6 @@
 // A test run's TMPDIR: short enough for a Unix socket under it, the test user's own 0700 directory, never one that
 // was already there, and wiped with the run. Regression: every browser suite in a sandboxed run died with Chrome's
 // FATAL "Socket path too long: /var/lib/<cli>-test/<name>/runs/<id>/tmp/org.chromium.Chromium.XXXXXX/SingletonSocket".
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

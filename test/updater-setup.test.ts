@@ -3,7 +3,6 @@
 // The signers file is the root of trust for release updates, so most of this is what a dashboard session can't do:
 // add a signer (it can only stage one; scripts/setup/updates.sh --confirm-signer adds it, as root), follow main, or
 // weaken how the updater verifies (its signature check and its exact-commit build, each with a guard test here).
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

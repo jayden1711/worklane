@@ -1,6 +1,5 @@
 // WHY: the owner's rules for every first-run screen: it can be skipped, run again later (from Settings), and done
 // without the page by a command or config key that the screen and docs/dashboard.md both name.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

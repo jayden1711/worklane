@@ -2,7 +2,6 @@
 // questions, the draft and the setup PR's merge. Checked end to end against a bare repo standing in for GitHub and a
 // stand-in gh, through a real dashboard: each step confirmed and owners only, and the checkout gets its config only
 // by fast-forwarding to the merged default branch.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';

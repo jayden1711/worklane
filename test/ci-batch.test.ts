@@ -1,6 +1,5 @@
 // The slow checks on main in batches, and the bisect of a red batch (scripts/ci/batch.mjs, run by
 // .github/workflows/ci-batch.yml): the pure decisions, then whole runs of the script against a fake GitHub.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

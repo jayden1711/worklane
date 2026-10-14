@@ -1,6 +1,5 @@
 // Budget blocks retry on their own once their window passes, up to a cap; auth blocks never do. A rate limit isn't a
 // block: the instance pauses until its reset and requeues the task (src/usage-limit.ts), one run per window.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeRunner, type RunRequest } from '../src/runner.js';

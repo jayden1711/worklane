@@ -2,7 +2,6 @@
 // commands detected from its files; every ambiguity a question with its choices, never a guess; each command run on
 // the default branch in a scratch worktree, a failing one a question; the draft valid against the schema; the
 // scaffold proposed from its own branch as a PR (a stand-in gh, a bare repo as GitHub), the default branch never pushed.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

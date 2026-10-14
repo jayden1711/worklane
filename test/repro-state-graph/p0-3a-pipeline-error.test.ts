@@ -1,5 +1,4 @@
 // P0 item 3a: an uncaught error in the issue pipeline leaves a comment on the issue, an event, and the claim released.
-import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { claimRef } from '../../src/claims.js';

@@ -1,5 +1,4 @@
 // A PR-mode task: in review while its PR is open, done once the merge closes the issue; never "blocked".
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

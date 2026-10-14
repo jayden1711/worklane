@@ -1,7 +1,6 @@
 // The engine and its root-owned sandbox helper speak one protocol: an engine that finds an older helper (one installed
 // before an engine update changed its arguments) starts no test run, raises one incident and posts a check that says
 // how to fix it; a setup step that fails says which, with its stderr, in the check.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

@@ -1,5 +1,4 @@
 // Plans cite decisions: the plan contract's Decisions section, checked against the decision records that exist.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';

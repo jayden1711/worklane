@@ -1,6 +1,5 @@
 // Add project's repo picker (wizard screen 5, src/setup/repo-picker.ts): an account's repos the agents' App can be
 // installed on, from GitHub (a fake one here), and the dashboard route that serves them to owners and writers only.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

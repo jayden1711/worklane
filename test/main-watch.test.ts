@@ -1,6 +1,5 @@
 // The main watch (src/main-watch.ts) over a real git remote and a fake GitHub: which commits on the default branch
 // are accounted for, at most one API call a minute, and a last checked commit that survives a restart.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

@@ -2,7 +2,6 @@
 // admins and writers that can never file, answer, change or start anything, whose runs read only the checkout, and
 // that stops at its own daily cap. Discord is a fake source (or the real adapter on a fake socket); the model is a
 // FakeRunner.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

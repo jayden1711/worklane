@@ -1,7 +1,6 @@
 // #180: role prompts are judged on held-out cases the prompt writer never saw. Two scores per role (visible and
 // held-out, before → after); the held-out one decides. The case writer sees only the role's contract; no agent
 // run can read the held-out store.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, statSync } from 'node:fs';

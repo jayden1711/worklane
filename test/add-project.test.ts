@@ -3,7 +3,6 @@
 // a failure stopping the run with its exact retry, every instance on the machine kept when the machine helper and
 // the dashboards are rerun, and the Claude token never echoed. Also the name and repo checks, the same in the
 // script, the helper and the engine.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

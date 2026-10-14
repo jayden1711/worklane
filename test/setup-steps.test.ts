@@ -2,7 +2,6 @@
 // its groups; each detector says done from the real state and not done without it; doctor and the dashboard's
 // first-run page show the same states; and the page's Start shows its change, needs a confirmation, is audited, and
 // is the owners' alone.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

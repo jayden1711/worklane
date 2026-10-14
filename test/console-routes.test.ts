@@ -1,4 +1,3 @@
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';

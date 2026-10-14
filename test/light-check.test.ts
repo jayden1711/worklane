@@ -1,4 +1,3 @@
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { importsOf, LIGHT_CHECK_WINDOW_MS, lightCheckPlan, lightCheckWait, lightOutcome } from '../src/light-check.js';

@@ -1,6 +1,5 @@
 // PR-mode batching wired into the coordinator's PR watch and merge policy: a PR ready on its fast check is batched,
 // merges only after its batch passes (both checks on its head), and a high-risk one still waits for the owner.
-import './isolate.js';
 import { addStartGate, clearStartGates, passGate } from '../src/testrun/gate.js';
 import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';

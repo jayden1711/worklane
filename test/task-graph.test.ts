@@ -1,4 +1,3 @@
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DependencyGate, dependencyReason, dependsOn, findCycle } from '../src/task-graph.js';

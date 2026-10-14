@@ -1,5 +1,4 @@
 // Every role's instructions are a contract: Own, Sources, Output, Approval, Failure, Never.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CONTRACT_PARTS, contractProblems, FAILURE_RULE } from '../src/role-contract.js';

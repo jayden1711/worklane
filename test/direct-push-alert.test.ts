@@ -2,7 +2,6 @@
 // lands without a PR is posted to the Discord ops channel at once, mentioning the owners, once per commit; a PR's
 // merge is never; and config.yaml main_watch.direct_push_alert: false turns it off. Discord itself is never called:
 // a fake chat source records each post, and the real adapter is checked with a fake fetch.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';

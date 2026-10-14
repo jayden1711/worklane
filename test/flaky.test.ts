@@ -2,7 +2,6 @@
 // commit first. Green on the re-run: flaky, quarantined, one issue per test however often it's seen, and nothing red
 // for the harness (no stop, no revert, no fix). Red again: real. A quarantined test blocks again after N passes in a
 // row or an owner's clear; the flake rate is flaky re-runs over red runs.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

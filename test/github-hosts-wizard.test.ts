@@ -1,7 +1,6 @@
 // The wizard's two additions to the code that talks to GitHub hold to the same rule as the rest (issue #377,
 // test/github-hosts.test.ts): the hub's setup mode (the sign-in App's manifest flow) and Add project's repo picker
 // name GitHub's hosts as constants, and read no environment variable that could name another.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

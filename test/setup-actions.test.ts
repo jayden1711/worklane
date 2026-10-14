@@ -1,7 +1,6 @@
 // WHY: the first-run page's Fix actions (src/setup-actions.ts) change the machine, so each is checked end to end
 // through the dashboard: its plan shown first, refused without a confirmation or for anyone but the owners, audited,
 // and the step it fixes turns done on the next check.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

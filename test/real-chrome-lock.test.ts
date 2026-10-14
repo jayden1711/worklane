@@ -1,7 +1,6 @@
 // One real Chrome at a time across test files (test/browser-helpers.ts): node --test runs files in parallel
 // processes, and headless Chromes started together on a small CI runner starved each other (main went red with
 // "timed out after 20000 ms waiting for Chrome to open its DevTools port").
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

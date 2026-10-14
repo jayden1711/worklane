@@ -1,5 +1,4 @@
 // A failed staging deploy names its issue and releases the task, so relabelling the issue `ready` requeues it.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agents, BUG, coordinator, fixture, skip } from './repro-state-graph/harness.js';

@@ -4,7 +4,6 @@
 // fix-forward opens a fix task whose PR goes through the normal gates, the culprit attached. A fix that is green
 // merges (the only PR that may while the branch is red) and the branch is green again: no revert. A fix whose CI
 // fails: the culprit's revert PR, for a human.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

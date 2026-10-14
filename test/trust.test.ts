@@ -1,7 +1,6 @@
 // Trust, measured (src/merge-metrics.ts trustMetrics, src/trust.ts): each number from a fixture event log, the
 // recommendation's thresholds, what a viewer sees, the weekly digest, and that nothing here can change slots, caps
 // or merges (read-only measurement, docs/design.md's stage-3 waiver of 2026-10-13).
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

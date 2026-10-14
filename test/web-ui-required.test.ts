@@ -2,7 +2,6 @@
 // the UI before each shard's tests and sets CI_REQUIRE_WEB=1 there, which makes a missing UI or Chrome fail the test
 // file (test/browser-helpers.ts). Before this, the UI was built after the tests, and every such test reported
 // "# SKIP web UI not built" in CI.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { globSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';

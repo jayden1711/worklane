@@ -1,6 +1,5 @@
 // The git layer of the default-branch guard (src/push-guard.ts): the pre-push hook in a checkout and in the
 // coordinator's own hooks dir refuses any push to the default branch, records it, and lets task branches through.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

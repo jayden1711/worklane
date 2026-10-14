@@ -1,7 +1,6 @@
 // Loop control (src/coordinator/loop-control.ts): the attempt cap from agents.yaml (default 8), a read-only
 // reflection before each retry, a reassign after 3 identical failures in a row, and the per-issue budget (an incident
 // at 85%, stopped at 100%).
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';

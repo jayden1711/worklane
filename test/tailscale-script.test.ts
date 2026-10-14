@@ -5,7 +5,6 @@
 // fetched key is exactly the pinned one, and asks apt for the pinned version with signatures required; `up` takes no
 // auth key and its login link reaches one 0400 file and nothing else; serve forwards 443 to the hub's sign-in port
 // only; public-url reruns dashboards.sh with the hub's own settings; every other argument list is refused.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

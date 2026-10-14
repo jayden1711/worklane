@@ -1,7 +1,6 @@
 // The machine watchdog (src/watchdog/): every trigger raises its incident once and resolves it once; posts are
 // rate-limited, carry no secret and link to the incident on the Health page; one coordinator posts per machine;
 // GET /api/health/incidents gives a viewer the allowlisted fields only.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

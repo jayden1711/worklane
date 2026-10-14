@@ -3,7 +3,6 @@
 // reverted at once, a fix that turns the branch green (no revert), failed fixes up to max_attempts then the revert,
 // the merge hold, and the ops posts once each within the limit. The coordinator wiring, with real git, is in
 // test/fix-forward-coordinator.test.ts.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

@@ -1,7 +1,6 @@
 // The stuck-run guard wired in: the runner stops a stuck run only in mode on, the run record keeps the streak,
 // the coordinator watches the worker and evaluators in the instance's mode (dry-run by default) and records each
 // verdict, and a stuck stop is a failed attempt.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';

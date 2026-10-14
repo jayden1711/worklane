@@ -1,7 +1,6 @@
 // `npx <pkg> init <repo>` (src/npx-engine.ts): run from npx's cache, local init installs the engine under the prefix
 // from the package npx is running, then hands over to that install; anywhere else it carries on as it is. Against a
 // stand-in npm here; the release workflow runs the real thing from the packed tarball.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

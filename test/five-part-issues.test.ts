@@ -1,5 +1,4 @@
 // Issues the harness drafts itself have five parts, and the contract parser checks all five.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkDraftedIssue, DRAFT_FORMAT, ISSUE_PARTS, issueParts, parseContract } from '../src/backlog/types.js';

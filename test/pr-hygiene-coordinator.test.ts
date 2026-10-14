@@ -2,7 +2,6 @@
 // a stale PR of the harness's gets main merged in (and then merges once green), a conflicting one goes to the
 // conflict path (labelled, never forced), an abandoned one is closed with a comment (branch kept), and a person's
 // PR, a held PR and a PR left to an owner are never touched. Each pass records its counts.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';

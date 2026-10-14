@@ -1,7 +1,6 @@
 // P0 item 4: blocks for the budget or auth keep the claim (block(..., release_=false)). They must retry on their own
 // once the window resets, and relabelling the issue `ready` must requeue them (isTerminal is false for them). A rate
 // limit is no longer a block at all: the instance pauses until its reset and the task is requeued (src/usage-limit.ts).
-import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeRunner, type RunRequest } from '../../src/runner.js';

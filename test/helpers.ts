@@ -6,6 +6,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { agentSettingsPath } from '../src/agent-settings.js';
 import { agentSettings } from '../src/install.js';
 
+// INVARIANT (#312): a test file runs only with the isolation preloaded (test/isolate.ts, `--import
+// ./dist/test/isolate.js` before --test, as npm test and CI run it). Without it the test would read and write this
+// machine's own home, state and slots, so its process stops here, before any test runs.
+if (/\.test\.js$/.test(process.argv[1] ?? '') && !(globalThis as Record<symbol, unknown>)[Symbol.for('test-isolation')]) {
+  throw new Error(`${process.argv[1]} ran without the test isolation: run it as node --import ./dist/test/isolate.js --test <file> from the repo root (or npm test)`);
+}
+
 export const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 export const engineCli = join(repoRoot, 'dist', 'src', 'cli.js');
 

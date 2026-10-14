@@ -1,4 +1,3 @@
-import './isolate.js';
 import { test } from 'node:test';
 import { tiersFor } from '../src/testrun/run.js';
 import assert from 'node:assert/strict';

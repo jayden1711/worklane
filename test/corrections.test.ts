@@ -1,4 +1,3 @@
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chatCorrections, correctionBrief, correctionsFromEvents, correctionsView, fingerprint, prRejection, readProposal, reviewCorrections } from '../src/corrections.js';

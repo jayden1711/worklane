@@ -1,7 +1,6 @@
 // updates.sh --add-check: names appended to an existing /etc/worklane/updates.json's required_checks, by
 // scripts/setup/updates-root.cjs add-checks, and nothing else changed. Here with its fixed paths pointed into a temp
 // root; the CI step "updates.sh --add-check, as root" in ci-slow.yml runs the real script on real systemd as root.
-import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
