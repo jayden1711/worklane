@@ -132,6 +132,7 @@ export class Coordinator extends HarnessEvals {
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('harness evals', () => this.checkHarnessEvals(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
+    await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -152,6 +153,7 @@ export class Coordinator extends HarnessEvals {
     await this.gardenerRun;
     await this.feedbackChecksRun;
     await this.optimizeRun;
+    await this.superfanRun;
     await this.harnessEvalRun;
     await this.prBatchIdle();
   }
@@ -235,6 +237,7 @@ export class Coordinator extends HarnessEvals {
     this.d.deployGate?.stop();
     this.d.previews?.stop();
     this.prBatchStop();
+    this.superfanStop();
   }
 
   /** What a shutdown still waits on: the tick step, tasks and live runs (named in the log when it runs out of time). */
