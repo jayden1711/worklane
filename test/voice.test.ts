@@ -11,6 +11,7 @@ import { FileBacklog } from '../src/backlog/file.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { startDashboard } from '../src/dashboard.js';
+import { answerDecision } from '../src/decide.js';
 import { EventLog } from '../src/events/log.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
 import { submitVoiceIntake, VoiceIntake } from '../src/intake/voice.js';
@@ -90,6 +91,27 @@ test('by voice a decision is only approved, never rejected or answered otherwise
     assert.equal(s.log.read(0, ['decision.answered']).length, 0);
   } finally {
     await s.d.close();
+  }
+});
+
+test('answerDecision itself refuses a voice approval from a non-owner, or of an excluded item, whatever route calls it', () => {
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'voice-decide-')), 'events.db'));
+  try {
+    log.append('decision.asked', asked('d-q', 'question', 3), 'c');
+    log.append('decision.asked', asked('d-money', 'plan', 6), 'c');
+    log.append('plan.posted', { issue: 6, plan: {}, held: true, reasons: ['high-risk: money-path (src/pay.ts)'], comments_at: 0, decision: 'd-money' }, 'c');
+    const call = (id: string, role: 'owner' | 'writer') => answerDecision(log, { id, answer: 'approve', who: { login: role === 'owner' ? OWNER : WRITER, role, via: 'session' }, instance: null, repo: 'example/repo', voice: true });
+    const writer = call('d-q', 'writer');
+    assert.equal(writer.ok, false, 'a writer approves nothing by voice, even one they may click');
+    assert.equal(!writer.ok && writer.status, 403);
+    const excluded = call('d-money', 'owner');
+    assert.equal(excluded.ok, false, 'an excluded item is refused by voice, even for an owner');
+    assert.match(!excluded.ok ? excluded.error : '', /not approvable by voice/);
+    assert.equal(log.read(0, ['decision.answered']).length, 0, 'nothing recorded');
+    // Without the voice flag, the same calls are the ordinary click path.
+    assert.equal(answerDecision(log, { id: 'd-q', answer: 'approve', who: { login: WRITER, role: 'writer', via: 'session' }, instance: null, repo: 'example/repo' }).ok, true);
+  } finally {
+    log.close();
   }
 });
 
