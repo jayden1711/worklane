@@ -1,12 +1,19 @@
 #!/usr/bin/env node
-// CI only (.github/workflows/ci-batch.yml, every 30 minutes and whenever a ci-slow.yml run ends): the slow checks
-// on main, in batches, and the bisect of a red batch. Each run is one short look; it keeps no state of its own (what
-// ran is read back from GitHub: ci-slow.yml's runs, and the check runs on main's commits).
-//   1. Batch: when main's newest commit has had no batch (no ci-slow.yml run on main for it, but a cancelled one)
-//      and none is queued or running, it starts one there: workflow_dispatch on main, job=all. A dispatched run's
-//      check runs land on the commit it runs on, so that commit gets the slow checks the engine updater requires.
-//      A commit the batch skipped never gets them, and the updater never installs it.
-//   2. Bisect: when the newest finished batch is red, the first-parent commits between the last green batch and it
+// CI only (.github/workflows/ci-batch.yml: whenever the fast checks finish on a push to main, whenever a ci-slow.yml
+// batch or bisect run ends, and every 30 minutes as a backstop, since GitHub drops scheduled runs): the slow checks
+// on main, in batches, and the bisect of a red batch. It keeps no state of its own (what ran is read back from
+// GitHub: ci-slow.yml's runs, this workflow's runs, and the check runs on main's commits).
+//   1. Bisect and 2. cleanup, below, first: one short look.
+//   3. Batch: when main's newest commit has had no batch (no ci-slow.yml run on main for it, but a cancelled one),
+//      none is queued or running, and the last one started SPACING_MS (30 minutes) ago or more, it starts one there:
+//      workflow_dispatch on main, job=all. A dispatched run's check runs land on the commit it runs on, so that
+//      commit gets the slow checks the engine updater requires. A commit the batch skipped never gets them, and the
+//      updater never installs it. When only the spacing is in the way, the run waits it out and looks again (no
+//      later event is promised to: main may stay quiet, and the schedule may be dropped), then starts the batch on
+//      whatever main's newest commit is by then. Runs of this workflow take turns by run id (olderRuns): the oldest
+//      decides, a newer one lets it finish first, or leaves it to it when it is waiting out the spacing. So two
+//      runs never start a batch each, and only one sits waiting.
+//   1. Bisect: when the newest finished batch is red, the first-parent commits between the last green batch and it
 //      are the candidates. The failing job's result on each is its check run there (a batch's, or an earlier
 //      bisect step's). Binary search: the next candidate is the untested one nearest the middle of the commits
 //      between the newest good one and the oldest bad one; it runs that job alone on that commit (a ci-bisect/<sha>
@@ -14,7 +21,7 @@
 //      on the candidate, never on main's tip). When a bad commit's first parent is good, that commit is the culprit:
 //      an issue, and a comment on its PR. Commits that couldn't be tested (a skipped or cancelled run) are passed
 //      over; if only those are left, the issue names the range instead.
-//   3. Cleanup: a ci-bisect/ branch whose run has finished is deleted.
+//   2. Cleanup: a ci-bisect/ branch whose run has finished is deleted.
 // Usage: node scripts/ci/batch.mjs [--dry-run]   (GITHUB_TOKEN, GITHUB_REPOSITORY; --dry-run changes nothing)
 
 import { appendFileSync } from 'node:fs';
@@ -30,6 +37,14 @@ export const SLOW_JOBS = {
   'auth-probe-real-users': ['Claude sign-in probe (real users)'],
 };
 export const SLOW_WORKFLOW = 'ci-slow.yml';
+export const BATCH_WORKFLOW = 'ci-batch.yml';
+/** INVARIANT: two batches on main never start closer together than this (the rule was only the schedule's before). */
+export const SPACING_MS = 30 * 60_000;
+/** WHY: the job's timeout (ci-batch.yml) must never cut a wait short: a cancelled check on main's tip stops the updater. */
+export const MAX_WAIT_MS = 35 * 60_000;
+/** How long a newer run gives an older one to finish its look, and how often it asks. */
+export const TURN_WAIT_MS = 60_000;
+export const TURN_POLL_MS = 10_000;
 export const BISECT_PREFIX = 'ci-bisect/';
 /** At most this many first-parent commits between the last green batch and the red one are bisected. */
 export const MAX_CANDIDATES = 50;
@@ -41,15 +56,77 @@ const isBatch = (r, branch) => r.event === 'workflow_dispatch' && r.head_branch 
 
 /**
  * Whether to start a batch on `head`, from ci-slow.yml's runs: not while one is queued or running on `branch`
- * (concurrency would only queue it behind), and not when `head` has had one already (a cancelled one doesn't count).
+ * (concurrency would only queue it behind), not when `head` has had one already (a cancelled one doesn't count), and
+ * not within SPACING_MS of the last batch's start (its run's created_at; a cancelled one doesn't count). When only
+ * the spacing is in the way, waitMs says how long until it isn't.
  */
-export function batchToStart(runs, head, branch = 'main') {
+export function batchToStart(runs, head, branch = 'main', now = Date.now()) {
   const batches = runs.filter((r) => isBatch(r, branch));
   const busy = batches.find((r) => r.status !== 'completed');
   if (busy) return { start: false, why: `batch ${busy.html_url ?? busy.id} on ${short(busy.head_sha)} is ${busy.status}` };
   const done = batches.find((r) => r.head_sha === head && r.conclusion !== 'cancelled');
   if (done) return { start: false, why: `${short(head)} has had its batch (${done.conclusion}, ${done.html_url ?? done.id})` };
+  const last = batches.filter((r) => r.conclusion !== 'cancelled').sort(byCreated)[0];
+  const waitMs = last ? Date.parse(last.created_at) + SPACING_MS - now : 0;
+  if (waitMs > 0) return { start: false, waitMs, why: `${short(head)} has had no batch, but the last one (${short(last.head_sha)}) started ${Math.max(0, Math.floor((now - Date.parse(last.created_at)) / 60_000))} minutes ago: at most one every ${SPACING_MS / 60_000}` };
   return { start: true, why: `${short(head)} has had no batch` };
+}
+
+/** The runs of this workflow still queued or running that are older than run `runId` (run ids only grow). */
+export async function olderRuns(gh, R, runId) {
+  const ids = [];
+  for (const status of ['in_progress', 'queued']) {
+    const runs = (await gh.get(`${R}/actions/workflows/${BATCH_WORKFLOW}/runs?status=${status}&per_page=100`)).workflow_runs ?? [];
+    for (const r of runs) if (r.status !== 'completed' && Number(r.id) < runId) ids.push(Number(r.id));
+  }
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+/**
+ * Step 3, the batch: decide (batchToStart), and start it, or wait out the spacing and decide again. `first` is what
+ * main() read already ({ head, runs }). Before starting or waiting, a run with a run id gives way to older runs of
+ * this workflow: it lets them finish (TURN_WAIT_MS at most) and reads again; one still going after that is waiting
+ * out the spacing itself, and the batch is left to it. Returns what it did: started, nothing, yielded or gave-up.
+ */
+export async function batchStep({ gh, R, branch, runId = 0, first = null, dry = false, say, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  const began = now();
+  for (let state = first; ; state = null) {
+    const head = state ? state.head : (await gh.get(`${R}/commits/${encodeURIComponent(branch)}`)).sha;
+    const runs = state ? state.runs : (await gh.get(`${R}/actions/workflows/${SLOW_WORKFLOW}/runs?event=workflow_dispatch&per_page=100`)).workflow_runs ?? [];
+    const b = batchToStart(runs, head, branch, now());
+    say(`batch: ${b.why}`);
+    if (!b.start && !(b.waitMs > 0)) return 'nothing';
+    if (runId) {
+      let older = await olderRuns(gh, R, runId);
+      if (older.length) {
+        for (let waited = 0; older.length && waited < TURN_WAIT_MS; waited += TURN_POLL_MS) {
+          await sleep(TURN_POLL_MS);
+          older = await olderRuns(gh, R, runId);
+        }
+        if (older.length) {
+          say(`batch: left to the older run ${older[0]} of ${BATCH_WORKFLOW}, which is waiting to start it`);
+          return 'yielded';
+        }
+        continue; // WHY: the older run may have started the batch: read again before deciding.
+      }
+    }
+    if (b.start) {
+      await gh.write('POST', `${R}/actions/workflows/${SLOW_WORKFLOW}/dispatches`, { ref: branch, inputs: { job: 'all', sha: '' } });
+      say(`batch: started on ${branch} (${short(head)})`);
+      return 'started';
+    }
+    const mins = Math.ceil(b.waitMs / 60_000);
+    if (dry) {
+      say(`batch: would wait ${mins} minute(s) and look again`);
+      return 'nothing';
+    }
+    if (now() + b.waitMs - began > MAX_WAIT_MS) {
+      say(`batch: not waiting ${mins} more minute(s): past this run's ${MAX_WAIT_MS / 60_000}; a later run starts it`);
+      return 'gave-up';
+    }
+    say(`batch: waiting ${mins} minute(s), then looking again`);
+    await sleep(b.waitMs);
+  }
 }
 
 /** The newest finished batch (cancelled ones aside), and the newest green batch older than it on another commit. */
@@ -155,30 +232,27 @@ async function main() {
   const branch = info.default_branch;
   const head = (await gh.get(`${R}/commits/${encodeURIComponent(branch)}`)).sha;
   const runs = (await gh.get(`${R}/actions/workflows/${SLOW_WORKFLOW}/runs?event=workflow_dispatch&per_page=100`)).workflow_runs ?? [];
-  const say = [];
+  // WHY: each line goes out as it is known: the batch step may wait out the spacing, and the bisect's lines shouldn't wait with it.
+  const say = (line) => {
+    console.log(line);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
+  };
 
-  // 1. Batch.
-  const b = batchToStart(runs, head, branch);
-  say.push(`batch: ${b.why}`);
-  if (b.start) {
-    await gh.write('POST', `${R}/actions/workflows/${SLOW_WORKFLOW}/dispatches`, { ref: branch, inputs: { job: 'all', sha: '' } });
-    say.push(`batch: started on ${branch} (${short(head)})`);
+  // 1. Bisect, and 2. cleanup: a bisect branch whose run has finished.
+  // WHY: an error here must not cost main its batch (the updater installs only batched commits): say it and go on.
+  try {
+    const refs = ((await gh.get(`${R}/git/matching-refs/heads/${BISECT_PREFIX}`)) ?? []).map((r) => ({ name: r.ref.replace(/^refs\/heads\//, ''), sha: r.object.sha }));
+    for (const line of await bisect({ gh, R, repoUrl, runs, refs, branch })) say(line);
+    for (const ref of refs) {
+      const its = runs.filter((r) => r.head_branch === ref.name);
+      if (its.length && its.every((r) => r.status === 'completed')) await gh.write('DELETE', `${R}/git/refs/heads/${ref.name}`);
+    }
+  } catch (e) {
+    annotate(e);
   }
 
-  // 2. Bisect.
-  const refs = ((await gh.get(`${R}/git/matching-refs/heads/${BISECT_PREFIX}`)) ?? []).map((r) => ({ name: r.ref.replace(/^refs\/heads\//, ''), sha: r.object.sha }));
-  say.push(...(await bisect({ gh, R, repoUrl, runs, refs, branch })));
-
-  // 3. Cleanup: a bisect branch whose run has finished.
-  for (const ref of refs) {
-    const its = runs.filter((r) => r.head_branch === ref.name);
-    if (its.length && its.every((r) => r.status === 'completed')) await gh.write('DELETE', `${R}/git/refs/heads/${ref.name}`);
-  }
-
-  for (const s of say) console.log(s);
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, say.map((s) => `- ${s}\n`).join(''));
-  }
+  // 3. Batch: last, since it may wait.
+  await batchStep({ gh, R, branch, runId: Number(process.env.GITHUB_RUN_ID) || 0, first: { head, runs }, dry, say });
 }
 
 async function bisect({ gh, R, repoUrl, runs, refs, branch }) {
@@ -252,10 +326,12 @@ async function bisect({ gh, R, repoUrl, runs, refs, branch }) {
   return say;
 }
 
+// WHY: never a red check on main's tip: this run's check lands there, and the engine updater refuses a commit with
+// any red check. An error shows as an annotation; the next run looks again.
+function annotate(e) {
+  console.log(`::error title=ci batch::${String(e && e.message ? e.message : e).replace(/\r?\n/g, ' ')}`);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((e) => {
-    // Never a red check on main's tip: this run's check lands there, and the engine updater refuses a commit with any
-    // red check. The error shows as an annotation; the next run (30 minutes at most) looks again.
-    console.log(`::error title=ci batch::${String(e && e.message ? e.message : e).replace(/\r?\n/g, ' ')}`);
-  });
+  main().catch(annotate);
 }

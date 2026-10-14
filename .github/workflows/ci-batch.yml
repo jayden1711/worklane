@@ -1,28 +1,45 @@
 name: ci batch
-# The slow checks on main, in batches, and the bisect of a red batch (scripts/ci/batch.mjs has the logic): every
-# 30 minutes, it starts ci-slow.yml on main's newest commit when that commit has had no batch and none is running;
-# when the newest finished batch is red, it runs the failing job on the first-parent commits since the last green
-# batch, one at a time (binary search), and names the culprit in an issue and on its PR. It also looks whenever a
-# ci-slow.yml batch or bisect run ends, so a bisect moves on without waiting for the next half hour.
+# The slow checks on main, in batches, and the bisect of a red batch (scripts/ci/batch.mjs has the logic): it starts
+# ci-slow.yml on main's newest commit when that commit has had no batch, none is running, and the last one started
+# 30 minutes ago or more (when only that is in the way, the run waits it out, then looks again); when the newest
+# finished batch is red, it runs the failing job on the first-parent commits since the last green batch, one at a
+# time (binary search), and names the culprit in an issue and on its PR.
+# It looks:
+#   - whenever the fast checks (ci.yml) finish on a push to main, so a new main commit gets its batch without waiting
+#     for the schedule: GitHub runs schedules late or not at all (once in 75 minutes, when this was every half hour's
+#     only start), and the engine updater installs only batched commits;
+#   - whenever a ci-slow.yml batch or bisect run ends, so a bisect moves on at once;
+#   - every 30 minutes, as a backstop.
 #
-# This run's own check (ci batch) lands on main's newest commit, as every scheduled run's does; the script never
-# fails it (an error is an annotation), since the engine updater refuses a commit with any red check.
+# This run's own check (ci batch) lands on main's newest commit, as every scheduled and workflow_run run's does; the
+# script never fails it (an error is an annotation), since the engine updater refuses a commit with any red check.
 on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
   workflow_run:
-    workflows: [ci slow]
+    workflows: [ci slow, ci]
     types: [completed]
 permissions:
   contents: read
 jobs:
   batch:
     name: ci batch
-    # A ci-slow.yml run on a pull request ends here too (workflow_run can't filter by event): nothing to do then.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch'
+    # INVARIANT: a run that a pull request's workflow run started does nothing (workflow_run can't filter by event,
+    # so every PR's ci.yml and ci-slow.yml run ends here too). Only a batch or bisect run (ci-slow.yml by
+    # workflow_dispatch, which only someone with write access can start) and ci.yml's run on a push to this
+    # repository's default branch get past this line. Nothing from the triggering run is ever checked out or run.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.event == 'workflow_dispatch'
+      || (github.event.workflow_run.name == 'ci'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == github.event.repository.default_branch
+          && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # INVARIANT: longer than the script ever waits (MAX_WAIT_MS, 35 minutes, plus its turn and the setup steps;
+    # test/ci-batch.test.ts): a timeout would leave a cancelled check on main's tip, which the updater refuses.
+    timeout-minutes: 45
     permissions:
       actions: write # start ci-slow.yml runs
       contents: write # make and delete the ci-bisect/<sha> branches a bisect step runs on
