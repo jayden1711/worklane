@@ -81,7 +81,8 @@ export interface TestRunDeps {
   host: RunHost;
   /** The coordinator's clone, where `sha` is (fetched already). */
   repo: string;
-  log: EventLog;
+  /** Only append is used: a measure (./measure.ts) passes a sink that keeps its runs' events out of the instance's log. */
+  log: Pick<EventLog, 'append'>;
   actor: string;
   /** Where each tier's full log goes: the instance's private state. */
   logDir: string;

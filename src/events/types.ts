@@ -676,6 +676,22 @@ export const EventSchemas = {
   'testrun.checks_permission': z.strictObject({ level: z.enum(['write', 'read', 'none', 'unknown']), detail: z.string().max(500) }),
   /** The sandbox's own check (the helper's `check`): no run starts until it passed. */
   'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000) }),
+  /**
+   * WHY: `<cli> testrun measure` (src/testrun/measure.ts), one tests.yaml test_run env value per sandboxed run. Its own
+   * type, never testrun.queued/started/finished: the PR runs, the batcher and the test-run view never read it.
+   */
+  'testrun.measure': z.strictObject({
+    id: z.string(),
+    sha,
+    key: z.string(),
+    phase: z.enum(['started', 'run_started', 'run_finished', 'recovered', 'stopped', 'finished']),
+    value: z.string().nullable(),
+    run_id: z.string().nullable(),
+    ok: z.boolean().nullable(),
+    wall_ms: z.number().int().nonnegative().nullable(),
+    tiers: z.array(z.strictObject({ tier: z.string(), status: z.enum(['passed', 'failed', 'timed out', 'not run']), duration_ms: z.number().int().nonnegative(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable() })),
+    detail: z.string().max(2000),
+  }),
   // the pre-deploy gate (src/deploy-gate/): a branch fast-forwarded only to default-branch commits green on every gate tier
   /** The gate's tiers ran on a default-branch commit: ok only when every one passed; `failed` names the rest. */
   'deploy_gate.verdict': z.strictObject({ sha, ok: z.boolean(), failed: z.array(z.string()), reason: z.string().max(2000), run: z.string().nullable() }),

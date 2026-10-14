@@ -586,6 +586,52 @@ jobs:
             /opt/worklane-test/docker/docker ps -aq --filter label=worklane.test-run > "$RUNNER_TEMP/left"
           if [ -s "$RUNNER_TEMP/left" ]; then echo "containers left:" >&2; cat "$RUNNER_TEMP/left" >&2; exit 1; fi
           echo "nothing left"
+      - name: testrun measure, as wl-ci, through the real helper and sudoers rule (two values of a test_run env key, in sequence)
+        run: |
+          # The CLI whole (it needs every dependency, not only zod) and the example project, world-readable for wl-ci.
+          cp -r node_modules/. "$T/node_modules/"
+          cp -r examples "$T/"
+          # WHY: only what this step added: $T/ids and $T/ids.db belong to wl-ci, so a chmod of all of $T fails on them.
+          chmod -R a+rX "$T/node_modules" "$T/examples"
+          cat > "$T/measure.sh" <<'EOF'
+          set -euo pipefail
+          t="$1"
+          export WORKLANE_INSTANCES_DIR="$HOME/measure-instances"
+          r="$HOME/measure-repo"
+          cp -r "$t/examples/basic" "$r"
+          # A tier that prints one stopwatch line per lane, as a runner that times its suites does.
+          printf '%s\n' 'test_run: {"tiers": [{"name": "lanes", "kind": "fast", "command": "for i in $(seq $LANES); do echo \"⏱ suite-$i: 0.$i\"s; done; sleep 1"}], "env": {"LANES": "1"}}' >> "$r/.worklane/tests.yaml"
+          g=(git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+          "${g[@]}" init -q -b main && "${g[@]}" add -A && "${g[@]}" commit -q -m measure
+          "$t/node" "$t/dist/src/cli.js" instance init ci --repo "$r" --github example-org/example-shop > /dev/null
+          printf 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: pr\n' > "$WORKLANE_INSTANCES_DIR/ci/policy.yaml"
+          cli() { "$t/node" "$t/dist/src/cli.js" testrun measure --instance ci "$@"; }
+          # Refused, and nothing started: not a key of test_run env, and a key the engine sets.
+          for bad in NOPE=1 DATABASE_URL=postgres://x; do
+            rc=0; cli --tier lanes --set "$bad" 2> "$HOME/refused.log" || rc=$?
+            echo "--set $bad: exit $rc: $(cat "$HOME/refused.log")"
+            [ "$rc" = 2 ] && grep -q '^refused: .*nothing was started$' "$HOME/refused.log"
+          done
+          [ ! -e "$WORKLANE_INSTANCES_DIR/ci/state/test-runs-measure" ]
+          cli --tier lanes --set LANES=1,2 | tee "$HOME/measure.log"
+          grep -E '^LANES=1  wall [0-9.]+s  ok  lanes passed in [0-9.]+s \(cpu [0-9.]+s, [0-9.]+ cores avg, mem peak [0-9]+ MB\); suites: suite-1 0\.1s  \[run measure-' "$HOME/measure.log"
+          grep -E '^LANES=2  wall [0-9.]+s  ok  lanes passed in [0-9.]+s \(cpu [0-9.]+s, [0-9.]+ cores avg, mem peak [0-9]+ MB\); suites: suite-2 0\.2s, suite-1 0\.1s  \[run measure-' "$HOME/measure.log"
+          # The instance's log has its own event type only: no testrun.queued/started/finished a PR run would read.
+          types="$("$t/node" -e 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); console.log([...new Set(db.prepare("select type from events").all().map((r) => r.type))].join(","))' "$WORKLANE_INSTANCES_DIR/ci/state/events.db")"
+          echo "event types recorded: $types"
+          [ "$types" = testrun.measure ]
+          grep -o 'run measure-[0-9a-f-]*' "$HOME/measure.log" | cut -d' ' -f2 > "$t/measure-ids"
+          EOF
+          chmod a+r "$T/measure.sh"
+          sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$T/measure-ids"
+          sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
+            bash -c 'cd "$HOME" && bash "$1/measure.sh" "$1"' _ "$T"
+          # Each value's run is wiped, seen as root.
+          [ "$(wc -l < "$T/measure-ids")" = 2 ]
+          while IFS= read -r id; do
+            if sudo test -e "/var/lib/worklane-test/ci/runs/$id"; then echo "run $id's directory is still there" >&2; exit 1; fi
+          done < "$T/measure-ids"
+          echo "both measure runs wiped"
       - name: the sandbox's units and Docker, on failure
         if: failure()
         run: |
