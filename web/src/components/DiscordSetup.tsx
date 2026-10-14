@@ -4,8 +4,9 @@
 // The token never reaches this page: the list comes from a child process on the instance that reads it itself.
 // Closing the step without confirming changes nothing.
 import { useCallback, useEffect, useState } from 'react';
-import { changeDiscordIntake, getDiscordBot, getDiscordSetup, openDiscordTokenAsk, type DiscordBot, type DiscordChannel, type DiscordFormValue, type DiscordIntakePlan, type DiscordSetup } from '../api';
+import { changeDiscordIntake, getDiscordBot, getDiscordSetup, isRefusal, openDiscordTokenAsk, type DiscordBot, type DiscordChannel, type DiscordFormValue, type DiscordIntakePlan, type DiscordSetup } from '../api';
 import { AskCard } from '../pages/Setup';
+import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
 import { ago, Badge, Button, cx } from './ui';
 
 const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-surface px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
@@ -328,18 +329,25 @@ export function DiscordSetupView({ v, bot = null, botError = null, loadingBot = 
   );
 }
 
-/** The step, live: its state from the instance, and the bot's view when an owner asks for it. */
+/**
+ * The step, live: its state from the instance, and the bot's view when an owner asks for it. A refusal says why, as
+ * before; a look that fails otherwise keeps the last good step on screen, with what was typed (web/src/refresh.tsx).
+ */
 export function DiscordSetupPanel({ onChanged }: { onChanged?: () => void }) {
-  const [v, setV] = useState<DiscordSetup | { error: string } | null>(null);
+  const [loaded, setLoaded] = useState<Loaded<DiscordSetup>>(NOTHING_YET);
+  const [refused, setRefused] = useState<string | null>(null);
   const [bot, setBot] = useState<DiscordBot | null>(null);
   const [botError, setBotError] = useState<string | null>(null);
   const [loadingBot, setLoadingBot] = useState(false);
   const load = useCallback(() => {
-    getDiscordSetup()
-      .then(setV)
-      .catch((e: Error) => setV({ error: e.message }));
+    getDiscordSetup().then(
+      (d) => (setRefused(null), setLoaded({ data: d, stale: null })),
+      (error: unknown) => (setRefused(isRefusal(error) ? (error as Error).message : null), setLoaded((p) => afterLoad(p, { error }))),
+    );
   }, []);
   useEffect(load, [load]);
+  useRetry(loaded, load);
+  const v = loaded.data;
   const loadBot = (fresh: boolean) => {
     setLoadingBot(true);
     setBotError(null);
@@ -348,19 +356,22 @@ export function DiscordSetupPanel({ onChanged }: { onChanged?: () => void }) {
       .catch((e: Error) => setBotError(e.message))
       .finally(() => setLoadingBot(false));
   };
-  if (!v) return <p className="text-[12.5px] text-ink-3">Loading…</p>;
-  if ('error' in v) return <p className="text-[12.5px] text-red">Can't load the Discord step: {v.error}</p>;
+  if (refused !== null) return <p className="text-[12.5px] text-red">Can't load the Discord step: {refused}</p>;
+  if (!v) return loaded.stale === null ? <p className="text-[12.5px] text-ink-3">Loading…</p> : <p className="text-[12.5px] text-red">Can't load the Discord step: {loaded.stale}, retrying</p>;
   return (
-    <DiscordSetupView
-      v={v}
-      bot={bot}
-      botError={botError}
-      loadingBot={loadingBot}
-      onLoadBot={loadBot}
-      onChanged={() => {
-        load();
-        onChanged?.();
-      }}
-    />
+    <div className="space-y-1">
+      <StaleNote stale={loaded.stale} />
+      <DiscordSetupView
+        v={v}
+        bot={bot}
+        botError={botError}
+        loadingBot={loadingBot}
+        onLoadBot={loadBot}
+        onChanged={() => {
+          load();
+          onChanged?.();
+        }}
+      />
+    </div>
   );
 }

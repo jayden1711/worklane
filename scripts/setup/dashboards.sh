@@ -304,7 +304,7 @@ echo
 echo "sign-in: $public_url (people sign in with GitHub; their role on each instance is their permission on its repo)"
 echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS and HTTPS certificates on; docs/dashboard.md)"
 echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
-echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/?t=<the token in $hub_token_file>"
+echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/ (the page asks for the key once: it is in $hub_token_file; never put it in a URL)"
 echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"
 if [ -s "$MACHINE_OWNERS" ]; then echo "machine owners (may change the slot caps and engine updates): $(cat "$MACHINE_OWNERS")"; else echo "machine owners: none yet, so only the break-glass may change the machine; rerun with --machine-owner <login>"; fi
 echo "logs: journalctl -u worklane-dashboard-hub.service; journalctl -u worklane-dashboard-<name>.service"

@@ -76,7 +76,7 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
     const feed = (await (await fetch(`${x.base}/api/runs/${RUN}/feed?after=-1`, { headers: x.h })).json()) as { items: { seq: number; kind: string }[]; ended: boolean };
     assert.deepEqual(feed.items.map((i) => i.kind), ['start', 'thinking', 'text', 'tool', 'tool_result']);
     assert.equal(feed.ended, false);
-    const stream = await fetch(`${x.base}/api/runs/${RUN}/live?t=${x.d.token}`);
+    const stream = await fetch(`${x.base}/api/runs/${RUN}/live`, { headers: x.h });
     assert.equal(stream.headers.get('content-type'), 'text/event-stream');
     // The run writes more while it's watched, then ends.
     setTimeout(() => {
@@ -89,7 +89,7 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
     assert.deepEqual(items.map(([, k]) => k), ['start', 'thinking', 'text', 'tool', 'tool_result', 'tool', 'diff', 'end']);
     assert.match(got, /"file":"src\/totals\.js"[\s\S]*-floor[\s\S]*\+round/, 'the diff as it was written');
     // Resuming from an id gives only what came after it.
-    const resumed = await readStream(await fetch(`${x.base}/api/runs/${RUN}/live?t=${x.d.token}`, { headers: { 'last-event-id': '5' } }), 'event: end');
+    const resumed = await readStream(await fetch(`${x.base}/api/runs/${RUN}/live`, { headers: { ...x.h, 'last-event-id': '5' } }), 'event: end');
     assert.deepEqual([...resumed.matchAll(/id: (\d+)\n/g)].map((m) => Number(m[1])), [6, 7]);
     assert.equal((await fetch(`${x.base}/api/runs/nope/feed`, { headers: x.h })).status, 404);
     assert.equal((await fetch(`${x.base}/api/runs/..%2Fx/feed`, { headers: x.h })).status, 404);
@@ -103,7 +103,7 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
     const feed = await fetch(`${writer.base}/api/runs/${RUN}/feed?after=-1`, { headers: writer.h });
     assert.equal(feed.status, 200, 'a writer reads the feed');
     assert.equal(((await feed.json()) as { ended: boolean }).ended, true);
-    const r = await fetch(`${writer.base}/api/runs/${RUN}/live?t=${writer.d.token}`, { headers: asPerson('example-collaborator') });
+    const r = await fetch(`${writer.base}/api/runs/${RUN}/live`, { headers: writer.h });
     assert.equal(r.status, 200, 'and the live view');
     assert.equal(r.headers.get('content-type'), 'text/event-stream');
     await r.body?.cancel();
@@ -112,7 +112,7 @@ test('the owner follows a run over SSE: every feed item in order, live as it gro
   }
   const other = await serve(s, 'someone-else');
   try {
-    const r = await fetch(`${other.base}/api/runs/${RUN}/live?t=${other.d.token}`, { headers: asPerson('someone-else') });
+    const r = await fetch(`${other.base}/api/runs/${RUN}/live`, { headers: other.h });
     assert.equal(r.status, 403, 'neither the owner nor a writer');
     assert.match(((await r.json()) as { error: string }).error, /^agent runs are for the instance's owners and writers \(admin or write on its repo\); @someone-else is a viewer/);
     assert.equal((await fetch(`${other.base}/api/live`, { headers: other.h })).status, 403, 'nor the list of live runs');
@@ -158,7 +158,7 @@ test('through the hub, the live stream reaches the browser from the instance\'s 
   const h = await startHub({ instances: [{ name: 'shop', port: Number(new URL(x.d.url).port), tokenFile: join(s.dir, 'dashboard-token') }], stateDir: mkdtempSync(join(tmpdir(), 'dash-live-hub-')) });
   try {
     setTimeout(() => s.feed.end({ reason: 'stopped', costUsd: 0.1, turns: 1 }), 100);
-    const got = await readStream(await fetch(`${h.breakGlassUrl.split('/?')[0]}/api/i/shop/runs/${RUN}/live?t=${h.token}`), 'event: end');
+    const got = await readStream(await fetch(`${h.breakGlassUrl}/api/i/shop/runs/${RUN}/live`, { headers: { authorization: `Bearer ${h.token}` } }), 'event: end');
     assert.match(got, /"kind":"end","reason":"stopped"/);
   } finally {
     await h.close();

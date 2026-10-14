@@ -137,7 +137,8 @@ async function server(withWeb = true, user?: string, slotsDir?: string) {
 test('dashboard API needs the token, binds locally, and serves state from the log', async () => {
   const s = await server();
   try {
-    assert.match(s.d.url, /^http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    assert.match(s.d.url, /^http:\/\/127\.0\.0\.1:\d+$/, 'the URL carries no key');
+    assert.ok(!s.d.url.includes(s.d.token));
     assert.equal((await fetch(`${s.base}/api/state`)).status, 401);
     for (const p of ['/api/report', '/api/settings', '/api/events']) assert.equal((await fetch(`${s.base}${p}`)).status, 401, p);
     const rep = (await (await fetch(`${s.base}/api/report`, { headers: s.h })).json()) as { report: string };
@@ -173,7 +174,7 @@ test('dashboard API needs the token, binds locally, and serves state from the lo
 test('dashboard streams a change when the log grows (another process writing)', async () => {
   const s = await server();
   try {
-    const res = await fetch(`${s.base}/api/stream?t=${s.d.token}`);
+    const res = await fetch(`${s.base}/api/stream`, { headers: s.h });
     const reader = res.body!.getReader();
     const dec = new TextDecoder();
     let got = '';

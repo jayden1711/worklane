@@ -3,7 +3,7 @@
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { TailscaleAction, TailscaleData } from './api';
-import type { DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -12,6 +12,7 @@ import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount 
 import { TalkStatus } from './voice/TalkBack';
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
+import { WakeIndicator } from './voice/WakeIndicator';
 import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
 import { Header } from './pages/Overview';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
@@ -42,6 +43,7 @@ import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { DiscordSetupView } from './components/DiscordSetup';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { Checks, IssueDetail } from './pages/IssueDetail';
+import { GoalGraphView } from './components/GoalGraph';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
 import { LogsPage } from './pages/Logs';
@@ -85,6 +87,7 @@ export function renderPage(name: keyof typeof pages, state: State): string {
   return renderToStaticMarkup(pages[name](state));
 }
 
+export const renderGoalGraph = (graph: GoalGraph) => renderToStaticMarkup(<GoalGraphView graph={graph} />);
 export const renderIssue = (state: State, issue: number) => renderToStaticMarkup(<IssueDetail state={state} issue={issue} />);
 export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks runs={runs} />);
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);
@@ -113,8 +116,10 @@ export const renderProposedSetting = (data: InstanceSettingsData, proposed: { ke
 export { actionHref, citationHref } from './components/ChatPanel';
 export const renderComposerMic = (role: string | undefined, prefs: VoicePrefs, support: Support | null, listening = false) => renderToStaticMarkup(<ComposerMic role={role} prefs={prefs} support={support} listening={listening} onToggle={() => {}} />);
 export const renderMicInterim = (listening: boolean, interim: string, error: string | null = null) => renderToStaticMarkup(<MicInterim listening={listening} interim={interim} error={error} />);
-export const renderVoiceSettings = (owner: boolean) => renderToStaticMarkup(<VoiceSettings owner={owner} />);
-export const renderVoiceSettingsView = (prefs: VoicePrefs, status: OnDeviceStatus | null) => renderToStaticMarkup(<VoiceSettingsView prefs={prefs} status={status} lang="en-US" onChange={() => {}} onInstall={() => {}} />);
+export const renderVoiceSettings = (owner: boolean, brand?: string) => renderToStaticMarkup(<VoiceSettings owner={owner} brand={brand} />);
+export const renderVoiceSettingsView = (prefs: VoicePrefs, status: OnDeviceStatus | null, brand?: string, wakeModel: string | null = null) => renderToStaticMarkup(<VoiceSettingsView prefs={prefs} status={status} lang="en-US" onChange={() => {}} onInstall={() => {}} brand={brand} wakeModel={wakeModel} />);
+export const renderWakeIndicator = (micOpen: boolean, phrase: string) => renderToStaticMarkup(<WakeIndicator micOpen={micOpen} phrase={phrase} onOff={() => {}} />);
+export { mayWake, NO_WAKE_MODEL, registerWakeEngine, startOnWake, wakeEngine, WakeListener, wakePhrase } from './voice/wake';
 export { checkSupport, Dictation, insertAt, intoBox, NO_ON_DEVICE, speechCtor } from './voice/speech';
 export { mayDictate } from './voice/Mic';
 export { readVoicePrefs, VOICE_DEFAULTS } from './voice/prefs';
@@ -190,5 +195,9 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 
-export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; mergePlan?: { command: string; then: string } } = {}) =>
-  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialMergePlan={o.mergePlan ?? null} />);
+export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean } = {}) =>
+  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialMergePlan={o.mergePlan ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} />);
+
+// What a live panel keeps when a look fails (web/src/refresh.tsx), for the tests to call.
+export { afterLoad, NOTHING_YET } from './refresh';
+export { ApiError, isRefusal } from './api';
