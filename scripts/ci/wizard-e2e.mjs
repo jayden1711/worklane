@@ -89,14 +89,10 @@ async function type(sel, value) {
 async function stepStatus(step) {
   return attr(row(step), 'data-status');
 }
-async function waitDone(step, ms = 60_000) {
-  return until(`step ${step} done`, async () => {
-    // The page checks again on its own (every 15 s); Re-check asks at once, as a person would click it.
-    if ((await stepStatus(step)) === 'done') return true;
-    if (await evaluate(`!!${q(tid('first-run-recheck'))} && !${q(tid('first-run-recheck'))}.disabled`)) await click(tid('first-run-recheck'));
-    await sleep(1500);
-    return (await stepStatus(step)) === 'done';
-  }, ms, 500);
+/** Once, right after an action's own result: the step reads done, checked fresh. No loop. */
+async function assertDone(step) {
+  const s = (await firstRun(true)).setup.groups.flatMap((g) => g.steps).find((x) => x.id === step);
+  assert.ok(s?.done, `${step} reads not done right after its action: ${s?.detail}`);
 }
 async function openFix(step) {
   const panel = `${row(step)} ${tid('first-run-fix-panel')}`;
@@ -105,11 +101,11 @@ async function openFix(step) {
   return panel;
 }
 /** The first-run checklist as the page's own API gives it (with the key the page holds). */
-async function firstRun() {
+/** `fresh`: checked now, as the page's Re-check asks (GitHub's answers are otherwise kept for 2 minutes). */
+async function firstRun(fresh = false) {
   return evaluate(`(async () => {
     const t = sessionStorage.getItem('dash-token') ?? '';
-    const inst = sessionStorage.getItem('dash-instance');
-    const path = ${JSON.stringify(mode === 'server' ? `/api/i/${instance}/first-run` : '/api/first-run')};
+    const path = ${JSON.stringify(mode === 'server' ? `/api/i/${instance}/first-run` : '/api/first-run')} + ${JSON.stringify(fresh ? '?fresh=1' : '')};
     const r = await fetch(path, { headers: t ? { authorization: 'Bearer ' + t } : {} });
     return r.ok ? r.json() : { error: r.status };
   })()`);
@@ -224,13 +220,16 @@ async function local() {
     const p = await openFix('claude-login');
     await click(`${p} ${tid('claude-signin-button')}`);
     await click(`${p} ${tid('claude-signin-confirm')}`);
+    // Async by design; the signal: the relayed link, which the panel shows once claude auth login hands it over.
     const href = await until('the sign-in link', () => attr(`${p} ${tid('claude-signin-link')}`, 'href'), 30_000, 300);
     const u = new URL(href);
     assert.equal(u.origin, 'https://claude.ai');
     assert.equal(new URL(u.searchParams.get('redirect_uri')).hostname, 'localhost');
     // The person signs in on Anthropic's page (not opened here: it is outside); Claude Code's listener hears back.
     writeFileSync(st('claude-signed-in'), '');
-    await waitDone('claude-login');
+    // Async by design; the signal: the panel's own state turning done (it polls `claude auth status` every 2 s).
+    await waitFor(`${p} [data-testid="claude-signin"][data-state="done"]`, 30_000);
+    await assertDone('claude-login');
     assert.match(readFileSync(st('claude-calls'), 'utf8'), /^auth login$/m);
   });
 
@@ -241,7 +240,9 @@ async function local() {
     assert.equal(code, 'WZRD-2E2E');
     assert.equal(await attr(`${p} ${tid('gh-login-link')}`, 'href'), 'https://github.com/login/device');
     writeFileSync(st('gh-code-typed'), '');
-    await waitDone('gh-login');
+    // Async by design; the signal: the panel's own state turning done (it asks `gh auth status` while waiting).
+    await waitFor(`${p} [data-testid="gh-login"][data-state="done"]`, 30_000);
+    await assertDone('gh-login');
     assert.ok(existsSync(st('gh-signed-in')), "gh's own store has the login");
     assert.match(readFileSync(st('gh-calls'), 'utf8'), /^auth login --web --hostname github\.com --git-protocol https$/m);
   });
@@ -252,6 +253,7 @@ async function local() {
     await click(`${p} ${tid('setup-draft-button')}`);
     await click(`${p} ${tid('setup-draft-confirm')}`);
     // auto-config runs the project's own commands on a scratch worktree; an open question is answered on the page.
+    // Async by design; the signal: /api/first-run's own draft state (running, then a question or the PR).
     const asked = await until('the draft to finish or ask', async () => {
       const fr = await firstRun();
       if (fr.draft?.running) return null;
@@ -265,6 +267,7 @@ async function local() {
       await click(tid('setup-save-answers'));
       await click(tid('setup-draft-button'));
       await click(tid('setup-draft-confirm'));
+      // Async by design; the signal: the setup PR in /api/first-run's auto-config state.
       await until('the setup PR', async () => (await firstRun()).autoConfig?.pr, 240_000, 1000);
     } else assert.equal(asked, 'pr', `auto-config: ${asked}`);
     await open('/first-run?step=config-on-main');
@@ -273,6 +276,7 @@ async function local() {
     await waitText(tid('setup-merge-confirming'), /gh pr merge \d+ --repo example\/alpha --merge/);
     await click(tid('setup-merge-confirm'));
     // The dashboard fast-forwards the checkout to the merged config and leaves setup mode on the same address.
+    // Async by design; the signal: /api/first-run's setupMode turning false (the page hands over on it).
     await until('setup mode to hand over', async () => (await firstRun()).setupMode === false, 120_000, 1000);
     const bare = st('git/example/alpha.git');
     assert.equal(sh('git', ['-C', bare, 'cat-file', '-e', 'main:.worklane/config.yaml']).status, 0, 'the config is on main at "GitHub"');
@@ -327,6 +331,7 @@ async function localRest(root) {
   await screen('screen 10: fingerprints skipped (its fetch runs a database command this project has no database for)', async () => {
     await open('/first-run');
     await click(`${row('fingerprints')} ${tid('first-run-skip')}`);
+    // The signal: the step's own badge, which the page re-reads when the skip request returns.
     await until('fingerprints skipped', async () => (await stepStatus('fingerprints')) === 'skipped', 20_000, 300);
   });
   await screen('screen 10: the hooks for local runs and the pre-commit secret scan', async () => {
@@ -335,8 +340,9 @@ async function localRest(root) {
       const p = `${row(step)} ${tid('first-run-fix-panel')}`;
       await click(`${p} ${tid('first-run-action-button')}`);
       await click(`${p} ${tid('first-run-action-confirm')}`);
+      // The action's own result (the request returning), then the step checked once.
       await waitText(`${p} ${tid('first-run-action-result')}`, /./);
-      await waitDone(step);
+      await assertDone(step);
     }
     assert.ok(existsSync(join(root, '.claude', 'settings.json')));
     const hook = join(root, '.git', 'hooks', 'pre-commit');
@@ -354,7 +360,7 @@ async function localRest(root) {
     await waitText(`${p} ${tid('first-run-action-result')}`, /GitHub now requires test on main/);
     const body = JSON.parse(readFileSync(join(standin, 'gh-protection-body.json'), 'utf8'));
     assert.ok(JSON.stringify(body).includes('"test"'), 'the protection requires the check');
-    await waitDone('protection', 150_000);
+    await assertDone('protection');
   });
 }
 
@@ -370,7 +376,8 @@ async function localStart() {
     const f = await firstRun();
     const label = f.start.label;
     if (process.platform === 'linux') {
-      await until(`${label} active`, () => sh('systemctl', ['--user', 'is-active', `${label}.service`]).out === 'active', 30_000, 500);
+      // Once, right after Start's own result (it ran systemctl --user enable --now before answering).
+      assert.equal(sh('systemctl', ['--user', 'is-active', `${label}.service`]).out, 'active');
       return { unit: `${label}.service`, file: f.start.file, mode: stat(f.start.file) };
     }
     return { label };
@@ -427,7 +434,9 @@ async function server() {
     await click(`${p} ${tid('policy-review')}`);
     const change = await waitText(`${p} ${tid('policy-confirming')}`, /budget\.daily_usd/);
     await click(`${p} ${tid('policy-confirm')}`);
-    await until('the policy written', () => /daily_usd: 30\b/.test(sudoOk('cat', file)), 30_000, 500);
+    // The write's own result, then the file checked once.
+    await waitText(`${p} ${tid('policy-result')}`, /./);
+    assert.match(sudoOk('cat', file), /daily_usd: 30\b/);
     assert.equal(stat(file), `wl-${instance} 600`);
     return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
   });
@@ -438,6 +447,7 @@ async function server() {
   await screen('screen 11: Discord skipped (Skip on the page; the step reads skipped)', async () => {
     await open('/first-run');
     await click(`${row('discord')} ${tid('first-run-skip')}`);
+    // The signal: the step's own badge, which the page re-reads when the skip request returns.
     await until('discord skipped', async () => (await stepStatus('discord')) === 'skipped', 20_000, 300);
   });
   return f;
@@ -477,12 +487,14 @@ async function serverMachine() {
     await waitFor(`${card} ${tid('tailscale-step-confirm')}`);
     await click(`${card} ${tid('tailscale-step-confirm-run')}`);
     if (during) await during();
+    // Async by design (the coordinator runs the request on its next tick); the signal: steps.jsonl's end line for this step.
     const last = await until(`tailscale ${step} to end`, () => {
       const l = lastStep();
       return l && l.step === step && (l.state === 'done' || l.state === 'failed') ? l : null;
     }, 300_000, 1000);
     assert.equal(last.state, 'done', `tailscale ${step}: ${last.detail}`);
     // One step at a time: the next is asked for once this one's unit has gone.
+    // The signal: the step's own unit (worklane-tailscale.service) gone, which the helper needs before the next step.
     await until('the tailscale unit to finish', () => sh('systemctl', ['is-active', '-q', 'worklane-tailscale.service']).status !== 0, 60_000, 1000);
     return last.detail;
   };
@@ -501,6 +513,7 @@ async function serverMachine() {
     const name = ['wizard-box', 'tail0ci', 'ts', 'net'].join('.');
     const detail = await tsStep('up', async () => {
       await open('/machine');
+      // Async by design; the signal: the login link the page shows once tailscale up has printed it.
       const href = await until('the login link on the page', () => attr(tid('tailscale-login-link'), 'href'), 240_000, 1000);
       // Exactly the link tailscale printed, which only the asking coordinator's user can read on the machine.
       assert.equal(href, sudoOk('cat', `${ts}/login-url`));
@@ -537,6 +550,7 @@ async function serverMachine() {
     await confirmUpdater(tid('updater-install'));
     let seen = '';
     try {
+      // Async by design (the coordinator's tick); the signal: the page's updater step reading installed.
       await until('the updater installed', async () => /installed, updates off/.test((seen = (await updaterState()) ?? '')), 240_000, 3000);
     } catch (e) {
       const files = sh('sudo', ['ls', '-la', '/etc/worklane', '/usr/local/libexec']).out;
@@ -563,6 +577,7 @@ async function serverMachine() {
     await type(tid('updater-signer-principal'), 'release@example.com');
     await type(tid('updater-signer-key'), pub);
     await confirmUpdater(tid('updater-signer-review'));
+    // Async by design (the coordinator's tick); the signal: the staged signer and its root command on the page.
     const cmd = await until('the staged signer and its root command', async () => {
       await updaterState();
       return text(tid('updater-pending-command'));
@@ -574,6 +589,7 @@ async function serverMachine() {
     sudoOk('bash', m[1], '--confirm-signer', m[2]);
     assert.ok(sudoOk('cat', '/etc/worklane/allowed_signers').includes(`release@example.com ${pub}`));
     assert.equal(stat('/etc/worklane/allowed_signers'), 'root 644');
+    // The signal: the page listing the signer the root step added (it re-reads the signers file).
     await until('the signer listed on the page', async () => {
       await updaterState();
       return (await text(tid('updater-signers')))?.includes('release@example.com');
@@ -584,6 +600,7 @@ async function serverMachine() {
     await updaterState();
     if ((await attr(tid('updater-channel'), 'data-channel')) !== 'release') {
       await confirmUpdater(tid('updater-release'));
+      // Async by design (the coordinator's tick); the signal: the page's channel reading release.
       await until('the release channel', async () => (await updaterState()) && (await attr(tid('updater-channel'), 'data-channel')) === 'release', 240_000, 3000);
     }
     assert.equal(JSON.parse(sudoOk('cat', '/etc/worklane/updates.json')).channel, 'release');
