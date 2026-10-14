@@ -8,12 +8,14 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
+import { BRAND } from '../src/brand.js';
 import { which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
 
 const launcher = join(repoRoot, 'scripts', 'push-gate-hook.mjs');
 const installer = join(repoRoot, 'scripts', 'setup-hooks.mjs');
 const skip = !which('gitleaks') && 'gitleaks not installed';
+const AGENT = `${BRAND.envPrefix}_AGENT`;
 const sha = (t: string) => createHash('sha256').update(t).digest('hex');
 const files = JSON.parse(execFileSync('node', [launcher, '--print-gate-files'], { encoding: 'utf8' })) as { code: string[]; rules: { required: string[]; optional: string[] } };
 const realPatterns = (JSON.parse(readFileSync(join(repoRoot, '.denylist.json'), 'utf8')) as { patterns: string[] }).patterns;
@@ -79,7 +81,13 @@ function world(o: { tree?: Record<string, string>; originBranch?: string } = {})
   const tmp = join(base, 'tmp');
   mkdirSync(tmp);
   // WHY: the launcher's private directory goes under a temp root of the test's own, so a test can see it come and go.
-  const env = (extra: Record<string, string> = {}) => ({ ...process.env, TMPDIR: tmp, TEMP: tmp, TMP: tmp, ...extra });
+  // WHY: a person's push unless a test says otherwise: this suite may itself be run by an agent, whose marker would refuse the hatch.
+  const env = (extra: Record<string, string> = {}) => {
+    const e: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp, TEMP: tmp, TMP: tmp };
+    delete e[AGENT];
+    delete e.PUSH_GATE_BOOTSTRAP;
+    return { ...e, ...extra };
+  };
   const push = (extra: Record<string, string> = {}, remote = 'origin', from = work.dir): Run => spawnSync('git', ['push', '-q', remote, 'HEAD:refs/heads/feature'], { cwd: from, encoding: 'utf8', env: env(extra) });
   const range = (extra: Record<string, string> = {}, from = work.dir): Run => spawnSync('node', [launcher, '--range', `origin/${branch}..HEAD`], { cwd: from, encoding: 'utf8', env: env(extra) });
   /** Land a change on origin's default branch, behind the work clone's back. */
@@ -217,10 +225,83 @@ test('first-time setup: origin\'s default branch without the gate refuses, and s
   assert.equal(w.pushed(), false);
   const boot = w.push({ PUSH_GATE_BOOTSTRAP: '1' });
   assert.equal(boot.status, 0, boot.stderr);
-  assert.match(boot.stderr, /!! PUSH GATE: PUSH_GATE_BOOTSTRAP=1\. origin\/main has no scripts\/push-gate\.mjs\.\n!! Using THE CHECKOUT'S OWN COPY/);
+  assert.match(boot.stderr, /!! PUSH GATE: PUSH_GATE_BOOTSTRAP=1\. origin\/main has no scripts\/push-gate\.mjs\.\n!! FIRST-TIME-SETUP HATCH USED by \S.* at \d{4}-\d\d-\d\dT[\d:.]+Z: this push is NOT judged by origin's rules\.\n!! Using THE CHECKOUT'S OWN COPY/);
   assert.match(boot.stderr, /!! {3}0 commit\(s\) behind origin\/main as last fetched/);
   w.work.commit('notes.md', 'deployed by secretproject\n');
   refused(w.push({ PUSH_GATE_BOOTSTRAP: '1' }), /notes\.md:1: denied term "secretproject"/);
+});
+
+/** A work clone whose origin holds no gate yet, with the gate committed in the checkout: the one case the hatch answers. */
+function firstTime() {
+  const w = world({ tree: { 'notes.txt': 'no gate here yet\n' } });
+  for (const f of files.code) cpSync(join(repoRoot, f), join(w.work.dir, f));
+  w.work.write('.denylist.json', rules('secretproject'));
+  w.work.git('add', '-A');
+  w.work.git('commit', '-q', '-m', 'add the gate');
+  const log = join(w.work.dir, '.git', 'push-gate-bootstrap.log');
+  const records = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, string>) : []);
+  return { ...w, log, records };
+}
+
+test('each use of the hatch is said loudly in the push output and recorded in the git dir; a refused or ordinary push records nothing', { skip }, () => {
+  const w = firstTime();
+  refused(w.push(), /First-time setup/);
+  assert.deepEqual(w.records(), [], 'no hatch, no record');
+  const boot = w.push({ PUSH_GATE_BOOTSTRAP: '1' });
+  assert.equal(boot.status, 0, boot.stderr);
+  assert.match(boot.stderr, /!! FIRST-TIME-SETUP HATCH USED by \S.* at \S+: this push is NOT judged by origin's rules\./);
+  assert.match(boot.stderr, /!! Recorded in .*push-gate-bootstrap\.log\n/);
+  const [one, ...more] = w.records();
+  assert.deepEqual(more, []);
+  assert.equal(one!.head, w.work.git('rev-parse', 'HEAD'));
+  assert.equal(one!.branch, 'main');
+  assert.equal(one!.mode, 'push to origin');
+  assert.equal(one!.default_branch, 'origin/main');
+  assert.match(one!.at!, /^\d{4}-\d\d-\d\dT/);
+  assert.ok(one!.user);
+  assert.match(one!.why!, /origin\/main has no scripts\/push-gate\.mjs/);
+  // By hand (--range), the same line and a second record.
+  const byHand = w.range({ PUSH_GATE_BOOTSTRAP: '1' });
+  assert.equal(byHand.status, 0, byHand.stderr);
+  assert.match(byHand.stderr, /FIRST-TIME-SETUP HATCH USED/);
+  assert.deepEqual(w.records().map((r) => r.mode), ['push to origin', '--range origin/main..HEAD']);
+  // INVARIANT: the record is in the git dir, never in the work tree, so no push carries or rewrites it.
+  assert.equal(w.work.git('status', '--porcelain'), '');
+});
+
+test('the hatch set where it does not apply (origin has the gate) changes nothing and records nothing', { skip }, () => {
+  const w = world();
+  w.work.commit('notes.md', 'fine\n');
+  const p = w.push({ PUSH_GATE_BOOTSTRAP: '1' });
+  assert.equal(p.status, 0, p.stderr);
+  assert.match(p.stderr, /push gate: gate and rules from origin\/main at /);
+  assert.doesNotMatch(p.stderr, /HATCH USED/);
+  assert.equal(existsSync(join(w.work.dir, '.git', 'push-gate-bootstrap.log')), false);
+});
+
+test('an agent run never gets the hatch: refused with the reason, nothing pushed, nothing recorded; a person\'s push still may', { skip }, () => {
+  const w = firstTime();
+  const agent = w.push({ PUSH_GATE_BOOTSTRAP: '1', [AGENT]: '1' });
+  refused(agent, /push gate: REFUSED\. origin\/main has no scripts\/push-gate\.mjs\.\nPUSH_GATE_BOOTSTRAP=1 is set, but this is an agent run \(/);
+  assert.ok(agent.stderr.includes(`this is an agent run (${AGENT}=1)`), agent.stderr);
+  assert.doesNotMatch(agent.stderr, /HATCH USED/);
+  assert.equal(w.pushed(), false);
+  assert.deepEqual(w.records(), []);
+  refused(w.range({ PUSH_GATE_BOOTSTRAP: '1', [AGENT]: '1' }), /this is an agent run/);
+  // An agent's ordinary push (no hatch) is refused as anyone's is here, and told why.
+  refused(w.push({ [AGENT]: '1' }), /First-time setup/);
+  const person = w.push({ PUSH_GATE_BOOTSTRAP: '1' });
+  assert.equal(person.status, 0, person.stderr);
+  assert.equal(w.pushed(), true);
+  assert.equal(w.records().length, 1);
+});
+
+test('a use of the hatch that cannot be recorded is refused', { skip }, () => {
+  const w = firstTime();
+  // WHY: a directory in the record's place stands in for a git dir the pusher can't write.
+  mkdirSync(w.log);
+  refused(w.push({ PUSH_GATE_BOOTSTRAP: '1' }), /push gate: REFUSED\. PUSH_GATE_BOOTSTRAP=1, but its use could not be recorded in .*push-gate-bootstrap\.log/);
+  assert.equal(w.pushed(), false);
 });
 
 test('rules missing on origin refuse even when the gate is there', { skip }, () => {
