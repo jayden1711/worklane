@@ -85,8 +85,10 @@ echo "OK: App x (id 91), installation 4242"`);
   stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
 users=""; for n in "$@"; do users="\${users:+$users, }wl-$n"; done
 printf 'Cmnd_Alias WORKLANE_MACHINE = x\\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\\n' "$users" > "$T/sudoers-machine"`);
-  stub(join(s, 'dashboards.sh'), 'dashboards', `opts=""; while [ "\${1#--}" != "$1" ]; do opts="$opts $1 $2"; shift 2; done
+  stub(join(s, 'dashboards.sh'), 'dashboards', `none=""; if [ "\${1:-}" = --no-instances ]; then none=1; shift; fi
+opts=""; while [ "$#" -gt 0 ] && [ "\${1#--}" != "$1" ]; do opts="$opts $1 $2"; shift 2; done
 hub=""; for n in "$@"; do hub="\${hub:+$hub,}$n=$T/homes/wl-$n/state"; touch "$T/active/worklane-dashboard-$n.service"; done
+if [ -n "$none" ]; then [ "$#" -eq 0 ] || exit 2; hub=-; mkdir -p "$T/homes/wl-dash/.local/state/worklane/dashboard-hub"; echo t > "$T/homes/wl-dash/.local/state/worklane/dashboard-hub/dashboard-token"; fi
 printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --service%s --signin-dir /x\\n' "$hub" "$opts" > "$T/hub.service"`);
   // "old": an instance set up earlier, in the machine helper's rule and the hub.
   for (const u of ['wl-old', 'wl-old-agent']) writeFileSync(join(T, 'users', u), '');
@@ -216,6 +218,70 @@ test("the App step is manifest only: with no hub it stops, naming the hub and th
   assert.equal(last.retry, `sudo bash ${m.s}/add-project.sh alpha example/alpha (it skips the steps already done); or this step alone: sudo ${m.T}/bin/worklane app-manifest alpha example/alpha`);
   assert.doesNotMatch(`${last.detail} ${last.retry} ${r.stderr}`, /by hand|credentials\.sh|key\.pem/);
   assert.ok(!m.calls().some((c) => c.startsWith('app ')), 'the manifest flow never started');
+});
+
+// WHY: on a machine's first project there is no hub for GitHub to send the browser back to, and add-project starts
+// the hub in its last step, so the App step used to stop there. Now it starts the hub alone first, with the sign-in App
+// the hub's setup mode stored (dashboards.sh --setup), and goes on; the last step adds the instance to it.
+/** A machine with no hub at all: no unit, no token. `signin`: what the hub's setup mode stored for wl-dash. */
+function firstProject(signin: Record<string, string>) {
+  const m = machine();
+  rmSync(join(m.T, 'hub.service'));
+  rmSync(join(m.T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub'), { recursive: true });
+  const d = join(m.T, 'homes', 'wl-dash', '.config', 'dashboard-signin');
+  mkdirSync(d, { recursive: true });
+  for (const [f, v] of Object.entries(signin)) writeFileSync(join(d, f), v);
+  return m;
+}
+
+test("a machine's first project: no hub yet, so the App step starts it alone, with what setup mode stored, before the manifest flow; the last step adds the instance", { skip: !posix }, () => {
+  const m = firstProject({ 'client-secret': 's', 'client-id': 'Iv1.stored00001', 'public-url': 'https://hub.example.test' });
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  // The same nine steps, in the same order, none failed: no step of its own, no by-hand step.
+  assert.deepEqual(r.events.filter((e) => e.state === 'started').map((e) => e.step), STEPS);
+  assert.ok(!r.events.some((e) => e.state === 'failed'));
+  const calls = m.calls();
+  const first = calls.indexOf('dashboards --no-instances --client-id Iv1.stored00001 --public-url https://hub.example.test');
+  const app = calls.indexOf('app app-manifest alpha example/alpha --ask-lines --timeout 15');
+  assert.ok(first > calls.indexOf('ensure_instance_home alpha example/alpha') && first < app, calls.join('\n'));
+  // The last step: the hub with its instances, its settings kept from the unit the first start wrote.
+  assert.equal(calls.at(-1), 'dashboards --client-id Iv1.stored00001 --public-url https://hub.example.test alpha old');
+  assert.equal(calls.filter((c) => c.startsWith('dashboards ')).length, 2);
+  assert.match(r.stderr, /no dashboard hub on this machine yet: starting it, with no instance/);
+  // A rerun starts nothing again.
+  const again = m.run();
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(m.calls().length, calls.length, 'every step skipped');
+});
+
+test("a machine's first project with no sign-in App yet: the App step stops, naming dashboards.sh --setup, and starts nothing", { skip: !posix }, () => {
+  const m = firstProject({});
+  const r = m.run();
+  assert.equal(r.status, 1);
+  const last = r.events.at(-1)!;
+  assert.deepEqual([last.step, last.state], ['app', 'failed']);
+  assert.match(last.detail, /no dashboard hub on this machine yet, and no sign-in App for one \(the App is made through GitHub's manifest flow[^)]*\): make the sign-in App first with sudo bash \S+\/dashboards\.sh --setup --public-url/);
+  assert.doesNotMatch(`${last.detail} ${last.retry}`, /by hand|credentials\.sh|key\.pem/);
+  assert.ok(!m.calls().some((c) => c.startsWith('dashboards') || c.startsWith('app ')), m.calls().join('\n'));
+});
+
+test('a second project is unchanged: with a hub on the machine, the hub is never started alone', { skip: !posix }, () => {
+  const m = machine();
+  // Even with what setup mode stored still there, and even when the hub's token is missing (the hub is down).
+  const d = join(m.T, 'homes', 'wl-dash', '.config', 'dashboard-signin');
+  mkdirSync(d, { recursive: true });
+  for (const [f, v] of Object.entries({ 'client-secret': 's', 'client-id': 'Iv1.stored00001', 'public-url': 'https://other.example.test' })) writeFileSync(join(d, f), v);
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!m.calls().some((c) => c.includes('--no-instances')), m.calls().join('\n'));
+  assert.ok(m.calls().includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --console-user admin --console-devices tag:owner alpha old'), "the hub's own settings, not the stored ones");
+  const down = machine();
+  rmSync(join(down.T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub', 'dashboard-token'));
+  mkdirSync(join(down.T, 'homes', 'wl-dash', '.config', 'dashboard-signin'), { recursive: true });
+  writeFileSync(join(down.T, 'homes', 'wl-dash', '.config', 'dashboard-signin', 'client-secret'), 's');
+  assert.equal(down.run().status, 1);
+  assert.ok(!down.calls().some((c) => c.startsWith('dashboards')), 'a hub that is down is not replaced by an empty one');
 });
 
 test("an instance by that name for another repo is never reused", { skip: !posix }, () => {
