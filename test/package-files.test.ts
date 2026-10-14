@@ -81,10 +81,84 @@ const forbidden = (p: string) =>
   /(^|\/)(\.npmrc|credentials\.ya?ml)$/.test(p) ||
   /^(src|test|\.github|docs|desktop)\//.test(p);
 
+/**
+ * Every path the engine reads from its own package root, as the scan above finds them in src/ (kept here by hand, so
+ * a new one is a reviewed change to this list: the installed-package test below checks each is in the package).
+ */
+const RUNTIME_PATHS = [
+  'dist/src/cli.js',
+  'dist/web/',
+  'examples/basic',
+  'package.json',
+  'scripts/setup/app-permissions.mjs',
+  'templates/evals/roles/',
+  'templates/evals/tasks',
+  'templates/project/',
+];
+
 test('the scan finds the paths the engine reads relative to itself', () => {
   const refs = selfRelativePaths();
   // If these go missing, the pattern stopped matching how src/ refers to them, and the tests below check nothing.
   for (const p of ['dist/web/', 'templates/project/', 'templates/evals/roles/', 'examples/basic', 'scripts/setup/app-permissions.mjs', 'package.json']) assert.ok(refs.includes(p), `found ${p} in ${refs.join(', ')}`);
+  assert.deepEqual(refs, RUNTIME_PATHS, "src/ reads a path from the package root that RUNTIME_PATHS doesn't list (or no longer reads one it lists): update the list");
+});
+
+/**
+ * The packed size's ceiling, in bytes (npm pack --dry-run --json: `size` is the tarball, `unpackedSize` its files),
+ * measured with the dashboard UI built (dist/web, as CI and the release build it) plus about 10%. Raising it is
+ * allowed, on purpose: in the PR that grows the package, with the new `npm pack --dry-run --json` numbers and why in
+ * its body. Never to get a PR green without looking at what grew.
+ */
+const PACKAGE_BUDGET = { size: 1_550_000, unpackedSize: 4_800_000 };
+
+/** Whether a pack's sizes fit the budget; the reasons when not, each saying how to raise it on purpose. */
+function overBudget(p: { size: number; unpackedSize: number }, budget = PACKAGE_BUDGET): string[] {
+  const how = 'if that growth is on purpose, raise PACKAGE_BUDGET in test/package-files.test.ts in the same PR and give the new numbers and why in its body; otherwise find what grew (npm pack --dry-run --json lists every file)';
+  return (['size', 'unpackedSize'] as const).filter((k) => p[k] > budget[k]).map((k) => `the package's ${k === 'size' ? 'tarball' : 'unpacked size'} is ${p[k]} bytes, over its budget of ${budget[k]}: ${how}`);
+}
+
+test('the package stays within its size budget (npm pack --dry-run --json)', () => {
+  const p = (JSON.parse(npm('pack', '--dry-run', '--json')) as { size: number; unpackedSize: number; files: { path: string }[] }[])[0]!;
+  // CI builds the UI before the tests (with CI_REQUIRE_WEB=1 a missing one throws here): the budget counts it.
+  if (webUiBuilt()) assert.ok(p.files.some((f) => f.path === 'dist/web/index.html'), 'measured with the dashboard UI in it');
+  assert.deepEqual(overBudget(p), []);
+  // The check itself: a budget below the current size fails, with the way to raise it.
+  const under = overBudget(p, { size: p.size - 1, unpackedSize: p.unpackedSize - 1 });
+  assert.equal(under.length, 2);
+  assert.match(under[0]!, /raise PACKAGE_BUDGET in test\/package-files\.test\.ts/);
+});
+
+test('the packed tarball, installed into an empty folder (no install scripts), runs: --version, and each --help without running the command', { timeout: 300_000 }, () => {
+  const out = mkdtempSync(join(tmpdir(), 'pack-install-'));
+  try {
+    const tarball = join(out, (JSON.parse(npm('pack', '--json', '--pack-destination', out)) as { filename: string }[])[0]!.filename);
+    const app = join(out, 'app');
+    mkdirSync(app);
+    writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'try', version: '1.0.0', private: true }));
+    npmIn(app, 'install', '--no-audit', '--no-fund', '--prefer-offline', tarball);
+    const pkgDir = join(app, 'node_modules', ...BRAND.pkg.split('/'));
+    const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) as { version: string; bin: Record<string, string> };
+    const bin = join(pkgDir, pkg.bin[BRAND.cli]!);
+    // From a folder that is no checkout and no git repo: nothing but the installed package to go on.
+    const cwd = join(out, 'elsewhere');
+    mkdirSync(cwd);
+    const run = (...args: string[]) => {
+      // A short timeout: a --help that runs its command (a dashboard serves until stopped) fails here, never hangs.
+      const r = spawnSync(process.execPath, [bin, ...args], { cwd, encoding: 'utf8', timeout: 30_000 });
+      assert.equal(r.status, 0, `${BRAND.cli} ${args.join(' ')}: ${r.error ?? ''} ${r.stderr}`);
+      return r.stdout;
+    };
+    assert.equal(run('--version').trim(), JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version);
+    for (const cmd of ['init', 'doctor', 'dashboard']) assert.match(run(cmd, '--help'), new RegExp(`^usage: ${BRAND.cli} ${cmd}( |$)`, 'm'), `${cmd} --help prints its usage`);
+    // Every path the engine reads from its package root is in the installed package (dist/web when it was built).
+    for (const p of RUNTIME_PATHS) {
+      if (p === 'dist/web/' && !existsSync(join(repoRoot, 'dist', 'web'))) continue;
+      assert.ok(existsSync(join(pkgDir, p)), `${p} is in the installed package`);
+    }
+    assert.ok(!existsSync(join(pkgDir, 'dist', 'test')), 'no tests in the installed package');
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 });
 
 test("package.json's files: the package holds what an install needs and nothing it mustn't (stand-in files, no build)", () => {
