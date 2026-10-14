@@ -234,7 +234,7 @@ unit_start() { systemctl start "$1"; }
 
 # The engine repo's checks on main, one name per element (names hold commas, so never a joined string): the fast
 # ones every push to main runs (ci.yml, gitleaks.yml) and the slow ones (ci-slow.yml: bootstrap on each OS, the real
-# systemd and real users jobs), which run on main in batches, on the newest commit at most every 30 minutes
+# systemd and real users jobs), which run on main in batches, on the newest commit, one batch at a time
 # (ci-batch.yml). A pull request needn't run the slow ones, so main is where they gate, and only a batched commit
 # can be installed. Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the updater
 # refuses a skipped required check. A test derives this list from the workflows.
