@@ -12,6 +12,7 @@
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './events/read-only.js';
 import { parseDocument, type Document } from 'yaml';
 import { BRAND } from './brand.js';
 import { replaceFileAtomically } from './os/index.js';
@@ -112,7 +113,7 @@ export function planMigrations(t: Targets, lists: { config?: ConfigMigration[]; 
     if (steps.length) plan.pending.push({ kind: 'config', path: f, from, to: steps.at(-1)!.to, steps: steps.map((m) => m.what), auto: false });
   }
   if (t.eventsDb && existsSync(t.eventsDb)) {
-    const db = new DatabaseSync(t.eventsDb, { readOnly: true });
+    const db = openReadOnly(t.eventsDb);
     try {
       const from = userVersion(db);
       if (from > latest(state)) plan.newer.push(`${t.eventsDb} is at state version ${from}; this engine knows up to ${latest(state)}`);

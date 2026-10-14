@@ -4,7 +4,7 @@
 // A run that fails without a parsable failure list never passes: unknown red
 // is red.
 import { existsSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './events/read-only.js';
 import type { EventLog } from './events/log.js';
 
 export interface FailureFormat {
@@ -100,7 +100,7 @@ export function recordBaseline(log: EventLog, actor: string, sha: string, exitCo
 /** The latest baseline straight from an events database, read-only (for hooks; never creates the file). */
 export function readBaseline(dbPath: string): Baseline | null {
   if (!existsSync(dbPath)) return null;
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const db = openReadOnly(dbPath);
   try {
     const r = db.prepare("SELECT ts, payload FROM events WHERE type = 'baseline.recorded' ORDER BY id DESC LIMIT 1").get() as { ts: string; payload: string } | undefined;
     if (!r) return null;
