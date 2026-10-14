@@ -96,7 +96,11 @@ interface Render {
   onInstance(instance: string | null, path: string, init: unknown, scope: Promise<unknown>): Promise<unknown>;
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
-  renderSignIn(): string;
+  renderSignIn(local?: boolean): string;
+  renderKeyPage(): string;
+  renderKeyForm(error?: string | null): string;
+  needsKey(hubPage: boolean, key: string): boolean;
+  tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
   renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
   renderHeader(title: string): string;
@@ -325,6 +329,36 @@ test('the PR page: what waits for you and exactly why, what is moving, what auto
   for (const id of ['prs-page', 'prs-auto-merge', 'prs-auto-merge-state', 'prs-auto-merge-why', 'prs-revert-link', 'prs-waiting', 'pr-wait-card', 'pr-wait-reasons', 'pr-gave-up-reasons', 'pr-checks', 'pr-link', 'pr-issue-link', 'pr-review-link', 'prs-in-progress', 'pr-row', 'pr-fixes', 'pr-github-link', 'prs-auto-merged', 'prs-auto-merged-table', 'pr-merged-row', 'pr-merge-commit-link', 'pr-merge-reasons', 'prs-refused', 'prs-refused-table', 'refused-row', 'refused-issue-link']) {
     assert.match(html, new RegExp(`data-testid="${id}"`), `data-testid ${id}`);
   }
+});
+
+test("the dashboard key: a page opened without one (the install's URL) asks for it in a hidden field or its file; it is tried in a header, then kept in this tab only", async () => {
+  assert.equal(r.needsKey(false, ''), true, "an instance's own page with no key asks for it");
+  assert.equal(r.needsKey(false, 'k'.repeat(32)), false);
+  assert.equal(r.needsKey(true, ''), false, 'a hub page signs in instead');
+  const page = r.renderKeyPage();
+  assert.match(page, /data-testid="key-page"/);
+  assert.match(page, /<input id="dash-key" type="password" autoComplete="off"|<input id="dash-key" type="password" autocomplete="off"/);
+  assert.match(page, /data-testid="key-file"[\s\S]*type="file"/, 'or its file');
+  assert.match(r.renderKeyForm("That key doesn't open this dashboard."), /role="alert" data-testid="key-error">That key doesn(&#x27;|')t open this dashboard\./);
+
+  const key = 'a'.repeat(32);
+  const kept: Partial<Record<string, string>> = {};
+  const store = { setItem: (k: string, v: string) => void (kept[k] = v) };
+  const calls: { url: string; auth: string | undefined }[] = [];
+  const answer = (ok: boolean, body: unknown = {}) => async (url: string, init?: { headers?: Record<string, string> }) => (calls.push({ url, auth: init?.headers?.authorization }), { ok, json: async () => body });
+  assert.equal(await r.tryKey(`  ${key}\n`, { hub: false, get: answer(true), store }), true, 'pasted with spaces, or read from the file with its newline');
+  assert.deepEqual(calls, [{ url: '/api/role', auth: `Bearer ${key}` }], 'in a header, never the URL');
+  assert.deepEqual(kept, { 'dash-token': key });
+  for (const k of Object.keys(kept)) Reflect.deleteProperty(kept, k);
+  assert.equal(await r.tryKey(key, { hub: false, get: answer(false), store }), false, 'a wrong key');
+  assert.equal(await r.tryKey('not a key!', { hub: false, get: answer(true), store }), false, 'not even asked');
+  assert.equal(await r.tryKey(key, { hub: true, get: answer(true, { login: null, csrf: null, breakGlass: false }), store }), false, "the hub's sign-in port says 200 to anyone: only the break-glass answer counts");
+  assert.deepEqual(kept, {}, 'nothing kept unless it opened the dashboard');
+  assert.equal(await r.tryKey(key, { hub: true, get: answer(true, { login: null, csrf: null, breakGlass: true }), store }), true);
+  assert.equal(calls.at(-1)!.url, '/api/me');
+
+  assert.match(r.renderSignIn(true), /data-testid="sign-in-key"[\s\S]*data-testid="key-form"/, "on this machine, the hub's sign-in page takes the key too");
+  assert.doesNotMatch(r.renderSignIn(), /key-form/, 'not through the public sign-in');
 });
 
 test('sign-in: the hub page shows a GitHub sign-in when nobody is signed in; the signed-in person, their role and a sign-out; the owners\' audit log', async () => {
