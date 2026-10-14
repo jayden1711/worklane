@@ -7,6 +7,7 @@ import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
+import { PreviewConfig } from '../preview/config.js';
 import { SparseExclude } from '../checkout.js';
 import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
 
@@ -164,6 +165,20 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
   /**
+   * Repeated "no"s become checks (src/checks-from-feedback.ts): people's words when they turn the harness's work
+   * down (reviews requesting changes, closed PRs, revised or rejected plans, objections, chat corrections), with
+   * the reverts as evidence, are grouped into constraints. At `min_sightings` one proposal per constraint: a draft
+   * ast-grep rule with its test cases (the repo has sgconfig.yml) or a test, as a draft PR quoting the evidence; an
+   * issue instead for a protected area. Never auto-merged; at most `max_proposals_per_week`. Off by default.
+   */
+  checks_from_feedback: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      min_sightings: z.number().int().min(2).max(20).default(2),
+      max_proposals_per_week: z.number().int().min(0).max(20).default(3),
+    })
+    .prefault({}),
+  /**
    * The weekly optimization pass (src/optimize.ts): on `weekday` after `at`, the top target (a benchmarks.yaml
    * benchmark, or the slowest test the metrics recorded) is measured on main, then built as a normal task on the
    * strongest model; it becomes a PR only if its median beats main's by more than the noise. Off by default; a hard
@@ -255,6 +270,18 @@ export const AgentsConfig = z
     /** No longer used (trust stages were removed); accepted so existing configs still load. */
     stage: z.number().int().min(1).max(3).optional(),
     daily_budget_usd: z.number().positive(),
+    /** Worker attempts at one issue before it is blocked (counted across restarts and requeues; reset by a block or an answer). */
+    max_attempts: z.number().int().min(1).max(20).default(8),
+    /**
+     * One issue's budget, all its runs together (src/coordinator/loop-control.ts): agent run time in minutes and
+     * tokens in and out. An incident at 85% of either; the task is stopped at 100%. Unset: no such cap.
+     */
+    budget: z
+      .strictObject({
+        task_minutes: z.number().positive().optional(),
+        task_tokens: z.number().int().positive().optional(),
+      })
+      .optional(),
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
     /**
@@ -281,6 +308,8 @@ export const AgentsConfig = z
         intake_thread: model.optional(),
         stage_judge: model.optional(),
         eval_answer: model.optional(),
+        /** The read-only reflection run before a worker's retry (src/coordinator/loop-control.ts). */
+        reflection: model.optional(),
       })
       .optional(),
     /**
@@ -583,6 +612,8 @@ export const TestsConfig = z.strictObject({
   test_run: TestRunConfig.optional(),
   /** The pre-deploy gate (src/deploy-gate/, docs/deploy-gate.md); absent: off. */
   deploy_gate: DeployGateConfig.optional(),
+  /** docs/previews.md: PR previews; absent or not enabled, off. */
+  preview: PreviewConfig.optional(),
 }).superRefine((t, ctx) => {
   for (const p of deployGateProblems(t.deploy_gate, t.test_run ? t.test_run.tiers.map((x) => x.name) : null)) ctx.addIssue({ code: 'custom', path: p.path, message: p.message });
 });

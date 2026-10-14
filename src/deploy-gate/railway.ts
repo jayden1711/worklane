@@ -46,9 +46,11 @@ const REDEPLOY = 'mutation($id:String!){deploymentRedeploy(id:$id){id status}}';
 /** The GraphQL bodies the client sends (tests and docs check them against each other). */
 export const RAILWAY_QUERIES = { LIST, ROLLBACK, REDEPLOY } as const;
 
-/** Railway's API over `f`, for one project's environment. `token` is read on every call. */
-export function railwayHost(ids: { project: string; environment: string }, token: () => string | null, f: typeof fetch = fetch, api = RAILWAY_API, timeoutMs = 20_000): DeployHost {
-  const call = async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
+export type RailwayCall = <T>(query: string, variables: Record<string, unknown>) => Promise<T>;
+
+/** INVARIANT: the one Railway client (post-deploy and previews): the token is read per call, never in an error. */
+export function railwayClient(token: () => string | null, f: typeof fetch = fetch, api = RAILWAY_API, timeoutMs = 20_000): RailwayCall {
+  return async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
     const t = token();
     if (!t) throw new NoHostToken();
     let res: Response;
@@ -76,6 +78,11 @@ export function railwayHost(ids: { project: string; environment: string }, token
     }
     return j.data;
   };
+}
+
+/** Railway's API over `f`, for one project's environment. `token` is read on every call. */
+export function railwayHost(ids: { project: string; environment: string }, token: () => string | null, f: typeof fetch = fetch, api = RAILWAY_API, timeoutMs = 20_000): DeployHost {
+  const call = railwayClient(token, f, api, timeoutMs);
   return {
     deployments: async (service, first) => {
       const d = await call<{ deployments: { edges: { node: { id: string; status: string; createdAt: string; canRollback?: boolean; meta?: unknown } }[] } }>(LIST, {

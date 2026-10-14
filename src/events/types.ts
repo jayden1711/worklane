@@ -41,6 +41,15 @@ export const EventSchemas = {
   /** `resumed`: the run continues the same attempt after research it asked for (it doesn't count as an attempt). */
   'run.started': z.strictObject({ issue, role: z.string(), model: z.string(), worktree: z.string(), pid: z.number().int(), pgid: z.number().int().nullable(), attempt: z.number().int(), resumed: z.literal('research').optional() }),
   'run.heartbeat': z.strictObject({ issue, role: z.string(), note: z.string() }),
+  // loop control (src/coordinator/loop-control.ts)
+  /** A worker attempt failed: how (`kind`), and its failure reduced to a fingerprint (failure-modes normalizeCause) that reads the same each time it recurs. */
+  'attempt.failed': z.strictObject({ issue, attempt: z.number().int().positive(), kind: z.enum(['stuck', 'rejected', 'checks', 'evaluator']), fingerprint: z.string().max(200) }),
+  /** The read-only reflection run before attempt `attempt`: `ok` when its what-failed / what-to-change reached that attempt's brief; else `why` not. */
+  'attempt.reflected': z.strictObject({ issue, attempt: z.number().int().positive(), model: z.string(), ok: z.boolean(), why: z.string().max(500).optional() }),
+  /** The same failure `repeats` times in a row: the attempts start again in a fresh worktree, on the escalated model. */
+  'task.reassigned': z.strictObject({ issue, attempt: z.number().int().positive(), fingerprint: z.string().max(200), repeats: z.number().int().positive(), model: z.string() }),
+  /** The issue's runs reached `share` of its agents.yaml budget: `warn` at 85% (an incident), `over` at 100% (the task is stopped). */
+  'task.budget': z.strictObject({ issue, level: z.enum(['warn', 'over']), share: z.number().nonnegative(), tokens: z.number().int().nonnegative(), minutes: z.number().nonnegative(), detail: z.string().max(500) }),
   'run.finished': z.strictObject({
     issue,
     role: z.string(),
@@ -299,12 +308,32 @@ export const EventSchemas = {
   'correction.grouped': z.strictObject({ key: z.string(), same_as: z.string(), how: z.enum(['same words', 'the agent']) }),
   /** No durable fix: the agent found none (why), or the run failed (failed: true; it isn't retried). */
   'correction.no_fix': z.strictObject({ key: z.string(), why: z.string(), failed: z.boolean() }),
+  /** WHY: item 33 (src/learnings.ts). `stage` null: code couldn't tell; the weekly judge's label joins by `run`. */
+  'learning.noted': z.strictObject({
+    key: z.string(),
+    issue,
+    role: z.string(),
+    attempt: z.number().int().nullable(),
+    run: z.string().nullable(),
+    outcome: z.string(),
+    stage: z.enum(['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness']).nullable(),
+    cause: z.string(),
+    fingerprint: z.string(),
+    same_as: z.string().nullable(),
+  }),
+  'learning.promote_requested': z.strictObject({ fingerprint: z.string(), line: z.string(), by: z.string() }),
+  /** WHY: `pr` null: nothing was filed, and `detail` says why (the owner may promote again). */
+  'learning.promoted': z.strictObject({ fingerprint: z.string(), line: z.string(), by: z.string(), pr: z.string().nullable(), number: z.number().int().positive().nullable(), detail: z.string() }),
   /** Gradual delegation: a harness PR merged; its review categories and whether it merged as proposed (no writer correction on it, no one else's push). */
   'delegation.observed': z.strictObject({ pr: z.number().int().positive(), issue, categories: z.array(z.string()), unchanged: z.boolean() }),
   /** A category put to the owner: loosen (a clean record) or tighten (loosened, then a revert, red main or later fix). */
   'delegation.suggested': z.strictObject({ category: z.string(), direction: z.enum(['loosen', 'tighten']), decision: z.string(), receipts: z.array(z.string()) }),
   /** The owner's answer; loosen or tighten files the review.yaml change as an issue (built into a PR they review). */
   'delegation.decided': z.strictObject({ category: z.string(), decision: z.string(), answer: z.string(), by: z.string(), issue: issue.nullable() }),
+  /** A constraint seen min_sightings+ times got its proposal: a draft PR (a check), or an issue (a protected area). `keys`: its sightings then. */
+  'feedback_check.proposed': z.strictObject({ constraint: z.string(), keys: z.array(z.string()), kind: z.enum(['pr', 'issue']), number: z.number().int().positive(), url: z.string(), mode: z.enum(['ast-grep', 'test', 'issue']), why: z.string() }),
+  /** No proposal for it: no check fits (failed: false), or the drafting run or its draft failed (failed: true). Tried again only on a new sighting. */
+  'feedback_check.dropped': z.strictObject({ constraint: z.string(), keys: z.array(z.string()), why: z.string(), failed: z.boolean() }),
   /**
    * One weekly optimization pass (src/coordinator/optimize.ts; started_at by the coordinator's clock): the target it
    * picked, main's numbers (baseline), and the task it filed; outcome: `filed`, or why it stopped.
@@ -677,6 +706,13 @@ export const EventSchemas = {
     github: z.strictObject({ total: z.number().int().nonnegative(), success: z.number().int().nonnegative() }).nullable(),
     token: z.boolean(),
   }),
+  // docs/previews.md: a host environment per open PR, deleted when it closes
+  'preview.created': z.strictObject({ pr: z.number().int().positive(), head: sha, environment: z.string().max(100) }),
+  'preview.ready': z.strictObject({ pr: z.number().int().positive(), head: sha, url: z.string().max(300), flows: z.array(z.strictObject({ flow: z.string().max(60), status: z.enum(['pass', 'fail', 'unavailable']), detail: z.string().max(500) })).max(20) }),
+  'preview.failed': z.strictObject({ pr: z.number().int().positive(), head: sha, outcome: z.enum(['deploy_failed', 'timed_out', 'error']), detail: z.string().max(1000) }),
+  'preview.removed': z.strictObject({ pr: z.number().int().positive(), environment: z.string().max(100), reason: z.enum(['closed', 'expired', 'failed']), ok: z.boolean() }),
+  'preview.waiting': z.strictObject({ pr: z.number().int().positive(), head: sha, active: z.number().int().nonnegative(), max: z.number().int().positive() }),
+  'preview.error': z.strictObject({ detail: z.string().max(1000) }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
   // CI timings read from GitHub for the metrics (src/ci-metrics.ts): each recorded once, so each is asked once.
