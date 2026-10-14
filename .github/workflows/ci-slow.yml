@@ -756,11 +756,12 @@ jobs:
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
           if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
-      - name: "outbound env on a real unit, as the coordinator (#381 follow-up): the unit's redirecting variables reach no child; root's network.json proxy does; a writable or non-root one is refused"
+      - name: "outbound env on a real unit, as the coordinator (#381 follow-up): the unit's redirecting and TLS-trust variables reach no child; root's network.json proxy and CA do; a writable, non-root, symlinked or non-PEM one is refused"
         run: |
           # As wl-ci in a transient unit whose own environment points every redirecting variable elsewhere: the env the
           # instance's coordinator builds (instanceEnv, its implicit gh/git children) and a project command's (childEnv),
-          # each printed by a real child. The proxy file is really root's here, which the unit tests can't make.
+          # each printed by a real child, and a real Node child's HTTPS request to a local server whose certificate only
+          # the test CA signs. The files are really root's here, which the unit tests can't make.
           d=/var/tmp/outbound-ci && sudo install -d -m 0755 "$d"
           cat > "$F/outbound.mjs" <<'EOF'
           const engine = '/opt/worklane/current/dist/src';
@@ -770,7 +771,11 @@ jobs:
           const { instanceEnv } = await import(`${engine}/service.js`);
           const envOf = (file, args, env) => Object.fromEntries(spawnSync(file, args, { env, encoding: 'utf8' }).stdout.split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
           const c = projectCommand('env');
-          console.log(JSON.stringify({ project: envOf(c.file, c.args, c.env), coordinator: envOf('/usr/bin/env', [], instanceEnv(loadInstance('ci'))) }));
+          const coord = instanceEnv(loadInstance('ci'));
+          // A real TLS handshake from a child with each env: trusted only through root's CA, never through the unit's own variables.
+          const get = "require('https').get('https://127.0.0.1:8443/', (r) => { console.log('status ' + r.statusCode); r.resume(); }).on('error', (e) => console.log('error ' + e.code))";
+          const tls = (env) => spawnSync(process.execPath, ['-e', get], { env, encoding: 'utf8', timeout: 20000 }).stdout.trim();
+          console.log(JSON.stringify({ project: envOf(c.file, c.args, c.env), coordinator: envOf('/usr/bin/env', [], coord), tls: { project: tls(c.env), coordinator: tls(coord) } }));
           EOF
           sudo install -m 0644 "$F/outbound.mjs" "$d/outbound.mjs"
           bad=http://attacker.invalid:8080
@@ -778,6 +783,7 @@ jobs:
             sudo systemd-run --uid=wl-ci --wait --pipe --quiet -p WorkingDirectory=/ \
               -p "Environment=HTTPS_PROXY=$bad HTTP_PROXY=$bad ALL_PROXY=$bad NO_PROXY=* https_proxy=$bad http_proxy=$bad all_proxy=$bad no_proxy=*" \
               -p "Environment=ANTHROPIC_BASE_URL=$bad ANTHROPIC_API_URL=$bad GH_HOST=attacker.invalid GH_REPO=attacker.invalid/o/r GITHUB_API_URL=$bad GIT_PROXY_COMMAND=/bin/false CLAUDE_CODE_USE_BEDROCK=1" \
+              -p "Environment=NODE_TLS_REJECT_UNAUTHORIZED=0 GIT_SSL_NO_VERIFY=1 NODE_EXTRA_CA_CERTS=/tmp/attacker-ca.pem SSL_CERT_FILE=/tmp/attacker-ca.pem SSL_CERT_DIR=/tmp/attacker-certs GIT_SSL_CAINFO=/tmp/attacker-ca.pem REQUESTS_CA_BUNDLE=/tmp/attacker-ca.pem CURL_CA_BUNDLE=/tmp/attacker-ca.pem SSLKEYLOGFILE=/tmp/attacker-keys GODEBUG=x509sha1=1 GIT_CONFIG_PARAMETERS=http.sslverify=false" \
               /usr/local/bin/node "$d/outbound.mjs"
           }
           check() { # $1: the probe's JSON; $2: the proxy root set, or empty for none
@@ -791,9 +797,32 @@ jobs:
               fi
             done
           }
+          # Only root's CA, as NODE_EXTRA_CA_CERTS, SSL_CERT_FILE and GIT_SSL_CAINFO; no other trust variable; and a real handshake
+          # to the test server that succeeds only with it ($2: the CA path, or empty for none).
+          check_ca() {
+            for k in project coordinator; do
+              jq -e --arg k "$k" '.[$k] | keys | map(select(test("^(NODE_TLS_REJECT_UNAUTHORIZED|GIT_SSL_NO_VERIFY|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|SSLKEYLOGFILE|GODEBUG|GIT_CONFIG_PARAMETERS)$"; "i"))) | length == 0' <<<"$1" || return 1
+              jq -e --arg k "$k" '.[$k] | to_entries | map(select(.value | test("attacker"))) | length == 0' <<<"$1" || return 1
+              if [ -n "$2" ]; then
+                jq -e --arg k "$k" --arg c "$2" '(.[$k] | .NODE_EXTRA_CA_CERTS == $c and .SSL_CERT_FILE == $c and .GIT_SSL_CAINFO == $c) and (.tls[$k] == "status 200")' <<<"$1" || return 1
+              else
+                jq -e --arg k "$k" '(.[$k] | has("NODE_EXTRA_CA_CERTS") or has("SSL_CERT_FILE") or has("GIT_SSL_CAINFO") | not) and (.tls[$k] | startswith("error "))' <<<"$1" || return 1
+              fi
+            done
+          }
+          # The test CA and a server certificate for 127.0.0.1 that only it signs, served by openssl on 8443.
+          t="$F/tls" && mkdir -p "$t"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/ca.key" -out "$t/ca.pem" -subj /CN=ci-test-ca -days 2 -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign 2>/dev/null
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/leaf.key" -out "$t/leaf.csr" -subj /CN=localhost 2>/dev/null
+          printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nbasicConstraints=CA:FALSE\n' > "$t/leaf.ext"
+          openssl x509 -req -in "$t/leaf.csr" -CA "$t/ca.pem" -CAkey "$t/ca.key" -CAcreateserial -out "$t/leaf.pem" -days 2 -extfile "$t/leaf.ext" 2>/dev/null
+          nohup openssl s_server -quiet -accept 8443 -cert "$t/leaf.pem" -key "$t/leaf.key" -www > "$t/server.log" 2>&1 &
+          echo $! > "$t/server.pid"
+          for _ in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/8443) 2>/dev/null && break; sleep 0.5; done
           n=/etc/worklane/network.json
           out="$(probe)"
           check "$out" ""
+          check_ca "$out" ""
           printf '{"proxy": "http://proxy.ci.invalid:3128", "no_proxy": "localhost,127.0.0.1"}\n' > "$F/network.json"
           sudo install -o root -g root -m 0644 "$F/network.json" "$n"
           check "$(probe)" "http://proxy.ci.invalid:3128"
@@ -806,8 +835,37 @@ jobs:
           sudo chown root "$n"
           printf '{"proxy": "http://user:pass@proxy.ci.invalid:3128"}\n' | sudo tee "$n" >/dev/null
           check "$(probe)" ""
+          # The custom CA: root's file in root's directory, then each refusal (no CA at all, never the unit's own).
+          ca=/etc/worklane/ca/ci-test.pem
+          sudo install -d -o root -g root -m 0755 /etc/worklane/ca
+          sudo install -o root -g root -m 0644 "$t/ca.pem" "$ca"
+          printf '{"ca_file": "%s"}\n' "$ca" | sudo tee "$n" >/dev/null
+          out="$(probe)"
+          check_ca "$out" "$ca"
+          check "$out" ""
+          sudo chmod 0666 "$ca"
+          check_ca "$(probe)" ""
+          sudo chmod 0644 "$ca"
+          sudo chown wl-ci "$ca"
+          check_ca "$(probe)" ""
+          sudo chown root "$ca"
+          sudo chmod 0777 /etc/worklane/ca
+          check_ca "$(probe)" ""
+          sudo chmod 0755 /etc/worklane/ca
+          sudo ln -sfn "$ca" /etc/worklane/ca/link.pem
+          printf '{"ca_file": "/etc/worklane/ca/link.pem"}\n' | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" ""
+          sudo install -o root -g root -m 0644 "$t/leaf.key" /etc/worklane/ca/key.pem
+          printf '{"ca_file": "/etc/worklane/ca/key.pem"}\n' | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" ""
+          head -c 300000 /dev/zero | tr '\0' ' ' | cat "$t/ca.pem" - | sudo tee /etc/worklane/ca/big.pem >/dev/null
+          printf '{"ca_file": "/etc/worklane/ca/big.pem"}\n' | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" ""
+          printf '{"ca_file": "%s"}\n' "$ca" | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" "$ca"
+          kill "$(cat "$t/server.pid")" || true
           sudo rm -f "$n"
-          sudo rm -rf "$d"
+          sudo rm -rf /etc/worklane/ca "$d"
       - name: through the machine helper, as the coordinator, every step is skipped as done
         run: |
           sudo -u wl-ci sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }
