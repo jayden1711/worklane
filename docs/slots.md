@@ -19,6 +19,7 @@ On a machine that runs agents for weeks, use the `/var/lib` and `/etc` locations
 | `full-run.lock` | A full test run is in progress. At most one per machine. |
 | `test-<i>.lock` | One coordinator test run (docs/test-runs.md). Counted apart from agents and capped by the config's `max_test_runs` (default 2, 1..8), which only the machine helper changes (`set-test-slots`). |
 | `STOP` | Emergency stop, `{"by", "at", "reason"}`. While it exists, every harness halts its running agents and takes no new slot. |
+| `update-drain.json` | The engine updater draining the machine for an install, `{"since", "until", "to"}`. While it stands (until its `until`), no new agent slot, test slot or full-run lock is taken; what holds one already keeps it until it ends. With the `/var/lib` slot directory it lives in root's `/var/lib/worklane/` (root-owned 0644), not in the slot directory, so only root writes or removes it. A flag past its `until`, unreadable, or more than 4 hours ahead is ignored. |
 
 Each lock file holds JSON: `{"pid": 1234, "owner": "free text: harness, project, task", "acquiredAt": "ISO-8601"}`.
 

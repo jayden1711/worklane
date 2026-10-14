@@ -10,6 +10,8 @@ export interface LockInfo {
   pid: number;
   owner: string;
   acquiredAt: string;
+  /** A test-run slot: the longest the run can take once it holds it (its setup and tiers' caps), for the updater's drain. */
+  limit_ms?: number;
 }
 
 export interface Lock {
@@ -63,9 +65,9 @@ export interface TakeoverHooks {
   taking?(): void;
 }
 
-export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}): { lock: Lock } | { holder: LockInfo | null } {
+export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
   mkdirSync(dirname(path), { recursive: true });
-  const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString() };
+  const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString(), ...extra };
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   writeFileSync(tmp, JSON.stringify(info));
   try {
