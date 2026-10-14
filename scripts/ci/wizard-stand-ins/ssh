@@ -1,0 +1,27 @@
+#!/bin/sh
+# CI only (the wizard end-to-end job, .github/workflows/ci-slow.yml): a stand-in for git's ssh to github.com, set as
+# core.sshCommand for the job's user. For an origin of github.com:<owner>/<repo>.git (git's scp-like ssh form), git
+# runs `ssh github.com git-upload-pack '<owner>/<repo>.git'` (or git-receive-pack); this runs that same command on the
+# bare repo $WIZARD_STANDIN_DIR/git/<owner>/<repo>.git instead, so the checkout's origin stays an address on
+# github.com and nothing leaves the machine. No key or token is involved: there is no authentication to stand in for.
+# INVARIANT: the host github.com only, git's two pack commands only, a repo path of exactly <owner>/<repo>.git.
+set -u
+d="${WIZARD_STANDIN_DIR:?the wizard stand-ins keep their state in WIZARD_STANDIN_DIR}"
+host=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o | -p | -i | -F | -l) shift 2 ;;
+    -*) shift ;;
+    *) host="$1"; shift; break ;;
+  esac
+done
+[ "$host" = github.com ] || { echo "ssh stand-in: only github.com, not $host" >&2; exit 255; }
+# What git asks for, one argument: git-upload-pack '<owner>/<repo>.git'
+cmd="$*"
+verb="${cmd%% *}"
+repo="$(printf '%s' "${cmd#* }" | tr -d "'")"
+repo="${repo#/}"
+case "$verb" in git-upload-pack | git-receive-pack) ;; *) echo "ssh stand-in: $verb is not a git pack command" >&2; exit 255 ;; esac
+printf '%s\n' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$' || { echo "ssh stand-in: no repo $repo" >&2; exit 255; }
+printf '%s %s\n' "$verb" "$repo" >> "$d/ssh-calls"
+exec git "${verb#git-}" "$d/git/$repo"

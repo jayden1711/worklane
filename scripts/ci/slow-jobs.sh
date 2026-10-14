@@ -6,13 +6,15 @@
 #     (SHA): a bisect step tests exactly the commit it asked for, or nothing.
 #   pull_request: all of them with the full-ci label (FULL=true) or a workflow change; the bootstrap jobs when the
 #     install path changes; the real systemd and real users jobs when the root and machine scripts (bootstrap.sh too:
-#     its server ending is proven in add-project's job), the OS layer, the
-#     test-run host or the runner's sign-in check change (PR_BASE, PR_HEAD: the PR's base and head commits).
+#     its server ending is proven in add-project's job), the OS layer, the test-run host or the runner's sign-in check
+#     change; the wizard's end-to-end job when either of those changes, or the wizard's own pages and server code do
+#     (PR_BASE, PR_HEAD: the PR's base and head commits).
 set -euo pipefail
 
 BOOTSTRAP="bootstrap bootstrap-windows"
 MACHINE="testrun-real-systemd add-project-real-systemd auth-probe-real-users"
-ALL="$BOOTSTRAP $MACHINE"
+WIZARD="wizard-e2e-real-systemd"
+ALL="$BOOTSTRAP $MACHINE $WIZARD"
 
 run=""
 case "${EVENT:-}" in
@@ -38,6 +40,8 @@ case "${EVENT:-}" in
     else
       if grep -qE '^(scripts/bootstrap\.sh|scripts/ci/wizard-url\.sh|src/dashboard-detach\.ts|web/src/components/DashboardKey\.tsx|Dockerfile|\.dockerignore|package(-lock)?\.json|scripts/ci/stand-ins/)' <<< "$files"; then run="$BOOTSTRAP"; fi
       if grep -qE '^(scripts/(setup|machine|ci)/|scripts/bootstrap\.sh|src/os/|src/testrun/|src/runner\.ts)' <<< "$files"; then run="$run $MACHINE"; fi
+      # WHY: the wizard's walk runs the install and the machine scripts too, so either of the above runs it as well.
+      if [ -n "$run" ] || grep -qE '^(web/src/(App\.tsx|api\.ts|pages/(FirstRun|Settings|Machine|Setup)\.tsx|components/(SetupScreens|SetupConfig|ClaudeSignin|DiscordSetup|PolicyForm|RepoConfigForm|TailscaleSetup|UpdaterSetup)\.tsx)|src/(setup-[a-z-]+|setup/[a-z-]+|claude-signin|gh-login|policy-edit|config-change|tailscale-setup|updater-setup|hub-setup|auto-config|init|dashboard|dashboard-hub|browser/cdp)\.ts)' <<< "$files"; then run="$run $WIZARD"; fi
     fi
     ;;
   *)
