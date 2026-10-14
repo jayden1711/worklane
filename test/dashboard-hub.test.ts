@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
@@ -10,12 +11,17 @@ import { startDashboard } from '../src/dashboard.js';
 import { parseHubArg, startHub, type HubInstance } from '../src/dashboard-hub.js';
 import { EventLog } from '../src/events/log.js';
 import { childEnv } from '../src/os/index.js';
+import { heldPort } from './held-port.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
 const seen = (issue: number, title: string) => ({ issue, title, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' });
 const asked = (id: string) => ({ id, kind: 'land' as const, issue: 1, owner: 'example-owner', question: 'Approve?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] });
 
-/** One instance's own dashboard server, with its own log and state dir. */
+/**
+ * One instance's own dashboard server, with its own log and state dir. The hub reaches it through a port the test
+ * holds until the end (test/held-port.ts): stop() stops the dashboard and that port then refuses every connection,
+ * and no other server on the machine can take it in the meantime.
+ */
 async function instance(title: string) {
   const dir = mkdtempSync(join(tmpdir(), 'hub-inst-'));
   const { dir: root } = exampleProject();
@@ -24,8 +30,12 @@ async function instance(title: string) {
   log.append('issue.seen', seen(1, title), 'c');
   log.append('decision.asked', asked('d-1'), 'c');
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: dir, user: 'example-owner', slotsDir: join(dir, 'slots'), pollMs: 50 });
-  const port = Number(new URL(d.url).port);
-  return { d, log, dir, port };
+  const held = await heldPort(Number(new URL(d.url).port));
+  const stop = async () => {
+    held.forwardTo(null);
+    await d.close();
+  };
+  return { d, log, dir, port: held.port, held, stop };
 }
 
 async function setup() {
@@ -45,6 +55,8 @@ async function setup() {
     await h.close();
     await a.d.close();
     await b.d.close();
+    await a.held.close();
+    await b.held.close();
   };
   return { a, b, h, base, hh, close };
 }
@@ -109,15 +121,29 @@ test('the hub streams an instance\'s changes, and says when an instance isn\'t a
     await Promise.race([read, new Promise((_, rej) => setTimeout(() => rej(new Error('no change event within 5s')), 5000))]);
     assert.match(got, /event: hello[\s\S]*event: change/);
     await reader.cancel();
-    await s.a.d.close();
+    await s.a.stop();
+    // Regression (#312): another server tries to take the stopped instance's port, as a live dashboard or another
+    // test file's could; the hub's answer must not change. When the test let the port go, this one answered 401.
+    const squatter = createServer((_q, r) => {
+      r.writeHead(401, { 'content-type': 'application/json' });
+      r.end('{"error":"not this instance"}');
+    });
+    squatter.on('error', () => {});
+    await new Promise<void>((r) => {
+      squatter.once('error', () => r());
+      squatter.listen(s.a.port, '127.0.0.1', () => r());
+    });
     const hub = (await (await fetch(`${s.base}/api/hub`, { headers: s.hh })).json()) as { instances: { name: string; up: boolean }[] };
     assert.deepEqual(hub.instances.map((i) => [i.name, i.up]), [['a', false], ['b', true]]);
     const down = await fetch(`${s.base}/api/i/a/state`, { headers: s.hh });
     assert.equal(down.status, 502);
     assert.match(((await down.json()) as { error: string }).error, /isn't answering/);
+    squatter.close();
   } finally {
     await s.h.close();
     await s.b.d.close();
+    await s.a.held.close();
+    await s.b.held.close();
   }
 });
 
