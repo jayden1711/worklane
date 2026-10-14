@@ -20,8 +20,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const [mode, dist, wizardUrl, keyFile, out, extra] = process.argv.slice(2);
-if (!['local', 'local-after', 'server'].includes(mode) || !dist || !wizardUrl || !keyFile || !out || !extra) {
-  console.error('usage: wizard-e2e.mjs local|local-after <dist dir> <wizard URL> <key file> <out dir> <checkout>\n       wizard-e2e.mjs server <dist dir> <wizard URL> <key file> <out dir> <instance>');
+if (!['local', 'server'].includes(mode) || !dist || !wizardUrl || !keyFile || !out || !extra) {
+  console.error('usage: wizard-e2e.mjs local <dist dir> <wizard URL> <key file> <out dir> <checkout>\n       wizard-e2e.mjs server <dist dir> <wizard URL> <key file> <out dir> <instance>');
   process.exit(2);
 }
 const instance = mode === 'server' ? extra : null;
@@ -295,9 +295,20 @@ async function local() {
     assert.deepEqual([repo, base, state], ['example/alpha', 'main', 'OPEN']);
     const bare = st('git/example/alpha.git');
     assert.match(sh('git', ['-C', bare, 'show', `${head}:.worklane/config.yaml`]).out, /required_checks:[\s\S]*- test/);
-    // The person merges it on GitHub (the stand-in's merge), then pulls (the one terminal line this screen leaves).
+    // The person merges it on GitHub (the stand-in's merge). Nothing after the install is a terminal command.
     assert.equal(sh('gh', ['pr', 'merge', n, '--repo', 'example/alpha', '--merge']).status, 0);
     return { pr: n, head };
+  });
+
+  await screen('screen 4: the merged config reaches the checkout and the page, with no git pull and no restart', async () => {
+    // INVARIANT (owner, #393): no `git pull` and no dashboard restart after a merge. Re-check is the page's own button.
+    await open('/first-run?step=required-checks');
+    await until('the checkout and the page have the merged required check', async () => {
+      const inCheckout = /required_checks:[\s\S]*- test/.test(readFileSync(join(checkout, '.worklane', 'config.yaml'), 'utf8'));
+      if (inCheckout && /required: test/.test((await text(row('required-checks'))) ?? '')) return true;
+      if (await evaluate(`!!${q(tid('first-run-recheck'))} && !${q(tid('first-run-recheck'))}.disabled`)) await click(tid('first-run-recheck'));
+      return false;
+    }, 60_000, 2000);
   });
 }
 
@@ -410,6 +421,9 @@ async function server() {
     return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
   });
 
+  // WHY skipped: since #387 the channel listing runs the engine's own CLI against Discord's API (a constant host); its
+  // only stand-in is a code-level seam (startDashboard's discordListing), which the installed dashboard unit's CLI
+  // never sets. So the real unit can't be given it, and a stand-in token would go to discord.com.
   await screen('screen 11: Discord skipped (Skip on the page; the step reads skipped)', async () => {
     await open('/first-run');
     await click(`${row('discord')} ${tid('first-run-skip')}`);
@@ -567,10 +581,9 @@ async function serverMachine() {
 }
 
 try {
-  if (mode === 'local') await local();
-  else if (mode === 'local-after') {
-    // A new tab on the same URL (the job pulled the merged change and restarted the dashboard in between).
-    await keyPage();
+  if (mode === 'local') {
+    // One tab, the whole walk: Protect must see the merged checks in the same dashboard, never after a restart.
+    await local();
     await localRest(checkout);
     const f = await firstRun();
     await automationLines(f);

@@ -1614,21 +1614,15 @@ jobs:
           u="$(bash scripts/ci/wizard-url.sh "$F/local-install.log" "$kf" /api/first-run | tail -n 1)"
           { echo "LOCAL_URL=$u"; echo "LOCAL_KEY=$kf"; } >> "$GITHUB_ENV"
           echo "the install's one URL: $u"
-      - name: "local mode, in the browser: Claude sign-in, Connect GitHub, the repo config in setup mode and its form (screens 1-4)"
-        run: node scripts/ci/wizard-e2e.mjs local "$GITHUB_WORKSPACE/dist" "$LOCAL_URL" "$LOCAL_KEY" "$F/browser" "$RUNNER_TEMP/alpha" | tee "$F/walk-local.jsonl"
-      - name: "local mode: the merged config change pulled; the dashboard restarted with the install command (same URL)"
+      # One tab, the whole walk, nothing typed in a terminal after the install: no git pull after a merge, and no
+      # dashboard restart for Protect to see the merged checks (owner, #393).
+      - name: "local mode, in the browser: Claude sign-in, Connect GitHub, the repo config and its form, a skip, hooks, Protect, every automation line, rerun from Settings, Start, the dashboard (screens 1-4, 6, 10)"
         run: |
-          git -C "$RUNNER_TEMP/alpha" pull -q --ff-only
-          grep -q -- '- test' "$RUNNER_TEMP/alpha/.worklane/config.yaml"
-          # WHY a restart: the first-run actions read the config the dashboard started with (opts.cfg), so Protect
-          # still says "name the required checks first" after they are merged and pulled. Reported with this job; the
-          # install command again is the documented way to (re)start the dashboard, and it must print the same URL.
-          pkill -f "dashboard --service --root $RUNNER_TEMP/alpha" && sleep 2
-          bash scripts/bootstrap.sh --engine "$TGZ" "$RUNNER_TEMP/alpha" < /dev/null | tee "$F/local-install2.log"
-          u2="$(bash scripts/ci/wizard-url.sh "$F/local-install2.log" "$LOCAL_KEY" /api/first-run | tail -n 1)"
-          [ "$u2" = "$LOCAL_URL" ] || { echo "the URL changed: $LOCAL_URL / $u2" >&2; exit 1; }
-      - name: "local mode, in the browser: skip, hooks, Protect, every automation line, rerun from Settings, Start, the dashboard (screens 6, 10)"
-        run: node scripts/ci/wizard-e2e.mjs local-after "$GITHUB_WORKSPACE/dist" "$LOCAL_URL" "$LOCAL_KEY" "$F/browser" "$RUNNER_TEMP/alpha" | tee -a "$F/walk-local.jsonl"
+          before="$(pgrep -f "dashboard --service --root $RUNNER_TEMP/alpha")"
+          node scripts/ci/wizard-e2e.mjs local "$GITHUB_WORKSPACE/dist" "$LOCAL_URL" "$LOCAL_KEY" "$F/browser" "$RUNNER_TEMP/alpha" | tee "$F/walk-local.jsonl"
+          # The same dashboard process served the whole walk, and the checkout is at "GitHub's" main without a pull.
+          [ "$(pgrep -f "dashboard --service --root $RUNNER_TEMP/alpha")" = "$before" ] || { echo "the dashboard was restarted during the walk" >&2; exit 1; }
+          [ "$(git -C "$RUNNER_TEMP/alpha" rev-parse HEAD)" = "$(git -C "$WIZARD_STANDIN_DIR/git/example/alpha.git" rev-parse main)" ]
       - name: "local mode: the coordinator's systemd --user unit, then down; the dashboard stopped"
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -1666,8 +1660,10 @@ jobs:
           [ "$u" = http://127.0.0.1:4398/first-run ] || { echo "the install's last line: $u" >&2; exit 1; }
           closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/server-install.log")"
           [ "$(grep -c '://' <<< "$closing")" = 1 ]
-          # What answers there on a fresh server, before any hub exists (reported, not asserted: see the job's PR).
-          echo "GET $u right after the install: HTTP $(curl -s -o /dev/null -w '%{http_code}' "$u" || true)"
+          # The URL answers on a fresh server, right after the install, before any project (owner, #393): the page.
+          code="$(curl -s -o "$F/fresh-page.html" -w '%{http_code}' "$u" || true)"
+          [ "$code" = 200 ] || { echo "GET $u right after the install: HTTP $code" >&2; exit 1; }
+          grep -q '<div id="root"></div>' "$F/fresh-page.html"
           # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token).
           sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
       - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
