@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { globSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,6 +12,13 @@ import { takeChromeLock } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 const helpers = pathToFileURL(join(import.meta.dirname, 'browser-helpers.js')).href;
+
+/** A pid no process has: one that just exited. */
+const deadPid = () =>
+  new Promise<number>((ok) => {
+    const c = spawn(process.execPath, ['-e', '']);
+    c.on('exit', () => ok(c.pid!));
+  });
 
 test('the lock holds across processes: four at once each get it in turn, never two together', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'chrome-lock-'));
@@ -41,15 +48,9 @@ test('a lock left by a process that has exited is taken over; one a live process
   const dir = mkdtempSync(join(tmpdir(), 'chrome-lock-'));
   try {
     const lock = join(dir, 'lock');
-    // A pid no process has: one that just exited.
-    const gone = await new Promise<number>((ok) => {
-      const c = spawn(process.execPath, ['-e', '']);
-      c.on('exit', () => ok(c.pid!));
-    });
-    mkdirSync(lock);
-    writeFileSync(join(lock, 'pid'), String(gone));
+    writeFileSync(lock, String(await deadPid()));
     const release = await takeChromeLock(lock);
-    assert.equal(readFileSync(join(lock, 'pid'), 'utf8'), String(process.pid));
+    assert.equal(readFileSync(lock, 'utf8'), String(process.pid));
     let second = false;
     const waiting = takeChromeLock(lock).then((r) => ((second = true), r));
     await new Promise((r) => setTimeout(r, 400));
@@ -80,4 +81,65 @@ test('every test that drives a real Chrome takes the lock first', () => {
   // 15 on main, plus #414's two (machine cards) and #418's one (web-key-in-url) on this branch.
   assert.ok(found === 18, `found the real-Chrome tests (${found})`);
   assert.deepEqual(missing, [], 'start with `await oneChromeAtATime(ctx);`');
+});
+
+/**
+ * Four processes that ask for the lock at the same instant (each spins until an agreed moment), and each holds it a
+ * moment: the log of who held it, "+pid" on taking and "-pid" before giving back (O_APPEND: whole lines, in order).
+ */
+async function race(dir: string, lock: string): Promise<string[]> {
+  const log = join(dir, 'log');
+  rmSync(log, { force: true });
+  const at = Date.now() + 400;
+  const code = `import { appendFileSync } from 'node:fs';
+const { takeChromeLock } = await import(${JSON.stringify(helpers)});
+while (Date.now() < ${at});
+const release = await takeChromeLock(${JSON.stringify(lock)});
+appendFileSync(${JSON.stringify(log)}, '+' + process.pid + '\\n');
+await new Promise((r) => setTimeout(r, 5));
+appendFileSync(${JSON.stringify(log)}, '-' + process.pid + '\\n');
+release();`;
+  await Promise.all([0, 1, 2, 3].map(() => new Promise<void>((ok, fail) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'inherit', 'inherit'] });
+    c.on('error', fail);
+    c.on('exit', (status) => (status === 0 ? ok() : fail(new Error(`exit ${status}`))));
+  })));
+  return readFileSync(log, 'utf8').trim().split('\n');
+}
+
+test('stress: the four-process race, 50 times (and 10 more from a dead owner\'s lock): no two ever hold the lock together', { timeout: 300_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chrome-lock-'));
+  try {
+    const lock = join(dir, 'lock');
+    for (let round = 0; round < 60; round++) {
+      // The last 10 start from a lock whose owner has exited: only one of the four may take it over at a time.
+      if (round >= 50) writeFileSync(lock, String(await deadPid()));
+      const lines = await race(dir, lock);
+      assert.equal(lines.length, 8, `round ${round}: each of the four took the lock once: ${lines.join(' ')}`);
+      for (let i = 0; i < lines.length; i += 2) {
+        assert.ok(lines[i]!.startsWith('+') && lines[i + 1] === `-${lines[i]!.slice(1)}`, `round ${round}: held together: ${lines.join(' ')}`);
+      }
+      assert.deepEqual(readdirSync(dir), ['log'], `round ${round}: no lock, takeover guard or half-made lock left behind`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a lock whose owner cannot be read is waited for, never taken over while it is recent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chrome-lock-'));
+  try {
+    const lock = join(dir, 'lock');
+    // What a waiter saw before the fix, in the moment between a lock's making and its pid's writing.
+    writeFileSync(lock, '');
+    let taken = false;
+    const waiting = takeChromeLock(lock).then((r) => ((taken = true), r));
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(taken, false, 'an empty lock is not a dead owner');
+    rmSync(lock);
+    (await waiting)();
+    assert.equal(taken, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
