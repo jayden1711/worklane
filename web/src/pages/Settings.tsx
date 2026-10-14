@@ -109,6 +109,16 @@ export function SettingsPage() {
         </a>
         .
       </div>
+      {/* WHY: only where the step exists: a server instance's dashboard, for its owners and writers. */}
+      {full?.discordSetup && (
+      <div className="px-6 pt-2 text-[12.5px] text-ink-2" data-testid="settings-discord">
+        The Discord bot (its token, invite link and channels) is set up, and changed later, in the{' '}
+        <a href="/first-run?open=discord" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/first-run?open=discord'))} data-testid="settings-discord-link">
+          First run page's Discord step
+        </a>
+        .
+      </div>
+      )}
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <Section title="Project">
           <Row k="Name">{s.project.name}</Row>

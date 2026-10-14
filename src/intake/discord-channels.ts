@@ -1,6 +1,12 @@
 // `discord channels`: the text and announcement channels an instance's bot can see, one line each as
 // "<server> / #<channel> <id>", so the owner can copy ids into intake.yaml (superfan.channel and the like) without
-// Discord's Developer Mode. Read-only by construction: the only request this module can make is a GET (getJson
+// Discord's Developer Mode. With --json: one JSON line with the same channels (each with its server's id) and the
+// bot's application (its id, for the invite link; whether its message-content intent is on), which is what the
+// dashboard's Discord setup reads from a child process run as the instance's user (src/intake/discord-setup.ts).
+// INVARIANT: every request goes to Discord's own REST base, the constant API (src/intake/discord.ts): no option,
+// argument, environment variable or file can name another host, because the bot token is sent there. Tests stand
+// in for Discord by injecting `fetch` in code.
+// Read-only by construction: the only request this module can make is a GET (getJson
 // takes no method), and it writes no file, event or log. The token is the instance's own (credentials.yaml
 // intake.discord_token, read by readDiscordToken as the bot reads it); it goes only into the Authorization header,
 // and every message that leaves this module has it scrubbed out (INVARIANT: no output or thrown error holds it).
@@ -19,9 +25,8 @@ export class DiscordChannelsError extends Error {}
 
 export interface ListOptions {
   token: string;
+  /** Tests stand in for Discord here, in code. */
   fetch?: typeof fetch;
-  /** Discord's REST base; tests point it at a fake server. */
-  api?: string;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -49,7 +54,7 @@ async function getJson<T>(path: string, o: ListOptions): Promise<T> {
     let r: Response;
     try {
       // INVARIANT: method is GET and the token is in a header only, never in the URL.
-      r = await f(`${o.api ?? API}${path}`, { method: 'GET', headers: { authorization: `Bot ${o.token}`, 'user-agent': `${BRAND.cli} discord-channels` }, signal: AbortSignal.timeout(15_000) });
+      r = await f(`${API}${path}`, { method: 'GET', headers: { authorization: `Bot ${o.token}`, 'user-agent': `${BRAND.cli} discord-channels` }, signal: AbortSignal.timeout(15_000) });
     } catch (e) {
       throw fail(`could not reach Discord (GET ${path}): ${(e as Error).message}`);
     }
@@ -80,8 +85,17 @@ async function getJson<T>(path: string, o: ListOptions): Promise<T> {
   }
 }
 
-/** Every text and announcement channel in every server the bot is in, as "<server> / #<channel> <id>", sorted. */
-export async function listDiscordChannels(o: ListOptions): Promise<string[]> {
+/** A channel the bot can see: its server (guild), its own id and name, and Discord's channel type. */
+export interface ChannelRow {
+  guild_id: string;
+  guild: string;
+  id: string;
+  name: string;
+  type: number;
+}
+
+/** Every text and announcement channel in every server the bot is in, sorted by server, then channel. */
+export async function listDiscordChannelRows(o: ListOptions): Promise<ChannelRow[]> {
   const guilds: Guild[] = [];
   for (let after = ''; ; ) {
     const page = await getJson<Guild[]>(`/users/@me/guilds?limit=200${after ? `&after=${encodeURIComponent(after)}` : ''}`, o);
@@ -89,23 +103,51 @@ export async function listDiscordChannels(o: ListOptions): Promise<string[]> {
     if (page.length < 200) break;
     after = page[page.length - 1]!.id;
   }
-  const rows: { guild: string; channel: string; id: string }[] = [];
+  const rows: ChannelRow[] = [];
   for (const g of guilds) {
     const channels = await getJson<Channel[]>(`/guilds/${encodeURIComponent(g.id)}/channels`, o);
-    for (const c of channels) if (LISTED_CHANNEL_TYPES.has(c.type)) rows.push({ guild: g.name, channel: c.name, id: c.id });
+    for (const c of channels) if (LISTED_CHANNEL_TYPES.has(c.type)) rows.push({ guild_id: g.id, guild: g.name, id: c.id, name: c.name, type: c.type });
   }
-  rows.sort((a, b) => a.guild.localeCompare(b.guild) || a.channel.localeCompare(b.channel) || a.id.localeCompare(b.id));
-  return rows.map((r) => `${r.guild} / #${r.channel} ${r.id}`);
+  rows.sort((a, b) => a.guild.localeCompare(b.guild) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return rows;
+}
+
+/** The same channels as "<server> / #<channel> <id>" lines. */
+export async function listDiscordChannels(o: ListOptions): Promise<string[]> {
+  return (await listDiscordChannelRows(o)).map((r) => `${r.guild} / #${r.name} ${r.id}`);
+}
+
+/** Discord's application flags for the message-content intent: granted (verified bots), or on for a small bot. */
+const MESSAGE_CONTENT_FLAGS = (1 << 18) | (1 << 19);
+
+/** The bot's own application: its id (the invite link's client_id), its name, and whether message content is on. */
+export interface BotApplication {
+  id: string;
+  name: string;
+  message_content: boolean;
+}
+
+export async function discordApplication(o: ListOptions): Promise<BotApplication> {
+  const a = await getJson<{ id?: unknown; name?: unknown; flags?: unknown }>('/applications/@me', o);
+  if (typeof a.id !== 'string' || !/^\d{5,25}$/.test(a.id)) throw new DiscordChannelsError('Discord sent no application id for GET /applications/@me');
+  return { id: a.id, name: typeof a.name === 'string' ? a.name : '', message_content: typeof a.flags === 'number' && (a.flags & MESSAGE_CONTENT_FLAGS) !== 0 };
+}
+
+/** What `discord channels --json` prints, on one line. */
+export interface ChannelsJson {
+  application: BotApplication;
+  channels: ChannelRow[];
 }
 
 export interface CommandOptions {
   instance?: string | undefined;
   dir?: string;
   fetch?: typeof fetch;
-  api?: string;
   sleep?: (ms: number) => Promise<void>;
   out?: (line: string) => void;
   err?: (line: string) => void;
+  /** One JSON line (ChannelsJson) instead of the lines. */
+  json?: boolean;
 }
 
 /** The CLI command: pick the instance, read its token, print the channels. Exit 0, or 1 with one scrubbed line. */
@@ -145,8 +187,14 @@ export async function discordChannelsCommand(o: CommandOptions = {}): Promise<nu
       err(`instance ${name}: its bot token file ${file} is empty`);
       return 1;
     }
-    const lines = await listDiscordChannels({ token, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.api ? { api: o.api } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) });
-    for (const l of lines) out(l);
+    const list: ListOptions = { token, ...(o.fetch ? { fetch: o.fetch } : {}), ...(o.sleep ? { sleep: o.sleep } : {}) };
+    if (o.json) {
+      const json: ChannelsJson = { application: await discordApplication(list), channels: await listDiscordChannelRows(list) };
+      // INVARIANT: nothing Discord sent leaves with the token in it, a channel or application name included.
+      out(scrubToken(JSON.stringify(json), token));
+      return 0;
+    }
+    for (const l of await listDiscordChannels(list)) out(l);
     return 0;
   } catch (e) {
     // WHY: the last net: whatever was thrown, its message is scrubbed and its stack (which could hold it) is dropped.

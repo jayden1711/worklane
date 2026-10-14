@@ -138,7 +138,9 @@ export type Fix =
   /** The Start button: the coordinator's service. */
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  /** WHY: the Discord step (src/intake/discord-setup.ts): token, invite, channel picks, intake.yaml after a shown diff. */
+  | { kind: 'discord'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -704,8 +706,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'some',
-    today: "Create the app and bot in Discord's developer portal, turn on the message-content intent, invite it, `credentials.sh <name> intake-discord`, then write intake.yaml by hand (guild, channels, owners, people) and restart the instance.",
-    fix: { kind: 'outside', url: 'https://discord.com/developers/applications', label: "Discord's developer portal", why: "creating the bot and its intent toggle exist only there" },
+    today: `Create the app and bot in Discord's developer portal and turn on the message-content intent (only there). Then here, or in a terminal: the token (\`credentials.sh <name> intake-discord\`, as root), the invite link, the bot's channels (\`${BRAND.cli} discord channels\`, as the instance's user), and intake.yaml's discord and superfan channel keys; who may send, people and owners stay in intake.yaml by hand. Restart the instance.`,
+    fix: { kind: 'discord', label: 'Set up' },
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return no(i.error);

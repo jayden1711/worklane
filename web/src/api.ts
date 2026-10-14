@@ -335,6 +335,8 @@ export interface Run {
 }
 
 export interface Settings {
+  /** Whether this dashboard has the First run page's Discord step (a server instance's). */
+  discordSetup?: boolean;
   configDir: string;
   project: { name: string; repo: string; landMode: string; runtime: unknown };
   owners: State['owners'];
@@ -780,7 +782,8 @@ export type SetupFix =
   | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  | { kind: 'discord'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -845,6 +848,53 @@ export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fre
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
 /** Run a first-run Fix action after the person confirmed the plan it showed. */
 export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** The first-run page's Discord step (src/intake/discord-setup.ts), as GET /api/first-run/discord serves it. */
+export type DiscordFormValue = boolean | string | string[] | null;
+export interface DiscordChannel {
+  guild_id: string;
+  guild: string;
+  id: string;
+  name: string;
+  type: number;
+}
+/** The bot's own view, from a child process on the instance that reads the token itself; this page never sees it. */
+export interface DiscordBot {
+  application: { id: string; name: string; message_content: boolean };
+  invite: string;
+  channels: DiscordChannel[];
+  at: string;
+}
+export type DiscordSetup =
+  | { available: false; why: string }
+  | {
+      available: true;
+      instance: string;
+      canAct: boolean;
+      portal: string;
+      token: { configured: boolean; file: string | null; present: boolean; error: string | null };
+      ask: (Ask & { kind: 'paste_secret' }) | null;
+      invite: { integer: string; permissions: { name: string; bit: number; why: string }[] };
+      intake: { file: string; exists: boolean; error: string | null; values: Record<string, DiscordFormValue>; warnings: string[] };
+      form: { key: string; kind: 'boolean' | 'id' | 'ids' | 'guild' | 'url'; what: string }[];
+      automation: { token: string; channels: string; file: string; keys: string[]; restart: string };
+    };
+export interface DiscordIntakePlan {
+  ok: boolean;
+  confirmed: boolean;
+  file: string;
+  creates: boolean;
+  changes: { key: string; from: DiscordFormValue; to: DiscordFormValue }[];
+  diff: string;
+  hash: string;
+  warnings: string[];
+}
+export const getDiscordSetup = () => api<DiscordSetup>('/api/first-run/discord');
+export const getDiscordBot = (fresh = false) => api<DiscordBot>(`/api/first-run/discord/channels${fresh ? '?fresh=1' : ''}`);
+/** Open the paste box for the bot token (a paste_secret ask); the token itself goes through pasteSecret. */
+export const openDiscordTokenAsk = () => api<{ ok: boolean; ask: Ask }>('/api/first-run/discord/token-ask', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Review (no `expect`: nothing written) or write the intake.yaml change these picks make; a write names the reviewed change's hash. */
+export const changeDiscordIntake = (values: Record<string, DiscordFormValue>, expect?: string) =>
+  api<DiscordIntakePlan>('/api/first-run/discord/intake', { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**

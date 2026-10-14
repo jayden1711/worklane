@@ -77,6 +77,7 @@
   "test/discord-explain.test.ts": 1255,
   "test/discord-ideas.test.ts": 370,
   "test/discord-owners.test.ts": 709,
+  "test/discord-setup.test.ts": 1500,
   "test/domain-requests.test.ts": 16,
   "test/domain-runner.test.ts": 495,
   "test/engine-update.test.ts": 25431,
