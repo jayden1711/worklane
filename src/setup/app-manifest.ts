@@ -25,6 +25,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../brand.js';
+import { GITHUB_API, GITHUB_WEB } from '../github-hosts.js';
 import type { Asks } from '../console/asks.js';
 import { CALLBACK_PATH } from '../dashboard-auth.js';
 import { appJwt } from '../github-app.js';
@@ -63,8 +64,8 @@ export const coordinatorUser = (instance: string) => `wl-${instance}`;
 export const VIEWER_USER = 'wl-dash';
 
 const HEADERS = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' } as const;
-const defaultApi = () => (process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com').replace(/\/+$/, '');
-const defaultWeb = () => (process.env[`${BRAND.envPrefix}_GITHUB_WEB`] ?? 'https://github.com').replace(/\/+$/, '');
+const defaultApi = () => GITHUB_API;
+const defaultWeb = () => GITHUB_WEB;
 
 export function validRepo(repo: unknown): repo is string {
   return typeof repo === 'string' && REPO.test(repo) && !repo.includes('..');
@@ -505,12 +506,17 @@ export const signInDir = (home: string) => join(home, '.config', 'dashboard-sign
 export const credentialsFile = (home: string, instance: string) => join(home, '.local', 'state', BRAND.cli, 'instances', instance, 'credentials.yaml');
 export const APP_PERMISSIONS_SCRIPT = fileURLToPath(new URL('../../../scripts/setup/app-permissions.mjs', import.meta.url));
 
-/** Run app-permissions.mjs as `user` (sudo when that isn't this user), against the same API base. Its output names no secret. */
-export function verifyWithScript(api = defaultApi(), script = APP_PERMISSIONS_SCRIPT): NonNullable<RunDeps['verify']> {
+/**
+ * Run app-permissions.mjs as `user` (sudo when that isn't this user); it asks GitHub itself (its host is a constant
+ * in the script). Its output names no secret. `node` is for a test's stand-in only: extra node arguments and
+ * environment for the child, so a test can give that process a GitHub on its own machine.
+ */
+export function verifyWithScript(opts: { script?: string; node?: { args?: string[]; env?: Record<string, string> } } = {}): NonNullable<RunDeps['verify']> {
+  const script = opts.script ?? APP_PERMISSIONS_SCRIPT;
+  const env = opts.node?.env ?? {};
   return (o) =>
     new Promise((done) => {
-      const env = { [`${BRAND.envPrefix}_GITHUB_API`]: api };
-      const args = ['--input-type=module', '-', o.key, String(o.appId), String(o.installationId), o.repo];
+      const args = [...(opts.node?.args ?? []), '--input-type=module', '-', o.key, String(o.appId), String(o.installationId), o.repo];
       const [file, argv] = o.user === currentUser() ? [process.execPath, args] : asUser(o.user, process.execPath, args, env);
       const p = spawn(file, argv, { cwd: '/', env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
       let out = '';
@@ -645,7 +651,7 @@ export async function runAppManifest(o: { instance: string; repo: string; kind: 
   log(`found installation ${installationId}`);
 
   // 4. The same check as credentials.sh, as the coordinator user.
-  const v = await (d.verify ?? verifyWithScript(api))({ user, key: keyPath, appId: app.id, installationId, repo: o.repo });
+  const v = await (d.verify ?? verifyWithScript())({ user, key: keyPath, appId: app.id, installationId, repo: o.repo });
   for (const line of v.output.split('\n').filter(Boolean)) log(`  ${line}`);
   if (!v.ok) return fail('verify', `${v.output.split('\n').filter((l) => l.startsWith('FAILED')).join('; ') || 'the check failed'}; nothing was written to credentials.yaml. Fix the installation on GitHub, then: credentials.sh ${o.instance} github-app ${app.id} ${installationId} ${keyPath} ${o.repo}`, installAsk);
   if (installAsk) d.onDone?.(installAsk, by);

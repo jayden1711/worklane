@@ -2,8 +2,9 @@
 // setup script runs this as the coordinator user (who alone can read the key),
 // piped on stdin:
 //   node --input-type=module - <key.pem> <app-id> <installation-id> <owner/repo> < app-permissions.mjs
-// Imported by tests for the rules alone. WORKLANE_GITHUB_API points it at another API base (a fake GitHub in
-// tests); the setup console's manifest flow (src/setup/app-manifest.ts) runs this same file the same way.
+// Imported by tests for the rules alone. It asks GitHub itself, always: the App's key signs what it sends, so no
+// setting names another host. The setup console's manifest flow (src/setup/app-manifest.ts) runs this same file the
+// same way.
 
 /** Needed for the coordinator to work at all. */
 export const REQUIRED = {
@@ -62,7 +63,7 @@ async function main([key, appId, instId, repo]) {
   const head = b64(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const body = b64(JSON.stringify({ iat, exp: iat + 600, iss: appId }));
   const jwt = `${head}.${body}.${b64(createSign('RSA-SHA256').update(`${head}.${body}`).sign(readFileSync(key, 'utf8')))}`;
-  const api = (process.env.WORKLANE_GITHUB_API || 'https://api.github.com').replace(/\/+$/, '');
+  const api = 'https://api.github.com';
   const h = (auth) => ({ authorization: `Bearer ${auth}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' });
   const app = await fetch(`${api}/app`, { headers: h(jwt) });
   if (!app.ok) throw new Error(`the key does not sign for App ${appId} (GitHub ${app.status})`);

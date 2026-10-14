@@ -15,6 +15,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { BRAND } from './brand.js';
+import { GITHUB_API } from './github-hosts.js';
 import { loadConfigAt, type Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
@@ -335,7 +336,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   // The backlog the coordinator files to, made when first needed: an instance's with its App's tokens.
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
-  const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com' })) : undefined;
+  const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: GITHUB_API })) : undefined;
   return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
 }
 
