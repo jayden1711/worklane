@@ -10,6 +10,7 @@ import { type CommitCheck, type PullRequest } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
+import type { Episode } from '../fix-forward.js';
 import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
@@ -30,6 +31,7 @@ import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
 import { FlakyGate } from './flaky.js';
+import { FixForward } from './fix-forward.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
@@ -40,6 +42,7 @@ export abstract class MergeFlow extends FixRuns {
   protected readonly waitPolls = new PollCounter();
   private batcher: PrBatcher | null = null;
   private flakyGateInst: FlakyGate | null = null;
+  private fixForwardInst: FixForward | null = null;
 
   /** The flaky-test gate in front of a red default branch (coordinator/flaky.ts): re-run first, quarantine what passes. */
   protected get flakyGate(): FlakyGate {
@@ -56,6 +59,50 @@ export abstract class MergeFlow extends FixRuns {
       fetch: () => void this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch),
     });
     return this.flakyGateInst;
+  }
+
+  /** Fix-forward on a real red default branch (coordinator/fix-forward.ts): the culprit, fix tasks, the revert if they fail. */
+  protected get fixForward(): FixForward {
+    const git = (...a: string[]) => this.gitOrNull(this.d.repo, ...a);
+    this.fixForwardInst ??= new FixForward({
+      log: this.d.log,
+      actor: this.d.instance,
+      backlog: this.d.backlog,
+      branch: this.branch,
+      repo: this.d.cfg.project.project.repo,
+      clone: this.d.repo,
+      git: {
+        tip: () => {
+          git('fetch', '-q', this.remote, this.branch);
+          return git('rev-parse', '--verify', '-q', `${this.remote}/${this.branch}`);
+        },
+        parent: (sha) => git('rev-parse', '--verify', '-q', `${sha}^1`),
+        isAncestor: (a, b) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
+        firstParents: (from, to) => (git('rev-list', '--first-parent', '--reverse', `${from}..${to}`) ?? '').split('\n').filter(Boolean),
+        subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
+        files: (sha) => (git('diff', '--name-only', `${sha}^1`, sha) ?? '').split('\n').filter(Boolean),
+        diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
+      },
+      config: () => this.d.cfg.project.fix_forward,
+      required: () => this.d.cfg.project.required_checks,
+      probeTimeoutMin: () => this.d.cfg.project.flaky.rerun_timeout_min,
+      testRuns: this.d.testRuns ?? null,
+      tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
+      categories: (files) => {
+        const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+        return computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review).categories;
+      },
+      revert: (o) => this.fixForwardRevert(o),
+      giveUp: (o) => this.fixForwardGaveUp(o.ep, o.reason),
+      post: (key, text) => this.opsPost(key, text),
+      pollMs: () => this.d.prPollMs ?? 60_000,
+    });
+    return this.fixForwardInst;
+  }
+
+  /** Fix-forward's pass: the open red default branch moved on, and its ops posts. */
+  protected async fixForwardStep() {
+    await this.fixForward.step();
   }
 
   /** The merge train: this pass's merges, up to tests.yaml land.parallel_merges. */
@@ -311,6 +358,8 @@ export abstract class MergeFlow extends FixRuns {
   private async trainMerge(w: EventPayload<'pr.opened'>, pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string } | null> {
     const { number } = w;
     if (this.mergeDeferred(number, pr.headSha)) return null;
+    // The default branch is red: only fix-forward's fix PR merges until it is green again.
+    if (this.fixForward.holds(w.issue)) return null;
     if (!this.mergePass.room()) {
       this.prPolled.delete(number); // first in line on the next pass
       return null;
@@ -657,39 +706,80 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
+  /** A real red after auto-merging `m`: fix-forward takes it (coordinator/fix-forward.ts), unless the branch was red already. */
   private async mainWentRed(m: EventPayload<'merge.done'>, failed: string[]) {
+    await this.fixForward.start({ sha: m.sha, number: m.number, failed });
+  }
+
+  private get stopResume() {
+    return `Auto-merge is stopped on this instance until the operator deletes \`${this.stopFile}\`; until then every PR waits for you.`;
+  }
+
+  /** Who is told about a red default branch: the owner of the issue behind one of `shas` (a harness merge), else the default owner. */
+  private redOwner(...shas: string[]): string {
+    const m = this.d.log.read(0, ['merge.done']).map((e) => e.payload as EventPayload<'merge.done'>).find((p) => shas.includes(p.sha));
+    return m ? this.ownerOf(m.issue) : this.d.cfg.project.owners.default;
+  }
+
+  private stopFor(reason: string, number: number | null, sha: string, revert: string | null) {
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason, number, sha, revert, at: new Date().toISOString() }, null, 2));
+    this.emit('merge.stopped', { reason, number, sha, revert });
+  }
+
+  /**
+   * Fix-forward reverts the culprit: a revert PR (git revert -m 1 on the current tip, through the push checks; never
+   * watched, never auto-merged) with the evidence, auto-merge stopped until the operator clears it, and the owner told
+   * on the PR that went red, the culprit's PR and the revert.
+   */
+  private async fixForwardRevert(o: { ep: Episode; culprit: string; number: number | null; title: string; evidence: string }): Promise<{ url: string; number: number } | null> {
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
-    let parent = '';
+    const s = o.ep.started;
+    const c = `${o.number ? `#${o.number} ` : ''}(\`${o.culprit.slice(0, 8)}\`)`;
+    const title = o.number ? `Revert "${o.title}" (#${o.number})` : `Revert ${o.culprit.slice(0, 8)} (culprit of ${this.branch} going red)`;
+    const body = `Reverts ${c}: after it, ${this.branch}'s required checks failed: ${s.failed.join(', ')}.\n\n${o.evidence}\n\nOpened by ${BRAND.name}. It never merges this; a human does.`;
+    let revert: { url: string; number: number } | null = null;
     try {
-      parent = this.git(this.d.repo, 'rev-parse', `${m.sha}^1`);
-    } catch {
-      // not a commit we have: treated as "main's state before it is unknown"
+      revert = await this.openRevertOf(o.culprit, o.number ? `pr-${o.number}` : o.culprit.slice(0, 12), title, body);
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `fix-forward revert ${o.culprit.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
     }
-    const before = parent ? requiredOutcomes(this.d.cfg.project.required_checks, await this.d.backlog.checks(parent)) : [];
-    const wasGreen = before.length > 0 && before.every((c) => c.outcome === 'pass');
-    const revert = wasGreen ? await this.openRevert(m, failed) : null;
-    const what = `${this.branch}'s required checks failed (${failed.join(', ')}) on \`${m.sha.slice(0, 8)}\` after auto-merging #${m.number}`;
-    const reason = wasGreen ? `${what}${revert ? `; revert PR ${revert.url}` : '; opening a revert PR failed'}` : `${what}, but ${this.branch} was not green before it (\`${parent.slice(0, 8) || '?'}\`), so nothing was reverted`;
-    writeGroupOnly(this.stopFile, JSON.stringify({ reason, number: m.number, sha: m.sha, revert: revert?.url ?? null, at: new Date().toISOString() }, null, 2));
-    this.emit('merge.stopped', { reason, number: m.number, sha: m.sha, revert: revert?.url ?? null });
-    const owner = this.ownerOf(m.issue);
-    const resume = `Auto-merge is stopped on this instance until the operator deletes \`${this.stopFile}\`; until then every PR waits for you.`;
-    await this.d.backlog.comment(m.number, `[${BRAND.cli}] @${owner} ${reason}. ${resume}`);
+    const what = `${this.branch}'s required checks failed (${s.failed.join(', ')}) on \`${s.sha.slice(0, 8)}\`${s.number ? ` after auto-merging #${s.number}` : ''}; the culprit is ${c}`;
+    const reason = `${what}${revert ? `; revert PR ${revert.url}` : '; opening a revert PR failed'}`;
+    this.stopFor(reason, s.number, s.sha, revert?.url ?? null);
+    const owner = this.redOwner(o.culprit, s.sha);
+    for (const n of new Set([s.number, o.number].filter((x): x is number => x !== null))) await this.d.backlog.comment(n, `[${BRAND.cli}] @${owner} ${reason}. ${this.stopResume}`);
     if (revert) {
       await this.d.backlog.addLabels(revert.number, ['needs-owner']);
-      await this.d.backlog.comment(revert.number, `[${BRAND.cli}] @${owner} reverts #${m.number}: ${what}. This revert waits for you; it never merges itself. ${resume}`);
+      await this.d.backlog.comment(revert.number, `[${BRAND.cli}] @${owner} reverts ${c}: ${what}. This revert waits for you; it never merges itself. ${this.stopResume}`);
       try {
         await this.d.backlog.requestReview(revert.number, [owner]);
       } catch (e) {
         this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${revert.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
       }
     }
+    return revert;
   }
 
-  /** A PR reverting an auto-merge (git revert -m 1 on the current tip), through the push checks. Never watched, so never merged by the harness. */
-  private openRevert(m: EventPayload<'merge.done'>, failed: string[]): Promise<{ url: string; number: number } | null> {
-    const body = `Reverts #${m.number} (\`${m.sha.slice(0, 8)}\`): after it was auto-merged, ${this.branch}'s required checks failed: ${failed.join(', ')}.\n\nOpened by ${BRAND.name}. It never merges this; a human does.`;
-    return this.openRevertOf(m.sha, `pr-${m.number}`, `Revert "${m.title}" (#${m.number})`, body);
+  /** Fix-forward can neither fix nor revert: auto-merge stopped until the operator clears it, and the owner told. */
+  private async fixForwardGaveUp(ep: Episode, why: string) {
+    const s = ep.started;
+    const reason = `${this.branch}'s required checks failed (${s.failed.join(', ')}) on \`${s.sha.slice(0, 8)}\`${s.number ? ` after auto-merging #${s.number}` : ''}, but ${why}`;
+    this.stopFor(reason, s.number, s.sha, null);
+    if (s.number) await this.d.backlog.comment(s.number, `[${BRAND.cli}] @${this.redOwner(s.sha)} ${reason}. ${this.stopResume}`);
+  }
+
+  /**
+   * One ops post (intake.yaml discord.ops_channel), once per key, within the machine-wide limit of ops posts
+   * (watchdog/post.ts takeOpsPost): sent (or had been), limited (a later pass tries again), off (nowhere to post).
+   */
+  private async opsPost(key: string, text: string): Promise<'sent' | 'limited' | 'off'> {
+    if (this.postedKeys().has(key)) return 'sent';
+    const cfg = this.d.intake?.config() ?? null;
+    const src = this.chatSource();
+    if (!cfg?.discord.enabled || !cfg.discord.ops_channel || !src) return 'off';
+    if (!takeOpsPost({ ...(this.d.slotsDir ? { dir: this.d.slotsDir } : {}) })) return 'limited';
+    await this.channelSend(src, key, { channel: cfg.discord.ops_channel }, { kind: 'notice', text });
+    return 'sent';
   }
 
   /**

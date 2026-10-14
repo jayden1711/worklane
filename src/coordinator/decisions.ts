@@ -12,7 +12,7 @@ import { loadMoneyPaths } from '../review.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
-import { decisionsMade, objection, PLAN_DISALLOWED, PLAN_REVIEW_SCHEMA, PLAN_SCHEMA, PLAN_SEND_BACKS, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, planHoldReasons, planReviewExtra, readPlan, readPlanReview, sendBackNote, type Plan, type PlanAnswer } from '../plan-mode.js';
+import { decisionsMade, objection, PLAN_DISALLOWED, PLAN_REVIEW_SCHEMA, PLAN_SCHEMA, PLAN_SEND_BACKS, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, gateReasons, planHoldReasons, planReviewExtra, readPlan, readPlanReview, sendBackNote, type Plan, type PlanAnswer } from '../plan-mode.js';
 import { decisionIndex, type DecisionEntry } from '../plan-decisions.js';
 import { Recovery } from './recovery.js';
 import { laneOf, DEFAULT_REVIEW } from './shared.js';
@@ -24,8 +24,9 @@ export abstract class Decisions extends Recovery {
   /** Decisions answered by CLI (decision.answered) or by a writer's `/<cli> <option>` comment. */
   /**
    * The plan for a size:M/L task. After the owner approved a held plan: that plan. Otherwise a read-only plan
-   * run (with the owner's note after a revise), posted on the issue; one touching high-risk or design-level
-   * areas is held as the owner's decision (the claim is released and the task stops: 'stop').
+   * run (with the owner's note after a revise), posted on the issue; the plan gate holds it as the owner's
+   * decision (every plan under plan_gate always; under risky, one touching high-risk or design-level areas): the
+   * claim is released and the task stops ('stop') before any worker runs.
    */
   protected async planStep(issue: Issue, doneWhen: DoneWhenList, path: string, base: string, owner: string): Promise<{ plan: Plan; commentsAt: number } | { stop: true }> {
     const n = issue.number;
@@ -47,7 +48,7 @@ export abstract class Decisions extends Recovery {
         return { stop: true };
       }
       // The plan contract check, then plan review against the recorded decisions: a refusal goes back to the planner.
-      const read = readPlan(r.structured, index);
+      const read = readPlan(r.structured, index, doneWhen);
       const verdict = 'invalid' in read ? { sendBack: read.invalid, by: 'contract' as const } : await this.planReview(issue, doneWhen, path, read, index);
       if (verdict === null) plan = read as Plan;
       else if ('block' in verdict) {
@@ -63,11 +64,12 @@ export abstract class Decisions extends Recovery {
       }
     }
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-    const reasons = planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 });
+    // The plan gate: always (the default) holds every plan for the owner; risky only one the merge policy's checks hold.
+    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
     await this.d.backlog.comment(n, planComment(plan, owner, reasons));
     const commentsAt = (await this.d.backlog.comments(n)).length;
     if (reasons.length) {
-      const d = planDecision(reasons);
+      const d = planDecision(reasons, plan.acceptance);
       const id = await this.ask('plan', n, owner, d.question, d.options, d.recommendation, d.receipts);
       this.emit('plan.posted', { issue: n, plan: plan as unknown as Record<string, unknown>, held: true, reasons, comments_at: commentsAt, decision: id });
       await this.d.backlog.removeLabel(n, 'agent:working');

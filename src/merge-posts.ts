@@ -16,8 +16,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { LINK_LAG_MS, type WatchGit } from './main-watch.js';
 import { writeGroupOnly } from './os/index.js';
-import { withIncidents } from './watchdog/incidents.js';
-import { RATE } from './watchdog/post.js';
 
 /** At most one GitHub API call per this long. */
 export const MERGE_POSTS_CALL_MS = 30_000;
@@ -70,20 +68,6 @@ function writeState(file: string, s: MergePostsState) {
   const tmp = `${file}.${process.pid}.tmp`;
   writeGroupOnly(tmp, JSON.stringify(s, null, 2));
   renameSync(tmp, file);
-}
-
-/**
- * One ops post, within the same machine-wide limit as the watchdog's incident posts (watchdog/post.ts RATE): true,
- * and counted, when one may go now; false when the window is full (it waits for a later pass).
- */
-export function takeOpsSlot(o: { dir?: string; now?: number } = {}): boolean {
-  const t = o.now ?? Date.now();
-  return withIncidents(o.dir, (f) => {
-    const recent = f.posts.filter((x) => t - Date.parse(x) < RATE.windowMs);
-    if (recent.length >= RATE.max) return false;
-    f.posts = [...recent, new Date(t).toISOString()];
-    return true;
-  });
 }
 
 /** The key a merge's post is sent under, once. */

@@ -48,6 +48,7 @@ import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLab
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
+import { INTAKE_LABEL } from './intake/github.js';
 import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
@@ -1025,7 +1026,7 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'labels': {
-      const created = await backlogFor(loadConfig(root), root).ensureLabels([...LABELS]);
+      const created = await backlogFor(loadConfig(root), root).ensureLabels([...LABELS, INTAKE_LABEL]);
       console.log(created.length ? `created: ${created.join(', ')}` : 'all labels exist');
       return 0;
     }

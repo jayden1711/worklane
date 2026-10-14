@@ -193,6 +193,45 @@ A submit is recorded as the machine request `add-project <name> <owner/repo>` (`
 
 The view then follows the run live, step by step, in the script's order: instance, app, claude-token, checkout, policy, service, test-user, machine-helper, dashboards. Each step's line from the script is an `add_project.step` event in the instance's log, so every step is on record. What it needs from you shows in the same view, as asks: GitHub's two approve links (create the App, then install it on exactly that repo), and the agent's Claude token (from `claude setup-token`), pasted into the dashboard's password box. The coordinator hands the token to the script once, on its input, for the agent user only, and deletes its copy; it's never in an event or a log, and never shown again. If a step fails, the view names it and the command to retry it. Fix what it says and add the same project again: the steps already done are skipped.
 
+## First-run screens: skip, run again, or automate
+
+The First run page (`/first-run`) lists every setup step, each with its state checked live. A step that the page can fix has a screen of its own: a button that shows its plan, a form, or Start. Every screen works three ways:
+
+- **Skip it.** An owner can press **Skip** on any step that isn't done. The page then shows it as skipped and stops counting it as left; **Undo skip** brings it back. A skip changes only the page: `worklane doctor` and `worklane init` still check the step.
+- **Run it again later.** Settings has a **Setup screens** list with each screen's state. Its link opens that step on the first-run page (`/first-run?step=<id>`), even when the step is done, so it can be run again.
+- **Do it without the page.** Each screen names the command or config key that does the same thing, and the table below lists them all. The test `test/setup-automation.test.ts` checks that the table and the page agree.
+
+**Before the config exists (setup mode).** A checkout with no `.worklane/` yet has no config for the dashboard to load. In that case `worklane dashboard --root <repo>` starts in setup mode and prints `http://127.0.0.1:<port>/first-run?t=<token>`. `worklane init` offers to open the same page when it stops at the repo config. Setup mode works like this:
+
+- The first-run page is the whole dashboard, and every address shows it.
+- From the page you can:
+  - pick the repo's GitHub origin;
+  - answer auto-config's questions;
+  - draft the config, which runs the project's commands on a scratch copy of the default branch, so it asks for a confirmation first;
+  - merge the setup PR that the draft opens.
+- Start is refused until the config exists.
+- Once the merged config is in the checkout, the normal dashboard takes over at the same address with the same token, and the page reloads.
+
+| step | mode | without the page |
+|---|---|---|
+| Tools: git, gitleaks, claude (and gh, locally) | local, server | `worklane init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened` |
+| The agents' Claude login | server | `scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step), or scripts/setup/credentials.sh <name> claude` |
+| The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
+| The agents' GitHub App | server | `scripts/setup/add-project.sh <name> <owner/repo> (its app step), or scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>` |
+| Default branch known | local | `git fetch origin <branch>, then git remote set-head origin --auto` |
+| Auto-config questions answered | local | `worklane init --answer <id>=<choice> (or answer init's questions in a terminal)` |
+| .worklane/ valid and on the default branch | local, server | `worklane init (drafts the config and proposes it as a PR), then gh pr merge <number>, then worklane init again (it fast-forwards)` |
+| Hooks for local runs installed | local | `worklane install` |
+| Owners and writers set | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Required checks named | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Budget, models, guardrails, review levels | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Pre-commit secret scan | local | `worklane install --git-hooks` |
+| Guardrail fingerprints fetched | local, server | `worklane guardrails refresh` |
+| Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
+| The instance's policy | server | `the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch` |
+| The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
+| The coordinator running | local | `worklane up` |
+
 ## Switching the agents' Claude account
 
 Every agent on a machine uses one Claude login, stored for each agent user (each instance's agent user, which channel chat runs as too, and its eval user). To move them all to another account, on the machine:
@@ -234,6 +273,8 @@ A viewer's board leaves out everything about runs and agents (the run, its resou
 
 Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
+The Settings page's **Model routing** panel (part of `GET /api/settings`, owners and writers) lists every task type in agents.yaml `routing` (src/routing.ts): the model or value in effect and where it came from: the default in code, a role's model that stands in for it, the agents.yaml key (an older `model_routing` or `eval_routing` key is flagged with its new name), or the instance's policy.yaml. It is read-only: its "Change it" snippet is the `routing:` block to edit in agents.yaml through a pull request.
+
 Above the machine settings, the **Updates** panel (`GET /api/updates`, owners and writers) says where the engine stands: the version and commit installed now, the last update, any rollback or held commit with its reason (a canary that failed says so), and the canary's last result: passed or failed (or timed out), after an update or the daily one, how long it took, and a link to its PR. See [canary.md](canary.md) for setting the canary up.
 
 ## Trust
@@ -249,6 +290,12 @@ it has been seen flaky since, its issue, and its passes in a row toward release;
 flake rate, flaky re-runs over red runs, over 7 and 30 days. An owner's **Clear** puts a check back to blocking at
 once (`POST /api/flaky/clear`, audited). Quarantine changes only the harness's own red/green decisions after a merge;
 the updater still installs only a commit with every check green.
+
+Under it, **Learnings** (owners and writers; `GET /api/learnings`, src/learnings.ts): the notes finished tasks left for
+their failed runs (earliest failed stage, normalized cause), grouped by cause, with sightings, stages, issues and when
+last seen. For a cause seen 3 times or more, an owner may edit the suggested line and **Promote** it
+(`POST /api/learnings/promote`, owners only, audited): the coordinator opens a PR adding the line to `AGENTS.md`,
+labelled `review:L3`, which waits for the owner. Agents never write `AGENTS.md` themselves.
 
 - **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
   on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
@@ -287,8 +334,8 @@ value under each. A figure whose source has recorded nothing yet says **not meas
 - **Main red** and **time to green**: from the check of the default branch after each auto-merge
   (`merge.main_result`): the times it went red, and the median minutes from red to its next green.
 - **Fix-forward versus revert**: revert PRs opened (on a red default branch, or for a commit the main watch couldn't
-  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward isn't built
-  yet; its slot fills from its `fix_forward.finished` events once it is.
+  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward success:
+  fixed over every red default branch fix-forward took on, from its `fix_forward.finished` events.
 - **PR CI wall-clock**: on each merged PR's head, from the first check run starting to the last required check
   (config.yaml `required_checks`; every check when none) completing. Read from GitHub's check runs once per PR
   (`ci.pr_timing`, src/ci-metrics.ts), at most one read-only call a minute.

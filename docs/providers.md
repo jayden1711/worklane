@@ -1,6 +1,6 @@
 # Open-model providers
 
-A model setting in `.worklane/agents.yaml` `model_routing` can name a provider instead of an Anthropic model:
+A model setting in `.worklane/agents.yaml` `routing` (or its older name, `model_routing`) can name a provider instead of an Anthropic model:
 
 - `local`: a small model on this machine, behind an Anthropic-compatible server. That can be a server that speaks
   the Anthropic Messages API itself, or a translating proxy (Anthropic to OpenAI) in front of an OpenAI-compatible
@@ -22,7 +22,7 @@ providers:
   hosted:
     glm:  { base_url: https://<provider endpoint>, credential: glm, model: <the provider's model id>,
             tier: haiku, usd_per_mtok_in: 0.6, usd_per_mtok_out: 2.2 }
-model_routing: { intake_replier: local, research: hosted:glm }
+routing: { intake_replier: local, research: hosted:glm }
 ```
 
 **Opting in, in the instance's `policy.yaml`.** No provider is used until the instance opts in:

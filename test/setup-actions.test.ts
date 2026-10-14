@@ -206,7 +206,7 @@ test('Install the git hooks: the hook files shown first; confirmed, the pre-comm
     assert.ok(readFileSync(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8').includes(GIT_HOOK_MARKER));
     assert.ok(existsSync(join(dir, '.git', 'hooks', 'pre-push')));
     assert.equal(step((await s.get()).setup, 'pre-commit').done, true);
-    assert.equal((await s.get()).actions['git-hooks'], undefined, 'no plan for a step that is done');
+    assert.equal((await s.get()).actions['git-hooks']!.available, true, 'a done step keeps its plan: it can be run again');
   } finally {
     await s.d.close();
   }
