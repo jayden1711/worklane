@@ -1443,7 +1443,9 @@ test("Add project's repo picker: the account's repos to pick from, the ones the 
   };
   const html = r.renderAddProject(data, picker);
   assert.match(html, /data-testid="add-project-picker" data-owner="ada"/);
-  assert.match(html, /<input[^>]*value="ada"[^>]*data-testid="add-project-account"/, 'the account listed, editable');
+  const account = html.match(/<input[^>]*data-testid="add-project-account"[^>]*>/)![0];
+  assert.match(account, /value="ada"/, 'the account listed');
+  assert.doesNotMatch(account, /disabled=""/, 'and editable: an organization GitHub does not show publicly is typed');
   const accounts = html.match(/<datalist id="add-project-accounts">[\s\S]*?<\/datalist>/)![0];
   assert.deepEqual([...accounts.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]), ['ada', 'example-org']);
   assert.match(html, /data-testid="add-project-account-list"/);
