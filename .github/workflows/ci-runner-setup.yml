@@ -132,6 +132,8 @@ jobs:
           if [ -n "$written" ]; then echo "a job wrote: $written" >&2; exit 1; fi
       - name: check; then a second install changes nothing, asks for no token, and leaves the idle runner running
         run: |
+          # The runner back to idle after the last job (its reset done), so the second install below finds it idle.
+          for _ in $(seq 180); do [ "$(sudo journalctl -u "worklane-ci-${NAME}@1.service" -o cat --no-pager | grep -c '^STANDIN idle$')" -ge 7 ] && break; sleep 1; done
           sudo bash scripts/setup/ci-runner.sh check "$REPO" --name "$NAME" | tee "$RUNNER_TEMP/check.log"
           tail -n 1 "$RUNNER_TEMP/check.log" | grep -qx 'OK: all checks passed'
           for p in 'is refused 127.0.0.1 9' 'is refused 10.255.255.1 9' 'is refused 100.100.100.100 80' 'reaches github.com 443'; do grep -q "^PASS wl-ci-$NAME $p" "$RUNNER_TEMP/check.log"; done

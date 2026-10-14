@@ -453,7 +453,7 @@ network_checks() {
 
 # Everything else check reports: the caps against the instances', the units, rootless Docker, the pinned version.
 service_checks() {
-  local fail=0 ci_mem ci_w wl_w u m i reg
+  local fail=0 ci_mem ci_w wl_w u m i reg st
   ci_mem="$(systemctl show worklane-ci.slice -p MemoryMax --value)"
   ci_w="$(systemctl show worklane-ci.slice -p CPUWeight --value)"
   if [[ "$ci_mem" =~ ^[0-9]+$ ]]; then echo "PASS worklane-ci.slice MemoryMax=$ci_mem"; else echo "FAIL worklane-ci.slice has no memory cap ($ci_mem)"; fail=1; fi
@@ -471,9 +471,16 @@ service_checks() {
   for reg in "$root"/reg-*; do
     [ -d "$reg" ] || continue
     i="${reg##*/reg-}"
-    for u in "worklane-ci-$name-docker@$i.service" "worklane-ci-$name@$i.service"; do
-      if systemctl is-active -q "$u"; then echo "PASS $u is active"; else echo "FAIL $u is not active (journalctl -u $u)"; fail=1; fi
-    done
+    u="worklane-ci-$name-docker@$i.service"
+    if systemctl is-active -q "$u"; then echo "PASS $u is active"; else echo "FAIL $u is not active (journalctl -u $u)"; fail=1; fi
+    # Between two jobs the runner is briefly starting again (auto-restart, then its reset): up, not failed.
+    u="worklane-ci-$name@$i.service"
+    st="$(systemctl show "$u" -p ActiveState --value)/$(systemctl show "$u" -p SubState --value)"
+    case "$st" in
+      active/*) echo "PASS $u is active" ;;
+      activating/auto-restart | activating/start | activating/start-pre) echo "PASS $u is starting its next run ($st)" ;;
+      *) echo "FAIL $u is $st (journalctl -u $u -u worklane-ci-$name-reset@$i.service)"; fail=1 ;;
+    esac
     if docker_as_user "$i" info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then echo "PASS runner $i's Docker is rootless, as $user"; else echo "FAIL runner $i's Docker isn't up or isn't rootless"; fail=1; fi
   done
   return "$fail"
