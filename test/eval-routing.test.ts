@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentsConfig } from '../src/config/schema.js';
-import { DEFAULT_EVAL_ROUTING, commentOnly, evaluatorModel, routingLevel, shouldEscalate } from '../src/eval-routing.js';
+import { DEFAULT_EVAL_ROUTING, commentOnly, evalRouting, evaluatorModel, routingLevel, shouldEscalate } from '../src/eval-routing.js';
 import { InstanceSettings } from '../src/instance.js';
 import { applySettings } from '../src/settings.js';
 import { loadConfig } from '../src/config/load.js';
@@ -39,12 +39,12 @@ test('a comment-only change routes as L0; any code line, an unknown file type or
 
 test('routing defaults in agents.yaml, overridable per instance in policy.yaml settings', () => {
   const agents = AgentsConfig.parse({ daily_budget_usd: 5, roles: { evaluator: { enabled: true, model: 'opus' } } });
-  assert.deepEqual(agents.eval_routing, { cheap_model: 'sonnet', cheap_levels: ['L0'], escalate: true });
+  assert.deepEqual(evalRouting(agents), { cheap_model: 'sonnet', cheap_levels: ['L0'], escalate: true });
   const { dir } = exampleProject();
   const cfg = loadConfig(dir);
   const s = InstanceSettings.parse({ eval_routing: { cheap_levels: ['L0', 'L1'], escalate: false } });
   const applied = applySettings(cfg, s);
-  assert.deepEqual(applied.agents.eval_routing, { cheap_model: 'sonnet', cheap_levels: ['L0', 'L1'], escalate: false });
-  assert.deepEqual(applySettings(cfg, {}).agents.eval_routing, cfg.agents.eval_routing, 'no setting: the repo default');
+  assert.deepEqual(evalRouting(applied.agents), { cheap_model: 'sonnet', cheap_levels: ['L0', 'L1'], escalate: false });
+  assert.deepEqual(evalRouting(applySettings(cfg, {}).agents), evalRouting(cfg.agents), 'no setting: the repo default');
   assert.throws(() => InstanceSettings.parse({ eval_routing: { cheap_levels: ['L9'] } }));
 });
