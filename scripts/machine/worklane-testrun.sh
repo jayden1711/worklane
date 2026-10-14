@@ -32,14 +32,22 @@
 # test runs' CPU and memory caps), sandboxed: read-only system, no /home or /root, every worklane path and every
 # other wl-* home inaccessible, no other run's workspace, no Docker socket, a private /tmp, no devices, no new
 # privileges, and an environment of exactly the variables named here (never the caller's).
+#
+# A run's TMPDIR (and TMP, TEMP) is its own short directory, $TMP_BASE/wlt-<8 hex> (run_tmp), never one under the run's
+# directory. WHY: Chrome binds its SingletonSocket at $TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket, and a Unix
+# socket's path is at most 107 bytes (sun_path is 108 with the NUL); under $BASE/<name>/runs/<id>/tmp every browser
+# suite died with "Socket path too long". create makes it as the test user, 0700, and refuses one already there; exec
+# binds it into the sandbox's private /tmp; wipe removes it with the run's directory.
 set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=4
+PROTOCOL=5
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
+# Where each run's short TMPDIR is made (run_tmp).
+TMP_BASE=/tmp
 SLICE=worklane-test.slice
 DOCKER=/opt/worklane-test/docker/docker
 LABEL=worklane.test-run
@@ -57,7 +65,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "wl-$name" ]; then die "$SUDO_US
 # The version first: it reads nothing and needs no tool or test user, so an engine can always ask it.
 if [ "$cmd" = version ]; then [ "$#" -eq 2 ] || die "usage: version"; echo "$PROTOCOL"; exit 0; fi
 # Every tool this helper runs, found right after the caller check, before any probe: one clear line instead of a run of failed probes.
-for tool in runuser systemd-run systemctl git getent install id stat; do
+for tool in runuser systemd-run systemctl git getent install id stat sha256sum cut mkdir; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool (PATH=$PATH)"
 done
 id -u "$user" >/dev/null 2>&1 || { echo "worklane-testrun: no user $user; run scripts/setup/test-user.sh install $name" >&2; exit 1; }
@@ -65,6 +73,19 @@ shift 2
 
 valid_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,47}$ ]] || die "a run id is lowercase letters, digits and dashes (at most 48), got $1"; }
 run_dir() { printf '%s/runs/%s' "$root" "$1"; }
+# INVARIANT: $TMP_BASE plus 13 bytes (/tmp/wlt-<8 hex>, 17), whatever the name and id; the same for the same run every
+# time, so wipe finds it from the id alone, never from anything a run could write.
+run_tmp() { printf '%s/wlt-%s' "$TMP_BASE" "$(printf '%s/%s' "$name" "$1" | sha256sum | cut -c1-8)"; }
+# Why the run's TMPDIR is not the test user's own real directory, 0700 (a symlink, anyone else's, another mode); empty when it is.
+tmp_problem() {
+  local t="$1" got
+  if [ -L "$t" ] || [ ! -d "$t" ]; then echo "$t is not a directory"; return 0; fi
+  got="$(stat -c '%U %a' -- "$t")"
+  [ "$got" = "$user 700" ] || echo "$t is $got, not $user's and 0700"
+}
+# The run's TMPDIR is there and the wipe's to remove: a symlink at its path (only the link goes), or a directory the
+# test user owns. Someone else's directory there was never the run's (create refused it), and is left alone.
+own_tmp() { [ -L "$1" ] || { [ -d "$1" ] && [ "$(stat -c %U -- "$1")" = "$user" ]; }; }
 as_user() { runuser -u "$user" -- "$@"; }
 docker_as_user() { runuser -u "$user" -- env HOME="$root/docker-home" XDG_RUNTIME_DIR="$sock_dir" DOCKER_HOST="unix://$sock_dir/docker.sock" "$DOCKER" "$@"; }
 
@@ -133,7 +154,7 @@ valid_dir() {
 }
 
 create() {
-  local id="${1:-}" branch="${2:-}" head="${3:-}" base="${4:-}" hsha="${5:-}" bsha="${6:-}" d p
+  local id="${1:-}" branch="${2:-}" head="${3:-}" base="${4:-}" hsha="${5:-}" bsha="${6:-}" d p t
   [ "$#" -ge 6 ] || die "usage: create <id> <branch> <head ref> <base ref> <head sha> <base sha> [<dir left out>]..."
   shift 6
   valid_id "$id"; d="$(run_dir "$id")"
@@ -143,8 +164,15 @@ create() {
   [ "$#" -le 32 ] || die "at most 32 directories left out"
   for p in "$@"; do valid_dir "$p"; done
   [ ! -e "$d" ] || die "run $id exists; wipe it first"
+  t="$(run_tmp "$id")"
+  # WHY: /tmp is everyone's. Whatever is already at the run's TMPDIR (a directory, a symlink) someone else made or left
+  # behind, and the run never takes it.
+  if [ -e "$t" ] || [ -L "$t" ]; then die "$t exists; refusing a temporary directory this run didn't make"; fi
   install -d -o root -g "$user" -m 0710 "$root/runs"
-  install -d -o "$user" -g "$user" -m 0700 "$d" "$d/work" "$d/tmp" "$d/home"
+  install -d -o "$user" -g "$user" -m 0700 "$d" "$d/work" "$d/home"
+  # mkdir, never mkdir -p or install -d: it fails on anything already there, a symlink planted since the check included.
+  as_user mkdir -m 0700 -- "$t" || die "can't make $t"
+  p="$(tmp_problem "$t")"; [ -z "$p" ] || die "$p"
   [ -d "$store" ] || install -d -o "$user" -g "$user" -m 0700 "$store"
   # The bundle (only the objects the store lacks; empty when it has both commits; never the coordinator's .git)
   # arrives on stdin. The store takes it and the workspace is made as the test user, so nothing in either is ever
@@ -236,7 +264,7 @@ systemd_command() {
 }
 
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d inaccessible p cmd flag
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag
   local -a envs=() noexpand=()
   [ "$#" -ge 2 ] || die "usage: exec <id> <timeout_s> [--env K=V]... -- <command>"
   valid_id "$id"; shift 2
@@ -248,6 +276,9 @@ exec_run() {
   [ "${1:-}" = -- ] && [ "$#" -eq 2 ] || die "exec: -- then exactly one command string"
   d="$(run_dir "$id")"
   [ -d "$d/work" ] || die "no run $id"
+  # WHY: systemd binds the TMPDIR in as root, following a symlink: only the test user's own 0700 directory goes in.
+  t="$(run_tmp "$id")"
+  p="$(tmp_problem "$t")"; [ -z "$p" ] || die "the run's TMPDIR: $p"
   cmd="$(systemd_command "$(systemd_version)" "$2")"
   flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
   [ -z "$flag" ] || noexpand=("$flag")
@@ -262,9 +293,9 @@ exec_run() {
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
-    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d" \
+    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d" -p BindPaths="$t" -p ReadWritePaths="$t" \
     -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible" \
-    --setenv=HOME="$d/home" --setenv=TMPDIR="$d/tmp" --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
+    --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user" \
     ${envs[@]+"${envs[@]}"} \
     /bin/bash -o pipefail -c "$cmd"
@@ -279,6 +310,8 @@ leftovers() {
     docker_as_user volume ls -q --filter "label=$LABEL=$name-$id" | sed 's/^/volume /'
   fi
   [ ! -e "$(run_dir "$id")" ] || echo "dir $(run_dir "$id")"
+  if own_tmp "$(run_tmp "$id")"; then echo "dir $(run_tmp "$id")"; fi
+  return 0
 }
 
 wipe() {
@@ -298,6 +331,8 @@ wipe() {
     [ -z "$vols" ] || docker_as_user volume rm -f $vols >/dev/null
   fi
   rm -rf --one-file-system -- "$(run_dir "$id")"
+  # rm never follows the path itself if it is a symlink, nor one inside it.
+  if own_tmp "$(run_tmp "$id")"; then rm -rf --one-file-system -- "$(run_tmp "$id")"; fi
   left="$(leftovers "$id")"
   if [ -n "$left" ]; then printf 'worklane-testrun: run %s is not wiped:\n%s\n' "$id" "$left" >&2; exit 1; fi
   echo "wiped $id"
@@ -341,7 +376,7 @@ check() {
   rm -f "$bundle"
   # The run also reads its commit through the object store, and can't write the store (its objects or its refs).
   # No ${...} in the command: systemd-run expands those itself (as ExecStart= does) before bash sees them.
-  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; s="$(dirname "$(cat .git/objects/info/alternates)")"; [ "$s" = "'"$store"'" ] || { echo "not the store: $s"; n=1; }; git cat-file -e HEAD:probe.txt || { echo "store unread: $s"; n=1; }; for w in "$s/objects/probe-write" "$s/refs/keep/probe-write" "$s/probe-write"; do if ( : > "$w" ) 2>/dev/null; then echo "open $w (written)"; rm -f "$w"; n=1; fi; done; echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
+  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; s="$(dirname "$(cat .git/objects/info/alternates)")"; [ "$s" = "'"$store"'" ] || { echo "not the store: $s"; n=1; }; git cat-file -e HEAD:probe.txt || { echo "store unread: $s"; n=1; }; for w in "$s/objects/probe-write" "$s/refs/keep/probe-write" "$s/probe-write"; do if ( : > "$w" ) 2>/dev/null; then echo "open $w (written)"; rm -f "$w"; n=1; fi; done; [ "$TMPDIR" = "'"$(run_tmp "$id")"'" ] && [ "$TMP" = "$TMPDIR" ] && [ "$TEMP" = "$TMPDIR" ] && ( : > "$TMPDIR/probe" ) || { echo "TMPDIR unusable: $TMPDIR"; n=1; }; echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
   wipe "$id" >/dev/null || { echo "FAIL the probe run was not wiped"; fail=1; }
   # The probe's commit is no tip worth keeping: its ref goes (its objects go with git's gc).
   (cd / && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --git-dir="$store" update-ref -d "refs/keep/$sha") || true

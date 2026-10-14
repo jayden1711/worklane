@@ -56,6 +56,7 @@ import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
+import { harnessEvalView } from './harness-evals/score.js';
 import { learningsView, promoteRefusal } from './learnings.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
@@ -319,7 +320,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
   const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com' })) : undefined;
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
 }
 
 /**
@@ -720,6 +721,8 @@ export function readServiceLog(src: LogSource, lines = 200, read: JournalReader 
   return { source: 'none', unit: src.unit, entries: [], problem: problem ?? 'no service log found: the coordinator runs in the foreground or as a service without a log file' };
 }
 
+/** WHY: a checkout's dashboard and `dashboard --detach` (src/dashboard-detach.ts) must agree, or a rerun prints another URL. */
+export const LOCAL_DASHBOARD_PORT = 4317;
 /** An instance's dashboard port, the same every time (so a tunnel to it can be set up once): 4400-4899, from its name. */
 export const instancePort = (name: string) => 4400 + (createHash('sha256').update(name).digest().readUInt32BE(0) % 500);
 
@@ -1207,6 +1210,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
         // and writers' to read; only an owner clears a test from quarantine, audited.
+        // Harness evals (src/harness-evals/): each run's success rate, cost, wall-clock and human interventions, and the
+        // change from its baseline. What runs cost: the owners' and writers', like the flaky tests and throughput.
+        if (url.pathname === '/api/harness-evals' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: `the harness evals are for the instance's owners and writers; @${who.login} is a ${who.role}` });
+          return json(res, 200, { ...harnessEvalView(readEvents(opts.eventsDb)), enabled: opts.cfg.project.harness_evals.enabled });
+        }
         if (url.pathname === '/api/flaky' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: `the flaky tests are for the instance's owners and writers; @${who.login} is a ${who.role}` });
           return json(res, 200, { ...flakyView(readEvents(opts.eventsDb), { now: new Date(), releaseAfter: opts.cfg.project.flaky.release_after_passes }), canClear: isOwnerHere });

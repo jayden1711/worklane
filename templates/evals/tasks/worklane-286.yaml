@@ -1,0 +1,16 @@
+id: worklane-286
+base: 57fcef132e1ce05bcb12bcac7ee63ad77063ee58
+title: "Tests: a leak marker number matches only as a whole number"
+body: "Main's Node 22 run on 57fcef1 failed the cross-instance isolation test in
+  test/dashboard-auth.test.ts: instance b's PR number 9270 matched inside the
+  machine's availableBytes (15381192704) in /api/i/a/health. Not a leak; the
+  marker regex matched digits inside a larger number, so it fails at random on
+  whatever machine numbers come up."
+done_when:
+  - test: test/helpers-marks.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 286
+  merge: fd21e1c0ee0cb472b5e35f4e44cf9f9c458b1367

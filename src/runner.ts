@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
+import type { CliAgentName } from './providers.js';
 import { safeProjectEnv } from './project-env.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 import { RunRecorder, runIssue } from './run-record.js';
@@ -55,9 +56,10 @@ export interface RunRequest {
   /**
    * An open-model provider this run goes to (src/providers.ts), resolved by the coordinator: claude talks to its
    * Anthropic-compatible endpoint, with the key from its file through apiKeyHelper (never an environment variable),
-   * and `model` is the provider's own model id. Absent: Anthropic, as always.
+   * and `model` is the provider's own model id. Absent: Anthropic, as always. Kind `cli`: another vendor's coding
+   * CLI (src/cli-agents.ts) runs it instead of claude, its budget enforced from its token counts at these prices.
    */
-  provider?: { name: string; kind: 'local' | 'hosted'; baseUrl: string; keyFile: string };
+  provider?: { name: string; kind: 'local' | 'hosted'; baseUrl: string; keyFile: string } | { name: string; kind: 'cli'; agent: CliAgentName; usdPerMtok: { in: number; out: number } };
   /**
    * What kind of work this is, for a model that names a provider (`local`, `hosted:<name>`): the coordinator
    * resolves it to the provider, or to `fallback` (the role's normal model) when the provider may not or can't run
@@ -485,6 +487,7 @@ export class CliRunner implements AgentRunner {
 
   /** One try. `started` releases the login's start lock: once claude has answered (its token is fresh), or ended. */
   private async runOnce(req: RunRequest, started: () => void): Promise<RunResult> {
+    if (req.provider?.kind === 'cli') return { reason: 'failed', detail: `${req.provider.name} runs on its own CLI, not claude; not starting`, costUsd: 0, turns: 0, model: req.model };
     // With a key file, apiKeyHelper is the key's only way in: none from this process's environment.
     const base = req.provider ? { ...this.base, ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined } : this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base;
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
