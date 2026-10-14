@@ -306,15 +306,15 @@ async function local() {
   await screen('screen 4: the config PR merged from the page; the checkout and the page have it when the merge reports done', async () => {
     // INVARIANT (owner, #393): the page's merge fast-forwards the checkout as part of the merge action, so everything is
     // checked right after the action's own result: no polling, no git pull, no dashboard restart.
-    // TODO(#393, bug E): these test ids follow setup mode's merge (setup-merge-*); set them to the fix's real ones
-    // before this is pushed.
-    await open('/first-run?step=required-checks');
+    // The merge panel (#403) appears once the form has proposed a PR: repo-config-merge, its review, confirm and result.
+    // Same page as the proposal (no reload): the panel follows the PR the form just opened.
     const p = `${row('required-checks')} ${tid('first-run-fix-panel')}`;
+    await waitFor(`${p} ${tid('repo-config-merge')}`);
     await click(`${p} ${tid('repo-config-merge-review')}`);
     await waitText(`${p} ${tid('repo-config-merge-confirming')}`, /gh pr merge \d+ --repo example\/alpha --merge/);
     await click(`${p} ${tid('repo-config-merge-confirm')}`);
     // The action's own answer (the request returning), not a timer.
-    const done = await waitText(`${p} ${tid('repo-config-result')}`, /merged/i);
+    const done = await waitText(`${p} ${tid('repo-config-merge-result')}`, /merged/i);
     const bare = st('git/example/alpha.git');
     assert.ok(configPr, 'the config PR from the screen before');
     assert.match(readFileSync(st(`prs/${configPr}`), 'utf8'), / MERGED$/m, 'merged at "GitHub" by the page');
