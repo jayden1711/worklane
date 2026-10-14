@@ -535,11 +535,17 @@ test('plan gate: size:S and unsized tasks skip it (no plan, built at once) while
   assert.ok(!m.roles().includes('worker'), 'size:M: held');
 });
 
-test('plan gate: off builds at once, even a plan the merge policy would hold', { skip }, async () => {
-  const t = plannedTask(() => ({ ...PLAN, files: ['migrations/002_orders.sql', 'src/price.js'] }), undefined, { gate: 'off' });
+test('plan gate: off builds an ordinary plan at once, but still holds a high-risk one until approved', { skip }, async () => {
+  const t = plannedTask(() => PLAN, undefined, { gate: 'off' });
   await t.run();
   assert.deepEqual([(lastOf(t.f.log, 'plan.posted') as { held: boolean }).held, t.f.log.read(0, ['decision.asked']).length], [false, 0]);
-  assert.ok(t.roles().indexOf('planner') < t.roles().indexOf('worker'), 'planned, then built at once');
+  assert.ok(t.roles().indexOf('planner') < t.roles().indexOf('worker'), 'ordinary: planned, then built at once');
+
+  const u = plannedTask(() => ({ ...PLAN, files: ['migrations/002_orders.sql', 'src/price.js'] }), undefined, { gate: 'off' });
+  await u.run();
+  const posted = lastOf(u.f.log, 'plan.posted') as { held: boolean; reasons: string[] };
+  assert.deepEqual([posted.held, posted.reasons], [true, ['high-risk: migration (migrations/002_orders.sql)', 'design: new top-level module (migrations/)']]);
+  assert.deepEqual(u.roles(), ['planner'], 'high-risk under off: held, no worker');
 });
 
 test('plan mode: under plan_gate risky, a size:M issue is planned read-only first, the plan posted, and an ordinary plan builds at once with the plan in its brief', { skip }, async () => {

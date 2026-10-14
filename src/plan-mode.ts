@@ -7,7 +7,8 @@
 // waits for the owner's approval of the plan: `always` (the default) holds
 // every size:M/L plan; `risky` holds only a plan that touches what the merge
 // policy would never merge on its own (high-risk categories, design-level
-// changes), judged with the merge policy's own checks; `off` holds none. A held
+// changes), judged with the merge policy's own checks; `off` is the same floor:
+// a high-risk or design-level plan still waits, an ordinary one never does. A held
 // plan is a decision for the owner (approve / revise with a note / reject),
 // posted on the issue and in the Discord decision thread ("approve plan <n>").
 // Every plan carries acceptance criteria, the issue's done_when when the
@@ -110,12 +111,12 @@ export function acceptanceOf(doneWhen: DoneWhenList): string[] {
 
 /**
  * The plan gate (config.yaml plan_gate): `always` holds every size:M/L plan for the owner's approval; `risky` only one
- * the merge policy's checks hold (`reasons`); `off` none, whatever they say.
+ * the merge policy's checks hold (`reasons`); `off` the same: it never drops the risk and design holds (the owner's
+ * rule), only the gate on ordinary plans.
  */
 export type PlanGate = 'always' | 'risky' | 'off';
 export const PLAN_GATE_REASON = "plan_gate is always: a size:M/L plan waits for the owner's approval";
 export function gateReasons(gate: PlanGate, reasons: string[]): string[] {
-  if (gate === 'off') return [];
   return gate === 'always' ? [...reasons, PLAN_GATE_REASON] : reasons;
 }
 

@@ -71,8 +71,8 @@ export const ProjectConfig = z.strictObject({
   /**
    * The plan gate for size:M/L tasks (src/plan-mode.ts): `always` holds every plan, with its acceptance criteria, for
    * an owner's approval (on the issue, the dashboard, or "approve plan <n>" in its Discord thread) before any worker
-   * runs; `risky` holds only a plan the merge policy's checks would hold (high-risk or design-level); `off` holds
-   * none and builds at once (the merge policy still judges the change before it merges). Smaller tasks have no plan.
+   * runs; `risky` and `off` hold only a plan the merge policy's checks would hold (high-risk or design-level): an
+   * ordinary plan builds at once, a high-risk or design-level one always waits. Smaller tasks have no plan.
    */
   plan_gate: z.enum(['always', 'risky', 'off']).default('always'),
   /**

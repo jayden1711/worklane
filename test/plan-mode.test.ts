@@ -118,12 +118,13 @@ test("a plan's acceptance criteria default to the issue's done_when; the planner
   assert.ok(planDecision(['x'], p.acceptance).receipts.includes('acceptance: totals ignore qty <= 0'));
 });
 
-test('the plan gate: always holds every plan, risky only a risky one, off none; always is the default, and a bad value is refused', () => {
+test('the plan gate: always holds every plan; risky and off only a risky one (off keeps the risk and design holds); always is the default, and a bad value is refused', () => {
   assert.deepEqual(gateReasons('always', []), [PLAN_GATE_REASON]);
   assert.deepEqual(gateReasons('always', ['high-risk: migration']), ['high-risk: migration', PLAN_GATE_REASON]);
   assert.deepEqual(gateReasons('risky', []), []);
   assert.deepEqual(gateReasons('risky', ['high-risk: migration']), ['high-risk: migration']);
-  assert.deepEqual(gateReasons('off', ['high-risk: migration']), []);
+  assert.deepEqual(gateReasons('off', ['high-risk: migration']), ['high-risk: migration']);
+  assert.deepEqual(gateReasons('off', []), []);
   const base = { version: 1, project: { name: 'x', repo: 'example/x' }, owners: { default: 'example-owner', writers: ['example-owner'] } };
   assert.equal(ProjectConfig.parse(base).plan_gate, 'always');
   assert.equal(ProjectConfig.parse({ ...base, plan_gate: 'off' }).plan_gate, 'off');
