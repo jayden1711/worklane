@@ -7,7 +7,7 @@ import { api, type IntakeReport, type IntakeView, type State } from '../api';
 import { navigate } from '../App';
 import { RecordsTable } from '../components/patterns';
 import { ago, Badge, cx, Empty } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const OUTCOME: Record<IntakeReport['outcome'], { label: string; tone: 'neutral' | 'ok' | 'warn' | 'danger' | 'info' }> = {
   filed: { label: 'filed', tone: 'ok' },

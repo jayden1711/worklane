@@ -1,4 +1,4 @@
-import { api, useFetch, type State } from '../api';
+import { useView, type State } from '../api';
 import { ConstraintsPanel } from '../components/ConstraintsPanel';
 import { MetricsPanel } from '../components/MetricsPanel';
 import { ThroughputPanel } from '../components/ThroughputPanel';
@@ -7,9 +7,7 @@ import { FlakyPanel } from '../components/FlakyPanel';
 import { HarnessEvalsPanel } from '../components/HarnessEvalsPanel';
 import { LearningsPanel } from '../components/LearningsPanel';
 import { Card } from '../components/ui';
-import { Header } from './Overview';
-
-const getReport = () => api<{ report: string }>('/api/report');
+import { Header } from '../components/Header';
 
 /** For a viewer the state says may not read the preview, the refusal the server would give; null for the owner and writers. */
 export const reportRefusal = (state: Pick<State, 'canReadReports' | 'owners' | 'user' | 'role'>) =>
@@ -18,7 +16,7 @@ export const reportRefusal = (state: Pick<State, 'canReadReports' | 'owners' | '
 export function Reports({ state, pulse }: { state: State; pulse: number }) {
   const refused = reportRefusal(state);
   // Refused up front (the state says so): not asked for at all.
-  const { data, error } = useFetch(() => (refused ? Promise.resolve(null) : getReport()), pulse);
+  const { data, error } = useView<{ report: string }>(refused ? null : '/api/report', pulse);
   return (
     <div data-testid="page-reports">
       <Header title="Reports" sub="posted at the configured times as comments on one report issue" />

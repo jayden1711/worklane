@@ -2,7 +2,7 @@
 // run's tiers. On the Board compactly, on the Machine page in full. A viewer is sent each run's tiers' pass or fail
 // and the slot counts only (src/testrun/status.ts testRunsView): no log, summary, slot holder or lock holder.
 import { useEffect, useState } from 'react';
-import { onInstance } from '../api';
+import { useView } from '../api';
 import { DotPill, RecordsTable } from './patterns';
 import { ago, cx } from './ui';
 
@@ -155,18 +155,8 @@ export function TestRunsView({ data, compact = false }: { data: TestRunsData; co
 
 /** Loads one instance's test runs (null: this page's own server), again whenever `pulse` changes. */
 export function TestRunsPanel({ instance = null, pulse = 0, compact = false }: { instance?: string | null; pulse?: number; compact?: boolean }) {
-  const [data, setData] = useState<TestRunsData | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    onInstance<TestRunsData>(instance, '/api/test-runs').then(
-      (d) => live && (setData(d), setError(null)),
-      (e: Error) => live && setError(e.message),
-    );
-    return () => {
-      live = false;
-    };
-  }, [instance, pulse]);
-  if (error) return <div className="text-[12.5px] text-ink-3">Test runs: {error}</div>;
+  // Shown at once from what was kept for this instance, then read again (web/src/cache.ts).
+  const { data, error } = useView<TestRunsData>('/api/test-runs', pulse, instance);
+  if (error && !data) return <div className="text-[12.5px] text-ink-3">Test runs: {error}</div>;
   return data ? <TestRunsView data={data} compact={compact} /> : null;
 }

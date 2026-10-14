@@ -1,24 +1,13 @@
 import type { CoordinatorError, State, UsageInfo } from '../api';
-import { MenuButton, navigate } from '../App';
+import { navigate } from '../App';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
 import { resetClock as clock, UsageLines } from '../components/Usage';
 
-export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
-  return (
-    <>
-      <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b border-line bg-page/90 px-6 backdrop-blur max-md:gap-2 max-md:px-4">
-        <MenuButton />
-        <h1 className="text-[14px] font-semibold tracking-tight text-ink" data-testid="page-title">{title}</h1>
-        {sub && <span className="truncate text-[12.5px] text-ink-3 max-md:hidden">{sub}</span>}
-        <div className="ml-auto flex items-center gap-2">{children}</div>
-      </header>
-      {/* On a phone the line under the title is whole, under the bar, rather than cut short in it. */}
-      {sub && <p className="px-6 pt-3 text-[12.5px] text-ink-3 md:hidden">{sub}</p>}
-    </>
-  );
-}
+// The page header lives in components/Header.tsx (every page has one; this page's chunk isn't theirs).
+import { Header } from '../components/Header';
+export { Header };
 
 /** A headline figure, as an insight card (Beautiful UI). */
 const Stat = InsightCard;
@@ -117,7 +106,7 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
     <div data-testid="page-overview">
       <Header title="Overview" sub={`${state.project.repo} · land mode ${state.project.landMode}`} />
       <div className="space-y-6 p-6">
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5" data-testid="overview-stats" data-last-id={state.lastId}>
           <Stat label="Agents running" value={`${state.slots.running} / ${state.slots.cap}`} hint="machine-wide, all harnesses" />
           <Stat label="In progress" value={active.length} hint={active.map((t) => `#${t.issue}`).join(' ') || 'nothing running'} />
           <Stat label="Needs a decision" value={open.length} tone={open.length ? 'warn' : undefined} hint={open[0] ? `oldest ${ago(open.at(-1)!.askedAt)}` : 'none waiting'} />

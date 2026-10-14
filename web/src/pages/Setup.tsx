@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAddProjectRepos, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView, type RepoPickerData } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { navigate } from '../App';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const KIND_LABEL: Record<Ask['kind'], string> = { paste_secret: 'Paste a secret', approve_link: 'Open and approve', question: 'Question', root_step: 'Machine step' };
 
