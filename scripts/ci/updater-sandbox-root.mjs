@@ -54,7 +54,8 @@ function world() {
   });
   const stat = () => helpers.map((h) => ((s) => `${basename(h.dest)} ${s.uid}:${s.gid} ${(s.mode & 0o7777).toString(8)}`)(statSync(h.dest)));
   const onDisk = (sha) => helpers.every((h) => readFileSync(h.dest).equals(bytes[sha][h.src]));
-  const version = () => Number(execFileSync('bash', [helpers.find((h) => /testrun$/.test(h.dest)).dest, 'alice', 'version'], { encoding: 'utf8' }).trim());
+  // WHY SUDO_USER: the helper answers only alice's coordinator (it reads who sudo ran it for); this script's own sudo names the runner.
+  const version = () => Number(execFileSync('bash', [helpers.find((h) => /testrun$/.test(h.dest)).dest, 'alice', 'version'], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', SUDO_USER: 'wl-alice' } }).trim());
   return { root, libexec, helpers, protocol, stat, onDisk, version };
 }
 
