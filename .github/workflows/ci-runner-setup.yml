@@ -78,8 +78,11 @@ jobs:
           sudo grep -qx "url=https://github.com/$REPO" "$reg"
           sudo grep -qx 'labels=box' "$reg"
           sudo grep -qx 'disableupdate=yes' "$reg"
-          if sudo grep -rIlF "$tok" /var/lib/worklane-ci /opt/worklane-ci /etc/worklane-ci /etc/systemd/system /usr/local/libexec/worklane-ci "$RUNNER_TEMP/install.log"; then echo "the token was written there" >&2; exit 1; fi
+          # The pattern from a file: on sudo's command line the token would land in the journal (sudo logs commands).
+          printf '%s\n' "$tok" > "$RUNNER_TEMP/token.pattern"
+          if sudo grep -rIlF -f "$RUNNER_TEMP/token.pattern" /var/lib/worklane-ci /opt/worklane-ci /etc/worklane-ci /etc/systemd/system /usr/local/libexec/worklane-ci "$RUNNER_TEMP/install.log"; then echo "the token was written there" >&2; exit 1; fi
           if sudo journalctl --no-pager | grep -qF "$tok"; then echo "the token is in the journal" >&2; exit 1; fi
+          rm -f "$RUNNER_TEMP/token.pattern"
           sudo nft list table inet "worklane_ci_$NAME"
       - name: jobs through the stand-in runner (a trusted one, four untrusted ones refused before their first step, a trusted one again)
         run: |
