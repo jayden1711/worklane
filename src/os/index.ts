@@ -564,9 +564,16 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 
+/**
+ * Whether a pid can be a child's (and its process group's): a whole number above 1. INVARIANT: never 0 or below, nor 1:
+ * kill(0) signals the caller's own process group, kill(-n) the group n, and kill(-1) every process the user may signal.
+ * A child that didn't start has no pid at all.
+ */
+export const isChildPid = (pid: number | undefined): pid is number => pid !== undefined && Number.isInteger(pid) && pid > 1;
+
 /** Kill a process group that runs as another user: only that user (or root) may signal it. */
 export function killTreeAs(user: string, pgid: number | undefined): void {
-  if (!pgid || process.platform === 'win32') return;
+  if (!isChildPid(pgid) || process.platform === 'win32') return;
   try {
     execFileSync('sudo', ['-n', '-u', user, '--', '/bin/kill', '-KILL', '--', `-${pgid}`], { stdio: 'ignore', timeout: 10_000 });
   } catch {
@@ -576,8 +583,8 @@ export function killTreeAs(user: string, pgid: number | undefined): void {
 
 export function killTree(pid: number | undefined, fallback: () => void): void {
   try {
-    if (pid && process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
-    else if (pid && process.platform === 'win32') execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    if (isChildPid(pid) && process.platform !== 'win32') process.kill(-pid, 'SIGKILL');
+    else if (isChildPid(pid) && process.platform === 'win32') execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
     else fallback();
   } catch {
     fallback();

@@ -1,3 +1,4 @@
+import { restoreIsolated } from './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -84,7 +85,7 @@ test('doctor passes on a fresh install of the example, after a fingerprint refre
       assert.equal(checks.find((c) => c.name === name)?.level, 'ok', name);
     }
   } finally {
-    delete process.env[`${BRAND.envPrefix}_STATE_DIR`];
+    restoreIsolated(`${BRAND.envPrefix}_STATE_DIR`);
   }
 });
 
