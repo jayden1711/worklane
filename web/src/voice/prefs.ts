@@ -7,17 +7,19 @@ export interface VoicePrefs {
   dictation: boolean;
   /** Fall back to the browser's cloud speech service when on-device isn't available. Off: on-device only. */
   allowCloud: boolean;
+  /** Listen for "hey <brand>" on this computer while a dashboard tab is visible (wake.ts). Off until an owner turns it on. */
+  wakeWord: boolean;
 }
 
-export const VOICE_DEFAULTS: VoicePrefs = { dictation: false, allowCloud: false };
+export const VOICE_DEFAULTS: VoicePrefs = { dictation: false, allowCloud: false, wakeWord: false };
 const KEY = 'dash-voice';
 const CHANGED = 'dash-voice-changed';
 
 export function readVoicePrefs(): VoicePrefs {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Record<keyof VoicePrefs, unknown>>;
-    // INVARIANT: only a stored `true` turns either on; anything else (missing, unreadable, odd) is the default, off.
-    return { dictation: raw.dictation === true, allowCloud: raw.allowCloud === true };
+    // INVARIANT: only a stored `true` turns any of them on; anything else (missing, unreadable, odd) is the default, off.
+    return { dictation: raw.dictation === true, allowCloud: raw.allowCloud === true, wakeWord: raw.wakeWord === true };
   } catch {
     return { ...VOICE_DEFAULTS };
   }
