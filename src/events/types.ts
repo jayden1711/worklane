@@ -667,6 +667,13 @@ export const EventSchemas = {
     github: z.strictObject({ total: z.number().int().nonnegative(), success: z.number().int().nonnegative() }).nullable(),
     token: z.boolean(),
   }),
+  // docs/previews.md: a host environment per open PR, deleted when it closes
+  'preview.created': z.strictObject({ pr: z.number().int().positive(), head: sha, environment: z.string().max(100) }),
+  'preview.ready': z.strictObject({ pr: z.number().int().positive(), head: sha, url: z.string().max(300), flows: z.array(z.strictObject({ flow: z.string().max(60), status: z.enum(['pass', 'fail', 'unavailable']), detail: z.string().max(500) })).max(20) }),
+  'preview.failed': z.strictObject({ pr: z.number().int().positive(), head: sha, outcome: z.enum(['deploy_failed', 'timed_out', 'error']), detail: z.string().max(1000) }),
+  'preview.removed': z.strictObject({ pr: z.number().int().positive(), environment: z.string().max(100), reason: z.enum(['closed', 'expired', 'failed']), ok: z.boolean() }),
+  'preview.waiting': z.strictObject({ pr: z.number().int().positive(), head: sha, active: z.number().int().nonnegative(), max: z.number().int().positive() }),
+  'preview.error': z.strictObject({ detail: z.string().max(1000) }),
   /** The sandbox helper's protocol version, asked at coordinator start (testrun/helper.ts): no run starts unless ok. */
   'testrun.helper': z.strictObject({ ok: z.boolean(), have: z.number().int().nullable(), need: z.number().int(), detail: z.string().max(1000) }),
   // CI timings read from GitHub for the metrics (src/ci-metrics.ts): each recorded once, so each is asked once.

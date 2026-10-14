@@ -119,6 +119,7 @@ export class Coordinator extends Optimizer {
     await step('merge posts', () => this.postMerges(), undefined);
     await step('ci metrics', () => this.measureCi(), undefined);
     await step('deploy gate', () => this.d.deployGate?.step(), undefined);
+    await step('previews', () => this.d.previews?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);
     await step('delegation', () => this.checkDelegation(), undefined);
@@ -135,6 +136,7 @@ export class Coordinator extends Optimizer {
     while (this.active.size) await Promise.all([...this.active.values()]);
     await this.d.prTestRuns?.idle();
     await this.d.deployGate?.idle();
+    await this.d.previews?.idle();
     await this.chatQueue;
     await this.intakeQueue;
     await this.quickIdle();
@@ -222,6 +224,7 @@ export class Coordinator extends Optimizer {
     // Test runs in flight are cancelled (and wiped); a cancelled PR's head runs again after the restart.
     this.d.prTestRuns?.stop();
     this.d.deployGate?.stop();
+    this.d.previews?.stop();
     this.prBatchStop();
   }
 
