@@ -650,6 +650,16 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  */
 export const SYSTEM_SLOTS = { dir: `/var/lib/${BRAND.cli}/agent-slots`, config: `/etc/${BRAND.cli}/slots.json` };
 
+/**
+ * The engine updater's drain flag (scripts/machine/<cli>-update.cjs, src/update-drain.ts): with the system slot
+ * directory it is in root's /var/lib/<cli>, beside the updater's other files, so no coordinator can write or remove
+ * it (the slot directory itself is group-writable); with any other slot directory (development, tests), inside it.
+ */
+export const UPDATE_DRAIN_FILE = `/var/lib/${BRAND.cli}/update-drain.json`;
+export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+  return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
+}
+
 export function slotsDir(system = SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');

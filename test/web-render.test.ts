@@ -712,6 +712,11 @@ test('the Updates panel: the engine installed, the last update, a rollback held 
   assert.match(ok, /data-testid="updates-canary-running"[\s\S]*?issue #(<!-- -->)?9/);
   // No canary configured: where to read how.
   assert.match(r.renderUpdatesPanel({ ...data, canary: { settings: null, running: null, last: null } }), /not set up: see[\s\S]*docs\/canary\.md/);
+  // Draining for an update (src/update-drain.ts): since when, and what is still finishing; no row when it isn't.
+  assert.doesNotMatch(html, /data-testid="updates-drain"/);
+  const drain = r.renderUpdatesPanel({ ...data, drain: { since: '2026-10-14T03:00:00.000Z', until: '2026-10-14T03:30:00.000Z', to: 'c'.repeat(40), testRuns: 2, agents: 1 } });
+  assert.match(drain, /data-testid="updates-drain"[\s\S]*?draining for update[\s\S]*?since (<!-- -->)?2026-10-14 03:00 UTC(<!-- -->)?, (<!-- -->)?2 runs and 1 agent finishing[\s\S]*?No new test run or agent starts until[\s\S]*?cccccccccccc[\s\S]*?nothing running is stopped/);
+  assert.match(r.renderUpdatesPanel({ ...data, drain: { since: '2026-10-14T03:00:00.000Z', until: '2026-10-14T03:30:00.000Z', to: null, testRuns: 0, agents: 0 } }), /nothing left running/);
   assert.deepEqual([r.duration(42_000), r.duration(17 * 60_000), r.duration(65 * 60_000), r.duration(null)], ['42s', '17 min', '1 h 05 min', '–']);
 });
 

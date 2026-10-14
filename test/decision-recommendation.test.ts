@@ -2,7 +2,7 @@
 // stored by an older engine, is shown as wrapped text with Show more, never as a one-line pill cut mid-sentence.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -13,7 +13,7 @@ import { RECOMMENDATION_PREFIX, settleRecommendation } from '../src/decision-ask
 import { seedDemo } from '../src/demo.js';
 import { EventLog } from '../src/events/log.js';
 import { INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, WORKER_SCHEMA } from '../src/roles.js';
-import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { exampleRoles, repoRoot } from './helpers.js';
 
 /** A long prose recommendation, as an older engine stored it (the one seen cut at "reconcile.js:472 (pin"). */
@@ -51,11 +51,10 @@ test("the dashboard's prefix for a recommendation's detail line is the engine's"
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
-const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
 
 test(
   'Inbox and Decisions in a real Chrome: prose wraps, whole, clamped to four lines at a word, with Show more; the pill is only for an option',
-  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
   async (ctx) => {
     await oneChromeAtATime(ctx);
     const prev = process.env[`${BRAND.envPrefix}_STATE_DIR`];

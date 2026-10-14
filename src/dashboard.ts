@@ -44,7 +44,8 @@ import { goalGraph } from './goal-graph.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
-import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
+import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
+import { updateDrain } from './update-drain.js';
 import { applySettings, changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
@@ -113,6 +114,15 @@ export function settingsView(cfg: Config, routing = routingInEffect({ cfg, polic
     guardrails: { rules: cfg.guardrails.rules.length, protectedPaths: cfg.guardrails.protected_paths, secretPaths: cfg.guardrails.secret_paths.length, network: cfg.guardrails.network ? 'restricted' : 'open', preApproved: cfg.guardrails.pre_approved },
     deploy: cfg.deploy ? { environments: cfg.deploy.environments.map((e) => ({ name: e.name, production: e.production })), prodRead: !!cfg.deploy.prod_read } : null,
   };
+}
+
+
+/** The updater's drain in force now (src/update-drain.ts), with what is still finishing; null when none. Read-only. */
+export function drainView(dir?: string, now = Date.now()): UpdatesDrain | null {
+  const d = updateDrain(dir, now);
+  if (!d) return null;
+  const slots = slotStatus(dir);
+  return { since: d.since, until: d.until, to: d.to, testRuns: testSlotsHeld(dir).length + (slots.fullRun ? 1 : 0), agents: slots.agents.length };
 }
 
 export interface DashboardOptions {
@@ -1348,7 +1358,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
         if (url.pathname === '/api/updates' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('engine updates are', who) });
-          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT)));
+          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT), drainView(opts.slotsDir)));
         }
         if (url.pathname === `/api/${DEVICE_VIEWS.machine}` && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
