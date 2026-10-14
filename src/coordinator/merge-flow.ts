@@ -46,6 +46,7 @@ export abstract class MergeFlow extends FixRuns {
 
   /** The flaky-test gate in front of a red default branch (coordinator/flaky.ts): re-run first, quarantine what passes. */
   protected get flakyGate(): FlakyGate {
+    const live = () => this.liveTestRuns;
     this.flakyGateInst ??= new FlakyGate({
       log: this.d.log,
       actor: this.d.instance,
@@ -54,7 +55,10 @@ export abstract class MergeFlow extends FixRuns {
       repo: this.d.cfg.project.project.repo,
       branch: this.branch,
       clone: this.d.repo,
-      testRuns: this.d.testRuns ?? null,
+      // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
+      get testRuns() {
+        return live();
+      },
       tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
       fetch: () => void this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch),
     });
@@ -64,6 +68,7 @@ export abstract class MergeFlow extends FixRuns {
   /** Fix-forward on a real red default branch (coordinator/fix-forward.ts): the culprit, fix tasks, the revert if they fail. */
   protected get fixForward(): FixForward {
     const git = (...a: string[]) => this.gitOrNull(this.d.repo, ...a);
+    const live = () => this.liveTestRuns;
     this.fixForwardInst ??= new FixForward({
       log: this.d.log,
       actor: this.d.instance,
@@ -86,7 +91,10 @@ export abstract class MergeFlow extends FixRuns {
       config: () => this.d.cfg.project.fix_forward,
       required: () => this.d.cfg.project.required_checks,
       probeTimeoutMin: () => this.d.cfg.project.flaky.rerun_timeout_min,
-      testRuns: this.d.testRuns ?? null,
+      // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
+      get testRuns() {
+        return live();
+      },
       tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
       categories: (files) => {
         const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
@@ -118,6 +126,7 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   protected get prBatch(): PrBatcher {
+    const live = () => this.liveTestRuns;
     this.batcher ??= new PrBatcher({
       log: this.d.log,
       instance: this.d.instance,
@@ -126,7 +135,10 @@ export abstract class MergeFlow extends FixRuns {
       branch: this.branch,
       identity: this.identity,
       config: () => this.d.cfg.tests.land.pr_batch,
-      testRuns: this.d.testRuns ?? null,
+      // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
+      get testRuns() {
+        return live();
+      },
       pullRequest: (n) => this.d.backlog.pullRequest(n),
       comment: (n, body) => this.d.backlog.comment(n, body),
       addLabels: (n, labels) => this.d.backlog.addLabels(n, labels),

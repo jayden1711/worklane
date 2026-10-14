@@ -231,7 +231,7 @@ export function instanceFindings(f: InstanceFacts): Finding[] {
   // The test sandbox's own check (the helper's check): no test run starts until it passes.
   const sandbox = [...f.events].reverse().find((e) => e.type === 'testrun.sandbox')?.payload as { ok: boolean; detail: string } | undefined;
   if (sandbox && !sandbox.ok) {
-    out.push({ kind: 'test_sandbox', key: i, instance: i, detail: `the test sandbox check failed: ${sandbox.detail}`, fix: "Re-run the machine's test-user setup (scripts/setup/test-user.sh) and restart the instance", tried: ['no test run starts until it passes; it is checked again when the instance starts'] });
+    out.push({ kind: 'test_sandbox', key: i, instance: i, detail: `the test sandbox check failed: ${sandbox.detail}`, fix: `Run the machine's check (sudo bash scripts/setup/test-user.sh check ${i}) and fix its FAIL lines; no restart needed`, tried: ['no test run starts until it passes; each open PR has a check that says so', 'checked again by itself, every 5 minutes at most; test runs go on when it passes'] });
   }
 
   // The sandbox helper's protocol isn't this engine's (an engine update that didn't reinstall the root helper).

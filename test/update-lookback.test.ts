@@ -15,6 +15,7 @@ const u = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'w
   pendingWaitMs(cfg: unknown): number;
   CHECKS_SPACING_MS: number;
   VERDICT_TTL_MS: number;
+  IDLE_AFTER_MS: number;
 };
 
 const sha = (c: string) => c.repeat(40);
@@ -22,12 +23,19 @@ const OLD = sha('0');
 const NOW = Date.parse('2026-10-13T20:00:00Z');
 const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
 
-type Verdict = 'green' | 'red' | 'pending' | 'none';
+type Verdict = 'green' | 'red' | 'pending' | 'none' | 'unbatched' | 'batching';
 type Commit = { sha: string; parents: string[]; checks: Verdict; landed?: number | undefined };
 
+const fast = { name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 };
+// unbatched: the fast check green, the required push-gate never run, nothing else on the commit (a main commit the
+// slow-checks batch hasn't reached, or skipped). batching: the same with another check of the batch still running.
 const runs = (v: Verdict) =>
   v === 'none'
     ? []
+    : v === 'unbatched'
+      ? [fast]
+      : v === 'batching'
+        ? [fast, { name: 'other slow check', status: 'in_progress', conclusion: null, started_at: '1', id: 3 }]
     : [
         { name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 },
         v === 'pending' ? { name: 'push-gate', status: 'in_progress', conclusion: null, started_at: '1', id: 2 } : { name: 'push-gate', status: 'completed', conclusion: v === 'green' ? 'success' : 'failure', started_at: '1', id: 2 },
@@ -200,6 +208,54 @@ test('a pending tip: waited for while young, nothing older installed; after pend
   const quiet = machine({ commits: old, tip: old[1]!.sha, noAnswer: [old[1]!.sha] });
   assert.equal(await u.run(quiet.deps), 'waiting');
   assert.deepEqual(quiet.checked(), [old[1]!.sha]);
+});
+
+test('a tip with a required check not run and nothing in flight is passed over at once for an older green commit', async () => {
+  // The incident: main's tip has had no slow-checks batch, its fast checks are done, and an older commit is fully
+  // green. 15 minutes on main, far inside pending_wait_minutes.
+  const commits = line(['green', 'unbatched'], [40, 15]);
+  const m = machine({ commits, tip: commits[1]!.sha });
+  assert.equal(await u.run(m.deps), 'installed');
+  assert.equal(m.current(), commits[0]!.sha, 'the older green commit, never the unbatched tip');
+  const chose = m.logs.find((l) => l.event === 'chose')!;
+  assert.match(JSON.stringify(chose), /required check \\"push-gate\\" hasn't run on this commit, and none of its checks is queued or running/);
+  // Several unbatched commits above the green one: each passed over, the green one installed.
+  const many = line(['green', 'unbatched', 'unbatched', 'unbatched'], [60, 40, 25, 12]);
+  const g = machine({ commits: many, tip: many[3]!.sha });
+  assert.equal(await u.run(g.deps), 'installed');
+  assert.equal(g.current(), many[0]!.sha);
+  // Below the tip, that verdict is remembered (only main's newest commit gets a batch): not asked again next run.
+  assert.deepEqual(Object.keys(g.memo() ?? {}).sort(), [many[1]!.sha, many[2]!.sha].sort());
+  // Nothing green below it: waiting on the tip, with the reason; never refused, nothing installed.
+  const alone = line(['red', 'unbatched'], [40, 15]);
+  const a = machine({ commits: alone, tip: alone[1]!.sha });
+  assert.equal(await u.run(a.deps), 'waiting');
+  assert.match(String(a.logs.at(-1)!.reason), /hasn't run on this commit/);
+  assert.deepEqual(a.built(), []);
+  // What is installed is as strict as ever: an unbatched commit is never chosen, however long it waits.
+  const only = line(['unbatched'], [600]);
+  const o = machine({ commits: only, tip: only[0]!.sha });
+  assert.equal(await u.run(o.deps), 'waiting');
+  assert.deepEqual(o.built(), []);
+});
+
+test('a tip whose checks are in flight, or that only just landed, is still waited for', async () => {
+  // The batch is running on the tip: something is in flight, so wait for it, nothing older installed.
+  const running = line(['green', 'batching'], [40, 15]);
+  const r = machine({ commits: running, tip: running[1]!.sha });
+  assert.equal(await u.run(r.deps), 'waiting');
+  assert.deepEqual(r.checked(), [running[1]!.sha], 'the parent is not even asked');
+  assert.deepEqual(r.built(), []);
+  // Landed 2 minutes ago with nothing running yet: its checks may not have appeared. Wait.
+  assert.equal(u.IDLE_AFTER_MS, 10 * 60_000);
+  const fresh = line(['green', 'unbatched'], [40, 2]);
+  const f = machine({ commits: fresh, tip: fresh[1]!.sha });
+  assert.equal(await u.run(f.deps), 'waiting');
+  assert.deepEqual(f.built(), []);
+  const none = line(['green', 'none'], [40, 2]);
+  const n = machine({ commits: none, tip: none[1]!.sha });
+  assert.equal(await u.run(n.deps), 'waiting');
+  assert.deepEqual(n.built(), []);
 });
 
 test('first parent only: a merge commit\'s second parent is never chosen', async () => {

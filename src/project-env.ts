@@ -3,6 +3,7 @@
 // e.g. a fixed test worker count. Committed config, so never secrets, and
 // never a variable the harness sets or relies on for its boundaries.
 import { BRAND } from './brand.js';
+import { PUSH_GATE_HATCH_ENV } from './guardrails/push-hook.js';
 
 const RESERVED_NAMES = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'PWD', 'OLDPWD', 'IFS', 'TERM', 'LANG', 'LC_.*', 'TZ',
@@ -13,6 +14,8 @@ const RESERVED_NAMES = [
   'GIT_.*', 'GH_.*', 'GITHUB_.*', 'SSH_.*', 'CLAUDE_.*', 'ANTHROPIC_.*', 'SUDO_.*', `${BRAND.envPrefix}_.*`,
   // The sandbox's network proxy and trust store.
   '(HTTPS?|ALL|NO|FTP)_PROXY', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_.*', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+  // WHY: the push gate's first-time-setup hatch is a person's, for one push; committed config never sets it.
+  PUSH_GATE_HATCH_ENV,
 ];
 const RESERVED = new RegExp(`^(?:${RESERVED_NAMES.join('|')})$`, 'i');
 const SECRET_LIKE = /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE/i;
