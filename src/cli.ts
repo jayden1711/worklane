@@ -39,6 +39,7 @@ import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setGithubApp } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
+import { sandboxVerdict } from './testrun/status.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
@@ -145,6 +146,9 @@ usage: ${BRAND.cli} <command> [options]
   canary file|check --instance name --repo owner/repo [--reason update|daily] [--issue n] --json
                                    (the engine updater runs these as the canary instance's user) file the
                                    canary issue on the scratch repo, or say how far it got (docs/canary.md)
+  sandbox-status --instance name --json
+                                   (the engine updater runs this as the instance's user) whether test runs are
+                                   configured, and the test sandbox check's last result at a coordinator start
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
                                    (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
@@ -399,6 +403,26 @@ async function main(argv: string[]): Promise<number> {
         const log = new EventLog(join(i.stateDir, 'events.db'));
         try {
           return out({ ok: true, ...(await checkCanary(backlog, repo, issue, log.read(0, ['issue.seen', 'issue.claimed', 'plan.posted', 'pr.opened', 'pr.closed']))) });
+        } finally {
+          log.close();
+        }
+      } catch (e) {
+        return (out({ ok: false, error: String((e as Error).message ?? e).split('\n')[0]!.slice(0, 500) }), 1);
+      }
+    }
+
+    case 'sandbox-status': {
+      // Read-only, for the engine updater: it compares the answer before and after an update (never root on the log).
+      const out = (j: unknown) => (console.log(JSON.stringify(j)), 0);
+      if (!instanceOpt) {
+        console.error(`usage: ${BRAND.cli} sandbox-status --instance <name> --json`);
+        return 2;
+      }
+      try {
+        const i = loadInstance(instanceOpt);
+        const log = new EventLog(join(i.stateDir, 'events.db'));
+        try {
+          return out({ ok: true, configured: !!i.config.tests.test_run, last: sandboxVerdict(log.read(0, ['testrun.sandbox', 'testrun.helper'])) });
         } finally {
           log.close();
         }

@@ -3,6 +3,26 @@
 // For health and the dashboard; viewers get viewerTestRuns, tier pass or fail only.
 import type { EventPayload, StoredEvent } from '../events/types.js';
 
+/**
+ * Whether this instance's test runs came up, as its coordinator last said at a start (./setup.ts): the newest of its
+ * sandbox check's result and an outdated helper (which skips the check and refuses every run). null: it never said
+ * (no test runs configured, or it hasn't started with them). The engine updater compares this across an update
+ * (the `sandbox-status` command).
+ */
+export function sandboxVerdict(events: StoredEvent[]): { ok: boolean; detail: string; at: string } | null {
+  let last: { ok: boolean; detail: string; at: string } | null = null;
+  for (const e of events) {
+    if (e.type === 'testrun.sandbox') {
+      const p = e.payload as EventPayload<'testrun.sandbox'>;
+      last = { ok: p.ok, detail: p.detail, at: e.ts };
+    } else if (e.type === 'testrun.helper') {
+      const p = e.payload as EventPayload<'testrun.helper'>;
+      if (!p.ok) last = { ok: false, detail: p.detail, at: e.ts };
+    }
+  }
+  return last;
+}
+
 export interface TestRunRow {
   id: string;
   sha: string;
