@@ -4,7 +4,8 @@
 // process instead:
 //
 //   CI_LOOPBACK_GITHUB_PORT=<port> node --import <this file> dist/src/cli.js ...
-//   (or NODE_OPTIONS=--import=<this file>, for a unit or a setup script that starts node itself)
+//   (or NODE_OPTIONS=--import=<this file>, for a unit or a setup script that starts node itself; with
+//   `<this file>?port=<port>` the port travels inside NODE_OPTIONS, through a user switch that clears the rest)
 //
 // What it does, in that one process:
 // - fetch to https://api.github.com, https://github.com or https://uploads.github.com goes to
@@ -22,10 +23,10 @@ const PORT_VARIABLE = 'CI_LOOPBACK_GITHUB_PORT';
 const GITHUB = new Set(['https://api.github.com', 'https://github.com', 'https://uploads.github.com']);
 const HERE = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
-const port = process.env[PORT_VARIABLE] ?? '';
+const port = new URL(import.meta.url).searchParams.get('port') ?? process.env[PORT_VARIABLE] ?? '';
 if (!/^[1-9][0-9]{1,4}$/.test(port) || Number(port) > 65535) {
   // Loaded without a port: refuse to run at all, rather than run against the real GitHub by accident.
-  console.error(`loopback-github: ${PORT_VARIABLE} must be a port on 127.0.0.1 (got "${port.slice(0, 20)}")`);
+  console.error(`loopback-github: ${PORT_VARIABLE} (or ?port=) must be a port on 127.0.0.1 (got "${port.slice(0, 20)}")`);
   process.exit(2);
 }
 const base = `http://127.0.0.1:${port}`;
