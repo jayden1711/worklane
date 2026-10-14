@@ -61,7 +61,7 @@ if (argv[0] === '--serve') {
     if (m === 'take') process.send({ timings: sink.splice(0), connections: conns(), rss: process.memoryUsage().rss });
     if (m === 'stop') void d.close().then(() => process.exit(0));
   });
-  process.send({ url: d.url, token: d.token });
+  process.send({ url: d.url, token: d.token, engine });
 } else {
   await main();
 }
@@ -127,9 +127,11 @@ async function main() {
       const t = performance.now();
       writeSyntheticLog(eventsDb, { count: sizes[i], seed: seed + i, instance: name, end: new Date() });
       process.stderr.write(`perf: ${name}: ${sizes[i]} events written in ${Math.round(performance.now() - t)} ms\n`);
-      const child = fork(fileURLToPath(import.meta.url), ['--serve', JSON.stringify({ name, root, eventsDb, stateDir, slotsDir: join(work, 'slots'), gh: ghUrl })], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+      const child = fork(fileURLToPath(import.meta.url), ['--serve', JSON.stringify({ name, root, eventsDb, stateDir, slotsDir: join(work, 'slots'), gh: ghUrl }), '--engine', engine], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
       children.push(child);
       const ready = await new Promise((r, f) => (child.once('message', r), child.once('exit', (c) => f(new Error(`${name}'s dashboard exited ${c}`)))));
+      // WHY: the instances must run the engine measured, not this script's checkout.
+      if (ready.engine !== engine) throw new Error(`${name}'s dashboard ran ${ready.engine}, not ${engine}`);
       instances.push({ name, child, url: ready.url, token: ready.token, tokenFile: join(stateDir, 'dashboard-token'), events: sizes[i] });
     }
     const hubSink = [];
@@ -236,7 +238,8 @@ async function main() {
       inflight.clear();
       const t0 = await act();
       const page = await settle(testid, t0);
-      const script = (await metric('ScriptDuration')) - script0;
+      // A new document starts its own count: a load's is all of it.
+      const script = (await metric('ScriptDuration')) - (t0 === 0 ? 0 : script0);
       const servers = await take();
       const inst = Object.entries(servers).flatMap(([name, s]) => s.timings.map((t) => ({ ...t, instance: name })));
       const hubT = hubSink.splice(0);
@@ -274,10 +277,15 @@ async function main() {
         const done = new Promise((r) => cdp.on('Tracing.tracingComplete', r));
         await cdp.send('Tracing.end');
         await done;
-        const isBundle = (e) => /\/assets\/index-[^/]*\.js/.test(e.args?.data?.url ?? e.args?.data?.stackTrace?.[0]?.url ?? '');
-        const evals = events.filter((e) => e.name === 'EvaluateScript' && isBundle(e));
-        const compile = events.filter((e) => (e.name === 'v8.compile' || e.name === 'v8.compileModule') && /\/assets\/index-/.test(e.args?.data?.url ?? e.args?.fileName ?? ''));
-        bundle = { evaluateMs: evals.reduce((s, e) => s + (e.dur ?? 0), 0) / 1000, compileMs: compile.reduce((s, e) => s + (e.dur ?? 0), 0) / 1000 };
+        // Whatever the trace calls compiling and evaluating the bundle (a module script: v8.compileModule,
+        // v8.evaluateModule; a classic one: v8.compile, EvaluateScript), summed per name, complete events only.
+        const bundleUrl = /\/assets\/index-[^/"]*\.js/;
+        const byName = {};
+        for (const e of events) {
+          if (e.ph !== 'X' || !/compile|evaluate|parse/i.test(e.name) || !bundleUrl.test(JSON.stringify(e.args ?? {}))) continue;
+          byName[e.name] = (byName[e.name] ?? 0) + (e.dur ?? 0) / 1000;
+        }
+        bundle = byName;
       }
       await step('reload (warm cache)', 'hub', reload, 'page-overview');
       // Switch instance: what the switcher does (web/src/api.ts selectInstance): remember it, reload.
@@ -299,7 +307,7 @@ async function main() {
       await sleep(500);
     }
     const rss = (await take());
-    const report = summarize({ results, bundle, rss, sizes, names, latency, kbps, runs, githubMs, seed });
+    const report = summarize({ engine, results, bundle, rss, sizes, names, latency, kbps, runs, githubMs, seed });
     process.stdout.write(report);
     const json = option('--json');
     if (json) writeFileSync(json, JSON.stringify({ results, bundle, rss, options: { sizes, latency, kbps, runs, githubMs, seed } }, null, 2));
@@ -325,7 +333,7 @@ function kb(b) {
 
 function summarize(o) {
   const lines = [];
-  lines.push(`Link: ${o.latency} ms added per round trip, ${o.kbps} kbit/s each way. Logs: ${o.names.map((n, i) => `${n} ${o.sizes[i]}`).join(', ')} events (seed ${o.seed}). Fake GitHub answers in ${o.githubMs} ms. Median of ${o.runs} runs.`);
+  lines.push(`Engine: ${o.engine}. Link: ${o.latency} ms added per round trip, ${o.kbps} kbit/s each way. Logs: ${o.names.map((n, i) => `${n} ${o.sizes[i]}`).join(', ')} events (seed ${o.seed}). Fake GitHub answers in ${o.githubMs} ms. Median of ${o.runs} runs.`);
   lines.push('');
   lines.push('| step | via | total ms | network ms | render after data ms | requests | round trips | bytes on the wire | script ms | slowest server endpoint (ms) | hub hop ms (median per call) |');
   lines.push('|---|---|---:|---:|---:|---:|---:|---:|---:|---|---:|');
@@ -369,7 +377,7 @@ function summarize(o) {
     lines.push(`Round trips of the cold load: ${first.waterfall.stages.map((s, i) => `${i + 1}. ${s}`).join('; ')}`);
     lines.push('');
   }
-  if (o.bundle) lines.push(`Bundle: compile ${r0(o.bundle.compileMs)} ms, evaluate ${r0(o.bundle.evaluateMs)} ms (trace of the cold load).`);
+  if (o.bundle) lines.push(`Bundle parse and evaluation (trace of the cold load, ms): ${Object.entries(o.bundle).map(([n, ms]) => `${n} ${r0(ms)}`).join(', ') || 'none found in the trace'}.`);
   const conns = o.results.at(-1)?.connections;
   if (conns) lines.push(`TCP connections each instance accepted over the whole run (the hub's to it, and Chrome's direct ones): ${Object.entries(conns).map(([n, c]) => `${n} ${c}`).join(', ')}.`);
   lines.push(`Instance dashboards' RSS at the end: ${Object.entries(o.rss).map(([n, s], i) => `${n} (${o.sizes[i]} events) ${Math.round(s.rss / 1048576)} MB`).join(', ')}.`);
