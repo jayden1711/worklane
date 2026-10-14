@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // CI only (the "add-project (real systemd)" job in .github/workflows/ci-slow.yml): the machine owner's browser in the
-// agents' App manifest flow, while scripts/setup/add-project.sh runs as root on the same host. It signs in to the real
-// hub (through the fake GitHub's sign-in), opens the approve link the App step asks with, checks the manifest the page
+// agents' App manifest flow, while scripts/setup/add-project.sh runs as root on the same host. It signs in to the hub's
+// stand-in (scripts/ci/hub-stand-in.mjs, whose sign-in is the fake GitHub's; the real hub signs in at github.com only), opens the approve link the App step asks with, checks the manifest the page
 // would post, has the fake GitHub make a one-time code (as GitHub does when the owner approves the App), and follows
 // GitHub's redirect back to the hub. No real App is made. The code is written to <code file> (0600) for the job's
 // leak check and never printed.
@@ -33,7 +33,7 @@ async function signIn(login) {
   const start = await fetch(`${hub}/auth/login`, { redirect: 'manual' });
   assert.equal(start.status, 302, `the hub's sign-in: ${start.status}`);
   const to = new URL(start.headers.get('location'));
-  assert.equal(to.origin, new URL(gh).origin, "sign-in goes to the fake GitHub, as the hub's unit points it");
+  assert.equal(to.origin, new URL(gh).origin, "the stand-in's sign-in goes to the fake GitHub");
   const code = `signin-${randomBytes(8).toString('hex')}`;
   assert.equal((await fake('/_fake/signin-code', { code, login })).status, 201);
   const back = await fetch(`${hub}/auth/callback?code=${code}&state=${to.searchParams.get('state')}`, { redirect: 'manual', headers: { cookie: cookieOf(start, STATE_COOKIE) } });
