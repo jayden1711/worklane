@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { openWaiting } from './events/open.js';
 import { BRAND } from './brand.js';
 import { writeGroupOnly, writeOwnerOnly } from './os/index.js';
 
@@ -56,7 +56,7 @@ const posix = (p: string) => p.split(sep).join('/');
 function snapshot(db: string): Buffer {
   const dir = mkdtempSync(join(tmpdir(), 'export-'));
   try {
-    const d = new DatabaseSync(db);
+    const d = openWaiting(db);
     try {
       d.exec(`VACUUM INTO '${join(dir, EVENTS).replace(/'/g, "''")}'`);
     } finally {
