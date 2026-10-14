@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
+import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
 
@@ -529,7 +530,8 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
     GIT_CONFIG_KEY_1: 'safe.directory',
     GIT_CONFIG_VALUE_1: '*',
   };
-  const [f, a] = asUser(runAs.user, file, args, env);
+  // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
+  const [f, a] = asUser(runAs.user, file, args, outboundEnv(env));
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 
@@ -601,6 +603,8 @@ export function shellCommand(command: string): [file: string, args: string[]] {
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   delete env.NODE_TEST_CONTEXT;
+  // INVARIANT: no redirecting variable from the engine's environment or `extra`; a proxy only from root's network.json.
+  outboundEnv(env);
   // WHY: project commands run code an agent wrote; the push gate's hatch in the engine's own environment stops here.
   return withoutPushGateHatch(env);
 }

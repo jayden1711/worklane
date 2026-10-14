@@ -11,6 +11,7 @@ import { mergeMetrics, type MergeMetrics } from './merge-metrics.js';
 import { heldUpdate, updateLog, type HeldUpdate, type UpdateEntry } from './updates.js';
 import { testRunStatus, type TestRunStatus } from './testrun/status.js';
 import { directLandProblem } from './direct-land.js';
+import { networkHealth } from './network.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -61,6 +62,8 @@ export interface HealthView {
   updateHold: HeldUpdate | null;
   /** The coordinator's test runs (src/testrun/): queue, runs, per-tier figures, and what keeps them from working. */
   testRuns: TestRunStatus;
+  /** The machine's outbound proxy from root's network.json (src/network.ts), or why that file was refused; null when none is set. Read-only. */
+  network: { proxy: string | null; file: string; error: string | null } | null;
   suggestions: string[];
 }
 
@@ -170,7 +173,7 @@ const secs = (ms: number) => `${Math.round(ms / 1000)} s`;
 export const THRESHOLDS = { memoryAvailablePct: 10, swapUsedPct: 25, unitMemoryPct: 90, diskFreePct: 10, diskFreeGb: 10, rateLimitsPerDay: 3, lockWaitMinPerDay: 30, loadPerCore: 1.5 } as const;
 
 /** Suggestions only, each a "consider", never a change made; one line saying so when there's nothing to suggest. */
-export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' | 'updateHold' | 'testRuns'> & { offsiteBackup?: OffsiteStatus | null },o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
+export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' | 'updateHold' | 'testRuns' | 'network'> & { offsiteBackup?: OffsiteStatus | null },o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
   const today = o.today ?? new Date().toISOString().slice(0, 10);
   const out: string[] = [];
   const m = v.machine;
@@ -206,12 +209,13 @@ export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' 
 }
 
 /** The whole health view. */
-export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string>; now?: Date; /** The machine's update log; read from its file when not given. */ updates?: UpdateEntry[] } = {}): HealthView {
+export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string>; now?: Date; /** The machine's update log; read from its file when not given. */ updates?: UpdateEntry[]; /** The network line; read from root's network.json when not given. */ network?: HealthView['network'] } = {}): HealthView {
   const started = [...events].reverse().find((e) => e.type === 'coordinator.started')?.payload as { instance?: string } | undefined;
   const since = new Date((o.now ?? new Date()).getTime() - MERGE_DAYS * 86_400_000);
   const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now), merge: mergeMetrics(events, { since }), updateHold: heldUpdate(o.updates ?? updateLog()) };
   const testRuns = testRunStatus(events);
   // What stops the coordinator or the test runs working is said first, plainly: it is not a suggestion.
   const direct = directLandProblem(events);
-  return { ...base, testRuns, suggestions: [...(direct ? [direct] : []), ...testRuns.problems, ...suggestions(base, o)] };
+  const network = o.network !== undefined ? o.network : networkHealth();
+  return { ...base, testRuns, network, suggestions: [...(direct ? [direct] : []), ...testRuns.problems, ...suggestions(base, o)] };
 }

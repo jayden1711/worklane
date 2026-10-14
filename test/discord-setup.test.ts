@@ -195,6 +195,8 @@ test("the listing runs this engine's own cli.js by absolute path: PATH, environm
   });
   assert.equal(existsSync(marks) ? readFileSync(marks, 'utf8') : '', '', 'a decoy ran');
   assert.deepEqual(Object.keys(listingEnv({ PATH: '/x', NODE_OPTIONS: '--require /y', NODE_PATH: '/z', HOME: '/h' })), ['PATH', 'HOME']);
+  // WHY: both strips compose (#391): no node loader and no host-redirect variable reach the token-carrying child.
+  assert.deepEqual(Object.keys(listingEnv({ PATH: '/x', NODE_OPTIONS: '--import /y', HOME: '/h', HTTPS_PROXY: 'http://p.example:1', no_proxy: '*', GITHUB_API_URL: 'https://e.example', ANTHROPIC_BASE_URL: 'https://e.example' })), ['PATH', 'HOME']);
   // An option naming another program is refused: only a stand-in made in code by discordListingStandIn is taken.
   const fn: RunCli = async () => ({ status: 0, stdout: canned, stderr: '' });
   for (const bad of [fn, naming, { path: naming }, { cli: naming }, { run: fn }, { [Symbol('a Discord listing stand-in')]: fn }, null, 0, Object.freeze({ ...discordListingStandIn(fn) })]) {

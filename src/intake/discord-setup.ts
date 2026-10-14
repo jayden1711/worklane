@@ -10,6 +10,7 @@
 //
 // Opening the step, loading the channels and reviewing a change write nothing: only a confirmed change does, and
 // only to intake.yaml.
+import { outboundEnv } from '../network.js';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
@@ -78,7 +79,8 @@ export const ENGINE_CLI = fileURLToPath(new URL('../cli.js', import.meta.url));
  */
 export function listingEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const { NODE_OPTIONS: _o, NODE_PATH: _p, ...rest } = env;
-  return rest;
+  // INVARIANT: and no host-redirect variable (src/network.ts, #391): the child carries the bot token.
+  return outboundEnv(rest);
 }
 
 /**
