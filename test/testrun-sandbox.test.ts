@@ -787,7 +787,7 @@ async function helperWithStubs() {
     writeFileSync(join(bin, n), `#!/bin/bash\n${body}\n`);
     chmodSync(join(bin, n), 0o755);
   };
-  for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id', 'sha256sum', 'cut', 'mkdir']) stub(t, 'exit 0');
+  for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id', 'sha256sum', 'cut', 'mkdir', 'chown']) stub(t, 'exit 0');
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   for (const t of ['od', 'tr', 'seq', 'sed', 'head', 'sleep', 'env', 'cat']) {
     const real = ['/usr/bin', '/bin'].map((d) => join(d, t)).find((p) => existsSync(p));

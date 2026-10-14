@@ -33,21 +33,27 @@
 # other wl-* home inaccessible, no other run's workspace, no Docker socket, a private /tmp, no devices, no new
 # privileges, and an environment of exactly the variables named here (never the caller's).
 #
-# A run's TMPDIR (and TMP, TEMP) is its own short directory, $TMP_BASE/wlt-<8 hex> (run_tmp), never one under the run's
+# A run's TMPDIR (and TMP, TEMP) is its own short directory, $TMP_BASE/<8 hex> (run_tmp), never one under the run's
 # directory. WHY: Chrome binds its SingletonSocket at $TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket, and a Unix
 # socket's path is at most 107 bytes (sun_path is 108 with the NUL); under $BASE/<name>/runs/<id>/tmp every browser
-# suite died with "Socket path too long". create makes it as the test user, 0700, and refuses one already there; exec
-# binds it into the sandbox's private /tmp; wipe removes it with the run's directory.
+# suite died with "Socket path too long". create makes it, the test user's, 0700, and refuses one already there; exec
+# binds it into the sandbox, alone under an empty $TMP_BASE; wipe removes it with the run's directory.
+#
+# INVARIANT: every path this helper makes and systemd then binds (the run's directory, its TMPDIR, the caches, the
+# shared directories, the store) is the same directory for this helper's caller and for PID 1. So none is under /tmp
+# or /var/tmp: the coordinator calls this from its own unit, which has PrivateTmp=yes, and a directory made in /tmp
+# there is not in the host's /tmp, where systemd looks for it (the run then died with exit 226, EXIT_NAMESPACE).
 set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=5
+PROTOCOL=6
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
-# Where each run's short TMPDIR is made (run_tmp).
-TMP_BASE=/tmp
+# Where each run's short TMPDIR is made (run_tmp): root's own, made here (tmp_base). Short, and never under /tmp or
+# /var/tmp (the INVARIANT above). Not under $BASE, where every entry is an instance's.
+TMP_BASE=/var/lib/wlt
 SLICE=worklane-test.slice
 DOCKER=/opt/worklane-test/docker/docker
 LABEL=worklane.test-run
@@ -65,7 +71,7 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "wl-$name" ]; then die "$SUDO_US
 # The version first: it reads nothing and needs no tool or test user, so an engine can always ask it.
 if [ "$cmd" = version ]; then [ "$#" -eq 2 ] || die "usage: version"; echo "$PROTOCOL"; exit 0; fi
 # Every tool this helper runs, found right after the caller check, before any probe: one clear line instead of a run of failed probes.
-for tool in runuser systemd-run systemctl git getent install id stat sha256sum cut mkdir; do
+for tool in runuser systemd-run systemctl git getent install id stat sha256sum cut mkdir chown; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool (PATH=$PATH)"
 done
 id -u "$user" >/dev/null 2>&1 || { echo "worklane-testrun: no user $user; run scripts/setup/test-user.sh install $name" >&2; exit 1; }
@@ -73,9 +79,18 @@ shift 2
 
 valid_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,47}$ ]] || die "a run id is lowercase letters, digits and dashes (at most 48), got $1"; }
 run_dir() { printf '%s/runs/%s' "$root" "$1"; }
-# INVARIANT: $TMP_BASE plus 13 bytes (/tmp/wlt-<8 hex>, 17), whatever the name and id; the same for the same run every
-# time, so wipe finds it from the id alone, never from anything a run could write.
-run_tmp() { printf '%s/wlt-%s' "$TMP_BASE" "$(printf '%s/%s' "$name" "$1" | sha256sum | cut -c1-8)"; }
+# INVARIANT: $TMP_BASE plus 9 bytes (/var/lib/wlt/<8 hex>, 21), whatever the name and id; the same for the same run
+# every time, so wipe finds it from the id alone, never from anything a run could write.
+run_tmp() { printf '%s/%s' "$TMP_BASE" "$(printf '%s/%s' "$name" "$1" | sha256sum | cut -c1-8)"; }
+# The base of every run's TMPDIR: this helper's user's (root's) own real directory, 0711, so only this helper puts
+# anything in it and a test user can only enter its own run's. Made here, so a machine set up earlier needs no step.
+tmp_base() {
+  local got
+  if [ -L "$TMP_BASE" ]; then die "$TMP_BASE is a symlink"; fi
+  [ -d "$TMP_BASE" ] || mkdir -m 0711 -- "$TMP_BASE" 2>/dev/null || [ -d "$TMP_BASE" ] || die "can't make $TMP_BASE"
+  got="$(stat -c '%U %a' -- "$TMP_BASE")"
+  [ "$got" = "$(id -un) 711" ] || die "$TMP_BASE is $got, not $(id -un)'s and 0711"
+}
 # Why the run's TMPDIR is not the test user's own real directory, 0700 (a symlink, anyone else's, another mode); empty when it is.
 tmp_problem() {
   local t="$1" got
@@ -83,9 +98,16 @@ tmp_problem() {
   got="$(stat -c '%U %a' -- "$t")"
   [ "$got" = "$user 700" ] || echo "$t is $got, not $user's and 0700"
 }
-# The run's TMPDIR is there and the wipe's to remove: a symlink at its path (only the link goes), or a directory the
-# test user owns. Someone else's directory there was never the run's (create refused it), and is left alone.
-own_tmp() { [ -L "$1" ] || { [ -d "$1" ] && [ "$(stat -c %U -- "$1")" = "$user" ]; }; }
+# The run's TMPDIR is there and the wipe's to remove: a symlink at its path (only the link goes), a directory the
+# test user owns, or one still this helper's user's (a create that died before handing it over). Another instance's
+# there (the same 8 hex) was never this run's (create refused it), and is left alone.
+own_tmp() {
+  local o
+  [ ! -L "$1" ] || return 0
+  [ -d "$1" ] || return 1
+  o="$(stat -c %U -- "$1")"
+  [ "$o" = "$user" ] || [ "$o" = "$(id -un)" ]
+}
 as_user() { runuser -u "$user" -- "$@"; }
 docker_as_user() { runuser -u "$user" -- env HOME="$root/docker-home" XDG_RUNTIME_DIR="$sock_dir" DOCKER_HOST="unix://$sock_dir/docker.sock" "$DOCKER" "$@"; }
 
@@ -165,13 +187,16 @@ create() {
   for p in "$@"; do valid_dir "$p"; done
   [ ! -e "$d" ] || die "run $id exists; wipe it first"
   t="$(run_tmp "$id")"
-  # WHY: /tmp is everyone's. Whatever is already at the run's TMPDIR (a directory, a symlink) someone else made or left
-  # behind, and the run never takes it.
+  tmp_base
+  # WHY: whatever is already at the run's TMPDIR (a directory, a symlink) is another run's (another instance's with
+  # the same 8 hex) or was left behind, and the run never takes it.
   if [ -e "$t" ] || [ -L "$t" ]; then die "$t exists; refusing a temporary directory this run didn't make"; fi
   install -d -o root -g "$user" -m 0710 "$root/runs"
   install -d -o "$user" -g "$user" -m 0700 "$d" "$d/work" "$d/home"
-  # mkdir, never mkdir -p or install -d: it fails on anything already there, a symlink planted since the check included.
-  as_user mkdir -m 0700 -- "$t" || die "can't make $t"
+  # mkdir, never mkdir -p or install -d: it fails on anything already there. Made here and handed over, not made as
+  # the test user: nobody but this helper can write $TMP_BASE, so nothing can be planted at the path in between.
+  mkdir -m 0700 -- "$t" || die "can't make $t"
+  chown -h "$user:$user" -- "$t"
   p="$(tmp_problem "$t")"; [ -z "$p" ] || die "$p"
   [ -d "$store" ] || install -d -o "$user" -g "$user" -m 0700 "$store"
   # The bundle (only the objects the store lacks; empty when it has both commits; never the coordinator's .git)
@@ -293,7 +318,8 @@ exec_run() {
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
-    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d" -p BindPaths="$t" -p ReadWritePaths="$t" \
+    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d" \
+    -p TemporaryFileSystem="$TMP_BASE:ro" -p BindPaths="$t" -p ReadWritePaths="$t" \
     -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible" \
     --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user" \
