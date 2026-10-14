@@ -29,6 +29,11 @@ export interface ExecResult {
   stats?: SystemdRunStats;
   /** Its stderr alone (the sandbox's systemd-run lines taken out): what a failed setup step's check shows. */
   err?: string;
+  /**
+   * It was stopped at its own timeout: the sandbox's unit at its RuntimeMaxSec (systemd-run's "Finished with result:
+   * timeout"; its exit code is then non-zero, not null), or the host's own timer. Never for a cancellation.
+   */
+  timedOut?: boolean;
 }
 
 /**
@@ -73,7 +78,7 @@ export function parseBytes(s: string): number | null {
 
 // systemd-run --wait's summary (src/run/run.c), each line in its own exact format, in the order it prints them.
 const SUMMARY_LINE: Array<[string, RegExp]> = [
-  ['result', /^Finished with result: [a-z-]+$/],
+  ['result', /^Finished with result: ([a-z-]+)$/],
   ['main', /^Main processes terminated with: code=[a-z]+\/status=[A-Za-z0-9+-]+$/],
   ['runtime', /^Service runtime: (.+)$/],
   ['cpu', /^CPU time consumed: (.+)$/],
@@ -109,6 +114,17 @@ export interface SystemdRunStats {
   memPeakMb: number | null;
 }
 
+/** A run's variables as the sandbox helper's exec reads them on stdin: NAME=value, each ended by a NUL. */
+export function runVars(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([k, v]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`not a variable name: ${k}`);
+      if (v.includes('\0') || v.includes('\n')) throw new Error(`${k}: one line, no NUL`);
+      return `${k}=${v}\0`;
+    })
+    .join('');
+}
+
 /**
  * systemd-run --wait's own lines in its stderr (not --quiet; the run's stderr is the same stream under --pipe):
  * "Running as unit: <unit>" near the start (with "; invocation ID: <id>" on some systemd 255 builds, not others), and its summary (result, CPU time, peak memory, ...)
@@ -116,9 +132,11 @@ export interface SystemdRunStats {
  * read: a run's own "Memory peak: 999G" line is part of its output, never a stat. `own`: the [start, end) ranges of
  * `stderr` that are systemd-run's.
  */
-export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: Array<[number, number]> } {
+export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: Array<[number, number]>; result: string | null } {
   const own: Array<[number, number]> = [];
   const stats: SystemdRunStats = { cpuS: null, memPeakMb: null };
+  // The unit's result ("success", "exit-code", "timeout", ...), from that final block only.
+  let result: string | null = null;
   const unit = new RegExp(`(?:^|\n)(Running as unit: ${BRAND.cli}-test-[a-z0-9-]+\\.service(?:; invocation ID: [0-9a-f]{32})?\n)`).exec(stderr);
   if (unit) own.push([unit.index + unit[0].length - unit[1]!.length, unit.index + unit[0].length]);
   // The last "Finished with result: " whose rest is all summary; the line may follow a run's last unended line.
@@ -130,9 +148,10 @@ export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: 
     const mem = s.get('mem');
     if (cpu !== undefined) stats.cpuS = Math.round(parseTimespan(cpu)! * 10) / 10;
     if (mem !== undefined) stats.memPeakMb = Math.round(parseBytes(mem)! * 10) / 10;
+    result = s.get('result') ?? null;
     break;
   }
-  return { stats, own };
+  return { stats, own, result };
 }
 
 /** What a run's Postgres is started with (test_run.database). */
@@ -373,13 +392,16 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
     },
     async exec(id, command, env, timeoutMs, signal) {
       checkId(id);
-      const args = ['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000)))];
-      for (const [k, v] of Object.entries(env)) args.push('--env', `${k}=${v}`);
+      // INVARIANT: no variable's value is ever in an argv. sudo logs its whole command line to the journal and any
+      // user can read a process's argv (ps, /proc/<pid>/cmdline); DATABASE_URL carries the run's database password.
+      // The run's variables go on stdin, each NAME=value ended by a NUL (no value can hold one).
+      const vars = runVars(env);
       // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left).
-      const r = await call([...args, '--', command], { timeoutMs: timeoutMs + 60_000, signal });
+      const r = await call(['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000))), '--', command], { stdin: vars, timeoutMs: timeoutMs + 60_000, signal });
       // systemd-run's lines are in the stderr the run shares with it: taken out, and its summary read from there only.
       const s = systemdRunStats(r.stderr);
-      return { code: r.code, out: r.without(s.own), stats: s.stats, err: cut(r.stderr, s.own) };
+      const timedOut = s.result === 'timeout' || (r.code === null && !signal?.aborted);
+      return { code: r.code, out: r.without(s.own), stats: s.stats, err: cut(r.stderr, s.own), timedOut };
     },
     async check() {
       const r = await call(['check'], { timeoutMs: 300_000 });
@@ -499,7 +521,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       // Exactly these variables: never this process's own environment.
       const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
       const r = await run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
-      return { code: r.code, out: r.out, err: r.stderr };
+      return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted };
     },
     async check() {
       return { ok: false, detail: 'the local host has no sandbox: for the engine\'s tests and development only' };

@@ -106,6 +106,28 @@ console.log(JSON.stringify(shellVars.out));
 assert.equal(shellVars.code, 0);
 assert.match(shellVars.out, /^got hello hel 5 two hello home$/m, 'every ${...} expanded by bash');
 
+step('exec: a tier that runs past its own cap is stopped by systemd at that cap, as a timeout; the next tier has a cap of its own');
+{
+  const { timedOutLine } = await load(dist, 'testrun/timeout.js');
+  const t0 = Date.now();
+  const stuck = await host.exec(id, 'echo started; sleep 300; echo never', {}, 30_000);
+  const took = Math.round((Date.now() - t0) / 100) / 10;
+  console.log(JSON.stringify({ code: stuck.code, timedOut: stuck.timedOut, took_s: took, out: stuck.out }));
+  assert.equal(stuck.timedOut, true, 'systemd-run said "Finished with result: timeout"');
+  assert.notEqual(stuck.code, null, 'systemd stopped it at its RuntimeMaxSec, not the engine\'s backstop timer (60 s later)');
+  assert.ok(took >= 29 && took < 60, `stopped at its 30 s cap, after ${took} s`);
+  assert.match(stuck.out, /^started$/m);
+  assert.doesNotMatch(stuck.out, /never/);
+  console.log(`the tier's check would start: ${timedOutLine('tier stuck', 30, 'its timeout_s in tests.yaml test_run')}`);
+  const t1 = Date.now();
+  const next = await host.exec(id, 'sleep 35; echo next-done', {}, 60_000);
+  const took2 = Math.round((Date.now() - t1) / 100) / 10;
+  console.log(JSON.stringify({ code: next.code, timedOut: next.timedOut, took_s: took2, out: next.out }));
+  assert.equal(next.code, 0, 'the next tier ran past the first one\'s 30 s: its own 60 s cap');
+  assert.equal(next.timedOut, false);
+  assert.match(next.out, /^next-done$/m);
+}
+
 step('exec: stdout, stderr and planted summary-like lines, through the coordinator\'s host');
 const cmd = [
   'echo out-line',

@@ -248,14 +248,17 @@ test('isolation: the sandbox helper gives a run no secret or harness variable, a
   assert.match(r.stderr, /wl-other may not use shop's test runs/);
   assert.equal(spawnSync('bash', [helperSrc, 'Bad;name', 'check'], { encoding: 'utf8' }).status, 2);
   // exec: a transient unit as the test user in the test slice, with nothing of the caller's environment (systemd-run
-  // starts it clean) beyond the fixed variables and the checked --env ones, and no Docker socket.
+  // starts it clean) beyond the fixed variables and the run's checked ones (from a root-only file), and no Docker socket.
   const src = readFileSync(helperSrc, 'utf8');
   const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
-  for (const s of ['--slice="$SLICE" --uid="$user" --gid="$user"', '-p NoNewPrivileges=yes', '-p ProtectSystem=strict', '-p ProtectHome=tmpfs', '-p PrivateTmp=yes', '-p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d"', 'inaccessible="-$sock_dir -$root/docker -$root/docker-home"', 'valid_env "$2"; envs+=("--setenv=$2")']) {
+  for (const s of ['--slice="$SLICE" --uid="$user" --gid="$user"', '-p NoNewPrivileges=yes', '-p ProtectSystem=strict', '-p ProtectHome=tmpfs', '-p PrivateTmp=yes', '-p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d"', 'inaccessible="-$sock_dir -$root/docker -$root/docker-home"', 'envfile=(-p "EnvironmentFile=$ENV_FILE")']) {
     assert.ok(exec.includes(s), s);
   }
   assert.doesNotMatch(exec, /--setenv=[A-Z_]*=\$\{?[A-Z]/, 'no variable passed through from the caller');
   assert.doesNotMatch(exec, /systemd-run[^\n]*-E\b|--property=Environment/);
+  // The run's own variables never on systemd-run's argv: only the fixed ones are --setenv, each a literal or a path.
+  assert.deepEqual([...exec.matchAll(/--setenv=([A-Z_]+)=/g)].map((m) => m[1]), ['HOME', 'TMPDIR', 'TMP', 'TEMP', 'PATH', 'LANG', 'CI', 'USER', 'LOGNAME']);
+  assert.doesNotMatch(exec, /--setenv=\$|--setenv="\$|RUN_ENV\[@\][^\n]*systemd-run|envs\+=/);
 });
 
 /**
@@ -392,11 +395,11 @@ test('isolation: no secret or credential variable of the coordinator\'s reaches 
   rmSync(base, { recursive: true, force: true });
 });
 
-test('the sandbox host calls the helper with sudo -n for its own instance, and passes each variable as a checked --env', { skip: !posix && 'POSIX sh' }, async () => {
+test('the sandbox host calls the helper with sudo -n for its own instance, and passes the run\'s variables on stdin, never in argv', { skip: !posix && 'POSIX sh' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'tr-helper-'));
   const log = join(dir, 'calls');
   const helper = join(dir, 'helper');
-  writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "$2" in db-start) echo "45678 ${'b'.repeat(32)}" ;; wipe) echo wiped ;; store-tips) printf '%s\\nnot-a-sha\\n%s\\n' ${'c'.repeat(40)} ${'d'.repeat(64)} ;; create) cat > /dev/null; echo /runs/x/work ;; *) echo /runs/x/work ;; esac\n`);
+  writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "$2" in db-start) echo "45678 ${'b'.repeat(32)}" ;; wipe) echo wiped ;; store-tips) printf '%s\\nnot-a-sha\\n%s\\n' ${'c'.repeat(40)} ${'d'.repeat(64)} ;; create) cat > /dev/null; echo /runs/x/work ;; exec) cat > "${log}.exec-stdin"; echo /runs/x/work ;; *) echo /runs/x/work ;; esac\n`);
   chmodSync(helper, 0o755);
   const sudo = join(dir, 'sudo');
   writeFileSync(sudo, '#!/bin/sh\n[ "$1" = -n ] || exit 9\nshift\nexec "$@"\n');
@@ -418,11 +421,14 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
   }
   assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), [
     `shop db-start fast-abc-1 ${pin} test 5 250`,
-    `shop exec fast-abc-1 60 --env DATABASE_URL=${db.url} -- npm test`,
+    'shop exec fast-abc-1 60 -- npm test',
     'shop wipe fast-abc-1',
     `shop create fast-abc-1 main refs/worklane/test-run/fast-abc-1/head refs/worklane/test-run/fast-abc-1/base ${'a'.repeat(40)} ${'b'.repeat(40)} docs/design art`,
     'shop store-tips',
   ]);
+  // The run's variables (the database password in DATABASE_URL) went on stdin, NUL-ended, and in no argv.
+  assert.equal(readFileSync(`${log}.exec-stdin`, 'utf8'), `DATABASE_URL=${db.url}\0`);
+  assert.ok(!readFileSync(log, 'utf8').includes(db.url) && !readFileSync(log, 'utf8').includes('postgres://'), 'no URL, so no password, in any argv');
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -701,8 +707,8 @@ test('regression: a run\'s ${...} is bash\'s, never systemd-run\'s (--expand-env
   const src = readFileSync(helperSrc, 'utf8');
   const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
   assert.ok(exec.includes('cmd="$(systemd_command "$(systemd_version)" "$2")"'));
-  assert.ok(exec.includes('exec systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
-  assert.ok(exec.endsWith('/bin/bash -o pipefail -c "$cmd"'), 'the command goes as systemd_command made it');
+  assert.ok(exec.includes('  systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
+  assert.ok(exec.includes('    /bin/bash -o pipefail -c "$cmd" || rc=$?\n'), 'the command goes as systemd_command made it');
 });
 
 test('a directory left out: the helper takes exactly what the engine\'s config takes', { skip: !posix && 'bash' }, () => {
@@ -789,7 +795,7 @@ async function helperWithStubs() {
   };
   for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id', 'sha256sum', 'cut', 'mkdir', 'chown']) stub(t, 'exit 0');
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
-  for (const t of ['od', 'tr', 'seq', 'sed', 'head', 'sleep', 'env', 'cat']) {
+  for (const t of ['od', 'tr', 'seq', 'sed', 'head', 'sleep', 'env', 'cat', 'rm', 'sh']) {
     const real = ['/usr/bin', '/bin'].map((d) => join(d, t)).find((p) => existsSync(p));
     if (real) symlinkSync(real, join(bin, t));
   }

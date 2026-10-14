@@ -413,14 +413,36 @@ function journalLine(event, sha, reason) {
  */
 function makeNote({ readState, writeState, log, print }) {
   return (event, sha, reason) => {
+    // INVARIANT: the state file holds the redacted reason, so the dedupe compares redacted with redacted: a reason
+    // with a secret in it is still logged once, not every run.
+    const why = redactDeep(reason);
     const last = readState() || {};
-    if (last.event !== event || last.sha !== sha || last.reason !== reason) {
-      log({ event, to: sha, reason });
-      writeState({ event, sha, reason });
+    if (last.event !== event || last.sha !== sha || last.reason !== why) {
+      log({ event, to: sha, reason: why });
+      writeState({ event, sha, reason: why });
     }
     print(journalLine(event, sha, reason));
     return event;
   };
+}
+
+/** A value with redact() applied to every string in it, however deep (keys are the updater's own, never data). */
+function redactDeep(v) {
+  if (typeof v === 'string') return redact(v);
+  if (Array.isArray(v)) return v.map(redactDeep);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x)]));
+  return v;
+}
+
+/**
+ * INVARIANT: every write to the update log, the state file and the hold file goes through these two, redacted: all
+ * three are world-readable (0644), and their fields carry reasons, URLs, build output and journal lines.
+ */
+function appendLog(file, entry) {
+  fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...redactDeep(entry) })}\n`, { mode: 0o644 });
+}
+function writeRedacted(file, value) {
+  saveJson(file, redactDeep(value), 0o644);
 }
 
 /** The last lines of a text, capped. */
@@ -1337,7 +1359,7 @@ function saveJson(file, value, mode) {
   fs.renameSync(tmp, file);
 }
 
-function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
+function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = { log: LOG, state: STATE, held: HELD }) {
   const readJson = (f) => {
     try {
       return JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -1345,7 +1367,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
       return null;
     }
   };
-  const log = (entry) => fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { mode: 0o644 });
+  const log = (entry) => appendLog(files.log, entry);
   return {
     config: () => readJson(CONFIG),
     installed: () => {
@@ -1388,7 +1410,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
         return parseSandbox(e && e.stdout); // WHY: a failing command still prints its answer; none is "unknown", never a verdict
       }
     },
-    held: () => readJson(HELD),
+    held: () => readJson(files.held),
     verdicts: () => readJson(VERDICTS),
     saveVerdicts: (map) => saveJson(VERDICTS, map, 0o644),
     stuckState: () => readJson(STUCK),
@@ -1403,12 +1425,8 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     // The watchdog's incidents (src/watchdog) once the installed engine has them; until then the log line is the record.
     raiseIncident: (kind, key, detail, fix) => void watchdog().then((w) => w && typeof w.raiseIncident === 'function' && w.raiseIncident(kind, key, detail, fix)).catch(() => {}),
     resolveIncident: (kind, key) => void watchdog().then((w) => w && typeof w.resolveIncident === 'function' && w.resolveIncident(kind, key)).catch(() => {}),
-    hold: (entry) => {
-      const tmp = `${HELD}.tmp`;
-      fs.writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { mode: 0o644 });
-      fs.chmodSync(tmp, 0o644);
-      fs.renameSync(tmp, HELD);
-    },
+    // The hold is read back by sha and time only; its reasons are for people, so redacting them changes no decision.
+    hold: (entry) => writeRedacted(files.held, entry),
     signersCheck: (file) => checkSigners(file),
     signersHold: () => signersHold(),
     signersAcknowledged: () => takeAcknowledged(),
@@ -1430,7 +1448,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log,
-    note: makeNote({ readState: () => readJson(STATE), writeState: (st) => fs.writeFileSync(STATE, JSON.stringify(st), { mode: 0o644 }), log, print }),
+    note: makeNote({ readState: () => readJson(files.state), writeState: (st) => writeRedacted(files.state, st), log, print }),
   };
 }
 
@@ -1445,7 +1463,7 @@ if (require.main === module) {
     (r) => said || print(r),
     (e) => {
       try {
-        fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), event: 'error', reason: String(e && e.message ? e.message : e).slice(0, 500) })}\n`);
+        appendLog(LOG, { event: 'error', reason: String(e && e.message ? e.message : e).slice(0, 500) });
       } catch {
         // nowhere to write: the journal has stderr
       }
@@ -1454,5 +1472,5 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
