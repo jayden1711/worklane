@@ -2,10 +2,34 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
-## v0.5.0 (2026-10-13)
+## v0.5.0 (2026-10-14)
+
+### Highlights
+
+One command, one URL: `bash scripts/bootstrap.sh <repo>` (or `--hardened` on a server) installs pinned, checksum-checked tools and the engine, then prints a single first-run wizard URL with no key in it, where every remaining setup step happens on its own screen (#357, #380). Owners can now dictate into the Ask panel and hear answers read back, on-device and off by default (#404, #405), and with voice intake turned on, speak an idea or "approve <issue>" and confirm it within 10 seconds (#411). A goal issue is split into child tasks with "Depends on" edges, and the goal's page draws that task graph (#347, #351, #410). The engine updater drains a machine that is never quiet: new runs pause, in-flight work finishes, the update installs and the machine reopens (#407). A full disk no longer kills the coordinator: events wait in memory, new work pauses under a `disk_full` incident, and everything resumes on its own (#398). One start gate now sits in front of every test run, so the disk floor and `disk_full` hold all six paths that start one (#406).
+
+### Upgrade notes (from v0.4.1)
+
+- **Config keys removed.** `.worklane/` files are strict, and v0.5.0 refuses these keys, which v0.4.1 accepted: `every_minutes` and `tools` on a role in `agents.yaml` (v0.4.1's template set `monitor: { ..., every_minutes: 30 }`), the `trust:` block in `agents.yaml`, and `stages:` in `review.yaml`. Delete them, or the config fails to load with `Unrecognized key`. The optional roles and trust stages they configured were removed. `stage:` in `agents.yaml` is still accepted and ignored.
+- **Plans wait for you.** `config.yaml` `plan_gate` defaults to `always`: every size:M/L plan waits for an owner's approval before any code is written. `plan_gate: risky` holds only high-risk or design-level plans (#334).
+- **More attempts per task.** A task gets up to 8 worker attempts by default (it was a fixed 3). Set `agents.yaml` `max_attempts` (1-20) to change it (#338).
+- **`land_mode: direct` needs branch protection.** The coordinator refuses to start in direct mode when the default branch is unprotected, or its protection can't be checked. Use `land_mode: pr` (the default) or turn protection on (#254).
+- **Proxies and custom CAs come only from root's `/etc/worklane/network.json`.** Proxy, host-redirect and TLS-trust variables (`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`, `ANTHROPIC_BASE_URL` and the like) are stripped from every child's environment (#391, #396). See docs/network.md.
+- **`WORKLANE_GITHUB_API` and `WORKLANE_GITHUB_WEB` are gone.** GitHub's hosts are constants (#381).
+- **Reinstall through the bootstrap.** `bash scripts/bootstrap.sh <repo>` installs the engine release pinned in it, checked by its release commit. `worklane doctor` lists any pending config or state migration, and `worklane migrate` applies it after a backup (the coordinator won't start while one is pending).
 
 ### Features
 
+- Run agents as their own OS user by default (#8)
+- Ship machine setup as reviewed scripts; no coordinator Claude login with separate users (#11)
+- Land by pull request; refuse admin tokens (#13)
+- Authenticate an instance's coordinator as a GitHub App (#14)
+- Run project commands as the agent user; App key install and cutover scripts (#15)
+- Service resource limits; doctor checks repo config against the instance policy (#17)
+- App key age instead of token expiry; a private /tmp per coordinator service (#18)
+- Prompts on stdin, not the command line; agent-run diagnostics and a worktree-commit probe (#19)
+- Locks: a stale-lock takeover never removes a fresh lock (#20)
+- A 'no change needed' outcome, confirmed by the coordinator's own checks (#22)
 - Checks can use git as the agent user; failing checks keep their output; retries judged against the base (#24)
 - Worker prompt: the coordinator runs the checks; name the fast tests to run (#27)
 - tests.yaml env: a project's own variables for its agents and commands (#28)
@@ -85,9 +109,9 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Role contracts: intake in the contract shape, with eval cases (#153)
 - Browser checks, 1/5: .worklane/app.yaml (start, UI paths, thresholds, flows), strict and off when absent (#155)
 - Browser checks, 2/5: run a project's flow (localhost only), shared DevTools driver (merge after #155) (#163)
-- #166 (#166)
+- Browser checks, 3/5: the browser: check, with thresholds and a baseline (#166)
 - Intake: Discord allowed senders; anyone else is dropped before anything is stored (#161)
-- #170 (#170)
+- Browser checks, 4/5: the UI-paths gate (#170)
 - Evaluator: tiered model by review level, one escalation, unread from the run record (#156)
 - Review: big-PR limits default to 800 lines / 20 files (#158)
 - Coordinator: post the daily "waiting on you" digest to one issue (#160)
@@ -95,8 +119,8 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Stuck-run guard wired in: dry-run by default, run.stuck events, a stuck stop is a failed attempt (H1) (#167)
 - Earliest-failed-stage labels, wired into the weekly report: code labels first, capped judge calls, one event per label (H3) (#174)
 - verify(): an unknown done_when kind fails the attempt instead of being skipped (#157)
-- #176 (#176)
-- #183 (#183)
+- Browser checks, 5/5: evidence for the PR description and the claims receipts (#176)
+- Browser checks, wired: verify() runs them, the PR shows them, a contract may ask (#183)
 - Gradual delegation, suggest-only: a clean waiting category is put to the owner, never loosened automatically (#172)
 - Caps on the coordinator's waits: deferred landing, mergeable rechecks, a pending light check, main checks after an auto-merge (#179)
 - Digest: list an auto-merge whose checks on the merge commit never reported (after #179) (#192)
@@ -114,7 +138,13 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Migrations: versioned config and state steps, doctor lists them, migrate applies them, the coordinator refuses to start until done (#208)
 - Quick start: a bootstrap for a fresh Mac or Linux machine, a Docker image, and a CI job that runs both (#207)
 - Stale docs and package contents: ship examples/basic; match design.md to the code (#204)
-- Batch 7 (final): #220 #223 #224 #225 #227 #221 #226 (#229)
+- Runner: role prompt file readable by the agent user under the service umask (#220)
+- A held issue closed by hand on GitHub stops waiting on the owner (#223)
+- Setup: offsite-backup.sh for Backblaze B2 with age (#224)
+- Dashboard: viewers get an allowlist of the event log and the project part of the settings (#225)
+- Machine changes from the dashboard: recorded by the dashboard, run by the coordinator (no sudo under NoNewPrivileges) (#227)
+- Owner terminal: only from the owner's Tailscale devices (console_devices), identified by Tailscale (merge after Batch 6) (#221)
+- Dashboard: the Board as home (stages across instances, role-checked inline actions) and a Machine page (merges after Batch 6) (#226)
 - Batch 8: test runs, PR batching, Discord, logo, Ubuntu-only CI (#243)
 - test-user.sh: Docker unit PATH has /usr/sbin and /sbin; check runs the helper as root (#244)
 - Test runs: keep systemd-run's summary apart from the run's output; a CI job on real systemd (#246)
@@ -129,20 +159,118 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - GitHub Apps through the manifest flow: the agent App and the sign-in App (#259)
 - Discord chat and thread questions: answered as they arrive, typing until the reply, not behind agent runs (#260)
 - Setup console: Add project, and the first machine owner at install (#261)
+- Discord as the owner's complete channel: L3 approvals, setup links by DM, one bot for several instances (#265)
+- Trust, measured: per-instance DORA-style numbers, the Trust panel and a weekly digest (read-only) (#272)
+- Usage-limit pause: pause on the Claude limit, requeue, one notice, resume at the reset; banner and usage line (#274)
+- Push gate: allow the repo owner in GitHub's merge subject; scan only a PR's own commits (#281)
+- main watch: judge a merge by the required_checks in force at it (#280)
+- Main watch: an admin accepts a hand merge as a bootstrap merge (#273)
+- Intake: production alerts as a second read-only prod-read query (owner merges) (#267)
+- Watchdog and Health page: incidents posted once to the ops channel, per-instance status dots (#268)
+- Self-modification guard: the harness's own controls always wait for the owner (owner merges) (#269)
+- Canary tied to auto-update: rollback on a failed canary, and the Updates panel (#270)
+- Claude account switch: claude-account.sh switch|status, and a machine-owner panel (owner merges) (#271)
+- Guided init with --mode local|server: one resumable checklist, in doctor and on a First-run page (#278)
+- export / import: move an instance's config and history to a server, one file, no ssh (#279)
+- Plans cite decisions: a Decisions section, checked by the plan contract and at plan review (#276)
+- Tests: a leak marker number matches only as a whole number (#286)
+- Config follows the default branch: loaded from git when main moves, validated, swapped in whole (#285)
 - CI: local mode end to end on Windows, inside WSL2 (bootstrap (windows-wsl)) (#287)
 - Watchdog: the Claude sign-in probe looks in the agent user's home (#289)
+- Init: auto-config drafts the repo's config, checks it on main, proposes it as a PR (#290)
+- Shutdown on SIGTERM: abort and requeue work in flight, exit within 20 s; a stopping watchdog stays out of the election (#291)
+- Branch protection: not strict by default, strict is a per-repo opt-in (#294)
 - Test runs: helper protocol version; updater keeps root helpers in step; setup failures in the check (#293)
 - CI: fast checks on PRs, every job on main; the updater waits on all of them (#295)
+- Merge train: up to land.parallel_merges green PRs merge per pass, no merging main in first (#296)
 - Pre-deploy gate: a deploy branch fast-forwarded only to green main commits (#297)
+- Push gate: a sign-off with the commit's own email is inherent to it, name included (#300)
+- CI: the unit tests in 4 shards per Node version, behind the same required names (#298)
+- Post-deploy check: smoke-test production after a deploy, roll back on failure (#303)
+- Updater: one red main tip no longer blocks updates (newest green first-parent commit) (#301)
+- Tests: example repos run no background git maintenance (#307)
+- Merge posts: every merge to main posted once in the Discord ops channel (#304)
+- Server setup: the App written in for you, auto-config's setup PR, waiting not failing, init's true status (audit B3-B7) (#306)
+- Release prep: v0.5.0 (version and changelog) (#311)
+- Main watch: a commit on main without a PR is posted to the ops channel at once, mentioning the owners (#299)
+- Test runs: a PR older than the test-run config says so; every tier check shows its last lines (#310)
+- Main watch: a merge GitHub hasn't linked to its PR yet is judged by the PR its subject names (#315)
+- Flaky tests: re-run a red main's failing checks on the same commit first; quarantine what passes (#302)
+- Deploy gate: an explicit off switch, deploy_gate.enabled (default false) (#308)
+- Stale PRs: merge main into old agent PRs, hand conflicts on, close abandoned ones (item 19) (#316)
+- Dashboard on a phone: nav drawer from a menu button; every page fits 390 px with 44 px tap targets (#317)
+- Roles: no defenses for hypothetical concerns (item 11) (#322)
+- Test selection: PRs run only the tests their change can affect (CI and test_run.select) (#319)
+- Review rules: PR intent and risk class, a size limit, a docs-only fast path (item 10) (#314)
+- CI: slow checks in 30-minute batches on main, a red batch bisected (item 24) (#313)
+- CI: timings for the 24 test files added since the last measurement (main red at 7e13344) (#329)
+- Feedback routing: CI failures, conflicts and reviews go back to the session that wrote the PR (item 29) (#328)
+- First run: a live checklist of every setup step, one registry for doctor, init and the page (#305)
+- Weekly optimization pass: PR only for a measured gain beyond the noise (item 20) (#323)
+- Test runs: one object store per instance, each run sent only what it lacks; sparse_exclude in run workspaces (items 12, 16; helper protocol 3) (#327)
+- Main watch, merge posts: PR facts from the GitHub API, not commit history (item 17) (#336)
+- Test runs: shell-only variables in a tier command reach bash, not systemd-run (helper protocol 4) (#339)
+- Loop control: attempt cap from agents.yaml (default 8), reflection before each retry, reassign after 3 identical failures, per-issue budget (item 31) (#338)
+- Checks from repeated feedback: twice-seen constraints become a draft ast-grep rule or test PR (issue for protected areas) (#325)
+- Intake: GitHub issues as a source, off by default (item 37) (#342)
+- Previews: a Railway environment per open PR, off by default (item 35) (#346)
+- Plan gate: size:M/L plans, with acceptance criteria, wait for an owner's approval before any code (item 30) (#334)
+- Model routing: one routing section keyed by task type, old keys as aliases, read-only Settings panel (item 32) (#340)
+- First run, tools and hooks: install tools, hooks, git hooks and fingerprints from the page (wizard screen 10) (#344)
+- Superfans: a watcher per instance and one for the engine, posting only what is new or odd (#324)
+- Task graph: Depends on holds, plan files as per-task file ownership (item 34, parts 1-2) (#347)
+- Setup: a self-hosted CI runner for trusted jobs only (ci-runner.sh) (#348)
+- Test runs: a short TMPDIR of each run's own, so Chrome's SingletonSocket fits (helper protocol 5) (#355)
+- discord channels: list the bot's channel ids, read-only, for superfan setup (#354)
+- Runners: Codex and Gemini CLIs behind AgentRunner, opt-in for easy builds only (item 38) (#345)
+- Goal split: a goal issue becomes child issues with Depends on edges (item 34, part 3; stacked on #347) (#351)
+- One command, one URL: the install ends with the first-run wizard's URL, no key in it (local and server) (#357)
+- Push gate hook: load the gate and its rules from origin's default branch on every push (#368)
+- CLI: silence node:sqlite's experimental warning, and only that one (#369)
+- Test runs: a run's TMPDIR off /tmp, so the helper works from inside the coordinator's unit (helper protocol 6) (#373)
+- ci batch: start a batch when the fast checks finish on main or a batch ends, not only on the schedule (#363)
+- CI shards: a test file with no timing is a warning, never a failure; timings for the 26 untimed files (#379)
+- updater: say why it is waiting on every run; don't wait on a commit with no batch and nothing in flight (#364)
+- intake check: validate an instance's intake.yaml on demand, and in doctor (#376)
+- updater: alert when the engine has been on one commit for 2 hours while main moved on (#367)
+- testrun measure: time one test_run env value per sandboxed run, in sequence, with no check and no PR (#386)
+- GitHub's hosts are constants: remove the WORKLANE_GITHUB_API / WORKLANE_GITHUB_WEB override (#381)
+- Test runs: a tier stopped at its own cap says it timed out, naming the tier and the cap (#385)
+- updater: redact everything written to updates.jsonl, update-state.json and update-held.json (#389)
+- Test runs: no value of a run's variables in any argv, the journal or the unit (helper protocol 7) (#388)
+- Children get no host-redirect variable; an outbound proxy only from root's network.json (#381 follow-up) (#391)
+- CI: the argv canary step records every docker call, so the old helper's password leak is caught on every run (#395)
+- Children get no inherited TLS trust variable; a custom CA only from root's network.json (#391 follow-up) (#396)
+- CI: real TLS handshakes through root's CA for both CLIs on a real unit, refused without it (#396 follow-up) (#397)
+- A full disk never kills the coordinator: events wait in memory, new work pauses, disk_full is raised, and it resumes on its own (#398)
+- Dashboard: owners-only mic in the Ask panel, off by default, on-device only, never sends (#404)
+- Dashboard: owners-only talk-back in the Ask panel, off by default, on-device voices only (#405)
+- One start gate in front of every test run: the disk floor and disk_full hold all six paths, through a list of refusal sources (#406)
+- Dashboard: an owners-only wake word, "hey <product name>", off by default, on-device only, no model bundled (#408)
+- Stage labels: plan and review from the run's trace, with their evidence in the Reports stage section (#409)
+- Dashboard: a goal's task graph on its page, read-only, from the split and task-graph.ts (#410)
+- Viewer state test: a sentinel run cost and a walk for cost-shaped fields, not the text 1.25 (#412)
+- Real-Chrome click helper: wait for the target to stop moving, and hit-test the point before pressing (#413)
+- Runner probe: fetch https://github.com/, not GitHub's rate-limited unauthenticated API (#419)
+- Real-Chrome tests: one Chrome at a time across test files (main red on 6a30f66) (#420)
+- Updater: drain a machine that is never quiet, install once in-flight runs finish, reopen on every exit (#407)
+- Reland #416 with control-dashboard starting Chrome through the engine's launchChrome (#422)
+- First run wizard: screens 2-11, integrated (#380)
+- Voice intake and spoken approvals: owners only, off by default, a 10 s spoken or clicked confirm (#411)
+- Real-Chrome lock: appear whole with its owner; take over a dead owner's only under a guard (main red on 729b51e) (#426)
+- docs: getting started around the one install command and the first-run wizard (#423)
+- docs: a short, current README; voice intake and approvals in getting started (#427)
 
 ### Fixes
 
+- Site-type instance fixes: review categories, service unit, pinned gitleaks, agent-user check (#16)
 - Dashboard: a pull requests page (checks, fix runs, merge calls, auto-merge state) (#46)
 - Dashboard: three fixes from verification (recommended option, hub probe, PR wait reasons) (#51)
 - Reports: how runs ended each week, the commonest causes, and fixes to decide on (#47)
 - Instance settings: the operator's policy wins for workers, budget, CI fix runs and run windows (#58)
 - Reports: weekly fixes for repeated failures go to the owner's Inbox, once (#61)
 - Conflict fix runs: a conflicting harness PR gets its base merged in and the hunks resolved (#64)
+- Merge metrics: what conflict fixes, combined-state checks and hotspot holds cost per merged PR (#65)
 - Weekly report: what conflict fixes, combined-state checks and hotspot holds cost (#67)
 - Updater: bin targets executable, a rolled-back commit held, crash loops caught early (#78)
 - Queue test: wait for the job to finish, not a fixed deadline; add a test under load (#91)
@@ -154,9 +282,19 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - The gardener: a weekly off-hours read-only scan, one log issue, fixes only for patterns seen 3+ times (#178)
 - Test-run helper and test-user.sh: fixed PATH with sbin, clear "missing tool" errors (#245)
 - Dashboard auth: drop the fresh sign-in; fix the terminal's CSRF over WebSocket and the device on machine views (#292)
+- Metrics: merges per day, main red, time to green, fix-forward vs revert, PR CI wall-clock, agent startup, flake rate and the slowest tests (items 9, 27) (#318)
+- Fix forward with culprit finding (items 2 and 8) (#337)
+- Fix red main: ownership tests under #334's default plan gate (item 34) (#358)
+- Harness evals: fixed past tasks replayed through the real coordinator, weekly and on src/ changes (item 36) (#335)
 
 ### Security and guardrails
 
+- Run project commands under bash with pipefail (#1)
+- Release 0.4.1 (lock race and pipefail fixes) (#7)
+- Sandbox agents per lane with Claude Code's native sandbox (#9)
+- Durable slot locations; repo-scoped GitHub credentials only (#10)
+- Stage 3: remove unproven features; partial-review refusal; emergency stop; credential setup (#12)
+- Keep the sandbox's empty mount points out of worktrees and commits (#21)
 - Agents commit with one harness identity (the App's bot), never one they pick (#25)
 - Sandbox placeholders: cover all of .claude/; keep the exclude block current (#26)
 - Setup: check the App token's permissions, and verify an installed App read-only (#33)
@@ -182,9 +320,22 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Unprotected default branch: never push it, watch every commit on it, batch people's PRs (#251)
 - Discord: decision threads in plain language, and chat channels (#253)
 - credentials.sh dashboard-signin: set $dir before the line that names it (#255)
+- npm release path: npx init from the package, and a release workflow (dry run until npm is set up) (#288)
+- Learnings: per-task failure notes grouped on Reports; owner promotes one to AGENTS.md as an L3 PR; agents never write AGENTS.md (item 33) (#343)
+- Test runs: a failed sandbox check at start never silently switches test runs off (journal, alert, retry) (#375)
+- Guardrails: agents never use the push gate's first-time-setup hatch or swap the pre-push hook (#378)
+- updater: roll back when an instance's test sandbox check passed before an update and fails after it (#372)
+
+### Reverted in this release
+
+- CI: build the dashboard UI before each shard's tests, and fail a web-UI test that would skip there (#416): reverted by #421
 
 ### Guardrail changes
 
+- Run project commands under bash with pipefail (#1): src/guardrails/context.ts
+- Release 0.4.1 (lock race and pipefail fixes) (#7): src/guardrails/context.ts
+- Sandbox agents per lane with Claude Code's native sandbox (#9): src/sandbox.ts
+- Stage 3: remove unproven features; partial-review refusal; emergency stop; credential setup (#12): src/hook.ts
 - Agents commit with one harness identity (the App's bot), never one they pick (#25): src/guardrails/engine.ts, src/guardrails/shell.ts
 - Push limits: every push of agent-written code is checked first (#31): src/push-check.ts, templates/project/guardrails.yaml
 - PR watch: drafts until required checks pass on the evaluated commit (#36): src/push-check.ts, templates/project/guardrails.yaml
@@ -203,3 +354,6 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Evals: held-out cases per role, written by a separate agent; the held-out score decides (#191): src/hook.ts
 - Unprotected default branch: never push it, watch every commit on it, batch people's PRs (#251): src/push-check.ts
 - Discord: decision threads in plain language, and chat channels (#253): src/hook.ts
+- npm release path: npx init from the package, and a release workflow (dry run until npm is set up) (#288): src/scan/secrets.ts
+- Learnings: per-task failure notes grouped on Reports; owner promotes one to AGENTS.md as an L3 PR; agents never write AGENTS.md (item 33) (#343): src/guardrails/engine.ts
+- Guardrails: agents never use the push gate's first-time-setup hatch or swap the pre-push hook (#378): src/guardrails/engine.ts, src/guardrails/push-hook.ts
