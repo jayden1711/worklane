@@ -16,6 +16,8 @@ import { instanceTargets, planMigrations, projectConfigFiles, type Targets } fro
 import { projectStateDir } from './guardrails/context.js';
 import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
 import { findTool, toolBin } from './tool-path.js';
+import { checkIntakeFile } from './intake/check.js';
+import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
@@ -99,6 +101,11 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   // instances installed before agent settings still find them.
   const instances = [...new Set([...(opts.instance ? [opts.instance] : []), ...(cfg ? policiesForRepo(cfg.project.project.repo).map((p) => p.name) : [])])];
   for (const name of instances) {
+    // WHY: the coordinator turns intake off on a broken intake.yaml with one log line; here it is a failing check.
+    const intake = checkIntakeFile(join(instancesDir(), name, INTAKE_FILE));
+    if (intake.state === 'off') add(`intake ${name}`, 'ok', `no ${INTAKE_FILE} in the instance home: intake is off`);
+    else if (intake.state === 'invalid') add(`intake ${name}`, 'fail', `${intake.file} is invalid, so intake is off until it is fixed (\`${BRAND.cli} intake check --instance ${name}\` checks an edit):\n${intake.errors.join('\n')}`);
+    else add(`intake ${name}`, intake.warnings.length ? 'warn' : 'ok', [`${INTAKE_FILE} valid: ${intake.summary.join('; ')}`, ...intake.warnings].join('\n'));
     // An API-key instance: its key file is the agent user's alone.
     try {
       const inst = loadInstance(name);

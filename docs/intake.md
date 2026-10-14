@@ -203,6 +203,17 @@ Discord off for the instance (it says why, `discord not started: ...`, and runs 
 connects with are fixed then: restart the instance after changing them. A reply is still checked against the
 config and the role read at that moment.
 
+**Checking an edit.** A broken `intake.yaml` turns intake off (one `intake off: ...` line in the service log), so
+check every edit before relying on it, as the instance's coordinator user:
+
+`sudo -H -u wl-<name> /usr/local/bin/<cli> intake check --instance <name>`
+
+It reads the file with the loader the coordinator uses and writes nothing. Valid: `valid`, then whether Discord is
+on and how many channels it reads, whether the superfan is on and its channel id, whether GitHub issues are on,
+and any warnings (exit 0). Invalid: every error with its path, such as
+`superfan.channel: superfan.channel is required when superfan is enabled` (exit 1). No file: it says intake is
+off (exit 0). `doctor` runs the same check for the instance and fails on an invalid file.
+
 ### 2.1.4 High-risk approvals from Discord (`discord.owners`)
 
 `discord.owners` (Discord user ids, empty by default) lists who may approve a high-risk merge from Discord.
@@ -351,8 +362,11 @@ superfan:
 4. Add the lines above to each instance's `intake.yaml`, as its coordinator user, keeping its owner and mode:
    `sudoedit -u wl-<name> "$(getent passwd wl-<name> | cut -d: -f6)/.local/state/<cli>/instances/<name>/intake.yaml"`
    (`<cli>` is the engine's command name).
-5. Check: the next pass (within `every_minutes`) records a `superfan.pass` event; a pass with nothing new is
-   `quiet` and posts nothing.
+5. Verify the edit, as the same user:
+   `sudo -H -u wl-<name> /usr/local/bin/<cli> intake check --instance <name>`
+   It must print `valid` and `superfan: on, channel <the id from step 4>`; an invalid file lists each error with
+   its path and exits 1 (2.1.1, "Checking an edit"). The next pass (within `every_minutes`) then records a
+   `superfan.pass` event; a pass with nothing new is `quiet` and posts nothing.
 
 ### 2.1.2 Ideas in conversation
 
@@ -593,7 +607,9 @@ test with an injection-style report.
    `alerts.columns`), set `alerts.table` and `alerts.columns` in `intake.yaml`, and the spike threshold. Only when
    the owner gives the go for that project.
 4. **Enable** each source per instance in `intake.yaml` (Discord also needs the server id), list the allowed
-   senders (`discord.allowed_senders`) and, among them, the trusted ones, by Discord user id.
+   senders (`discord.allowed_senders`) and, among them, the trusted ones, by Discord user id. **Verify** this and
+   every later edit of the file with `intake check --instance <name>` (2.1.1, "Checking an edit"): it must print
+   `valid` and, for Discord, `discord: on` with the number of channels listed.
 5. **Discord as a channel** (2.1.1): map each person's Discord user id to their GitHub login
    (`discord.people`), and set `discord.asks_channel` and `discord.dashboard_url`.
 6. **Chat channels** (2.1.3): list them in `discord.chat_channels`, and give the bot read and send permissions
@@ -606,7 +622,7 @@ test with an injection-style report.
 9. **GitHub issues** (2.4): set `github.enabled: true` (and any `trusted.github` logins) in `intake.yaml`, run
    `labels` once to create the intake label, and add it to an issue template if outsiders should reach intake.
 10. **Superfans** (2.1.7): a channel per instance and one for the engine, their ids in each instance's
-   `intake.yaml` under `superfan`.
+   `intake.yaml` under `superfan`; verify with `intake check --instance <name>` (`superfan: on, channel <id>`).
 
 ## 11. Build order
 
