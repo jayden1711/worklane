@@ -54,6 +54,9 @@ const pending = () => JSON.parse(readFileSync(PENDING, 'utf8')).pending;
 const sh = (file, args, cwd = '/') => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 /** One run of the updater's unit, as its timer starts it; when it fails, its own journal says why. */
 const updaterRun = () => {
+  // This proof starts the unit many times in a few seconds, past systemd's default start limit (5 in 10 s); its timer
+  // starts it every 10 minutes. Clear the count first, so only the updater's own result decides.
+  spawnSync('systemctl', ['reset-failed', 'worklane-update.service'], { cwd: '/' });
   const r = spawnSync('systemctl', ['start', 'worklane-update.service'], { encoding: 'utf8', cwd: '/' });
   if (r.status !== 0) {
     const journal = spawnSync('journalctl', ['-u', 'worklane-update.service', '-n', '80', '--no-pager', '-o', 'cat'], { encoding: 'utf8' }).stdout;
