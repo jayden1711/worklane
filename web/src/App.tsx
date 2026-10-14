@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { hub, instanceScope, loadIncidents, needsSignIn, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
+import { hub, instanceScope, keyMissing, loadIncidents, needsSignIn, onLoopback, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { MainWatchAlert } from './components/Protection';
@@ -29,6 +29,7 @@ import { LogsPage, logsRefusal } from './pages/Logs';
 import { RunDetail, runsRefusal } from './pages/RunDetail';
 import { PullRequests } from './pages/PullRequests';
 import { HealthPage, StatusDot } from './pages/Health';
+import { KeyForm, KeyPage } from './components/DashboardKey';
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -184,7 +185,7 @@ function Item({ children, onSelect, hint, value }: { children: React.ReactNode; 
 }
 
 /** The hub's sign-in page: one way in, with GitHub; what you may do then is your role on each instance's repo. */
-export function SignInPage({ brand }: { brand?: string }) {
+export function SignInPage({ brand, local = false }: { brand?: string; local?: boolean }) {
   return (
     <div className="flex h-full items-center justify-center bg-canvas p-6" data-testid="sign-in">
       <div className="w-[min(380px,100%)] rounded-card bg-surface p-6 shadow-card">
@@ -195,6 +196,12 @@ export function SignInPage({ brand }: { brand?: string }) {
         <a href="/auth/login" data-testid="sign-in-github" className="mt-5 flex h-9 items-center justify-center rounded-control bg-ink text-[13.5px] font-medium text-surface hover:opacity-90">
           Sign in with GitHub
         </a>
+        {local && (
+          <div className="mt-6 border-t border-line pt-4" data-testid="sign-in-key">
+            <p className="text-[12.5px] leading-5 text-ink-2">On this machine, before the sign-in App is set up: the owner's dashboard key.</p>
+            <KeyForm hub />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -233,7 +240,8 @@ export function App() {
     void needsSignIn.then(setSignIn);
   }, []);
   if (signIn === null) return <Loading />;
-  if (signIn) return <SignInPage />;
+  if (signIn) return <SignInPage local={onLoopback} />;
+  if (keyMissing) return <KeyPage />;
   return <Dashboard />;
 }
 

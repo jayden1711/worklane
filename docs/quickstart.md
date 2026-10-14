@@ -20,6 +20,18 @@ You choose where it runs. `worklane init` and the bootstrap take `--mode local` 
 | Always on | while your machine is | yes |
 | Set up with | `bash scripts/bootstrap.sh --mode local <repo>` | `sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>` |
 
+### One command, one URL
+
+Each of those commands ends by printing one URL, last: the dashboard's first-run wizard, where every setup step after the install happens.
+- **Local:** the bootstrap installs the tools and the engine, starts the repo's dashboard in the background (`worklane dashboard --detach`), and prints `http://127.0.0.1:4317/first-run`. Run it again and it prints the same URL and changes nothing; if the dashboard stopped (a reboot), it starts it again.
+- **Server:** it prints the dashboard hub's wizard: `https://<the hub's name>/first-run` once the sign-in App is set up and the machine has its Tailscale name (or `--public-url`), otherwise `http://127.0.0.1:4398/first-run`, the owner's break-glass on the server (from your laptop, `ssh -N -L 4398:127.0.0.1:4398 <you>@<server>` first).
+- **No key in the URL.** The page asks once for the dashboard key (a hidden field, or choose the key file). The key stays in a file only you (local) or root and the hub's user (server) can read; the command prints that file's path, never the key. The tab keeps it until you close it.
+- **Unattended:** `--config <file>` gives the same result without a person. The wizard's steps run in the terminal first (`worklane init --yes`, then `worklane doctor`), then the same URL. The file holds `key=value` lines: `mode=local|server`, `answer=<question id>=<choice>` (repeatable; auto-config's questions, as `init --answer` takes them), `machine_owner=<login>` and `public_url=<https url>` (server). It is read as data and never run. `--yes` alone does the same with no answers.
+
+The wizard's screens and their script equivalents: tools, Claude, GitHub, repo config and protection are `worklane init --yes` (with `--answer` for auto-config's questions); the pre-commit hook is `worklane install --git-hooks`; fingerprints are `worklane guardrails refresh`; Start is `worklane up`.
+
+An engine older than the wizard (one without `dashboard --detach`) runs the checklist in the terminal instead, as before, and says so.
+
 What local mode can't do, `worklane doctor` and the dashboard's First-run page say plainly, each with why:
 - **separate OS users**: the agents run as you, with your files and logins;
 - **root-run add-project**: the dashboard's Add project needs root and the machine helper, so you set up another repo with `worklane init <repo>` instead;

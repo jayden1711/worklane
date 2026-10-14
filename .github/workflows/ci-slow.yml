@@ -94,7 +94,7 @@ jobs:
           docker run --rm worklane-trial sh -c 'gitleaks version && claude --version && node --version'
       - name: no GitHub from here on (a stand-in gh, signed in, that reaches nothing; a stand-in claude, signed in)
         run: echo "$GITHUB_WORKSPACE/scripts/ci/stand-ins" >> "$GITHUB_PATH"
-      - name: bootstrap in local mode, twice
+      - name: bootstrap in local mode, three times, each ending with the same one wizard URL that answers
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
@@ -104,15 +104,32 @@ jobs:
           git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
           tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
           bash scripts/bootstrap.sh --dry-run --mode local --engine "$tgz" "$ex"
+          # Unattended (--yes): init's checklist here, then the dashboard and its URL.
           bash scripts/bootstrap.sh --mode local --yes --engine "$tgz" "$ex" | tee "$RUNNER_TEMP/first.log"
           # Each step's result line ("   done: ...") can follow what the step printed doing it: count them, not neighbours.
           [ "$(grep -cE '^   done: ' "$RUNNER_TEMP/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$RUNNER_TEMP/first.log"
-          # The second run: no --mode and no terminal (local, said so); it installs nothing and redoes no step.
+          grep -q 'started in the background' "$RUNNER_TEMP/first.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$RUNNER_TEMP/first.log")"
+          [ "$(ls -l "$kf" | cut -c1-10)" = '-rw-------' ] || { ls -l "$kf"; echo "the key file isn't 0600" >&2; exit 1; }
+          u1="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/first.log" "$kf" /api/first-run | tail -n 1)"
+          # The second run, the one command as a person runs it: no --mode and no terminal (local, said so); no checklist
+          # in the terminal, nothing installed, the dashboard already running: the same URL.
           bash scripts/bootstrap.sh --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/second.log"
-          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/|init --mode|started in the background' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
           grep -q 'no --mode, and no terminal to ask on: local mode' "$RUNNER_TEMP/second.log"
-          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/second.log"
+          grep -q 'already running; nothing changed' "$RUNNER_TEMP/second.log"
+          u2="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/second.log" "$kf" /api/first-run | tail -n 1)"
+          # The dashboard stopped (a reboot, say): the third run, unattended from a config file (the wizard's steps as
+          # key=value lines), redoes no step, starts the dashboard again, and ends at the same URL.
+          pkill -f 'dashboard --service --root' && sleep 2
+          printf 'mode=local\n' > "$RUNNER_TEMP/setup.conf"
+          bash scripts/bootstrap.sh --config "$RUNNER_TEMP/setup.conf" --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/third.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/third.log"
+          grep -q 'started in the background' "$RUNNER_TEMP/third.log"
+          u3="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/third.log" "$kf" /api/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] && [ "$u2" = "$u3" ] || { echo "the URL changed: $u1 / $u2 / $u3" >&2; exit 1; }
+          echo "every run ended with $u1"
       - name: doctor shows the checklist, and what local mode can't do
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -218,7 +235,7 @@ jobs:
         run: |
           . /etc/wl-ci.env
           if command -v node; then echo "node is already here; the bootstrap must fetch its own" >&2; exit 1; fi
-      - name: bootstrap in local mode, twice
+      - name: bootstrap in local mode, twice, each ending with the same one wizard URL that answers
         shell: wsl-sudo {0}
         run: |
           . /etc/wl-ci.env
@@ -230,10 +247,16 @@ jobs:
           bash "$WS/scripts/bootstrap.sh" --mode local --yes --engine "$tgz" "$ex" | tee "$H/first.log"
           [ "$(grep -cE '^   done: ' "$H/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$H/first.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$H/first.log")"
+          [ "$(stat -c %a "$kf")" = 600 ]
+          u1="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/first.log" "$kf" /api/first-run | tail -n 1)"
           bash "$WS/scripts/bootstrap.sh" --engine "$tgz" "$ex" < /dev/null | tee "$H/second.log"
-          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/|init --mode|started in the background' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
           grep -q 'no --mode, and no terminal to ask on: local mode' "$H/second.log"
-          grep -q 'resuming: 6 of 6 steps done earlier' "$H/second.log"
+          grep -q 'already running; nothing changed' "$H/second.log"
+          u2="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/second.log" "$kf" /api/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
+          pkill -f 'dashboard --service --root' || true
       - name: doctor shows the checklist, the OS as WSL, and what local mode can't do
         shell: wsl-sudo {0}
         run: |
@@ -801,6 +824,20 @@ jobs:
           set +e; sudo -H -u wl-gamma worklane doctor --mode server --instance gamma --root /srv/worklane/gamma/gamma > "$F2/doctor2.log" 2>&1; set -e
           cat "$F2/doctor2.log"
           for s in tools claude github repo-config coordinator protection; do grep -q "^ok    setup $s: " "$F2/doctor2.log"; done
+      - name: "server: the install ends with one URL, the hub's wizard, no key in it; it answers 200, and the checklist given the hub's key; a rerun prints the same"
+        run: |
+          tail -n 12 "$F2/boot3.log"
+          # The hub's key, root's to read: copied into a 0600 file of the runner's, never into an argument.
+          hk="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; sudo cat "$hk" > "$F2/hub-key")
+          u1="$(bash scripts/ci/wizard-url.sh "$F2/boot3.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
+          # The sign-in App is set up here, but the machine has no public name (no Tailscale, no --public-url): the break-glass.
+          [ "$u1" = http://127.0.0.1:4398/first-run ]
+          grep -qF "asks once for the hub's key: it is in $hk" "$F2/boot3.log"
+          sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot4.log" 2>&1 || { cat "$F2/boot4.log"; exit 1; }
+          u2="$(bash scripts/ci/wizard-url.sh "$F2/boot4.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
+          rm -f "$F2/hub-key"
       - name: the units and the fake's log, on failure
         if: failure()
         run: |
