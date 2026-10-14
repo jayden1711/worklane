@@ -31,6 +31,14 @@ const provider = z.strictObject({
   gpu_lock: z.string().refine((p) => p.startsWith('/'), 'an absolute path').optional(),
   latency_ms: z.number().int().positive().max(60_000).optional(),
 });
+
+/** INVARIANT: item 38. All required: the runner enforces a run's budget from the CLI's token counts at these prices. */
+const cliAgent = z.strictObject({
+  model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,80}$/, 'a model id (letters, digits, . _ : / -)'),
+  tier: z.enum(['haiku', 'sonnet', 'opus']),
+  usd_per_mtok_in: z.number().positive(),
+  usd_per_mtok_out: z.number().positive(),
+});
 const regex = z.string().refine(
   (s) => {
     try {
@@ -320,13 +328,14 @@ export const AgentsConfig = z
     /** INVARIANT: an alias of `routing` (same key names); a key set in both is an error. */
     model_routing: z.strictObject(modelRoutingShape).optional(),
     /**
-     * Open-model providers a model setting can name: `local`, or `hosted:<name>`. Each instance opts in (policy.yaml
+     * Open-model providers a model setting can name: `local`, `hosted:<name>` or `cli:<agent>`. Each instance opts in (policy.yaml
      * settings.providers); what each may run is fixed in code (src/providers.ts).
      */
     providers: z
       .strictObject({
         local: provider.optional(),
         hosted: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,40}$/), provider).optional(),
+        cli: z.strictObject({ codex: cliAgent.optional(), gemini: cliAgent.optional() }).optional(),
       })
       .optional(),
     /** INVARIANT: an alias of `routing`: cheap_model is eval_cheap, cheap_levels eval_cheap_levels, escalate eval_escalate. */
@@ -382,7 +391,7 @@ export const AgentsConfig = z
       const route = key === 'build' ? 'build' : key === 'build_high_risk' ? 'build' : (key as RoutedRun);
       const why = key === 'build_high_risk' ? 'hosted and local models never build high-risk work' : providerRefusal(named.kind, { route });
       if (why) ctx.addIssue({ code: 'custom', path: at(key), message: why });
-      const known = named.kind === 'local' ? c.providers?.local : c.providers?.hosted?.[named.name];
+      const known = named.kind === 'local' ? c.providers?.local : named.kind === 'cli' ? (c.providers?.cli as Record<string, unknown> | undefined)?.[named.name] : c.providers?.hosted?.[named.name];
       if (!known) ctx.addIssue({ code: 'custom', path: at(key), message: `${value} is not configured under providers` });
     }
     // Everywhere else a model is named (role models, tiered evaluation, instruction evals), only Anthropic models.

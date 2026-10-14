@@ -137,3 +137,46 @@ The throughput panel and the weekly report show cost, tokens and time per merged
    - the key installed with `credentials.sh <name> provider-key <credential>`.
 3. **The opt-in:** `policy.yaml` `settings.providers`.
 4. **Evals per role and candidate model:** 3 samples, visible and held-out, recorded in the gate, before any role moves.
+
+## Other vendors' coding CLIs: `cli:codex`, `cli:gemini`
+
+`model_routing.build` can also name `cli:codex` (OpenAI's Codex CLI) or `cli:gemini` (Google's Gemini CLI). These
+runs don't use `claude` at all: `src/cli-agents.ts` starts the vendor's CLI headless (`codex exec --json -`,
+`gemini --output-format stream-json -p ...`), with the prompt on stdin, and reads its JSON events into the run's
+result, record and live feed.
+
+- **Opt-in, configured, evaluated:** as for hosted models. The instance lists the CLI in `policy.yaml`
+  `settings.providers.cli`, `agents.yaml` names its model, tier and prices, and the role must pass its evals on that
+  model id. Otherwise the build runs on its normal model, with a `provider.fallback` event.
+- **Builds only, never high-risk:** planning, research, the evaluator, intake, the stage judge, interactive runs and
+  high-risk builds are refused, both when routing and by the runner itself. A resumed session is refused, and the
+  fix run starts fresh on its normal model.
+- **No claude sandbox and no guardrail hooks:** neither applies to these CLIs. The run's boundary is the OS user: it
+  runs only as the lane's agent user, through `sudo -u`, with the same allowlisted environment as any agent (no
+  GitHub token, no git credential helper, no provider keys). A lane without an agent user never runs one.
+- **The change is held after the build:** a change that is above L1, or touches a protected path
+  (`guardrails.yaml` `protected_paths` and the built-in ones), a money path or agent instructions, is refused. The
+  task's later attempts then run on Anthropic.
+- **Budgets:** the runner prices the CLI's token counts at the configured `usd_per_mtok_in` / `usd_per_mtok_out`. It
+  stops the run once the cost passes the run's budget, or once its tool calls pass the turn cap. Both CLIs report
+  tokens when a turn ends, so between reports the turn cap and the run's timeout bound it. A run that ends over
+  budget counts as `budget_exhausted`.
+- **Structured output:** the prompt asks the agent to end with a JSON object matching the run's schema, and the
+  runner reads it back. An answer without one fails the run.
+
+```yaml
+# agents.yaml
+providers:
+  cli:
+    codex:  { model: <codex model id>, tier: sonnet, usd_per_mtok_in: 1.25, usd_per_mtok_out: 10 }
+    gemini: { model: <gemini model id>, tier: sonnet, usd_per_mtok_in: 1.25, usd_per_mtok_out: 10 }
+model_routing: { build: cli:codex }
+# policy.yaml
+settings:
+  providers: { cli: [codex] }
+```
+
+**What the owner sets up (nothing here installs either CLI or signs in to one):** install the CLI where the agent
+user's `PATH` finds it (`codex`, `gemini`), and sign it in as the agent user, so its login lives in that user's home
+(`~/.codex`, `~/.gemini`). Give it no MCP servers or extensions in that user's config. Then fill in the
+configuration above and record the role's evals on the model.
