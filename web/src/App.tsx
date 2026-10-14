@@ -4,7 +4,7 @@ import { Command } from 'cmdk';
 import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
 import { healthPass, hub, hubNow, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type State } from './api';
 import { peek, useUpdating } from './cache';
-import { Loading, SidebarRow } from './components/patterns';
+import { Entrances, Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { VoiceControl } from './voice/VoiceControl';
 import { useVoicePrefs } from './voice/prefs';
@@ -448,7 +448,9 @@ function InstanceDashboard({ health }: { health: Health | null }) {
           {state && <StopBanner state={state} />}
           <UsageBanner usage={usage} now={now} />
           {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
-          <Suspense fallback={<Loading />}>{page}</Suspense>
+          <Entrances key={path}>
+            <Suspense fallback={<Loading />}>{page}</Suspense>
+          </Entrances>
         </main>
         <UpdatingMark />
         <NavDrawer open={nav} setOpen={setNav}>

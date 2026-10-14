@@ -128,6 +128,7 @@ Any other path shows the Board, the dashboard's home.
 | A PR's links | `prs` | the PR number, its issue, and Review on GitHub | – | `[data-testid="pr-link"]`, `[data-testid="pr-issue-link"]`, `[data-testid="pr-review-link"]` |
 | A PR's checks and fix runs | `prs` | the check pills and the fix-run count on a card or row | – | `[data-testid="pr-checks"]`, `[data-testid="pr-fixes"]` |
 | PRs in progress | `prs` | the "In progress" list; a row expands | – | `[data-testid="prs-in-progress"]`, `[data-testid="pr-row"]`, `[data-testid="pr-github-link"]` |
+| PR lists: Show more | `prs` | each list (in progress, auto-merged, merged or closed) shows its newest 50, then Show more for the rest | – | `[data-testid="prs-show-more"]` |
 | Auto-merged PRs | `prs` | the "Auto-merged" table: merge commit, main afterwards, why it merged | – | `[data-testid="prs-auto-merged"]`, `[data-testid="prs-auto-merged-table"]`, `[data-testid="pr-merged-row"]`, `[data-testid="pr-merge-commit-link"]`, `[data-testid="pr-merge-reasons"]` |
 | Closed without merging | `prs` | the "Closed" list | – | `[data-testid="prs-closed"]` |
 | Refused pushes | `prs` | the "Pushes the harness refused" table | – | `[data-testid="prs-refused"]`, `[data-testid="prs-refused-table"]`, `[data-testid="refused-row"]`, `[data-testid="refused-issue-link"]` |

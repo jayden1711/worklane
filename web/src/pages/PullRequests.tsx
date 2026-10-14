@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { useView, type PrView, type PrsView, type State } from '../api';
 import { navigate } from '../App';
-import { DotPill, Loading, RecordsTable, StatusMark, TaskRow, type MarkState } from '../components/patterns';
+import { DotPill, Loading, RecordsTable, StatusMark, TaskRow, useEntrance, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from '../components/Header';
 
@@ -93,8 +94,9 @@ function WaitingCard({ pr }: { pr: PrView }) {
     ...((pr.waitReasons ?? []).length ? [{ title: 'Why it waits for you', reasons: pr.waitReasons, testId: 'pr-wait-reasons' }] : []),
     ...(pr.conflict && conflictNeedsOwner(pr) ? [{ title: pr.conflict.outcome === 'gave_up' ? 'Why the conflict fix stopped' : 'Why the conflict fix waits for you', reasons: pr.conflict.reasons.length ? pr.conflict.reasons : [pr.conflict.detail || 'no reason recorded'], testId: 'pr-conflict-reasons' }] : []),
   ];
+  const entrance = useEntrance();
   return (
-    <div className="overflow-hidden rounded-card bg-surface shadow-card" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-wait-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
+    <div className="overflow-hidden rounded-card bg-surface shadow-card" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-wait-card" style={entrance}>
       <div className="primitive-card-pad">
         <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
           <PrLink pr={pr} />
@@ -160,8 +162,24 @@ function Fixes({ pr }: { pr: PrView }) {
   );
 }
 
+/** How many rows each list shows before its "Show more" (newest first): a busy instance's 1500 merged PRs made every switch to this page build them all. */
+export const PR_ROWS = 50;
+
+function ShowMore({ list, total, onMore }: { list: string; total: number; onMore: () => void }) {
+  if (total <= PR_ROWS) return null;
+  return (
+    <button type="button" data-testid="prs-show-more" data-list={list} onClick={onMore} className="w-full px-3 py-2 text-left text-[12px] font-medium text-ink-2 hover:bg-hover hover:text-ink">
+      Show {total - PR_ROWS} more
+    </button>
+  );
+}
+
 /** The whole PR view from its data (also what the render checks render). */
 export function PullRequestsView({ view }: { view: PrsView }) {
+  // Lists shown whole; the others show their first PR_ROWS.
+  const [whole, setWhole] = useState<ReadonlySet<string>>(() => new Set());
+  const rows = <T,>(list: string, xs: T[]) => (whole.has(list) ? xs : xs.slice(0, PR_ROWS));
+  const more = (list: string) => () => setWhole((w) => new Set(w).add(list));
   const by = (...phases: PrView['phase'][]) => view.prs.filter((p) => phases.includes(p.phase));
   const waiting = by('waiting', 'gave_up');
   const moving = by('fixing', 'resolving', 'light_check', 'checks', 'ready');
@@ -218,7 +236,7 @@ export function PullRequestsView({ view }: { view: PrsView }) {
       <Card className="overflow-hidden" data-testid="prs-in-progress">
         <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">In progress ({moving.length})</div>
         {moving.length ? (
-          moving.map((pr, i) => (
+          rows('moving', moving).map((pr, i) => (
             <TaskRow
               key={pr.number}
               index={i}
@@ -248,13 +266,14 @@ export function PullRequestsView({ view }: { view: PrsView }) {
         ) : (
           <div className="p-4 text-[13px] text-ink-3">No open PRs being checked or fixed.</div>
         )}
+        <ShowMore list="moving" total={whole.has('moving') ? 0 : moving.length} onMore={more('moving')} />
       </Card>
 
       <section className="space-y-2" aria-label="Auto-merged" data-testid="prs-auto-merged">
         <div className="text-[13px] font-medium text-ink">Auto-merged ({auto.length})</div>
         {auto.length ? (
           <RecordsTable testId="prs-auto-merged-table" head={['PR', 'Merge commit', 'Main after', 'Why it merged itself']} className="[&_th:nth-child(1)]:w-[34%] [&_th:nth-child(2)]:w-28 [&_th:nth-child(3)]:w-28">
-            {auto.map((pr) => (
+            {rows('auto', auto).map((pr) => (
               <tr key={pr.number} className="border-b border-line last:border-0" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-merged-row" style={{ background: pr.mainResult?.outcome === 'red' ? 'var(--red-tint)' : undefined }}>
                 <td className="primitive-table-cell text-[13px]">
                   <PrLink pr={pr} /> <span className="text-ink">{pr.title}</span>
@@ -277,12 +296,13 @@ export function PullRequestsView({ view }: { view: PrsView }) {
         ) : (
           <Card className="p-4 text-[13px] text-ink-3">Nothing auto-merged yet.</Card>
         )}
+        <ShowMore list="auto" total={whole.has('auto') ? 0 : auto.length} onMore={more('auto')} />
       </section>
 
       {done.length > 0 && (
         <Card className="overflow-hidden" data-testid="prs-closed">
           <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Merged by a person, or closed ({done.length})</div>
-          {done.map((pr, i) => (
+          {rows('done', done).map((pr, i) => (
             <TaskRow
               key={pr.number}
               index={i}
@@ -303,6 +323,7 @@ export function PullRequestsView({ view }: { view: PrsView }) {
               }
             />
           ))}
+          <ShowMore list="done" total={whole.has('done') ? 0 : done.length} onMore={more('done')} />
         </Card>
       )}
 

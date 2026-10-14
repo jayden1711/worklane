@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { decide, type Decision, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
-import { ValuePill } from '../components/patterns';
+import { useEntrance, ValuePill } from '../components/patterns';
 import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
 import { Header } from '../components/Header';
 
@@ -72,8 +72,9 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
   // Prose: an older event's free-text recommendation, and the reasoning the detail carries (src/decision-ask.ts).
   const prose = [...(!isOption && d.recommendation.trim() ? [d.recommendation.trim()] : []), ...detail.filter((r) => r.startsWith(RECOMMENDATION_PREFIX)).map((r) => r.slice(RECOMMENDATION_PREFIX.length))];
   const receipts = detail.filter((r) => !r.startsWith(RECOMMENDATION_PREFIX));
+  const entrance = useEntrance();
   return (
-    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={{ animation: 'fade-up 380ms cubic-bezier(0.23,1,0.32,1) both' }}>
+    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={entrance}>
       <div className="primitive-card-pad">
         <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
           <Avatar login={d.owner} size={18} />
