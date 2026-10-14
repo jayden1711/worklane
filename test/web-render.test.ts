@@ -41,6 +41,8 @@ interface Render {
   renderThroughput(t: unknown): string;
   renderThroughputPanel(state: unknown): string;
   renderTrust(t: unknown): string;
+  renderConstraints(c: unknown): string;
+  renderConstraintsPanel(state: unknown): string;
   renderMetrics(m: unknown): string;
   renderMetricsPanel(state: unknown): string;
   renderFlaky(f: unknown): string;
@@ -1675,6 +1677,28 @@ test('the trust panel: the recommendation and its rules, each figure over 7 and 
   assert.deepEqual([...viewer.matchAll(/data-testid="trust-figure" data-figure="([a-z]+)"/g)].map((m) => m[1]), ['merges']);
   assert.doesNotMatch(viewer, /trust-recommendation|trust-area|~\$/);
   assert.match(viewer, /data-testid="trust-hidden"[^>]*>The other figures \(failures, restore, review, flaky, verification, cost, area\) are for the instance/);
+});
+
+test('the repeated-feedback panel: each constraint with its count, a link per sighting and revert, its proposal or why not; refused for anyone but the owner and writers', () => {
+  const sighting = (n: number) => ({ key: `review:${n}`, source: 'review_changes', by: 'example-owner', at: '2026-10-01T10:00:00Z', ref: `PR #${n}`, url: `https://example.com/acme/app/pull/${n}`, words: 'Never call the payments client from a handler.' });
+  const c = {
+    enabled: true,
+    minSightings: 2,
+    maxPerWeek: 3,
+    usedThisWeek: 1,
+    constraints: [
+      { id: 'c-1', label: 'Never call the payments client from a handler.', terms: ['payment'], count: 2, sightings: [sighting(11), sighting(12)], reverts: [{ url: 'https://example.com/acme/app/pull/30', at: 'x', words: 'checks failed' }], status: 'proposed_pr', proposal: { kind: 'pr', number: 40, url: 'https://example.com/acme/app/pull/40' }, detail: '' },
+      { id: 'c-2', label: 'Feature flags need an owner field.', terms: [], count: 1, sightings: [sighting(15)], reverts: [], status: 'watching', proposal: null, detail: 'seen 1 time(s); a check is proposed from 2' },
+    ],
+  };
+  const html = r.renderConstraints(c);
+  assert.match(html, /data-testid="constraints-panel"[\s\S]*?Repeated feedback[\s\S]*?at 2 sightings it becomes a proposed check \(1 of 3 this week\)/);
+  assert.deepEqual([...html.matchAll(/data-testid="constraint" data-status="([a-z_]+)" data-count="(\d+)"/g)].map((m) => [m[1], m[2]]), [['proposed_pr', '2'], ['watching', '1']]);
+  assert.match(html, /href="https:\/\/example.com\/acme\/app\/pull\/11"[^>]*>PR #11<\/a>[\s\S]*?href="https:\/\/example.com\/acme\/app\/pull\/12"[^>]*>PR #12<\/a>[\s\S]*?href="https:\/\/example.com\/acme\/app\/pull\/30"[^>]*>revert<\/a>/);
+  assert.match(html, /data-testid="constraint-detail"[^>]*><a href="https:\/\/example.com\/acme\/app\/pull\/40"[^>]*>PR #40<\/a>/);
+  assert.match(html, /Check proposed[\s\S]*?Seen once/);
+  assert.match(r.renderConstraints({ ...c, enabled: false, constraints: [] }), /off for this instance[\s\S]*?data-testid="constraints-empty"/);
+  assert.match(r.renderConstraintsPanel(asOther), /data-testid="constraints-refused"[^>]*>Repeated feedback is for the instance(&#x27;|')s owners and writers \(admin or write on its repo\); @someone-else is a viewer\./);
 });
 
 test('the metrics panel: each figure over 7 and 30 days, merges per day, the slowest tests and those over budget; a missing source says "not measured yet", never 0; a viewer is told it is the writers\'', () => {
