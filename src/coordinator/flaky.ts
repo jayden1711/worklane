@@ -7,6 +7,7 @@
 //     a failure; passed is flaky: quarantined (one issue per test, ever), and counted as passed.
 //   - a quarantined check that fails counts as passed; one that passes counts toward its release.
 // Nothing here changes a check on GitHub or what the updater requires.
+import { HeldTime, startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { BRAND } from '../brand.js';
 import type { Backlog, RerunJobs } from '../backlog/types.js';
 import type { EventLog } from '../events/log.js';
@@ -45,7 +46,9 @@ type Via = EventPayload<'flaky.rerun_requested'>['via'][number];
 
 export class FlakyGate {
   /** A test-run re-run's checks by commit: each check's outcome once it finished (lost on a restart: the posted check is read then). */
-  private testRunReruns = new Map<string, Map<string, 'pass' | 'fail'> | 'running'>();
+  private testRunReruns = new Map<string, Map<string, 'pass' | 'fail'> | 'running' | { held: string[] }>();
+  /** Time each re-run spent held at the start gate: not counted against rerun_timeout_min. */
+  private heldTime = new HeldTime();
 
   constructor(private readonly d: FlakyGateDeps) {}
 
@@ -148,6 +151,12 @@ export class FlakyGate {
           await tr.postChecks(sha, r, names).catch((e: unknown) => this.error(`checks of the re-run on ${sha.slice(0, 8)}`, e));
         }
       } catch (e) {
+        // WHY: held at the start gate (src/testrun/gate.ts) is no verdict: the re-run starts again once the gate lets it.
+        if (e instanceof TestRunHeld) {
+          this.testRunReruns.set(sha, { held: checks });
+          this.heldTime.held(sha, this.now, true);
+          return;
+        }
         this.error(`test-run re-run of ${sha.slice(0, 8)}`, e);
       }
       for (const c of checks) if (!got.has(c)) got.set(c, 'fail');
@@ -158,6 +167,12 @@ export class FlakyGate {
   /** The re-run's verdict, once every check is in (or the wait timed out); null while it runs. */
   private async resolve(sha: string, number: number | null, req: EventPayload<'flaky.rerun_requested'>, at: number, outcomes: RequiredCheck[], cfg: FlakyConfig) {
     const mem = this.testRunReruns.get(sha);
+    if (mem && typeof mem === 'object' && 'held' in mem) {
+      const held = startRefusal() !== null;
+      this.heldTime.held(sha, this.now, held);
+      if (!held) this.startTestRunRerun(sha, mem.held);
+      return null;
+    }
     const now = (v: Via): 'pass' | 'fail' | null => {
       if (v.how === 'none') return 'fail';
       if (v.how === 'test_run' && mem instanceof Map) return mem.get(v.check) ?? 'fail';
@@ -167,7 +182,7 @@ export class FlakyGate {
       if (!c || c.outcome === 'pending' || c.outcome === 'missing' || (v.id !== null && c.id === v.id)) return null;
       return c.outcome === 'pass' ? 'pass' : 'fail';
     };
-    const timedOut = this.now - at >= cfg.rerun_timeout_min * 60_000;
+    const timedOut = this.now - at - this.heldTime.ms(sha, this.now) >= cfg.rerun_timeout_min * 60_000;
     const v = classifyRerun(
       req.via.map((x) => ({ check: x.check, now: now(x) })),
       timedOut,

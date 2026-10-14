@@ -45,7 +45,7 @@ export interface TestRunSetup {
   timer?: SandboxWatchDeps['timer'];
 }
 
-export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: EventLog; actor: string; root: string; stateDir: string; remote?: string; hold?: () => string | null }): Promise<PrTestRuns | undefined> {
+export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: EventLog; actor: string; root: string; stateDir: string; remote?: string }): Promise<PrTestRuns | undefined> {
   const config = cfg.tests.test_run;
   if (!config) return undefined;
   const host = s.host ?? sandboxHost(s.instance);
@@ -78,7 +78,6 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
     start: (req, o) => startTestRun(req, o),
     post: (sha, result) => postChecks(sha, result, names),
     ...(sandbox ? { sandbox } : {}),
-    ...(d.hold ? { hold: d.hold } : {}),
   });
   // INVARIANT: the first check is awaited here, so a coordinator whose sandbox passes starts exactly as before; one
   // whose check fails starts too, with every run refused until a later check passes.

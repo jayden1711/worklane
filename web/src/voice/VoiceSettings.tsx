@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { onDevice, speechCtor, type Availability, type RecognitionCtor } from './speech';
 import { synthOf, type Voice } from './talk';
 import { speechLang, useVoicePrefs, type VoicePrefs } from './prefs';
+import { NO_WAKE_MODEL, wakeEngine, wakePhrase } from './wake';
 import { Button, Card } from '../components/ui';
 
 /** What on-device recognition is here: no recognizer, no on-device API (null), or its availability. */
@@ -34,7 +35,11 @@ function voicesLine(c: VoiceCount | undefined, allowNetwork: boolean): string {
   return `${local}${c.network ? `, ${c.network} network${allowNetwork ? '' : ' (not used)'}` : ''}`;
 }
 
-export function VoiceSettingsView({ prefs, status, lang, onChange, onInstall, installing = false, voices }: { prefs: VoicePrefs; status: OnDeviceStatus | null; lang: string; onChange: (p: VoicePrefs) => void; onInstall: () => void; installing?: boolean; voices?: VoiceCount }) {
+/**
+ * `brand`: the product name the server serves, for the wake phrase. `wakeModel`: the installed wake-word model's
+ * label, or null (none ships: the switch says so, and nothing listens).
+ */
+export function VoiceSettingsView({ prefs, status, lang, onChange, onInstall, installing = false, voices, brand, wakeModel = null }: { prefs: VoicePrefs; status: OnDeviceStatus | null; lang: string; onChange: (p: VoicePrefs) => void; onInstall: () => void; installing?: boolean; voices?: VoiceCount; brand?: string | undefined; wakeModel?: string | null }) {
   return (
     <Card className="overflow-hidden" data-testid="settings-voice">
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Voice (this browser, owners only)</div>
@@ -53,6 +58,20 @@ export function VoiceSettingsView({ prefs, status, lang, onChange, onInstall, in
             <span className="block text-[12px] text-ink-3">Off: on-device only. On: the browser may send your audio to its speech service (in Chrome, Google's). Never to this dashboard's server.</span>
           </span>
         </label>
+        {brand && (
+          <label className={TOGGLE}>
+            <input type="checkbox" className="mt-0.5" checked={prefs.wakeWord} disabled={!prefs.dictation && !prefs.wakeWord} onChange={(e) => onChange({ ...prefs, wakeWord: e.target.checked })} data-testid="voice-wake-word" />
+            <span className="min-w-0">
+              <span className="block text-ink">Wake word: “{wakePhrase(brand)}”</span>
+              <span className="block text-[12px] text-ink-3">
+                While a dashboard tab is visible, listens on this computer for the phrase, then stops any read-aloud answer and starts dictating into the Ask box (never sends). A marker shows whenever the mic is open. Needs the mic button on. Off by default.
+              </span>
+              <span className="mt-1 block text-[12px] text-ink-2" data-testid="voice-wake-model">
+                {wakeModel ? `Model: ${wakeModel}` : `${NO_WAKE_MODEL[0]!.toUpperCase()}${NO_WAKE_MODEL.slice(1)}: it won't listen, and the mic isn't opened, until one is (docs/wake-word.md).`}
+              </span>
+            </span>
+          </label>
+        )}
         <div className="px-4 py-2.5 text-[12.5px] text-ink-2" data-testid="voice-on-device">
           On-device recognition ({lang}):{' '}
           {!status ? 'checking…' : !status.recognizer ? 'this browser has no speech recognition' : status.availability === null ? "this browser can't recognize on-device" : STATUS[status.availability]}
@@ -98,7 +117,7 @@ async function statusOf(ctor: RecognitionCtor | null, lang: string): Promise<OnD
 }
 
 /** The section, for an owner only; anyone else gets nothing. */
-export function VoiceSettings({ owner }: { owner: boolean }) {
+export function VoiceSettings({ owner, brand }: { owner: boolean; brand?: string | undefined }) {
   const [prefs, setPrefs] = useVoicePrefs();
   const [status, setStatus] = useState<OnDeviceStatus | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -130,5 +149,5 @@ export function VoiceSettings({ owner }: { owner: boolean }) {
     setInstalling(false);
     setStatus(await statusOf(ctor, lang));
   };
-  return <VoiceSettingsView prefs={prefs} status={status} lang={lang} onChange={setPrefs} onInstall={() => void install()} installing={installing} voices={voices} />;
+  return <VoiceSettingsView prefs={prefs} status={status} lang={lang} onChange={setPrefs} onInstall={() => void install()} installing={installing} voices={voices} brand={brand} wakeModel={wakeEngine()?.label ?? null} />;
 }
