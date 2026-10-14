@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -78,4 +78,28 @@ test('end to end: opens a page in a real headless Chrome with PR history, and ke
   // The PR history matches this engine's event schemas: every event was recorded.
   assert.doesNotMatch(r.stderr, /not recorded/, r.stderr);
   void readFileSync;
+});
+
+// On a loaded machine Chrome can take longer than one launch wait to open its DevTools port (main went red with
+// "timed out after 20000 ms waiting for Chrome to open its DevTools port" when this script had a fixed wait of its
+// own). It starts Chrome as the engine does (src/browser/cdp.ts launchChrome): a stuck start is stopped and Chrome
+// is started once more, and that is said.
+test('a Chrome that never opens its DevTools port is started once more, as the engine does, and the page still opens', { skip: webUiSkip(chrome) || (process.platform === 'win32' && 'the stand-in browser is a shell script') }, async (ctx) => {
+  await oneChromeAtATime(ctx);
+  const work = mkdtempSync(join(tmpdir(), 'dash-stuck-chrome-'));
+  try {
+    // A stand-in that hangs the first time (as Chrome can on a loaded machine), then is the real Chrome.
+    const stub = join(work, 'chrome');
+    writeFileSync(stub, `#!/bin/sh\nif [ ! -f "${work}/started" ]; then echo $$ > "${work}/started"; exec sleep 600; fi\nexec "${chrome}" "$@"\n`);
+    chmodSync(stub, 0o755);
+    const r = spawnSync(process.execPath, [join(dir, 'control-dashboard.mjs'), 'open', 'overview', '--chrome', stub], { encoding: 'utf8', timeout: 180_000 });
+    const line = r.stdout.split('\n')[0] ?? '';
+    assert.ok(line.startsWith('{'), `control-dashboard printed no result (exit ${r.status}, signal ${r.signal}${r.error ? `, ${r.error.message}` : ''}):\n${r.stdout}\n${r.stderr}`);
+    assert.equal((JSON.parse(line) as { page?: string }).page, 'overview', `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /control-dashboard: Chrome was started twice: the first never opened its DevTools port \(timed out after \d+ ms/);
+    const stuck = Number(readFileSync(join(work, 'started'), 'utf8'));
+    assert.throws(() => process.kill(stuck, 0), { code: 'ESRCH' }, 'the stuck first start was stopped');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
