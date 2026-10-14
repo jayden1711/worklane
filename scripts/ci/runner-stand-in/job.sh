@@ -37,13 +37,14 @@ done
 if docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then ok "Docker is rootless"; else bad "Docker isn't rootless or isn't up"; fi
 if [ -n "$(docker ps -aq)" ]; then bad "an earlier job's container is still here: $(docker ps -a --format '{{.Names}}')"; else ok "no containers from an earlier job"; fi
 img=alpine:3.20
-# A connect, not a fetch: GitHub's unauthenticated API is rate-limited per address, and the runner's is shared.
-if out="$(docker run --rm "$img" nc -z -w 10 github.com 443 2>&1)"; then ok "a container reaches the internet (github.com:443)"; else bad "a container can't reach the internet: $out"; fi
+# An HTTPS fetch (DNS, TLS, a response) of a page with no per-address quota: GitHub's unauthenticated API has one, and
+# the runner's address is shared.
+if out="$(docker run --rm "$img" wget -q -T 10 -O /dev/null https://github.com/ 2>&1)"; then ok "a container reaches the internet (https://github.com/)"; else bad "a container can't reach the internet: $out"; fi
 for u in "http://$HOST_IP:$LISTEN_PORT/" "http://10.0.2.2:$LISTEN_PORT/"; do
   if out="$(docker run --rm "$img" wget -q -T 5 -O- "$u" 2>&1)"; then bad "a container reached $u"; else ok "a container can't reach $u (${out##*$'\n'})"; fi
 done
 b="$(mktemp -d)"
-printf 'FROM %s\nRUN nc -z -w 10 github.com 443\n' "$img" > "$b/Dockerfile"
+printf 'FROM %s\nRUN wget -q -T 10 -O /dev/null https://github.com/\n' "$img" > "$b/Dockerfile"
 if out="$(docker build -q -t ci-probe "$b" 2>&1)"; then ok "docker build, with the network"; else bad "docker build: $out"; fi
 docker run -d --name "leftover-$j" "$img" sleep 600 >/dev/null && ok "left a container running, for the reset"
 
