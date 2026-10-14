@@ -529,7 +529,7 @@ test('the sandbox helper clones exactly as the engine does', () => {
   assert.match(helper, /install -d -o "\$user" -g "\$user" -m 0700 "\$store"/);
   const exec = helper.slice(helper.indexOf('exec_run() {'), helper.indexOf('\n}\n', helper.indexOf('exec_run() {')));
   assert.match(exec, /-p ProtectSystem=strict/);
-  assert.deepEqual([...exec.matchAll(/ReadWritePaths=("?)([^"\s]+)/g)].map((m) => m[2]), ['$d', '-$root/cache']);
+  assert.deepEqual([...exec.matchAll(/ReadWritePaths=("?)([^"\s]+)/g)].map((m) => m[2]), ['$d', '$t', '-$root/cache'], 'its directory and its own TMPDIR');
   assert.ok(exec.includes('"ReadWritePaths=-$root/cache -$root/shared"'));
   assert.doesNotMatch(exec, /store/);
   // The check's sandbox probe: systemd-run expands ${...} in its command itself (as ExecStart= does), so the probe has
@@ -787,7 +787,7 @@ async function helperWithStubs() {
     writeFileSync(join(bin, n), `#!/bin/bash\n${body}\n`);
     chmodSync(join(bin, n), 0o755);
   };
-  for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id']) stub(t, 'exit 0');
+  for (const t of ['systemd-run', 'systemctl', 'git', 'getent', 'install', 'stat', 'id', 'sha256sum', 'cut', 'mkdir']) stub(t, 'exit 0');
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   for (const t of ['od', 'tr', 'seq', 'sed', 'head', 'sleep', 'env', 'cat']) {
     const real = ['/usr/bin', '/bin'].map((d) => join(d, t)).find((p) => existsSync(p));
