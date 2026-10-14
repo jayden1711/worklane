@@ -305,14 +305,27 @@ export function AddProjectView({ data, onChanged, picker: initialPicker }: { dat
           void submit();
         }}
       >
-        <input value={name} onChange={(e) => (setName(e.target.value), setErr(null))} disabled={!data.allowed || busy} aria-label="Project name" placeholder="name (e.g. shop)" spellCheck={false} autoComplete="off" className={cx(field, 'w-40')} data-testid="add-project-name" />
-        <input value={repo} onChange={(e) => (setRepo(e.target.value), setErr(null))} disabled={!data.allowed || busy} aria-label="GitHub repo" placeholder="owner/repo (picked below, or typed)" spellCheck={false} autoComplete="off" className={cx(field, 'min-w-56 flex-1')} data-testid="add-project-repo" />
-        <Button type="submit" size="sm" disabled={!data.allowed || busy} data-testid="add-project-submit">
-          {busy ? 'Adding…' : 'Add project'}
-        </Button>
+        <input value={name} onChange={(e) => (setName(e.target.value), setErr(null))} disabled={(!data.allowed && !data.manual) || busy} aria-label="Project name" placeholder="name (e.g. shop)" spellCheck={false} autoComplete="off" className={cx(field, 'w-40')} data-testid="add-project-name" />
+        <input value={repo} onChange={(e) => (setRepo(e.target.value), setErr(null))} disabled={(!data.allowed && !data.manual) || busy} aria-label="GitHub repo" placeholder="owner/repo (picked below, or typed)" spellCheck={false} autoComplete="off" className={cx(field, 'min-w-56 flex-1')} data-testid="add-project-repo" />
+        {!data.manual && (
+          <Button type="submit" size="sm" disabled={!data.allowed || busy} data-testid="add-project-submit">
+            {busy ? 'Adding…' : 'Add project'}
+          </Button>
+        )}
       </form>
+      {data.manual && (
+        <div className="space-y-1.5 rounded-lg bg-orange-tint p-3" data-testid="add-project-manual">
+          <p className="text-[12.5px] text-ink">
+            Not from this page here: {data.manual.why}. With the name and repo above filled in, run:
+          </p>
+          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline" data-testid="add-project-manual-command">
+            {`sudo bash ${data.manual.script} ${name.trim() || '<name>'} ${repo.trim() || '<owner/repo>'}`}
+          </code>
+          <p className="text-[12px] text-ink-3">It asks for the agents' Claude token itself, and prints each step; this page shows the project once its services run.</p>
+        </div>
+      )}
       {data.allowed && <RepoPicker picker={picker} repo={repo} disabled={busy} onPick={(r) => (setRepo(r), setErr(null))} onAccount={(o) => (setPicker(picker && { ...picker, owner: o, repos: [], error: null }), listFor(o))} />}
-      {!data.allowed && data.why && (
+      {!data.allowed && !data.manual && data.why && (
         <p className="text-[12.5px] text-ink-2" data-testid="add-project-disabled">
           Not available: {data.why}.
           {/* The machine owners, unless the reason already names them. */}

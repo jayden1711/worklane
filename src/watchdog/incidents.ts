@@ -50,6 +50,8 @@ export const KINDS = {
   // signers file changed and no updates.sh command made the change. Open until an admin acknowledges it at a root shell.
   update_signers_changed: { title: 'The release signers file changed outside updates.sh', severity: 'red' },
   update_signer_added: { title: 'A release signer was added for engine updates', severity: 'amber' },
+  // A notice too: someone staged a signer from a dashboard (trusted for nothing until confirmed at a root shell).
+  update_signer_staged: { title: 'A release signer was staged for engine updates', severity: 'amber' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
   // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.

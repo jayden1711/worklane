@@ -40,7 +40,7 @@ import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount, flockHolders, installService, serviceChange, type ServiceSpec } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
-import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN } from './machine.js';
+import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
@@ -62,7 +62,7 @@ import { harnessEvalView } from './harness-evals/score.js';
 import { learningsView, promoteRefusal } from './learnings.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
-import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
+import { ADD_PROJECT_EVENTS, addProjectManual, addProjectView } from './console/add-project.js';
 import { listInstallableRepos } from './setup/repo-picker.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { SETUP_STEPS, type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
@@ -177,7 +177,7 @@ export interface DashboardOptions {
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
-  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string };
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
   acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
@@ -1685,7 +1685,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === `/api/${DEVICE_VIEWS.addProject}` && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
           const requester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
-          return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}));
+          return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, { ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) }));
         }
         // Add project's repo picker (src/setup/repo-picker.ts): an account's repos the agents' App can be installed on,
         // the signed-in person's own account by default. Read-only: it starts nothing, and the start checks it all again.
@@ -1763,6 +1763,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, status, { error });
           };
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may add a project; @${who.login} is a ${who.role}`);
+          // This machine's sudo rule leaves add-project out: no request (it could only fail at sudo); the root command instead.
+          const manual = addProjectManual(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {});
+          if (manual) return refused(409, `${manual.why}: ${addProjectCommand(typeof body.name === 'string' ? body.name.trim() : '', typeof body.repo === 'string' ? body.repo.trim() : '')}`);
           const log = new EventLog(opts.eventsDb);
           let r: MachineRequest;
           try {

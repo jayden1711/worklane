@@ -22,7 +22,7 @@ import { SETUP_STEPS } from '../src/setup-steps.js';
 import { updateLog } from '../src/updates.js';
 import { ALLOWED_SIGNERS, confirmCommand, listedSigners, PENDING_MAX, PENDING_SIGNERS, PENDING_TTL_MS, pendingSigners, signerInput, updaterPlan, updaterSetup } from '../src/updater-setup.js';
 import { openIncidents, readIncidents } from '../src/watchdog/incidents.js';
-import { SIGNER_NOTICE_MS, signerFindings } from '../src/watchdog/probes.js';
+import { SIGNER_NOTICE_MS, signerFindings, stagedSignerFindings } from '../src/watchdog/probes.js';
 import { Watchdog, type WatchdogDeps } from '../src/watchdog/watchdog.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
 
@@ -133,7 +133,7 @@ test('the setup as the page shows it: installed or not, the channel, each signer
   ]);
   assert.deepEqual(listedSigners(join(f.dir, 'nope')), null);
   // The staged one that still counts: with when it expires and the exact root command that confirms it. The expired and the malformed are not shown.
-  assert.deepEqual(v.pending, [{ principal: 'second@example.com', key: b, fingerprint: signerFingerprint(b), by: 'wl-site', at, expiresAt: new Date(Date.parse(at) + PENDING_TTL_MS).toISOString(), confirm: `sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer ${signerFingerprint(b)}` }]);
+  assert.deepEqual(v.pending, [{ principal: 'second@example.com', key: b, fingerprint: signerFingerprint(b), by: 'wl-site', instance: null, at, expiresAt: new Date(Date.parse(at) + PENDING_TTL_MS).toISOString(), confirm: `sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer ${signerFingerprint(b)}` }]);
   assert.equal(v.pending[0]!.confirm, confirmCommand(signerFingerprint(b)));
   assert.deepEqual(pendingSigners(f.pendingPath, Date.parse(at) + PENDING_TTL_MS), [], 'gone 24 hours after it was staged');
   assert.equal(pendingSigners(f.pendingPath, Date.parse(at) + PENDING_TTL_MS - 1).length, 1);
@@ -143,6 +143,7 @@ test('the setup as the page shows it: installed or not, the channel, each signer
     confirm: 'sudo bash scripts/setup/updates.sh --confirm-signer <SHA256 fingerprint of a staged signer>',
     release: 'sudo bash scripts/setup/updates.sh --channel release',
     main: 'sudo bash scripts/setup/updates.sh --channel main',
+    releaseHold: 'sudo bash scripts/setup/updates.sh --release-hold',
   });
   // An existing install without a channel follows main; one whose config names another signers file says so.
   const old = updaterSetup(machineFiles({ config: { enabled: true, allowed_signers: '/root/signers' } }));
@@ -354,12 +355,18 @@ function rootIn(root = mkdtempSync(join(tmpdir(), 'updates-root-'))) {
   writeFileSync(updaterCopy, paths(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs'), 'utf8')));
   /** As a coordinator through sudo: the machine helper. */
   const asCoordinator = (...args: string[]) => spawnSync(process.execPath, [helperCopy, ...args], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'wl-alpha' } });
-  /** As an admin at a root shell: what updates.sh runs. */
-  const asAdmin = (...args: string[]) => spawnSync(process.execPath, [rootCopy, ...args], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'admin' } });
+  /** As an admin at a root shell, typing `typed` when asked: what updates.sh runs. */
+  const asAdminTyping = (typed: string, ...args: string[]) => spawnSync(process.execPath, [rootCopy, ...args], { encoding: 'utf8', input: `${typed}\n`, env: { ...process.env, SUDO_USER: 'admin' } });
+  /** The same, typing the staged signer's own principal when a confirm asks for it (the admin read it right). */
+  const asAdmin = (...args: string[]) => {
+    let typed = '';
+    if (args[0] === 'confirm-signer' && existsSync(pending)) typed = ((JSON.parse(readFileSync(pending, 'utf8')) as { pending: { principal: string; fingerprint: string }[] }).pending.find((e) => e.fingerprint === args[1]) ?? { principal: '' }).principal;
+    return asAdminTyping(typed, ...args);
+  };
   const signers = join(etc, 'allowed_signers');
   const read = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : null);
   const staged = () => (JSON.parse(readFileSync(pending, 'utf8')) as { pending: { principal: string; key: string; at: string }[] }).pending;
-  return { root, etc, log, pending, signers, updaterCopy, signersState: join(root, 'var', 'signers-state.json'), asCoordinator, asAdmin, read, staged };
+  return { root, etc, log, pending, signers, updaterCopy, signersState: join(root, 'var', 'signers-state.json'), asCoordinator, asAdmin, asAdminTyping, read, staged };
 }
 
 test('staging from the dashboard can\'t change the signers file; only the admin\'s confirming command, with the matching fingerprint, adds the staged key', () => {
@@ -388,7 +395,7 @@ test('staging from the dashboard can\'t change the signers file; only the admin\
   assert.equal(yes.status, 0, yes.stderr);
   const shown = yes.stdout.indexOf(`  principal:   owner@example.com\n  public key:  ssh-ed25519 ${a}\n  fingerprint: ${signerFingerprint(a)}\n`);
   assert.ok(shown > 0 && shown < yes.stdout.indexOf('allowed_signers: added'), `the principal and key are printed before it is applied:\n${yes.stdout}`);
-  assert.match(yes.stdout, /^the staged signer, from wl-alpha at /);
+  assert.match(yes.stdout, /^the staged signer, staged by wl-alpha \(instance alpha\) at /);
   assert.equal(m.read(m.signers), `${mine}\nowner@example.com ssh-ed25519 ${a}\n`, 'appended: every earlier byte in place');
   assert.deepEqual(m.staged().map((e) => e.principal), ['second@example.com']);
   // Once applied it is no longer staged: the same command again adds nothing.
@@ -462,12 +469,16 @@ test('the root command only ever adds a line: --signer and a confirmed signer ke
   }
 });
 
-test('whenever a signer is added, by --signer or by a confirmed staged one, the watchdog raises an alert naming the principal and fingerprint, and posts it to the ops channel once', async () => {
+test('whenever a signer is staged, and whenever one is added (by --signer or a confirmed staged one), the watchdog raises an alert naming the principal and fingerprint, and posts it to the ops channel once', async () => {
   const m = rootIn();
   const [a, b] = [ed25519(), ed25519()];
-  // Staging alone alerts nobody: nothing was added.
+  // Staging adds nothing, so it is no "added" alert; it is its own alert, naming who staged it and from which instance.
   assert.equal(m.asCoordinator('stage-update-signer', 'staged@example.com', 'ssh-ed25519', b).status, 0);
   assert.deepEqual(signerFindings(machineChanges(m.log), Date.now()), []);
+  const stagedAlerts = stagedSignerFindings(machineChanges(m.log), Date.now());
+  assert.deepEqual(stagedAlerts.map((f) => [f.kind, f.key, f.instance]), [['update_signer_staged', `staged@example.com ${signerFingerprint(b)}`, 'alpha']]);
+  assert.match(stagedAlerts[0]!.detail, new RegExp(`a release signer was staged: staged@example\\.com, key fingerprint ${signerFingerprint(b).replace(/[+/]/g, '\\$&')}, by wl-alpha \\(instance alpha\\) at .* trusted for nothing until an admin confirms it at a root shell`));
+  assert.match(stagedAlerts[0]!.fix, /--confirm-signer SHA256:.*it asks you to type the principal.*discard it on the Machine page/);
   assert.equal(m.asAdmin('add-signer', 'direct@example.com', 'ssh-ed25519', a).status, 0);
   assert.equal(m.asAdmin('confirm-signer', signerFingerprint(b)).status, 0);
   const findings = signerFindings(machineChanges(m.log), Date.now());
@@ -496,18 +507,20 @@ test('whenever a signer is added, by --signer or by a confirmed staged one, the 
   const dog = new Watchdog(deps);
   await dog.pass();
   const open = openIncidents(readIncidents(dir));
-  assert.deepEqual(open.map((i) => [i.kind, i.title, i.severity, i.key]).sort(), [
-    ['update_signer_added', 'A release signer was added for engine updates', 'amber', `direct@example.com ${signerFingerprint(a)}`],
-    ['update_signer_added', 'A release signer was added for engine updates', 'amber', `staged@example.com ${signerFingerprint(b)}`],
+  assert.deepEqual(open.map((i) => [i.kind, i.title, i.severity, i.key, i.instance]).sort(), [
+    ['update_signer_added', 'A release signer was added for engine updates', 'amber', `direct@example.com ${signerFingerprint(a)}`, null],
+    ['update_signer_added', 'A release signer was added for engine updates', 'amber', `staged@example.com ${signerFingerprint(b)}`, null],
+    ['update_signer_staged', 'A release signer was staged for engine updates', 'amber', `staged@example.com ${signerFingerprint(b)}`, 'alpha'],
   ]);
   // The principal and the fingerprint reach the stored incident and the post whole: they are public, and nothing redacts them.
   for (const [p, k] of [['direct@example.com', a], ['staged@example.com', b]] as const) {
     assert.ok(open.some((i) => i.detail.includes(p) && i.detail.includes(signerFingerprint(k))), `${p} in an incident`);
-    assert.equal(posts.filter((c) => c.includes(p) && c.includes(signerFingerprint(k))).length, 1, `${p} posted once:\n${posts.join('\n---\n')}`);
+    assert.equal(posts.filter((c) => c.includes('was added') && c.includes(p) && c.includes(signerFingerprint(k))).length, 1, `${p} posted once:\n${posts.join('\n---\n')}`);
   }
+  assert.equal(posts.filter((c) => c.includes('was staged') && c.includes('staged@example.com') && c.includes(signerFingerprint(b)) && c.includes('wl-alpha')).length, 1, 'the staging posted once, with who staged it');
   now = new Date(now.getTime() + 31 * 60_000);
   await dog.pass();
-  assert.equal(posts.length, 2, 'not posted again while it stays open');
+  assert.equal(posts.length, 3, 'not posted again while they stay open');
   // A day on the notice closes by itself.
   now = new Date(now.getTime() + SIGNER_NOTICE_MS);
   await dog.pass();
@@ -896,4 +909,154 @@ test('the watch adds a refusal in front of the signature check and takes nothing
   assert.match(sh, /^  node "\$root_steps" acknowledge-signers$/m);
   // Only root's updates.sh acknowledges: the helper and its sudoers rule have no such command.
   assert.doesNotMatch(readFileSync(helperSrc, 'utf8') + readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8'), /acknowledge/);
+});
+
+test('the confirm shows who staged the signer and from which instance, and adds it only when the admin types its principal', () => {
+  const m = rootIn();
+  const [a, b] = [ed25519(), ed25519()];
+  writeFileSync(m.signers, `first@example.com ssh-ed25519 ${a}\n`);
+  assert.equal(m.asCoordinator('stage-update-signer', 'owner@example.com', 'ssh-ed25519', b).status, 0);
+  const entry = (JSON.parse(readFileSync(m.pending, 'utf8')) as { pending: Record<string, unknown>[] }).pending[0]!;
+  assert.deepEqual([entry.by, entry.instance], ['wl-alpha', 'alpha'], 'the pending entry records the coordinator user and its instance');
+  const before = m.read(m.signers);
+  // Typed wrong, typed nothing, typed with something after it, typed as the fingerprint: nothing is added, and it stays staged.
+  for (const typed of ['other@example.com', '', 'owner@example.com x', signerFingerprint(b), 'OWNER@example.com']) {
+    const r = m.asAdminTyping(typed, 'confirm-signer', signerFingerprint(b));
+    assert.equal(r.status, 1, `typed ${JSON.stringify(typed)}: ${r.stdout}`);
+    assert.match(r.stdout, /^the staged signer, staged by wl-alpha \(instance alpha\) at .*\n  principal:   owner@example\.com\n/);
+    assert.match(r.stderr, /Type the principal to add it[\s\S]*isn't the staged signer's \(owner@example\.com\): nothing was added/);
+    assert.equal(m.read(m.signers), before);
+    assert.equal(m.staged().length, 1);
+  }
+  assert.ok(!machineChanges(m.log).some((c) => c.what === 'updates.allowed_signers'));
+  // Typed right (surrounding spaces don't matter): added, cleared.
+  const ok = m.asAdminTyping('  owner@example.com ', 'confirm-signer', signerFingerprint(b));
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(m.read(m.signers), `${before}owner@example.com ssh-ed25519 ${b}\n`);
+  assert.deepEqual(m.staged(), []);
+  // A signer staged by root itself (no coordinator): it says so, and still asks.
+  const rootStaged = rootIn();
+  const run = spawnSync(process.execPath, [join(rootStaged.root, 'scripts', 'machine', 'worklane-machine.cjs'), 'stage-update-signer', 'root@example.com', 'ssh-ed25519', a], { encoding: 'utf8', env: { ...process.env, SUDO_USER: '' } });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(rootStaged.asAdminTyping('nope', 'confirm-signer', signerFingerprint(a)).stdout, /^the staged signer, staged by root at /);
+});
+
+// ---- holds: nothing a coordinator can run releases one; only the root command does ----
+
+/** The updater as an engine has it, its fixed paths in a temp root: run() over the real hold file, and updates-root.cjs beside it. */
+function heldMachine() {
+  const m = rootIn();
+  const varDir = join(m.root, 'var');
+  mkdirSync(varDir, { recursive: true });
+  const held = join(varDir, 'update-held.json');
+  const cfgFile = join(m.etc, 'updates.json');
+  const rewrite = (src: string) => src.replace("const HELD = '/var/lib/worklane/update-held.json';", `const HELD = ${JSON.stringify(held)};`).replace("const CONFIG = '/etc/worklane/updates.json';", `const CONFIG = ${JSON.stringify(cfgFile)};`).replace("const ETC = '/etc/worklane';", `const ETC = ${JSON.stringify(m.etc)};`).replace("const LOG = '/var/lib/worklane/machine-changes.jsonl';", `const LOG = ${JSON.stringify(m.log)};`).replace("const PENDING = '/var/lib/worklane/pending-signers.json';", `const PENDING = ${JSON.stringify(m.pending)};`);
+  const updaterCopy = join(m.root, 'scripts', 'machine', 'worklane-update.cjs');
+  writeFileSync(updaterCopy, rewrite(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs'), 'utf8')));
+  const rootCopy = join(m.root, 'scripts', 'setup', 'updates-root.cjs');
+  writeFileSync(rootCopy, rewrite(readFileSync(rootSrc, 'utf8')));
+  const helperCopy = join(m.root, 'scripts', 'machine', 'worklane-machine.cjs');
+  writeFileSync(helperCopy, rewrite(readFileSync(helperSrc, 'utf8')));
+  const NEW = 'b'.repeat(40);
+  writeFileSync(cfgFile, `${JSON.stringify({ enabled: true, channel: 'main', repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'] })}\n`);
+  writeFileSync(held, `${JSON.stringify({ sha: NEW, at: new Date(Date.now() - 3_600_000).toISOString(), failed: ['worklane-x.service: failed'] })}\n`);
+  const u = require_(updaterCopy) as { run(deps: object): Promise<string> };
+  const logs: Record<string, unknown>[] = [];
+  /** One run on the real hold file, as realDeps reads it; GitHub and the build stood in, every check green. */
+  const once = async () => {
+    let current = 'a'.repeat(40);
+    let clock = 0;
+    const r = await u.run({
+      config: () => JSON.parse(readFileSync(cfgFile, 'utf8')),
+      held: () => (existsSync(held) ? JSON.parse(readFileSync(held, 'utf8')) : null),
+      // What realDeps reported before this change: updates.json's mtime. A write to updates.json must not matter.
+      configChangedAt: () => statSync(cfgFile).mtimeMs,
+      installed: () => current,
+      installedVersion: () => '1.0.0',
+      // Both channels see the held commit as their newest: main's tip, and the release tag v1.0.1's commit.
+      verifyRelease: () => ({ ok: true, base: 'c'.repeat(40) }),
+      exec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\trefs/tags/v1.0.1\n${NEW}\trefs/tags/v1.0.1^{}\n` : file === 'git' ? `${NEW}\trefs/heads/main\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n' : ''),
+      fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', behind_by: 0, ahead_by: 1, total_commits: 1, commits: [{ sha: NEW, parents: [{ sha: current }], commit: { committer: { date: new Date(0).toISOString() } } }] } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
+      slots: () => [],
+      alive: () => false,
+      installTree: () => {},
+      syncHelpers: () => [],
+      switchTo: (sha: string) => (current = sha),
+      now: () => clock,
+      sleep: async (ms: number) => void (clock += ms),
+      log: (e: Record<string, unknown>) => logs.push(e),
+      hold: () => {},
+      note: (event: string, sha: string | null, reason: string) => (logs.push({ event, to: sha, reason }), event),
+    });
+    return r;
+  };
+  const asCoordinator = (...args: string[]) => spawnSync(process.execPath, [helperCopy, ...args], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'wl-alpha' } });
+  const asAdmin = (...args: string[]) => spawnSync(process.execPath, [rootCopy, ...args], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'admin' } });
+  return { m, held, cfgFile, once, logs, asCoordinator, asAdmin, helperCopy };
+}
+
+test('a rolled-back commit\'s hold survives everything a coordinator can run (the channel, the on/off switch) and is released only by updates.sh --release-hold', async () => {
+  const h = heldMachine();
+  assert.equal(await h.once(), 'held');
+  assert.match(String(h.logs.at(-1)!.reason), /held until a newer commit, or until an admin releases it at a root shell: sudo bash \/opt\/worklane\/current\/scripts\/setup\/updates\.sh --release-hold/);
+  const holdBytes = readFileSync(h.held, 'utf8');
+  // Every command the helper takes that touches the updater, each after the hold: updates.json changes, the hold doesn't.
+  for (const args of [['set-update-channel', 'release'], ['set-updates', 'off'], ['set-updates', 'on'], ['set-update-channel', 'release']]) {
+    await new Promise((r) => setTimeout(r, 15));
+    const r = h.asCoordinator(...args);
+    assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
+    assert.equal(readFileSync(h.held, 'utf8'), holdBytes, `${args.join(' ')} left the hold file as it was`);
+    assert.ok(statSync(h.cfgFile).mtimeMs > Date.parse(JSON.parse(holdBytes).at), 'updates.json is newer than the hold');
+    assert.equal(await h.once(), args.join(' ') === 'set-updates off' ? 'disabled' : 'held', `still held after ${args.join(' ')}`);
+  }
+  assert.ok(JSON.parse(readFileSync(h.cfgFile, 'utf8')).channel === 'release' && JSON.parse(readFileSync(h.cfgFile, 'utf8')).enabled === true);
+  // The helper names no hold file: it has no way to one.
+  assert.doesNotMatch(readFileSync(helperSrc, 'utf8'), /update-held|held\.json|signers-state|-hold/i);
+  // At a root shell: shown, moved aside (kept), logged; the next run tries the commit again.
+  const r = h.asAdmin('release-hold');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^held: bbbbbbbbbbbb, rolled back at .* \(worklane-x\.service: failed\)\nreleased: the updater may try bbbbbbbbbbbb again on its next run\n$/);
+  assert.ok(!existsSync(h.held) && existsSync(h.held.replace(/\.json$/, '.released.json')));
+  assert.deepEqual(machineChanges(h.m.log).filter((c) => c.what === 'updates.hold_released').map((c) => c.by), ['admin']);
+  assert.equal(await h.once(), 'installed');
+  assert.match(h.asAdmin('release-hold').stdout, /^nothing is held/);
+});
+
+test('the invariant for every hold the updater keeps under /var/lib: no helper command writes there but its own log and pending list, and the updater never reads updates.json to release one', () => {
+  const helper = readFileSync(helperSrc, 'utf8');
+  // The helper's only paths under /var/lib: its change log and the staged signers. Not a hold file, of any kind.
+  assert.deepEqual([...helper.matchAll(/'\/var\/lib\/[^']*'/g)].map((x) => x[0]).sort(), ["'/var/lib/worklane/machine-changes.jsonl'", "'/var/lib/worklane/pending-signers.json'"]);
+  const updater = readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs'), 'utf8');
+  // updates.json's mtime (what set-updates and set-update-channel change) plays no part in any hold.
+  assert.doesNotMatch(updater, /configChangedAt|mtimeMs/);
+  // The one release, by root, named everywhere a hold is shown.
+  for (const f of ['src/updates.ts', 'web/src/components/UpdatesPanel.tsx', 'web/src/components/HealthPanel.tsx', 'web/src/components/UpdaterSetup.tsx', 'docs/separate-users.md', 'docs/canary.md']) assert.match(readFileSync(join(repoRoot, f), 'utf8'), /--release-hold|releaseHold/, f);
+  for (const f of ['src/updates.ts', 'src/digest.ts', 'web/src/components/UpdatesPanel.tsx', 'web/src/components/HealthPanel.tsx', 'docs/separate-users.md', 'docs/canary.md', 'scripts/machine/worklane-update.cjs']) assert.doesNotMatch(readFileSync(join(repoRoot, f), 'utf8'), /until (updates are turned|you turn updates) off and on|turning updates off and on again retries/, f);
+});
+
+test('#384\'s signers hold survives set-update-channel and set-updates off/on run through the helper; only updates.sh --acknowledge-signers lifts it', async () => {
+  const m = rootIn();
+  const w = require_(m.updaterCopy) as Watch;
+  const [a, b] = [ed25519(), ed25519()];
+  writeFileSync(join(m.etc, 'updates.json'), `${JSON.stringify({ enabled: true, channel: 'release', allowed_signers: m.signers, repo_url: 'https://github.com/example-org/engine.git', required_checks: ['test'] })}\n`);
+  writeFileSync(m.signers, `owner@example.com ssh-ed25519 ${a}\n`);
+  assert.equal(w.checkSigners(m.signers, m.signersState), null, 'recorded');
+  appendFileSync(m.signers, `intruder@example.com ssh-ed25519 ${b}\n`);
+  assert.ok(w.checkSigners(m.signers, m.signersState), 'the hand edit is reported');
+  const hold = readFileSync(m.signersState, 'utf8');
+  assert.ok(w.signersHold(m.signersState), 'and held');
+  for (const args of [['set-update-channel', 'release'], ['set-updates', 'off'], ['set-updates', 'on'], ['set-update-channel', 'release']]) {
+    const r = m.asCoordinator(...args);
+    assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
+    assert.equal(readFileSync(m.signersState, 'utf8'), hold, `${args.join(' ')} left signers-state.json as it was`);
+    const x = watched(m, w, { enabled: args[1] !== 'off', channel: 'release' });
+    assert.equal(await w.run(x.deps), args[1] === 'off' ? 'disabled' : 'held', `still held after ${args.join(' ')}`);
+  }
+  // updates.sh --release-hold is for a rolled-back commit, not this: it leaves the signers hold alone.
+  assert.equal(m.asAdmin('release-hold').status, 0);
+  assert.equal(readFileSync(m.signersState, 'utf8'), hold);
+  // Only the acknowledgement, at a root shell.
+  assert.equal(m.asAdmin('acknowledge-signers').status, 0);
+  assert.equal(w.signersHold(m.signersState), null);
+  assert.equal(await w.run(watched(m, w, { enabled: true, channel: 'release' }).deps), 'installed');
 });

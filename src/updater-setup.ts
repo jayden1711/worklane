@@ -65,8 +65,9 @@ export interface PendingSigner {
   principal: string;
   key: string;
   fingerprint: string;
-  /** The coordinator user that staged it (the helper's SUDO_USER). */
+  /** The coordinator user that staged it (the helper's SUDO_USER), and so the instance whose dashboard asked. */
   by: string;
+  instance: string | null;
   at: string;
   expiresAt: string;
   /** What confirms it: the only way it becomes a signer. */
@@ -84,12 +85,12 @@ export function pendingSigners(path = PENDING_SIGNERS, now = Date.now()): Pendin
   }
   const out: PendingSigner[] = [];
   for (const x of list) {
-    const e = x as { principal?: unknown; key?: unknown; by?: unknown; at?: unknown } | null;
+    const e = x as { principal?: unknown; key?: unknown; by?: unknown; instance?: unknown; at?: unknown } | null;
     if (!e || !signerPrincipalOk(e.principal) || !signerKeyOk(e.key) || typeof e.at !== 'string') continue;
     const age = now - Date.parse(e.at);
     if (!(age >= 0 && age < PENDING_TTL_MS)) continue;
     const fingerprint = signerFingerprint(e.key);
-    out.push({ principal: e.principal, key: e.key, fingerprint, by: typeof e.by === 'string' ? e.by.slice(0, 64) : 'unknown', at: e.at, expiresAt: new Date(Date.parse(e.at) + PENDING_TTL_MS).toISOString(), confirm: confirmCommand(fingerprint) });
+    out.push({ principal: e.principal, key: e.key, fingerprint, by: typeof e.by === 'string' ? e.by.slice(0, 64) : 'unknown', instance: typeof e.instance === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(e.instance) ? e.instance : null, at: e.at, expiresAt: new Date(Date.parse(e.at) + PENDING_TTL_MS).toISOString(), confirm: confirmCommand(fingerprint) });
   }
   return out.slice(0, PENDING_MAX);
 }
@@ -140,7 +141,7 @@ export interface UpdaterSetup {
   pending: PendingSigner[];
   pendingMax: number;
   /** The same steps without the page: as root, from the engine's checkout. */
-  script: { install: string; signer: string; confirm: string; release: string; main: string };
+  script: { install: string; signer: string; confirm: string; release: string; main: string; releaseHold: string };
 }
 
 /** The updater's setup as the page shows it. */
@@ -171,6 +172,7 @@ export function updaterSetup(o: { updatesConfigPath?: string; signersPath?: stri
       confirm: `sudo bash ${UPDATES_SCRIPT} --confirm-signer <SHA256 fingerprint of a staged signer>`,
       release: `sudo bash ${UPDATES_SCRIPT} --channel release`,
       main: `sudo bash ${UPDATES_SCRIPT} --channel main`,
+      releaseHold: `sudo bash ${UPDATES_SCRIPT} --release-hold`,
     },
   };
 }

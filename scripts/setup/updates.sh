@@ -4,18 +4,22 @@
 # or `sudo /usr/local/libexec/worklane-machine set-updates on` as a coordinator user once
 # machine-helper.sh is set up).
 #
-#   bash scripts/setup/updates.sh [--check "name" ...] [--channel release|main]
+#   bash scripts/setup/updates.sh [--check "name" ...] [--channel release|main] [--release-hold]
 #                                 [--signer <principal> ssh-ed25519 <public key>] [--confirm-signer SHA256:<fingerprint>]
 #                                 [--acknowledge-signers]
 #       (repeat --check for each required check)
 #
-# The last three are an admin's, at a root shell, and go through scripts/setup/updates-root.cjs, the only code that
+# These are an admin's, at a root shell, and go through scripts/setup/updates-root.cjs, the only code that
 # writes /etc/worklane/allowed_signers (it only ever adds a line). Each is checked before anything is installed.
+#   --release-hold     the one way to release the updater's hold on a commit it rolled back (besides a newer commit):
+#                      it shows what was held and why, moves the hold aside and logs it. Turning updates off and on,
+#                      or changing the channel (anything the dashboard or a coordinator can do), never releases a hold.
 #   --channel          what the updater follows. The dashboard can only set release; main is set here.
 #   --signer           adds one release signer: one line in allowed_signers, the ones there kept as they are.
 #   --confirm-signer   adds the signer the dashboard's Updater setup staged (the Machine page), named by the SHA256
 #                      fingerprint the page shows. It applies only a staged signer with exactly that fingerprint,
-#                      staged less than 24 hours ago, prints its principal and key first, and clears it from the
+#                      staged less than 24 hours ago, prints who staged it and its principal and key, asks you to TYPE
+#                      the principal (a mismatch adds nothing), and clears it from the
 #                      pending list. The dashboard itself can never add a signer: this command, or --signer, does.
 #   --acknowledge-signers   the updater hashes allowed_signers on every run; a change that didn't come from --signer or
 #                      --confirm-signer raises an incident and holds release installs. This prints the file's hash
@@ -44,6 +48,7 @@ channel=""
 signer=()
 confirm=""
 acknowledge=""
+release_hold=""
 # An absolute path: node's require takes a relative one for a package name.
 root_steps="$(cd "$(dirname "$0")" && pwd)/updates-root.cjs"
 while [ "$#" -gt 0 ]; do
@@ -53,6 +58,7 @@ while [ "$#" -gt 0 ]; do
     --signer) [ "$#" -ge 4 ] || { echo "--signer needs <principal> ssh-ed25519 <public key>" >&2; exit 2; }; signer=("$2" "$3" "$4"); shift 4 ;;
     --confirm-signer) [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--confirm-signer needs the staged signer's fingerprint (SHA256:...)" >&2; exit 2; }; confirm="$2"; shift 2 ;;
     --acknowledge-signers) acknowledge=1; shift ;;
+    --release-hold) release_hold=1; shift ;;
     --checks) echo "--checks (a comma-separated list) is gone: check names contain commas. Pass each with --check \"name\"." >&2; exit 2 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
@@ -150,6 +156,10 @@ fi
 if [ -n "$acknowledge" ]; then
   say "the signers file, acknowledged as it is now"
   node "$root_steps" acknowledge-signers
+fi
+if [ -n "$release_hold" ]; then
+  say "the updater's hold on a rolled-back commit, released"
+  node "$root_steps" release-hold
 fi
 [ -f /etc/worklane/allowed_signers ] || echo "NOTE: no /etc/worklane/allowed_signers yet: the release channel installs nothing until it lists the key that signs releases (--signer <principal> ssh-ed25519 <public key>; or stage it on the Machine page's Updater setup, then --confirm-signer <its fingerprint>)"
 echo "updates are $(node -e 'process.stdout.write(require("/etc/worklane/updates.json").enabled ? "ON" : "OFF")'); turn them on from the hub's settings once machine-helper.sh is set up"

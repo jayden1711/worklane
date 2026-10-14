@@ -239,7 +239,10 @@ async function checkRunsOf(deps, api, sha) {
 
 /** `a0685ce: required check "push-gate" ended failure; …` */
 const skippedText = (skipped) => skipped.map((s) => `${short(s.sha)}: ${s.reason}`).join('; ');
-const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`;
+// A hold is released only at a root shell (updates.sh --release-hold) or by a newer commit: never by updates.json
+// changing, which any coordinator can make happen through the machine helper (the on/off switch, the channel).
+const RELEASE_HOLD = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold';
+const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until an admin releases it at a root shell: ${RELEASE_HOLD}`;
 
 /**
  * Which candidate (firstParentLine, newest first) to install: the newest one that isn't held and whose checks are
@@ -266,7 +269,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
   for (let i = 0; i < cands.length && !out; i++) {
     const c = cands[i];
     let v;
-    if (held && held.sha === c.sha && !(deps.configChangedAt() > Date.parse(held.at))) v = { ok: false, final: true, held: true, reason: heldReason(held) };
+    if (held && held.sha === c.sha) v = { ok: false, final: true, held: true, reason: heldReason(held) };
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
@@ -836,15 +839,16 @@ async function update(deps, cfg, seen = {}) {
     seen.head = head;
     if (head === current) return 'current';
   }
-  // A commit that was rolled back is never retried by itself: only a newer commit, or the owner turning
-  // updates off and on again after the rollback (updates.json written later), releases it.
+  // A commit that was rolled back is never retried by itself: only a newer commit, or an admin at a root shell
+  // (updates.sh --release-hold, which moves the hold file aside), releases it. Nothing a coordinator can do through
+  // the machine helper does: updates.json changing (on/off, the channel) is not read here.
   // (On main, a held commit is passed over for an older one; see chooseCommit.)
   const held = deps.held();
   const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
   // On main: the newer commits passed over for the one installed, and why.
   let skipped = [];
   if (release) {
-    if (held && held.sha === head && !(deps.configChangedAt() > Date.parse(held.at))) return deps.note('held', head, heldReason(held), true);
+    if (held && held.sha === head) return deps.note('held', head, heldReason(held), true);
     // The commit whose checks count: the main commit the release was cut from.
     // The signers file changed outside updates.sh and nobody has acknowledged it: no release is installed on its say-so.
     const signersHeld = typeof deps.signersHold === 'function' ? deps.signersHold() : null;
@@ -1114,7 +1118,7 @@ function logCanary(deps, pending, v, extra = {}) {
 function raise(deps, pending, v) {
   if (typeof deps.raiseIncident !== 'function') return;
   const what = pending.update ? `the canary after installing ${String(pending.update.to).slice(0, 12)} failed: ${v.reason}; rolled back and held` : `the daily canary failed: ${v.reason}`;
-  const fix = pending.update ? 'look at the canary issue and its PR; turning updates off and on again retries the held commit' : 'look at the canary issue and its PR';
+  const fix = pending.update ? `look at the canary issue and its PR; an admin retries the held commit with: ${RELEASE_HOLD}` : 'look at the canary issue and its PR';
   try {
     deps.raiseIncident('canary_failed', 'canary', what, fix);
   } catch {
@@ -1432,13 +1436,6 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     signersAcknowledged: () => takeAcknowledged(),
     // stderr is the unit's journal: a line there needs neither the dashboard nor a coordinator.
     warn: (line) => process.stderr.write(`${line}\n`),
-    configChangedAt: () => {
-      try {
-        return fs.statSync(CONFIG).mtimeMs;
-      } catch {
-        return 0;
-      }
-    },
     switchTo: (sha) => {
       const link = path.join(OPT, '.current.new');
       fs.rmSync(link, { force: true });

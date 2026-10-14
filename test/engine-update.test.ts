@@ -155,7 +155,7 @@ function machine(over: Record<string, unknown> = {}) {
     note: (event: string, sha: string | null, reason: string) => (logs.push({ event, to: sha, reason }), event),
     ...over,
   };
-  return { deps, calls, logs, states, current: () => current, held: () => heldEntry, setConfigAt: (t: number) => (configAt = t), setCurrent: (sha: string) => (current = sha) };
+  return { deps, calls, logs, states, current: () => current, held: () => heldEntry, release: () => (heldEntry = null), setConfigAt: (t: number) => (configAt = t), setCurrent: (sha: string) => (current = sha) };
 }
 
 test('run: off does nothing; up to date does nothing', async () => {
@@ -239,7 +239,7 @@ test('run: refuses a non-fast-forward, a skipped or failed required check; waits
   }
 });
 
-test('a rolled-back commit is held: not tried again until a newer commit, or updates are turned off and on after it', async () => {
+test('a rolled-back commit is held: not tried again until a newer commit, or until an admin releases it at a root shell; updates.json changing never releases it', async () => {
   const m = machine();
   m.states[NEW] = ['failed'];
   assert.equal(await u.run(m.deps), 'rolled_back');
@@ -251,11 +251,14 @@ test('a rolled-back commit is held: not tried again until a newer commit, or upd
   const before = m.calls.length;
   assert.equal(await u.run(m.deps), 'held');
   assert.equal(m.logs.at(-1)!.event, 'held');
-  assert.match(String(m.logs.at(-1)!.reason), /rolled back at .*held until a newer commit, or until updates are turned off and on again/);
+  assert.match(String(m.logs.at(-1)!.reason), /rolled back at .*held until a newer commit, or until an admin releases it at a root shell: sudo bash \/opt\/worklane\/current\/scripts\/setup\/updates\.sh --release-hold/);
   assert.ok(!m.calls.slice(before).some((c) => c.startsWith('systemd-run') || c.startsWith('switchTo')));
-  // Turning updates off and on (updates.json written after the rollback) releases it.
+  // updates.json written after the rollback (the on/off switch, the channel: what any coordinator can change) doesn't release it.
   m.setConfigAt(Date.parse(held.at) + 1000);
   m.states[NEW] = ['active'];
+  assert.equal(await u.run(m.deps), 'held');
+  // updates.sh --release-hold, at a root shell, moves the hold file aside: then it is tried again.
+  m.release();
   assert.equal(await u.run(m.deps), 'installed');
 });
 

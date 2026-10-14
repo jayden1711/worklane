@@ -136,6 +136,27 @@ export function addProjectRepoOk(s: unknown): s is string {
   return !!m && m[2] !== '.' && m[2] !== '..';
 }
 
+/** What machine-helper.sh recorded about this machine's sudo rule (scripts/setup/lib.sh HELPER_RULES). */
+export const HELPER_RULES = `/etc/${BRAND.cli}/helper-rules.json`;
+/** The root command an owner runs instead, where the helper's add-project rule isn't installed. */
+export const ADD_PROJECT_SCRIPT = `/opt/${BRAND.cli}/current/scripts/setup/add-project.sh`;
+
+/**
+ * The helper's commands this machine's sudo rule leaves out (an older sudo reads their patterns as literal text), and
+ * that sudo's version; null when machine-helper.sh hasn't recorded it (a machine set up before it did).
+ */
+export function helperRules(path = HELPER_RULES): { sudo: string | null; leftOut: string[] } | null {
+  try {
+    const j = JSON.parse(readFileSync(path, 'utf8')) as { sudo?: unknown; left_out?: unknown };
+    return { sudo: typeof j.sudo === 'string' && j.sudo ? j.sudo : null, leftOut: Array.isArray(j.left_out) ? j.left_out.filter((x): x is string => typeof x === 'string') : [] };
+  } catch {
+    return null;
+  }
+}
+
+/** The root command for one add-project, its name and repo filled in (or placeholders). */
+export const addProjectCommand = (name?: string, repo?: string) => `sudo bash ${ADD_PROJECT_SCRIPT} ${name || '<name>'} ${repo || '<owner/repo>'}`;
+
 /** The helper's change log, newest last; unreadable or malformed lines are skipped. */
 export function machineChanges(path = MACHINE_CHANGES, limit = 200): MachineChange[] {
   let text: string;

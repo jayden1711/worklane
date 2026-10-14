@@ -15,7 +15,7 @@ import { createInterface } from 'node:readline';
 import type { EventLog } from '../events/log.js';
 import { asks } from '../console/asks.js';
 import { secretsDir } from '../console/secrets.js';
-import { MACHINE_HELPER } from '../machine.js';
+import { addProjectCommand, MACHINE_HELPER } from '../machine.js';
 import type { MachineRequest } from '../machine-requests.js';
 
 export const ADD_PROJECT_STEPS = ['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'] as const;
@@ -199,7 +199,12 @@ export function runAddProject(d: AddProjectDeps, r: MachineRequest): Promise<voi
       const f = lastFailed as Line | null;
       if (code === 0) finish('done', `added ${name} (${repo})`);
       else if (f) finish('failed', `${f.step}: ${f.detail}${f.retry ? `; retry: ${f.retry}` : ''}`);
-      else finish('failed', `${MACHINE_HELPER} add-project exited ${code}: ${stderrTail.trim().split('\n').at(-1) ?? ''}`);
+      else {
+        const said = stderrTail.trim().split('\n').at(-1) ?? '';
+        // sudo refused (no rule for it here: an older sudo, or machine-helper.sh not run since): never just a failure; the root command instead.
+        const instead = /password is required|not allowed to execute|may not run sudo|not in the sudoers/i.test(stderrTail) ? `; sudo won't run the machine helper's add-project here, so run it at a root shell on the machine: ${addProjectCommand(name, repo)}` : '';
+        finish('failed', `${MACHINE_HELPER} add-project exited ${code}: ${said}${instead}`);
+      }
     });
   });
 }
