@@ -202,6 +202,17 @@ export interface GoalGraph {
 
 export interface Activity { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }
 
+/** One coordinator error, grouped by where and message (src/projection.ts CoordinatorError). */
+export interface CoordinatorError {
+  where: string;
+  message: string;
+  kind?: string;
+  count?: number;
+  first?: string;
+  last?: string;
+  at: string;
+}
+
 export interface State {
   brand: { name: string; cli: string };
   /** Setup mode (src/setup-mode.ts): no config yet; the first-run page is the whole dashboard. */
@@ -246,8 +257,13 @@ export interface State {
   baseline: { sha: string; failing: string[]; at: string } | null;
   deploys: { env: string; sha: string; status: string; why?: string; at: string }[];
   coordinator: { instance: string; startedAt: string; lastTick: string | null } | null;
-  /** The coordinator's recent errors; a viewer gets only how many (errorCount), never their text. */
-  errors?: { at: string; where: string; message: string }[];
+  /**
+   * The coordinator's errors still current (a later tick or a restart clears one: src/projection.ts), one per place
+   * and message with how many times, first and last; a viewer gets only how many (errorCount), never their text.
+   */
+  errors?: CoordinatorError[];
+  /** Errors no longer current, newest first: history only (owners and writers). */
+  earlierErrors?: CoordinatorError[];
   errorCount?: number;
   activity: Activity[];
   inbox: { decisions: Decision[]; blocked: Task[]; notify: Task[] };
@@ -560,6 +576,27 @@ export function probeHub(servedByHub: boolean, get: typeof fetch = fetch, auth =
     .catch(() => null);
 }
 export const hub: Promise<HubInfo | null> = inBrowser ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null);
+
+/**
+ * The hub's list again, from a fresh answer: it replaces the last one when it differs (an instance that was down at
+ * page load, during an update's restart, is up again); no answer (the hub itself didn't answer, or refused) keeps the
+ * last one rather than emptying the sidebar.
+ */
+export function nextHub(prev: HubInfo | null, fresh: HubInfo | null): HubInfo | null {
+  if (!fresh) return prev;
+  return prev && JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh;
+}
+/** The hub's list as last read: this page's first answer, then each refresh's (refreshHub). */
+let latestHub: Promise<HubInfo | null> = hub;
+/** The hub's instances as last read, without asking again. */
+export const currentHub = (): Promise<HubInfo | null> => latestHub;
+/** Ask the hub for its instances again (each health refresh does): whether each answers now, not at page load. */
+export async function refreshHub(probe: () => Promise<HubInfo | null> = () => (servedByHub ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null))): Promise<HubInfo | null> {
+  const prev = await latestHub;
+  const next = nextHub(prev, await probe());
+  latestHub = Promise.resolve(next);
+  return next;
+}
 
 /**
  * Which instances a hub page reads: the selected one, or every instance this person has a role on when they
@@ -1580,6 +1617,8 @@ export interface InstanceIncidents {
   name: string | null;
   view: IncidentsView | null;
   error: string | null;
+  /** The hub says this instance's dashboard isn't answering (not merely that its incidents couldn't be read). */
+  down?: boolean;
 }
 
 /**
@@ -1590,7 +1629,7 @@ export async function loadIncidents(h: HubInfo | null, get: (name: string | null
   const names: (string | null)[] = h?.instances.length ? h.instances.map((i) => i.name) : [null];
   return Promise.all(
     names.map(async (name) => {
-      if (name && h?.instances.find((i) => i.name === name)?.up === false) return { name, view: null, error: "its dashboard isn't answering" };
+      if (name && h?.instances.find((i) => i.name === name)?.up === false) return { name, view: null, error: "its dashboard isn't answering", down: true };
       try {
         return { name, view: await get(name, '/api/health/incidents'), error: null };
       } catch (e) {
@@ -1612,7 +1651,23 @@ export function mergeIncidents(all: InstanceIncidents[]): { open: Incident[]; re
   };
 }
 
-/** Each instance's dot: its own server's status; red when it isn't answering. */
-export function statusOf(all: InstanceIncidents[]): Record<string, HealthStatus> {
-  return Object.fromEntries(all.map((a) => [a.name ?? '', a.view?.status ?? 'red']));
+/**
+ * A status dot: an instance's own status (green, amber, red), or unknown when its incidents couldn't be read (a
+ * refusal, a timeout, a proxy blip): that is not "broken", and red stays for an open red incident or an instance
+ * that isn't answering.
+ */
+export type DotStatus = HealthStatus | 'unknown';
+/** Each instance's dot: its own server's status; red when the hub says it isn't answering; unknown when its incidents couldn't be read. */
+export function statusOf(all: InstanceIncidents[]): Record<string, DotStatus> {
+  return Object.fromEntries(all.map((a) => [a.name ?? '', a.view ? a.view.status : a.down ? 'red' : 'unknown']));
+}
+/** Why each instance's status couldn't be read (only those that couldn't), for the dot's hover and screen-reader text. */
+export function whyOf(all: InstanceIncidents[]): Record<string, string> {
+  return Object.fromEntries(all.filter((a) => !a.view && a.error).map((a) => [a.name ?? '', a.error!]));
+}
+/** One health refresh: the hub's list asked again (an instance down at page load can be up now), then each instance's incidents. */
+export async function healthPass(refresh: () => Promise<HubInfo | null> = refreshHub, load: (h: HubInfo | null) => Promise<InstanceIncidents[]> = (h) => loadIncidents(h)): Promise<{ hub: HubInfo | null; status: Record<string, DotStatus>; why: Record<string, string> }> {
+  const h = await refresh();
+  const all = await load(h);
+  return { hub: h, status: statusOf(all), why: whyOf(all) };
 }

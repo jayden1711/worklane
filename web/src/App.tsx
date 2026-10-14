@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { hub, instanceScope, keyMissing, loadIncidents, needsSignIn, onLoopback, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
+import { healthPass, hub, instanceScope, keyMissing, needsSignIn, onLoopback, selectAllInstances, selectInstance, signOut, useLiveState, type DotStatus, type HubInfo, type InstanceScope, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { VoiceControl } from './voice/VoiceControl';
@@ -330,7 +330,7 @@ function Dashboard() {
   else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
 
-  const sidebar = { state, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} /> };
+  const sidebar = { state, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} why={health?.why} live={health?.hub} /> };
   return (
     <NavMenu.Provider value={{ open: nav, setOpen: setNav }}>
       <div className="flex h-full">
@@ -356,7 +356,7 @@ function Dashboard() {
 }
 
 type Counts = Partial<Record<string, number>>;
-type Health = { hub: HubInfo | null; status: Record<string, HealthStatus> };
+type Health = { hub: HubInfo | null; status: Record<string, DotStatus>; why?: Record<string, string> };
 
 /**
  * The sidebar's contents: the project and its status dot (off a hub), the instance list (on a hub), Search, the pages,
@@ -375,7 +375,7 @@ export function SidebarBody({ state, path, counts, health, live, theme, toggleTh
         {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}
         {health && !health.hub && (
           <a href="/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/health'))} title="Health">
-            <StatusDot status={health.status[''] ?? 'green'} testId="instance-status-dot" />
+            <StatusDot status={health.status[''] ?? 'green'} why={health.why?.['']} testId="instance-status-dot" />
           </a>
         )}
       </div>
@@ -490,14 +490,14 @@ export function NavDrawer({ open, setOpen, children }: { open: boolean; setOpen:
  * chosen: the Board and its test runs then show every instance, each item labelled; every other page stays on the
  * selected instance.
  */
-export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {}, status = {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void; status?: Record<string, HealthStatus> }) {
+export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {}, status = {}, why = {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void; status?: Record<string, DotStatus>; why?: Record<string, string> }) {
   return (
     <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher data-testid="instance-switcher" data-scope={all ? 'all' : current}>
       <div className="px-2 pt-1 pb-1 text-[11.5px] font-medium text-ink-3">Instances</div>
       {info.instances.map((i) => (
         <SidebarRow
           key={i.name}
-          icon={<StatusDot status={i.up ? (status[i.name] ?? 'green') : 'red'} testId="instance-dot" />}
+          icon={<StatusDot status={i.up ? (status[i.name] ?? 'green') : 'red'} why={i.up ? why[i.name] : (i.error ?? "its dashboard isn't answering")} testId="instance-dot" />}
           label={i.up ? i.name : `${i.name} (not answering)`}
           title={i.error ?? undefined}
           active={!all && i.name === current}
@@ -518,22 +518,35 @@ export function InstanceList({ hub: info, current, all = false, onSelect, onSele
   );
 }
 
-/** On a hub: which instance this page shows (or All instances, for the Board), and a switch to the others (each served by its own dashboard). */
-function InstanceSwitcher({ status }: { status: Record<string, HealthStatus> }) {
+/**
+ * On a hub: which instance this page shows (or All instances, for the Board), and a switch to the others (each served
+ * by its own dashboard). `live`: the hub's list as the last health refresh read it, so an instance that was down at
+ * page load and is up again can be picked without a reload.
+ */
+function InstanceSwitcher({ status, why, live }: { status: Record<string, DotStatus>; why?: Record<string, string> | undefined; live?: HubInfo | null | undefined }) {
   const [info, setInfo] = useState<{ hub: HubInfo; scope: InstanceScope } | null>(null);
   useEffect(() => {
     void Promise.all([hub, instanceScope]).then(([h, scope]) => h && scope.current && setInfo({ hub: h, scope }));
   }, []);
   if (!info) return null;
-  return <InstanceList hub={info.hub} current={info.scope.current!} all={info.scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} status={status} />;
+  return <InstanceList hub={live ?? info.hub} current={info.scope.current!} all={info.scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} status={status} {...(why ? { why } : {})} />;
 }
 
-/** Each instance's status dot (green, amber, red) from its watchdog incidents, read again every minute. */
-function useHealth(): { hub: HubInfo | null; status: Record<string, HealthStatus> } | null {
-  const [health, setHealth] = useState<{ hub: HubInfo | null; status: Record<string, HealthStatus> } | null>(null);
+/**
+ * Each instance's status dot (green, amber, red; grey when its status couldn't be read) from its watchdog incidents,
+ * read again every minute, with the hub's list asked again each time (healthPass).
+ */
+function useHealth(): Health | null {
+  const [health, setHealth] = useState<Health | null>(null);
   useEffect(() => {
     let live = true;
-    const load = () => void hub.then(async (h) => ({ hub: h, status: statusOf(await loadIncidents(h)) })).then((x) => live && setHealth(x));
+    let first = true;
+    // The first pass uses the list this page loaded with; every later one asks the hub again.
+    const load = () => {
+      const pass = first ? healthPass(() => hub) : healthPass();
+      first = false;
+      void pass.then((x) => live && setHealth(x));
+    };
     load();
     const t = setInterval(load, 60_000);
     return () => {
