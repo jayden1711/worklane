@@ -46,9 +46,8 @@ export const forceAll = (f) => FORCE_ALL.find(([re]) => re.test(f))?.[1] ?? null
 export const runtimePath = (f) => (/^(src|test)\/.+\.ts$/.test(f) ? `dist/${f.replace(/\.ts$/, '.js')}` : f);
 /**
  * A built path back to its source: dist/src and dist/test are tsc's. dist/web (the dashboard's build of web/) stays
- * as it is: a test that opens the built UI (test/browser-helpers.ts's webUiSkip) does so through the dashboard, whose
- * src/ module reads the package (packagePaths: dist/web is web/), so a web/ change picks it that way; web/'s own
- * tests read web/ directly (join(repoRoot, 'web', …)).
+ * as it is: the unit tests run before anything builds it, so no test reaches web/ through the dashboard; web/'s own
+ * tests read web/ directly (join(repoRoot, 'web', …)), and those are what a web/ change picks.
  */
 export const sourcePath = (p) => (/^dist\/(src|test)(\/|$)/.test(p) ? p.slice(5) : p);
 
