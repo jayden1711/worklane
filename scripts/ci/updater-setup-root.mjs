@@ -346,7 +346,7 @@ console.log(`OK: ${sudoV} on this runner (1.9.10 or later): the stage-update-sig
 const fake = mkdtempSync('/var/lib/wl-fake-sudo-');
 writeFileSync(join(fake, 'sudo'), '#!/bin/sh\n[ "$1" = -V ] && echo "Sudo version 1.9.9" && exit 0\nexit 1\n', { mode: 0o755 });
 const older = execFileSync('bash', ['-c', 'source "$1"; machine_sudoers wl-ci', '_', '/opt/worklane/current/scripts/setup/lib.sh'], { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } });
-assert.ok(!older.includes('stage-update-signer ') && !older.includes('discard-update-signer ') && older.includes('install-updater') && older.includes('^add-project '), older);
+assert.ok(!older.includes('^stage-update-signer ') && !older.includes('^discard-update-signer ') && older.includes('# Not here: stage-update-signer and discard-update-signer. This sudo (1.9.9)') && older.includes('install-updater') && older.includes('^add-project '), older);
 writeFileSync(join(fake, 'rule'), older);
 assert.equal(spawnSync('visudo', ['-cf', join(fake, 'rule')]).status, 0, 'visudo accepts the rule without them');
 rmSync(fake, { recursive: true, force: true });
