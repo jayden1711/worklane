@@ -77,6 +77,7 @@ test('every test that drives a real Chrome takes the lock first', () => {
       if (!/^\s*await oneChromeAtATime\((?:t|ctx)\);$/.test(next)) missing.push(`${f}: ${head.slice(0, 80).replace(/\s+/g, ' ')}`);
     }
   }
-  assert.ok(found === 14, `found the real-Chrome tests (${found})`);
+  // 15 on main, plus #414's two (machine cards) and #418's one (web-key-in-url) on this branch.
+  assert.ok(found === 18, `found the real-Chrome tests (${found})`);
   assert.deepEqual(missing, [], 'start with `await oneChromeAtATime(ctx);`');
 });

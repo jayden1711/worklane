@@ -650,6 +650,16 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  */
 export const SYSTEM_SLOTS = { dir: `/var/lib/${BRAND.cli}/agent-slots`, config: `/etc/${BRAND.cli}/slots.json` };
 
+/**
+ * The engine updater's drain flag (scripts/machine/<cli>-update.cjs, src/update-drain.ts): with the system slot
+ * directory it is in root's /var/lib/<cli>, beside the updater's other files, so no coordinator can write or remove
+ * it (the slot directory itself is group-writable); with any other slot directory (development, tests), inside it.
+ */
+export const UPDATE_DRAIN_FILE = `/var/lib/${BRAND.cli}/update-drain.json`;
+export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+  return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
+}
+
 export function slotsDir(system = SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
@@ -878,6 +888,20 @@ export function openUrl(url: string): void {
   } catch {
     // no browser here: the URL is printed anyway
   }
+}
+
+/**
+ * A browser opener that opens nothing: it writes the URL it is given to `urlFile` (this user's only), so a program
+ * that opens a browser through $BROWSER (claude auth login) hands its URL to the dashboard instead. Written into
+ * `dir` (a 0700 directory of this user's), 0700. Null where $BROWSER can't name such a script (Windows): there the
+ * program opens the browser itself.
+ */
+export function browserRelay(dir: string, urlFile: string): string | null {
+  if (process.platform === 'win32') return null;
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  const file = join(dir, 'browser-relay');
+  writeExecutable(file, `#!/bin/sh\numask 077\nprintf '%s\\n' "$1" > ${q(urlFile)}\n`, 0o700);
+  return file;
 }
 
 /** A native executable's file name on this OS. */

@@ -8,6 +8,7 @@ import { helperFix } from '../testrun/helper.js';
 import type { StoredEvent } from '../events/types.js';
 import type { UnitState } from '../os/stats.js';
 import type { UpdateEntry } from '../updates.js';
+import type { MachineChange } from '../machine.js';
 import { project } from '../projection.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident, type Incident, type Severity, type WatchdogKind } from './incidents.js';
 
@@ -99,6 +100,65 @@ export function updateFindings(log: UpdateEntry[]): Finding[] {
   const why = last.reason ?? (last.migration ? `instance ${last.migration.instance}'s migration failed: ${last.migration.error}` : last.failed?.length ? `failed: ${last.failed.join('; ')}` : 'its checks after the install failed');
   const tried = [`rolled back to ${last.back ? last.back.slice(0, 12) : 'the previous engine'}`, ...(last.held ? [`held ${sha}: the updater skips it until a newer commit`] : [])];
   return [{ kind: 'update_rollback', key: sha, instance: null, detail: `the update to ${sha} was rolled back${last.held ? ' and is held' : ''}: ${why}`, fix: 'Read the rollback on the Machine page (the update log), fix it in a new commit; the hold lifts when a newer one installs', tried }];
+}
+
+/** How long a signer's addition stays an open incident: posted once when seen, resolved (and posted once more) after this. */
+export const SIGNER_NOTICE_MS = 24 * 60 * 60_000;
+const SIGNER_ADDED = /^added ([^\s]+) ssh-ed25519 [A-Za-z0-9+/]+ \((SHA256:[A-Za-z0-9+/]{43})\)$/;
+
+/**
+ * Every release signer added to the updater's allowed signers file in the last day, from the machine change log
+ * (scripts/setup/updates-root.cjs writes one line per signer added, by updates.sh --signer or --confirm-signer): one
+ * incident each, keyed by the key's fingerprint, naming the principal, the fingerprint and who ran it. A public key
+ * and a principal are not secrets.
+ */
+export function signerFindings(changes: readonly MachineChange[], now: number): Finding[] {
+  const out = new Map<string, Finding>();
+  for (const c of changes) {
+    if (c.what !== 'updates.allowed_signers' || typeof c.to !== 'string') continue;
+    const m = SIGNER_ADDED.exec(c.to);
+    const age = now - Date.parse(c.at);
+    if (!m || !(age >= 0 && age < SIGNER_NOTICE_MS)) continue;
+    const [, principal, fingerprint] = m as unknown as [string, string, string];
+    out.set(`${principal} ${fingerprint}`, {
+      kind: 'update_signer_added',
+      key: `${principal} ${fingerprint}`,
+      instance: null,
+      detail: `the release signer ${principal}, key fingerprint ${fingerprint}, was added to /etc/${BRAND.cli}/allowed_signers by ${c.by} at ${c.at}: engine releases signed with that key now verify on this machine`,
+      fix: `Nothing, if you added it. If you didn't: turn engine updates off (the Machine page), remove its line from /etc/${BRAND.cli}/allowed_signers at a root shell, and find out who ran it. This notice closes by itself after a day`,
+      tried: [],
+    });
+  }
+  return [...out.values()];
+}
+
+const SIGNER_STAGED = /^staged ([^\s]+) ssh-ed25519 [A-Za-z0-9+/]+ \((SHA256:[A-Za-z0-9+/]{43})\)$/;
+
+/**
+ * Every release signer STAGED in the last day (the machine helper's stage-update-signer, asked for from a dashboard), from
+ * the machine change log: one incident each, naming the principal, the fingerprint, the coordinator user that staged it
+ * and so its instance. Staging trusts the key for nothing, but an owner should know someone asked, before anyone at
+ * a root shell is asked to confirm it.
+ */
+export function stagedSignerFindings(changes: readonly MachineChange[], now: number): Finding[] {
+  const out = new Map<string, Finding>();
+  for (const c of changes) {
+    if (c.what !== 'updates.pending_signer' || typeof c.to !== 'string') continue;
+    const m = SIGNER_STAGED.exec(c.to);
+    const age = now - Date.parse(c.at);
+    if (!m || !(age >= 0 && age < SIGNER_NOTICE_MS)) continue;
+    const [, principal, fingerprint] = m as unknown as [string, string, string];
+    const inst = /^wl-([a-z][a-z0-9-]{0,20})$/.exec(c.by);
+    out.set(`${principal} ${fingerprint}`, {
+      kind: 'update_signer_staged',
+      key: `${principal} ${fingerprint}`,
+      instance: inst ? inst[1]! : null,
+      detail: `a release signer was staged: ${principal}, key fingerprint ${fingerprint}, by ${c.by}${inst ? ` (instance ${inst[1]})` : ''} at ${c.at}. It is trusted for nothing until an admin confirms it at a root shell`,
+      fix: `If you asked for it, confirm it on the machine: sudo bash /opt/${BRAND.cli}/current/scripts/setup/updates.sh --confirm-signer ${fingerprint} (it asks you to type the principal). If not, discard it on the Machine page's Updater setup. It is dropped after 24 hours either way`,
+      tried: [],
+    });
+  }
+  return [...out.values()];
 }
 
 /** The share of a disk in use at or above which the watchdog alerts. */

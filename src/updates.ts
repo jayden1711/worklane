@@ -10,9 +10,12 @@ export const UPDATES_LOG = `/var/lib/${BRAND.cli}/updates.jsonl`;
 /** The engine the machine's services run: a link to /opt/<cli>/<sha>. */
 export const ENGINE_CURRENT = `/opt/${BRAND.cli}/current`;
 
-/** held: a commit that was rolled back, skipped until a newer one or until updates are turned off and on again. */
+/** held: a commit that was rolled back, skipped until a newer one or until an admin releases it at a root shell (updates.sh --release-hold). */
+/** The root command that releases a hold; nothing a coordinator or the dashboard can do releases one. */
+export const RELEASE_HOLD = `sudo bash /opt/${BRAND.cli}/current/scripts/setup/updates.sh --release-hold`;
 /** chose: an older commit than main's tip is being installed (the tip, and every newer one, failed or held). */
-export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | CanaryEvent;
+/** signers_changed: the release signers file changed outside updates.sh --signer or --confirm-signer; release installs are held until acknowledged. */
+export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | 'signers_changed' | CanaryEvent;
 /** The canary (docs/canary.md): filed, then passed or failed. */
 export type CanaryEvent = 'canary_filed' | 'canary_passed' | 'canary_failed';
 export interface UpdateEntry {
@@ -66,7 +69,7 @@ export function heldUpdate(log: UpdateEntry[]): HeldUpdate | null {
   return { at: last.at, sha: last.from ?? null, reason, migration: !!last.migration || /migration failed/.test(reason) };
 }
 
-const EVENTS = new Set<string>(['attempt', 'chose', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error', 'canary_filed', 'canary_passed', 'canary_failed']);
+const EVENTS = new Set<string>(['attempt', 'chose', 'installed', 'rolled_back', 'held', 'refused', 'waiting', 'build_failed', 'error', 'signers_changed', 'canary_filed', 'canary_passed', 'canary_failed']);
 
 /** What the updater follows: signed release tags, or main's tip. */
 export type UpdateChannel = 'release' | 'main';
@@ -152,12 +155,25 @@ export interface UpdatesPanel {
   lastInstall: { at: string; from: string | null; to: string | null } | null;
   /** The newest rollback, while no later install succeeded: when, what, why, and whether it is held. */
   rollback: { at: string; sha: string | null; reason: string; held: boolean; canary: boolean } | null;
+  /**
+   * The updater is draining the machine for an install (src/update-drain.ts): since when, the commit it waits to
+   * install, and what is still finishing (test runs, the full-run lock, agents). Null when it isn't, or the flag lapsed.
+   */
+  drain: UpdatesDrain | null;
   canary: {
     settings: CanarySettings | null;
     /** A canary filed and not yet passed or failed. */
     running: { at: string; trigger: 'update' | 'daily'; issue: number | null; url: string | null; deadline: string | null } | null;
     last: CanaryResult | null;
   };
+}
+
+export interface UpdatesDrain {
+  since: string;
+  until: string;
+  to: string | null;
+  testRuns: number;
+  agents: number;
 }
 
 /** The engine the services run: its commit (the link's target) and version (its package.json); null where there's none. */
@@ -180,7 +196,7 @@ export function installedEngine(current = ENGINE_CURRENT): { sha: string | null;
 }
 
 /** The Updates panel from the updater's log (oldest first), its settings and the engine installed now. */
-export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof updateSettings>, installed: { sha: string | null; version: string | null }): UpdatesPanel {
+export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof updateSettings>, installed: { sha: string | null; version: string | null }, drain: UpdatesDrain | null = null): UpdatesPanel {
   const lastOf = (f: (e: UpdateEntry) => boolean) => [...log].reverse().find(f) ?? null;
   const install = lastOf((e) => e.event === 'installed');
   const rolled = lastOf((e) => e.event === 'rolled_back');
@@ -197,6 +213,7 @@ export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof upd
     rollback: rollbackNow
       ? { at: rollbackNow.at, sha: rollbackNow.from ?? null, reason: rollbackNow.reason ?? (rollbackNow.failed?.length ? `rolled back: ${rollbackNow.failed.join('; ')}` : 'rolled back'), held: !!held && held.at === rollbackNow.at, canary: !!rollbackNow.canary }
       : null,
+    drain,
     canary: {
       settings: settings?.canary ?? null,
       running: running ? { at: running.at, trigger: running.trigger === 'update' ? 'update' : 'daily', issue: running.issue ?? null, url: running.url ?? null, deadline: running.deadline ?? null } : null,

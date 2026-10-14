@@ -62,6 +62,10 @@ function machine(o: { repoUrl?: string; build?: string; migrate?: string } = {})
     sleep: async (ms: number) => void (clock += ms),
     configChangedAt: () => 0,
     // The rest of realDeps reaches the machine (systemd-run, /var/lib, the installed engine): faked here.
+    // WHY: #384's signers watch reads root's /var/lib/<cli>/signers-state.json; no signers file here, so no change and no hold.
+    signersCheck: () => null,
+    signersHold: () => null,
+    signersAcknowledged: () => false,
     verdicts: () => null,
     saveVerdicts: () => {},
     sandboxStatus: () => null,

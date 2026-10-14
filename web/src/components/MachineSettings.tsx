@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { DotPill, RecordsTable } from './patterns';
+import { UpdaterSetupView, type UpdaterData } from './UpdaterSetup';
 import { ago, Button, Card, cx } from './ui';
 
 /** A machine change asked for from the dashboard, as the coordinator has handled it so far (src/machine-requests.ts). */
@@ -37,6 +38,8 @@ export interface MachineData {
   /** The machine's test-run slot cap; absent from older servers. */
   testSlots?: { cap: number; running: number; min: number; max: number };
   updates: { configured: true; enabled: boolean; branch: string; requiredChecks: string[] } | { configured: false; enabled: null };
+  /** The updater's setup (installed, channel, release signers), for the Updater setup steps; absent from older servers. */
+  updater?: UpdaterData;
   changes: { at: string; by: string; what: string; from: unknown; to: unknown }[];
   history: { at: string; event: string; from?: string | null; to?: string | null; reason?: string; units?: string[]; failed?: string[]; back?: string }[];
   /** Changes asked for here, newest first; absent from older servers. */
@@ -47,7 +50,7 @@ const REQUEST_TONE: Record<MachineRequestRow['status'], 'green' | 'red' | 'orang
 const REQUEST_LABEL: Record<MachineRequestRow['status'], string> = { pending: 'waiting for the coordinator', running: 'running', done: 'done', failed: 'failed', refused: 'refused', interrupted: 'interrupted' };
 export const anyPending = (d: MachineData) => (d.requests ?? []).some((r) => r.status === 'pending' || r.status === 'running');
 
-const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink', canary_passed: 'green', canary_failed: 'red', canary_filed: 'ink' };
+const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { installed: 'green', rolled_back: 'red', build_failed: 'red', error: 'red', signers_changed: 'red', refused: 'orange', waiting: 'orange', attempt: 'ink', canary_passed: 'green', canary_failed: 'red', canary_filed: 'ink' };
 const short = (s?: string | null) => (s ? s.slice(0, 8) : '–');
 const val = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : v === null || v === undefined ? '–' : String(v));
 
@@ -122,9 +125,15 @@ function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm
 
 /** The section from its data (also what the render checks render). */
 export function MachineSettingsView({ data, onChanged = () => {} }: { data: MachineData; onChanged?: (d: MachineData) => void }) {
-  const [slots, setSlots] = useState(String(data.slots.cap));
-  const [updates, setUpdates] = useState(data.updates.enabled === true ? 'on' : 'off');
-  const [testSlots, setTestSlots] = useState(String(data.testSlots?.cap ?? ''));
+  // What the owner typed, kept across every refresh of the data (this view is never remounted for new data). Until
+  // they type, and again after a confirmed change, each input shows what is set now, as the data says.
+  type Drafts = { slots: string | null; updates: string | null; testSlots: string | null };
+  const [drafts, setDrafts] = useState<Drafts>({ slots: null, updates: null, testSlots: null });
+  const draft = (k: keyof Drafts) => (v: string) => setDrafts((d) => ({ ...d, [k]: v }));
+  const [setSlots, setUpdates, setTestSlots] = [draft('slots'), draft('updates'), draft('testSlots')];
+  const slots = drafts.slots ?? String(data.slots.cap);
+  const updates = drafts.updates ?? (data.updates.enabled === true ? 'on' : 'off');
+  const testSlots = drafts.testSlots ?? String(data.testSlots?.cap ?? '');
   const tn = Number(testSlots);
   const ts = data.testSlots;
   const testSlotsProposed = !ts ? null : !testSlots.trim() || !Number.isInteger(tn) ? { error: 'a whole number' } : tn < ts.min || tn > ts.max ? { error: `${ts.min} to ${ts.max}` } : { value: tn, text: String(tn) };
@@ -132,6 +141,8 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
   const slotsProposed = !slots.trim() || !Number.isInteger(n) ? { error: 'a whole number' } : n < data.slots.min || n > data.slots.max ? { error: `${data.slots.min} to ${data.slots.max}` } : { value: n, text: String(n) };
   const send = (what: 'slots' | 'updates' | 'testSlots') => async (value: unknown) => {
     const r = await api<{ machine: MachineData }>('/api/machine', { method: 'POST', body: JSON.stringify({ what, value }) });
+    // Confirmed: this input follows what is set again (the card's own choice, never a remount's).
+    setDrafts((d) => ({ ...d, [what]: null }));
     onChanged(r.machine);
   };
   return (
@@ -159,6 +170,7 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
           {data.deviceReady === true ? `You may change these: this page came from ${data.needs}.` : data.deviceReady === false ? `A change needs ${data.needs}, and this page didn't come from one.` : `A change needs ${data.needs}.`}
         </div>
       )}
+      <UpdaterSetupView data={data} onChanged={onChanged} />
       <div className="overflow-hidden rounded-card bg-surface shadow-card">
         <table className="w-full table-fixed border-collapse text-left">
           <thead>
@@ -197,7 +209,7 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
               label="Engine updates"
               testKey="updates"
               current={data.updates.configured ? (data.updates.enabled ? 'on' : 'off') : 'not set up'}
-              bounds={data.updates.configured ? `on: the updater installs green ${data.updates.branch} commits when the machine is quiet, and rolls back a failed one` : "the updater isn't set up on this machine (an admin runs its setup script)"}
+              bounds={data.updates.configured ? `on: the updater installs green ${data.updates.branch} commits when the machine is quiet, and rolls back a failed one` : data.updater ? "the updater isn't set up on this machine: install it in Updater setup, above" : "the updater isn't set up on this machine (an admin runs its setup script)"}
               disabled={!data.canChange || !data.updates.configured}
               proposed={{ value: updates === 'on', text: updates }}
               onConfirm={send('updates')}
@@ -303,7 +315,9 @@ export function MachineSettings() {
   }, [waiting]);
   if (error) return <div className="text-[13px] text-red" data-testid="machine-settings">Can't load the machine settings: {error}</div>;
   if (!data) return null;
-  return <MachineSettingsView key={JSON.stringify([data.slots.cap, data.updates.enabled, data.changes.length])} data={data} onChanged={setData} />;
+  // Never keyed on the data: new data (a change logged, a request run) is new props, so what an owner typed, a
+  // review they have open and a message they are reading all stay (test/machine-cards-keep-state.test.ts).
+  return <MachineSettingsView data={data} onChanged={setData} />;
 }
 
 

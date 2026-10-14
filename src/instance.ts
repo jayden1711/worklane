@@ -5,8 +5,8 @@
 //   <instances dir>/<name>/state/            event log, locks, worktree records
 // The repo's own config folder keeps project behavior (tests, review levels,
 // skills) and is reviewed like code; it may only tighten the instance policy.
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
@@ -481,4 +481,32 @@ export function setGithubApp(file: string, app: { appId: number; installationId:
   // Each keeps its directory's owner: root (the manifest flow) writes them for the coordinator user.
   replaceFileAtomically(file, String(doc), 0o600, dirname(file));
   replaceFileAtomically(join(dirname(app.keyPath), APP_ORIGIN_FILE), `${origin}\n`, 0o600, dirname(app.keyPath));
+}
+
+/**
+ * Point an instance's credentials.yaml at its chat bot's token file (intake.discord_token), keeping its other
+ * settings, validated against the schema before anything is written (0600, renamed into place). The one writer of
+ * that entry: credentials.sh intake-discord (`instance set-discord-token`) and the dashboard's pasted token both come
+ * here. Only the file's path: the token is never read here. Refused: a path that isn't absolute, isn't a plain file,
+ * or that its group or others can read (the token is the coordinator user's alone).
+ */
+export function setDiscordToken(file: string, tokenFile: string): void {
+  if (!isAbsolute(tokenFile)) throw new Error(`the token file must be an absolute path, not ${tokenFile}`);
+  if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
+  let st;
+  try {
+    st = lstatSync(tokenFile);
+  } catch {
+    throw new Error(`no token file ${tokenFile}`);
+  }
+  if (!st.isFile()) throw new Error(`${tokenFile} is not a plain file`);
+  // WHY: POSIX only; Windows has no mode bits to read.
+  if (typeof process.getuid === 'function' && st.mode & 0o077) throw new Error(`${tokenFile} is open to its group or others (mode ${(st.mode & 0o777).toString(8)}); the bot token is its owner's alone (chmod 400)`);
+  const doc = parseDocument(readFileSync(file, 'utf8'));
+  if (doc.errors.length) throw new Error(`${file} isn't valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`);
+  doc.setIn(['intake', 'discord_token'], tokenFile);
+  const r = CredentialsFile.safeParse(doc.toJS());
+  if (!r.success) throw new Error(`${file} would not be valid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  // WHY: lineWidth 0, so a long path doesn't re-wrap the file's other lines.
+  replaceFileAtomically(file, doc.toString({ lineWidth: 0 }), 0o600, dirname(file));
 }

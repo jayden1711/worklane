@@ -11,7 +11,7 @@ import { EventLog } from '../events/log.js';
 import { ASK_EVENTS, AskError, asks, asksFrom, mayAnswerAsk } from './asks.js';
 import { requestRootStep } from './root-steps.js';
 import { MACHINE_EVENTS, machineRequests } from '../machine-requests.js';
-import { readSecretBody, secretsDir, storeSecret } from './secrets.js';
+import { readSecretBody, secretsDir, storeSecret, type SecretRule } from './secrets.js';
 import { useSetupLink } from './links.js';
 import type { SessionOf } from './session.js';
 
@@ -24,6 +24,8 @@ export interface AskRouteContext {
   secretsHome?: string;
   /** The machine owners file (src/machine-owners.ts); the system's when unset. */
   machineOwnersFile?: string;
+  /** Per credential name: its value's shape, and what follows its install (src/console/secrets.ts SecretRule). */
+  secretRules?: Record<string, SecretRule>;
 }
 
 const send = (res: ServerResponse, status: number, body: unknown) => {
@@ -112,7 +114,7 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
     let ask;
     if (what === 'secret') {
       const value = await readSecretBody(req);
-      ask = storeSecret(log, id, { by: who.login, role: who.role, value, dir: secretsDir(asks(log).get(id)?.instance ?? ctx.instance, ctx.secretsHome) });
+      ask = storeSecret(log, id, { by: who.login, role: who.role, value, dir: secretsDir(asks(log).get(id)?.instance ?? ctx.instance, ctx.secretsHome), ...(ctx.secretRules ? { rules: ctx.secretRules } : {}) });
     } else if (what === 'run') {
       req.resume();
       const requester = { login: who.login, breakGlass: who.breakGlass === true, deviceOk: who.deviceOk === true };

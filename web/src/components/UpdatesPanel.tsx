@@ -11,6 +11,8 @@ export interface UpdatesPanelData {
   installed: { sha: string | null; version: string | null };
   lastInstall: { at: string; from: string | null; to: string | null } | null;
   rollback: { at: string; sha: string | null; reason: string; held: boolean; canary: boolean } | null;
+  /** The updater draining the machine for an install (src/update-drain.ts); absent from an older server. */
+  drain?: { since: string; until: string; to: string | null; testRuns: number; agents: number } | null;
   canary: {
     settings: { instance: string; repo: string; timeLimitMinutes: number } | null;
     running: { at: string; trigger: 'update' | 'daily'; issue: number | null; url: string | null; deadline: string | null } | null;
@@ -40,6 +42,12 @@ export function duration(ms: number | null): string {
   const m = Math.round(s / 60);
   if (m < 60) return `${m} min`;
   return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+}
+
+/** `2 runs finishing`, `1 run and 1 agent finishing`, `nothing left running`. */
+export function finishing(runs: number, agents: number): string {
+  const parts = [runs ? `${runs} ${runs === 1 ? 'run' : 'runs'}` : '', agents ? `${agents} ${agents === 1 ? 'agent' : 'agents'}` : ''].filter(Boolean);
+  return parts.length ? `${parts.join(' and ')} finishing` : 'nothing left running';
 }
 
 function Row({ label, testId, children }: { label: string; testId: string; children: React.ReactNode }) {
@@ -82,6 +90,21 @@ export function UpdatesPanelView({ data }: { data: UpdatesPanelData }) {
             'no install recorded yet'
           )}
         </Row>
+        {data.drain ? (
+          <Row label="Draining" testId="updates-drain">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge tone="warn">draining for update</Badge>
+                <span title={data.drain.since}>
+                  since {when(data.drain.since)}, {finishing(data.drain.testRuns, data.drain.agents)}
+                </span>
+              </div>
+              <div className="text-[12px] text-ink-3">
+                No new test run or agent starts until {data.drain.to ? <span className="font-mono">{short(data.drain.to)}</span> : 'the update'} is installed; nothing running is stopped.
+              </div>
+            </div>
+          </Row>
+        ) : null}
         <Row label="Rollback" testId="updates-rollback">
           {data.rollback ? (
             <div role="alert" className="space-y-1">
@@ -94,7 +117,7 @@ export function UpdatesPanelView({ data }: { data: UpdatesPanelData }) {
                 </span>
               </div>
               <div data-testid="updates-rollback-reason">{data.rollback.reason}</div>
-              {data.rollback.held ? <div className="text-[12px] text-ink-3">Every instance runs the previous engine. This commit is held until a newer one, or until updates are turned off and on.</div> : null}
+              {data.rollback.held ? <div className="text-[12px] text-ink-3">Every instance runs the previous engine. This commit is held until a newer one, or until an admin releases it at a root shell: <span className="font-mono">sudo bash scripts/setup/updates.sh --release-hold</span>. Turning updates off and on doesn't.</div> : null}
             </div>
           ) : (
             'none'

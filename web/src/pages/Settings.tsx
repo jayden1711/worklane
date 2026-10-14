@@ -4,6 +4,7 @@ import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
 import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
+import { SetupScreens } from '../components/SetupScreens';
 import { Header } from './Overview';
 import { VoiceSettings } from '../voice/VoiceSettings';
 
@@ -103,14 +104,31 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
       <div className="px-6 pt-6">
         <InstanceSettings />
       </div>
+      <div className="px-6 pt-6">
+        <SetupScreens />
+      </div>
       <div className="px-6 pt-6 text-[12.5px] text-ink-2">
         The machine-wide settings (the agent slot cap, engine updates) and their history are on the{' '}
         {/* A link in the sentence (it stays inline on a phone, where every other control is a 44 px target). */}
         <a href="/machine" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/machine'))} data-testid="settings-machine-link">
           Machine page
         </a>
+        . Each setup step (Connect GitHub, the tools, the hooks, ...) is checked again, and can be run again, on the{' '}
+        <a href="/first-run" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/first-run'))} data-testid="settings-first-run-link">
+          First run page
+        </a>
         .
       </div>
+      {/* WHY: only where the step exists: a server instance's dashboard, for its owners and writers. */}
+      {full?.discordSetup && (
+      <div className="px-6 pt-2 text-[12.5px] text-ink-2" data-testid="settings-discord">
+        The Discord bot (its token, invite link and channels) is set up, and changed later, in the{' '}
+        <a href="/first-run?open=discord" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/first-run?open=discord'))} data-testid="settings-discord-link">
+          First run page's Discord step
+        </a>
+        .
+      </div>
+      )}
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <VoiceSettings owner={owner} brand={brand} />
         <Section title="Project">

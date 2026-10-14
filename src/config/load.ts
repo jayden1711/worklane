@@ -86,7 +86,7 @@ export function loadConfigAt(root: string, rev: string): Config {
 }
 
 /** Parse, validate and cross-check every config file `read` returns (null: the file is absent). */
-function configFrom(root: string, read: (file: string) => string | null): Config {
+export function configFrom(root: string, read: (file: string) => string | null): Config {
   const dir = join(root, BRAND.configDir);
   const errors: ConfigError[] = [];
   const out: Record<string, unknown> = {};

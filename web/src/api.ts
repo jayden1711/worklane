@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { openStream, type Stream, type StreamOptions } from './sse';
 
 export type TaskStatus =
   | 'triage' | 'ready' | 'claimed' | 'reproducing' | 'building' | 'verifying' | 'evaluating'
@@ -203,6 +204,8 @@ export interface Activity { id: number; ts: string; type: string; actor: string;
 
 export interface State {
   brand: { name: string; cli: string };
+  /** Setup mode (src/setup-mode.ts): no config yet; the first-run page is the whole dashboard. */
+  setupMode?: boolean;
   /** Whether this viewer may read intake reports (the owner or a writer); absent from an older server: yes. */
   canReadIntake?: boolean;
   /** Whether this viewer may read the throughput panel (the owner or a writer); absent from an older server: yes. */
@@ -350,6 +353,8 @@ export interface Run {
 }
 
 export interface Settings {
+  /** Whether this dashboard has the First run page's Discord step (a server instance's). */
+  discordSetup?: boolean;
   configDir: string;
   project: { name: string; repo: string; landMode: string; runtime: unknown };
   owners: State['owners'];
@@ -389,21 +394,12 @@ export function useFetch<T>(fn: () => Promise<T>, dep: unknown = 0): { data: T |
 /** In a browser (not the render checks, which render pages on the server). */
 const inBrowser = typeof window !== 'undefined';
 
+/**
+ * INVARIANT: the key is read from this tab's storage only, never from the address bar: the servers refuse a request
+ * whose URL carries a key (src/dashboard.ts keyInUrl), so a page opened that way never loads. The key page puts it here.
+ */
 function readToken(): string {
   if (!inBrowser) return '';
-  const url = new URL(window.location.href);
-  const t = url.searchParams.get('t');
-  if (t) {
-    try {
-      sessionStorage.setItem('dash-token', t);
-    } catch {
-      // storage unavailable: keep it in the URL instead
-      return t;
-    }
-    url.searchParams.delete('t');
-    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
-    return t;
-  }
   try {
     return sessionStorage.getItem('dash-token') ?? '';
   } catch {
@@ -487,8 +483,7 @@ export const keyMissing = inBrowser && needsKey(servedByHub, token);
 export const onLoopback = inBrowser && ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname);
 
 /**
- * INVARIANT: a key is tried (in a header, never a URL) before it is kept, and kept in this tab only, as a ?t= link's
- * is. On a hub only the break-glass answer counts: its sign-in port says 200 to anyone.
+ * INVARIANT: a key is tried (in a header, never a URL) before it is kept, and kept in this tab only. On a hub only the break-glass answer counts: its sign-in port says 200 to anyone.
  */
 export async function tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: RequestInit) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: Pick<Storage, 'setItem'> }): Promise<boolean> {
   const key = given.trim();
@@ -521,8 +516,14 @@ export async function terminalProtocols(): Promise<string[]> {
   return ['terminal.v1', ...(csrf ? [`csrf.${csrf}`] : [])];
 }
 
-/** A stream's URL: the break-glass token on it (EventSource sends no headers); a session's cookie goes by itself. */
-export const streamUrl = (path: string) => (token ? `${path}?t=${encodeURIComponent(token)}` : path);
+/**
+ * A live stream (server-sent events) at `path`, read with fetch so the break-glass key goes in the Authorization
+ * header like every other call (a session's cookie goes by itself). It reconnects after a drop, with Last-Event-ID.
+ * INVARIANT: no stream URL carries the key; EventSource, which can't send headers, isn't used (test/web-key-in-url.test.ts).
+ */
+export function liveStream(path: string | Promise<string>, on: StreamOptions['on'], o: Pick<StreamOptions, 'onOpen' | 'onError'> = {}): Stream {
+  return openStream(path, { headers: async (): Promise<Record<string, string>> => (await me, token ? { authorization: `Bearer ${token}` } : {}), on, ...o });
+}
 
 /** Sign out: the hub deletes the session (server-side), then the page shows the sign-in again. */
 export async function signOut(): Promise<void> {
@@ -617,16 +618,35 @@ export async function apiPath(path: string): Promise<string> {
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
 export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
-  const body = (await res.json()) as T & { error?: string };
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  return body;
+  return answer<T>(res);
+}
+
+/** A server's answer that wasn't a success, with its HTTP status: a refusal (isRefusal) or something to retry. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** Not signed in, not allowed, or no such view on this server: an answer, not a hiccup. Anything else is transient. */
+export const isRefusal = (e: unknown): boolean => e instanceof ApiError && (e.status === 401 || e.status === 403 || e.status === 404);
+
+async function answer<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    // A proxy's 502 page is no JSON: its status still says what it was.
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status);
+  }
+  return (await res.json()) as T;
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
-  const body = (await res.json()) as T & { error?: string };
-  if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-  return body;
+  return answer<T>(res);
 }
 
 /** State from the server, refetched whenever the event log changes (one SSE stream). */
@@ -648,24 +668,23 @@ export function useLiveState() {
 
   useEffect(() => {
     void refresh();
-    let es: EventSource | null = null;
-    let closed = false;
-    void apiPath('/api/stream').then((p) => {
-      if (closed) return;
-      es = new EventSource(streamUrl(p));
-      es.addEventListener('hello', () => setLive(true));
-      es.addEventListener('change', () => {
-        window.clearTimeout(timer.current);
-        timer.current = window.setTimeout(() => {
-          void refresh();
-          setPulse((p) => p + 1);
-        }, 150);
-      });
-      es.onerror = () => setLive(false);
-    });
+    const es = liveStream(
+      apiPath('/api/stream'),
+      {
+        hello: () => setLive(true),
+        change: () => {
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => {
+            void refresh();
+            setPulse((p) => p + 1);
+          }, 150);
+        },
+      },
+      { onError: () => setLive(false) },
+    );
     return () => {
-      closed = true;
-      es?.close();
+      window.clearTimeout(timer.current);
+      es.close();
     };
   }, [refresh]);
 
@@ -752,8 +771,27 @@ export interface AddProjectData {
   machineOwners: string[];
   /** Newest first. */
   runs: AddProjectRun[];
+  /** When the machine helper can't run add-project here (an older sudo): why, and the root script to run instead; absent from older servers. */
+  manual?: { sudo: string | null; why: string; script: string } | null;
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
+/** Add project's repo picker (GET /api/add-project/repos, src/setup/repo-picker.ts): an account's repos to pick from. */
+export interface PickableRepo {
+  fullName: string;
+  private: boolean;
+  installable: boolean;
+  why: string | null;
+  pushedAt: string | null;
+}
+export interface RepoPickerData {
+  owner: string;
+  ownerType: 'User' | 'Organization' | null;
+  accounts: string[];
+  repos: PickableRepo[];
+  note: string;
+  error: string | null;
+}
+export const getAddProjectRepos = (owner?: string) => api<RepoPickerData>(`/api/add-project/repos${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`);
 
 /** The first-run checklist (GET /api/first-run, src/init.ts firstRunView): init's steps as it recorded them. */
 export type FirstRunStatus = 'pending' | 'done' | 'skipped' | 'failed';
@@ -787,7 +825,76 @@ export interface FirstRun {
   actions?: Record<string, FirstRunActionPlan>;
   /** Whether this viewer may run a Fix action (the instance's owners). */
   canAct?: boolean;
+  /** A server instance's policy form (src/policy-edit.ts); null for a checkout. */
+  policy?: FirstRunPolicy | null;
+  /** A checkout's Repo config form, from the default branch's config (src/config-change.ts); null on a server. */
+  repoConfig?: FirstRunRepoConfig | { error: string } | null;
+  /** Setup mode (src/setup-mode.ts): the checkout has no config yet; this page is the whole dashboard. */
+  setupMode?: boolean;
+  /** Setup mode: the checkout's own config loads now (the dashboard takes over shortly). */
+  configReady?: boolean;
+  draft?: DraftJob;
 }
+export interface DraftJob {
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lines: string[];
+  result: { status: string; detail: string } | null;
+}
+export const getSetupRepos = () => api<{ repos: string[]; error?: string }>('/api/first-run/setup/repos');
+export const setupOrigin = (repo: string, confirm: boolean) => api<{ ok: boolean; commands?: string[]; repo?: string; confirmed: boolean }>('/api/first-run/setup/origin', { method: 'POST', body: JSON.stringify({ repo, confirm }) });
+export const setupAnswers = (answers: Record<string, string>) => api<{ ok: boolean; saved: string[] }>('/api/first-run/setup/answers', { method: 'POST', body: JSON.stringify({ answers }) });
+export const setupDraft = () => api<{ ok: boolean; draft: DraftJob }>('/api/first-run/setup/draft', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+export const setupMerge = (confirm: boolean) => api<{ ok: boolean; number: number; url?: string; command?: string; confirmed: boolean }>('/api/first-run/setup/merge', { method: 'POST', body: JSON.stringify({ confirm }) });
+export interface RepoConfigValues {
+  writers: string[];
+  required_checks: string[];
+  daily_budget_usd: number;
+  workers_count: number;
+  workers_model: string;
+}
+export interface FirstRunRepoConfig {
+  values: RepoConfigValues;
+  owner: string;
+  branch: string;
+  repo: string;
+}
+export interface ConfigChange {
+  file: string;
+  key: string;
+  from: unknown;
+  to: unknown;
+}
+/** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
+export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+/** Preview (nothing written) or propose as a PR the config change these values make. */
+/** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
+export const mergeRepoConfig = (number: number, confirm: boolean) =>
+  api<{ ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string }>('/api/first-run/repo-config/merge', { method: 'POST', body: JSON.stringify({ number, confirm }) });
+export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+export interface FirstRunPolicyField {
+  key: string;
+  value: number | boolean | string;
+  kind: 'number' | 'boolean' | 'choice';
+  min?: number;
+  max?: number;
+  step?: number;
+  choices?: string[];
+  why: string;
+}
+export interface FirstRunPolicy {
+  fields: FirstRunPolicyField[];
+  fixed: { key: string; value: unknown }[];
+  error: string | null;
+}
+export interface PolicyChange {
+  key: string;
+  from: unknown;
+  to: unknown;
+}
+/** Preview (confirm false: nothing written) or write the policy change these values make. */
+export const changePolicy = (values: Record<string, unknown>, confirm: boolean) => api<{ ok: boolean; changes: PolicyChange[]; confirmed: boolean }>('/api/first-run/policy', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunActionPlan {
   id: string;
   step: string;
@@ -804,7 +911,11 @@ export type SetupFix =
   | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  | { kind: 'signin'; label: string }
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'gh-login'; label: string; command: string }
+  | { kind: 'discord'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -818,6 +929,10 @@ export interface SetupStepView {
   detail: string;
   today: string;
   fix: SetupFix;
+  /** The command or config key that does the same without the page. */
+  automation: string | null;
+  /** Skipped on the first-run page (not counted as left). */
+  skipped: boolean;
   network: boolean;
   checkedAt: string;
 }
@@ -869,6 +984,101 @@ export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fre
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
 /** Run a first-run Fix action after the person confirmed the plan it showed. */
 export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Sign in to Claude (src/claude-signin.ts), as GET /api/first-run/claude-signin serves it. */
+export interface ClaudeStatusView {
+  loggedIn: boolean;
+  method: string | null;
+  /** Claude Code's cached account email: may predate a token change, so it is shown as cached. */
+  cachedAccount: string | null;
+}
+export type ClaudeSigninData =
+  | {
+      mode: 'local';
+      canAct: boolean;
+      state: 'idle' | 'waiting' | 'done' | 'failed' | 'cancelled' | 'timed-out';
+      /** Anthropic's sign-in page while waiting (the owners only). */
+      url: string | null;
+      detail: string;
+      startedAt: string | null;
+      endedAt: string | null;
+      status: ClaudeStatusView | null;
+    }
+  | {
+      mode: 'server';
+      canAct: boolean;
+      agentUser: string;
+      /** add-project's open claude-token paste box for this instance, when one is waiting. */
+      ask: (Ask & { kind: 'paste_secret' }) | null;
+      status: { at: string; loggedIn: boolean; method: string | null; cachedAccount: string | null; installedAt: string | null } | null;
+      command: string;
+      script: string;
+    };
+export const getClaudeSignin = () => api<ClaudeSigninData>('/api/first-run/claude-signin');
+/** Start the relayed `claude auth login` (local mode), after the person confirmed what it does. */
+export const startClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+export const cancelClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin/cancel', { method: 'POST', body: '{}' });
+/** Skip a setup step on the first-run page, or undo the skip. */
+export const skipStep = (step: string, skip: boolean) => api<{ ok: boolean; skipped: string[] }>('/api/first-run/skip', { method: 'POST', body: JSON.stringify({ step, skip }) });
+/** Connect GitHub (src/gh-login.ts): gh's device login, run by the server; only its one-time code reaches the page. */
+export interface GhLoginView {
+  state: 'idle' | 'waiting' | 'done' | 'failed' | 'expired' | 'cancelled';
+  code: string | null;
+  url: string | null;
+  startedAt: string | null;
+  expiresAt: string | null;
+  detail: string | null;
+  installed: boolean;
+}
+export const getGhLogin = () => api<GhLoginView>('/api/first-run/gh-login');
+export const startGhLogin = () => api<GhLoginView>('/api/first-run/gh-login', { method: 'POST', body: '{}' });
+export const cancelGhLogin = () => api<GhLoginView>('/api/first-run/gh-login', { method: 'DELETE' });
+/** The first-run page's Discord step (src/intake/discord-setup.ts), as GET /api/first-run/discord serves it. */
+export type DiscordFormValue = boolean | string | string[] | null;
+export interface DiscordChannel {
+  guild_id: string;
+  guild: string;
+  id: string;
+  name: string;
+  type: number;
+}
+/** The bot's own view, from a child process on the instance that reads the token itself; this page never sees it. */
+export interface DiscordBot {
+  application: { id: string; name: string; message_content: boolean };
+  invite: string;
+  channels: DiscordChannel[];
+  at: string;
+}
+export type DiscordSetup =
+  | { available: false; why: string }
+  | {
+      available: true;
+      instance: string;
+      canAct: boolean;
+      portal: string;
+      token: { configured: boolean; file: string | null; present: boolean; error: string | null };
+      ask: (Ask & { kind: 'paste_secret' }) | null;
+      invite: { integer: string; permissions: { name: string; bit: number; why: string }[] };
+      intake: { file: string; exists: boolean; error: string | null; values: Record<string, DiscordFormValue>; warnings: string[] };
+      form: { key: string; kind: 'boolean' | 'id' | 'ids' | 'guild' | 'url'; what: string }[];
+      automation: { token: string; channels: string; file: string; keys: string[]; restart: string };
+    };
+export interface DiscordIntakePlan {
+  ok: boolean;
+  confirmed: boolean;
+  file: string;
+  creates: boolean;
+  changes: { key: string; from: DiscordFormValue; to: DiscordFormValue }[];
+  diff: string;
+  hash: string;
+  warnings: string[];
+}
+export const getDiscordSetup = () => api<DiscordSetup>('/api/first-run/discord');
+export const getDiscordBot = (fresh = false) => api<DiscordBot>(`/api/first-run/discord/channels${fresh ? '?fresh=1' : ''}`);
+/** Open the paste box for the bot token (a paste_secret ask); the token itself goes through pasteSecret. */
+export const openDiscordTokenAsk = () => api<{ ok: boolean; ask: Ask }>('/api/first-run/discord/token-ask', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Review (no `expect`: nothing written) or write the intake.yaml change these picks make; a write names the reviewed change's hash. */
+export const changeDiscordIntake = (values: Record<string, DiscordFormValue>, expect?: string) =>
+  api<DiscordIntakePlan>('/api/first-run/discord/intake', { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
@@ -939,11 +1149,62 @@ export interface ClaudeAccountData {
   canPasteToken: boolean;
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
 }
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
+
+/** Tailscale and HTTPS for the hub (src/tailscale-setup.ts), as GET /api/tailscale serves it to a machine owner. */
+export type TailscaleAction = 'install' | 'up' | 'serve' | 'public-url';
+export interface TailscaleStatus {
+  installed: boolean;
+  version: string | null;
+  pinnedVersion: string | null;
+  state: string | null;
+  name: string | null;
+  https: boolean;
+  serve: boolean;
+  other443: boolean;
+  breakGlassForwarded: boolean;
+  funnel: boolean;
+  hubUrl: string | null;
+}
+export interface TailscaleStepView {
+  id: TailscaleAction;
+  title: string;
+  done: boolean;
+  blocked: string | null;
+  changes: string[];
+  command: string;
+  link: { url: string; label: string } | null;
+}
+export interface TailscaleStepLine {
+  at: string;
+  step: TailscaleAction;
+  state: 'started' | 'running' | 'waiting' | 'done' | 'failed';
+  detail: string;
+}
+export interface TailscaleData {
+  machineOwner: boolean;
+  machineOwners: string[];
+  login: string;
+  instance: string;
+  /** Whether this person may run a step (the server checks again). */
+  allowed: boolean;
+  why: string | null;
+  busy: string | null;
+  status: TailscaleStatus | null;
+  steps: TailscaleStepView[];
+  next: TailscaleAction | null;
+  run: { step: TailscaleAction; startedAt: string; status: 'running' | 'waiting' | 'done' | 'failed' | 'stalled'; detail: string; lines: TailscaleStepLine[] } | null;
+  /** Tailscale's login page for the waiting `up`: sent to machine owners only, never stored by the page. */
+  loginUrl: string | null;
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
+  script: { status: string; steps: string[] };
+}
+export const getTailscale = (fresh = false) => api<TailscaleData>(`/api/tailscale${fresh ? '?fresh=1' : ''}`);
+export const tailscaleAction = (action: TailscaleAction) => api<{ ok: boolean }>('/api/machine/tailscale', { method: 'POST', body: JSON.stringify({ action, confirm: true }) });
 
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
@@ -1280,10 +1541,10 @@ export async function onInstance<T>(instance: string | null, path: string, init:
   if (instance !== null && !s.instances.includes(instance)) throw new Error(`instance ${instance} isn't selected: choose it, or All instances, in the switcher`);
   return instance ? instanceApi<T>(instance, path, init) : api<T>(path, init);
 }
-/** A stream's URL on one instance in this page's scope (as onInstance): through the hub to the named one, or this page's own server (null). */
+/** A stream's path on one instance in this page's scope (as onInstance): through the hub to the named one, or this page's own server (null). No key: liveStream sends it. */
 export async function instanceStream(instance: string | null, path: string, scope: Promise<InstanceScope> = instanceScope): Promise<string> {
   if (instance !== null && !(await scope).instances.includes(instance)) throw new Error(`instance ${instance} isn't selected`);
-  return streamUrl(instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : await apiPath(path));
+  return instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : apiPath(path);
 }
 
 /** An instance's health, as its sidebar dot shows it: green (nothing open), amber (needs a person soon), red (broken). */

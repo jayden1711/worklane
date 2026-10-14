@@ -9,8 +9,9 @@
 // A lock file holds {pid, owner, acquiredAt}; a dead pid means the slot is free.
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { acquireLock, tryLock, type Lock, type LockInfo } from './locks.js';
+import { tryLock, type Lock, type LockInfo } from './locks.js';
 import { pidAlive, slotsConfigPath, slotsDir } from './os/index.js';
+import { drainHoldLine, updateDrain } from './update-drain.js';
 
 export const DEFAULT_MAX_AGENTS = 2;
 
@@ -43,6 +44,9 @@ export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
   }
   if (!guard) return null; // busy for 2s: treat as full and try again next tick
   try {
+    // INVARIANT: no new agent while the updater drains the machine (src/update-drain.ts): an install restarts every
+    // coordinator, which would end an agent's session, so the install waits for none to be running. Read under the lock.
+    if (updateDrain(dir)) return null;
     if (slotStatus(dir).agents.length >= machineCap(dir)) return null;
     for (let i = 0; i < SLOT_INDEX_LIMIT; i++) {
       const r = tryLock(join(dir, `agent-${i}.lock`), owner);
@@ -54,8 +58,19 @@ export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
   }
 }
 
-export function fullRunLock(owner: string, waitMs: number, dir = slotsDir()) {
-  return acquireLock(join(dir, 'full-run.lock'), owner, waitMs, 1000);
+/**
+ * Take the machine's full-run lock, waiting up to waitMs. Never while the updater drains the machine
+ * (src/update-drain.ts): the drain is checked before every try, and a wait that ends inside one says so as its holder.
+ */
+export async function fullRunLock(owner: string, waitMs: number, dir = slotsDir(), pollMs = 1000): Promise<{ lock: Lock } | { holder: LockInfo | null }> {
+  const path = join(dir, 'full-run.lock');
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const drain = updateDrain(dir);
+    const r: { lock: Lock } | { holder: LockInfo | null } = drain ? { holder: { pid: 0, owner: drainHoldLine(drain), acquiredAt: drain.since } } : tryLock(path, owner);
+    if ('lock' in r || Date.now() >= deadline) return r;
+    await new Promise((res) => setTimeout(res, Math.max(1, Math.min(pollMs, deadline - Date.now()))));
+  }
 }
 
 export interface SlotStatus {

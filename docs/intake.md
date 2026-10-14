@@ -587,9 +587,26 @@ test with an injection-style report.
 
 ## 6. Credentials
 
-- The chat-bot token: a file owned by the coordinator user, mode 0400, in the instance home, referenced from
-  `credentials.yaml`, installed with `credentials.sh <name> intake-discord`. No agent user can read it; the
-  sandbox denies the instance home.
+- The chat-bot token: a file owned by the coordinator user, mode 0400, in a 0700 directory of that user's,
+  referenced from `credentials.yaml` (`intake.discord_token`). No agent user can read it; the sandbox denies it.
+  Two ways in, and neither is a hand edit:
+  - `sudo bash scripts/setup/credentials.sh <name> intake-discord`: the token at a hidden prompt, or on stdin when
+    there is no terminal (automation); never an argument, never echoed. It installs the file, then writes its path
+    into `credentials.yaml` through the engine's config code (`<cli> instance set-discord-token`, as the
+    coordinator user), keeping the file's other settings.
+  - the dashboard's First run page, Discord step: an owner opens a paste box (a `paste_secret` ask) and pastes
+    the token; it goes from the browser straight to the file, and `credentials.yaml` is pointed at it the same
+    way. A value that isn't token-shaped is refused and nothing is stored.
+  The token is in no log, event, URL, argument or response, and the dashboard's own process never opens the file:
+  what needs it runs in a child process (`<cli> discord channels`), as the coordinator user.
+- Where the listing sends the token: Discord's REST API, and nowhere else. Its base URL is a constant in the code
+  (`src/intake/discord.ts`): no argument, environment variable, request, signed-in user or `intake.yaml` key can
+  name another host, and a test holds that.
+- Which program lists: always the installed engine's own `cli.js`, by absolute path, run by the dashboard's own node
+  binary. No PATH lookup, and no option, environment variable, config key or request can change it (`NODE_OPTIONS`
+  and `NODE_PATH` are dropped from the child's environment, so nothing else is loaded into it). Tests and CI replace
+  the listing only in code, with a stand-in that answers in-process (`discordListingStandIn`); anything else handed to
+  the dashboard in its place is refused.
 - A project's production read credentials stay on the production service, as with `prod-read` today.
 
 ## 7. Caps (instance settings)
@@ -618,9 +635,9 @@ test with an injection-style report.
 
 ## 10. What needs the owner's hands
 
-1. **Chat bot:** create an application and bot in the Discord developer portal, enable the message-content
-   intent, invite it to the one server with read and send permissions in the chosen channels, then install the
-   token with `credentials.sh <name> intake-discord`.
+1. **Chat bot:** create an application and bot in the Discord developer portal and enable the message-content
+   intent (only there), install the token, invite the bot, and pick its server and channels: section 10.1, on
+   the dashboard or by script.
 2. **In-product reports:** create a read-only database role limited to the bug-report table or view, store
    its connection string on the production service (as for `prod-read`), and set the query in the project's
    config. Only when the owner gives the go for that project.
@@ -644,6 +661,45 @@ test with an injection-style report.
    `labels` once to create the intake label, and add it to an issue template if outsiders should reach intake.
 10. **Superfans** (2.1.7): a channel per instance and one for the engine, their ids in each instance's
    `intake.yaml` under `superfan`; verify with `intake check --instance <name>` (`superfan: on, channel <id>`).
+
+### 10.1 The Discord step: on the dashboard, or by script
+
+The dashboard's First run page has a Discord step for a server instance (Settings links to it, and it opens
+again on a finished step). It is optional, and looking at it changes nothing: every write is an owner's,
+confirmed first. Each part has a script equivalent.
+
+| part | on the dashboard (an owner) | by script |
+|---|---|---|
+| the bot token | Paste the token: a paste box, straight to a 0400 file; `credentials.yaml` pointed at it | `sudo bash scripts/setup/credentials.sh <name> intake-discord` (hidden prompt, or stdin) |
+| the invite link | built from the bot's own application id, with the permissions below | the link below, with the application id from the developer portal |
+| the bot's channels | Load the bot's view: the instance asks Discord as its coordinator user, read-only | `sudo -H -u wl-<name> <cli> discord channels --instance <name>` (`--json` for ids of servers too) |
+| `intake.yaml` | pick the server and channels from that list; Review shows the exact diff; Confirm writes it (0600, renamed into place) | edit the keys below in `~/.local/state/<cli>/instances/<name>/intake.yaml` (0600) as the coordinator user |
+| take effect | restart the instance (the command is shown) | `sudo systemctl restart <cli>-<name>.service` |
+
+**The invite link** asks for exactly these four permissions, permission integer `309237648384`, and the `bot`
+scope only:
+
+`https://discord.com/oauth2/authorize?client_id=<application id>&scope=bot&permissions=309237648384`
+
+- **View Channels** (bit 10): see the channels it is added to and receive their messages.
+- **Send Messages** (bit 11): reply, and post decisions, incidents, merges and what the superfan finds.
+- **Create Public Threads** (bit 35): open one thread per idea, decision or setup ask.
+- **Send Messages in Threads** (bit 38): answer inside those threads.
+
+Nothing else: no reading of history, no managing channels, messages or the server, no mentioning everyone. A
+channel whose own permissions hide it from the bot's role still needs View Channel and Send Messages there.
+
+**The `intake.yaml` keys the step writes**, and nothing else in the file (every other key and comment is
+kept; the diff shows the exact change): `discord.enabled`, `discord.guild`, `discord.channels`, `discord.asks_channel`, `discord.ops_channel`,
+`discord.chat_channels`, `discord.dashboard_url`, `superfan.enabled`, `superfan.channel`,
+`superfan.machine_channel`. Each id is one the bot can see; a channel the bot reads (`channels`,
+`asks_channel`, `chat_channels`) is in the chosen server; a superfan channel is never one the bot reads; and the
+result must pass the schema (so the asks or ops channel needs `discord.dashboard_url`). A confirm writes only
+the change that was shown: if the file or the bot's list changed meanwhile, nothing is written.
+
+**Still by hand in `intake.yaml`:** who may send (`discord.allowed_senders`), who is who (`discord.people`),
+`discord.owners` and `trusted`. Until `allowed_senders` lists someone, no Discord message is accepted, and the
+step says so.
 
 ## 11. Build order
 

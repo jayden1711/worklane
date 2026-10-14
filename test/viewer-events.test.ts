@@ -95,7 +95,7 @@ test('a viewer gets the project part of /api/settings only; a writer and the own
 
 /** Collect a live stream's change events for `ms`. */
 async function changes(base: string, token: string, who: string, during: () => void, ms = 700) {
-  const res = await fetch(`${base}/api/stream?t=${token}`, { headers: asPerson(who) });
+  const res = await fetch(`${base}/api/stream`, { headers: { authorization: `Bearer ${token}`, ...asPerson(who) } });
   const reader = res.body!.getReader();
   const dec = new TextDecoder();
   let got = '';

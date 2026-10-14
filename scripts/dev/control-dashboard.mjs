@@ -42,7 +42,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { baselineErrors, errorKey, findPage, loadFeatureMap, pagePath, parseCommand, readyText, targetExpr } from './feature-map.mjs';
 // The DevTools client and its helpers, shared with the project-app runner (src/browser/cdp.ts, built).
-import { Cdp, findChrome as sharedFindChrome, freePort, sleep, until } from '../../dist/src/browser/cdp.js';
+import { findChrome as sharedFindChrome, freePort, launchChrome, sleep, until } from '../../dist/src/browser/cdp.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
@@ -70,6 +70,21 @@ export function findChrome(given = option('--chrome', process.env.CHROME)) {
 
 export { freePort };
 
+/**
+ * The dashboard's URL and key from what `dashboard` (or signin-fake.mjs's `instance` line) printed: the key-free URL
+ * and the key read from the file named after it; an older engine printed the key on the URL as `?t=`.
+ */
+export function printedDashboard(printed) {
+  const m = printed.match(/(http:\/\/127\.0\.0\.1:\d+)(?:\/\?t=([A-Za-z0-9_-]+)|\/? \(the page asks for the key once: it is in (.+)\))/);
+  if (!m) return null;
+  if (m[2]) return { base: m[1], token: m[2] };
+  if (!existsSync(m[3])) return null;
+  return { base: m[1], token: readFileSync(m[3], 'utf8').trim() };
+}
+
+/** A script for a new document: puts the key in this origin's session storage, as the page's key form does. */
+export const keySeed = (token) => `try { sessionStorage.setItem('dash-token', ${JSON.stringify(token)}); } catch {}`;
+
 /** Seed the demo, start its dashboard, start Chrome: everything under one temporary directory. */
 async function start() {
   const cli = join(engine, 'dist', 'src', 'cli.js');
@@ -79,8 +94,12 @@ async function start() {
   const { BRAND } = await import(pathToFileURL(join(engine, 'dist', 'src', 'brand.js')).href);
   const work = mkdtempSync(join(tmpdir(), 'dash-control-'));
   const procs = [];
-  const stop = () => {
+  let browser = null;
+  const stop = async () => {
     for (const p of procs) p.kill();
+    // Chrome and all its processes stopped, and its profile removed, before the directory holding it goes.
+    const note = browser ? await browser.close() : null;
+    if (note) process.stderr.write(`control-dashboard: ${note}\n`);
     if (!flag('--keep')) rmSync(work, { recursive: true, force: true, maxRetries: 3 });
   };
   try {
@@ -101,13 +120,14 @@ async function start() {
     let printed = '';
     dash.stdout.on('data', (d) => (printed += d));
     dash.stderr.on('data', (d) => (printed += d));
-    const shown = await until('the dashboard URL', () => printed.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/)?.[0], 20_000).catch((e) => {
+    // The printed URL carries no key; the key's file follows it (an older engine put the key on the URL as ?t=).
+    const shown = await until('the dashboard URL', () => printedDashboard(printed), 20_000).catch((e) => {
       throw new Error(`${e.message}\n${printed}`);
     });
     // With --as, the browser goes through the hub and signs in; the token here only seeds the run below.
     const hub = as ? await until('the hub URL', () => printed.match(/^hub (http:\/\/127\.0\.0\.1:\d+)$/m)?.[1], 20_000) : null;
-    const direct = shown.split('/?')[0];
-    const token = shown.split('?t=')[1];
+    const direct = shown.base;
+    const token = shown.token;
     const base = hub ?? direct;
     const state = await (await fetch(`${direct}/api/state`, { headers: { authorization: `Bearer ${token}` } })).json();
     const issue = state.tasks.find((t) => t.status === 'awaiting_decision')?.issue ?? state.tasks[0]?.issue;
@@ -119,34 +139,22 @@ async function start() {
     if (flag('--with-stage-labels')) await seedStageLabels(root, state.tasks.map((t) => t.issue));
     if (flag('--with-goal')) await seedGoals(root, state.tasks.map((t) => t.issue));
 
-    const profile = join(work, 'chrome');
-    mkdirSync(profile);
-    const browser = spawn(chrome, [
-      '--headless=new',
-      '--remote-debugging-port=0',
-      `--user-data-dir=${profile}`,
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-gpu',
-      '--hide-scrollbars',
-      `--window-size=${viewport.width},${viewport.height}`,
-      '--force-prefers-reduced-motion',
-      ...(flag('--no-chrome-sandbox') ? ['--no-sandbox'] : []),
-      ...(theme === 'dark' ? ['--force-dark-mode', '--blink-settings=preferredColorScheme=0'] : ['--blink-settings=preferredColorScheme=1']),
-      'about:blank',
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-    procs.push(browser);
-    let chromeErr = '';
-    browser.stderr.on('data', (d) => (chromeErr = (chromeErr + d).slice(-2000)));
-    const portFile = join(profile, 'DevToolsActivePort');
-    const devtools = await until('Chrome to open its DevTools port', () => existsSync(portFile) && readFileSync(portFile, 'utf8').split(/\r?\n/)[0], 20_000).catch((e) => {
-      throw new Error(`${e.message}\nChrome said: ${chromeErr.trim() || '(nothing)'}`);
+    // Chrome started the way the engine starts it for its own browser checks (src/browser/cdp.ts launchChrome):
+    // its launch wait (scaled on a loaded machine by <PREFIX>_BROWSER_TIMEOUT_SCALE) and one more start when the
+    // DevTools port never appears, rather than a fixed wait of this script's own. Its profile is in the temporary
+    // directory with everything else.
+    browser = await launchChrome(chrome, {
+      width: viewport.width,
+      height: viewport.height,
+      noSandbox: flag('--no-chrome-sandbox'),
+      profileRoot: work,
+      extraArgs: ['--force-prefers-reduced-motion', ...(theme === 'dark' ? ['--force-dark-mode', '--blink-settings=preferredColorScheme=0'] : ['--blink-settings=preferredColorScheme=1'])],
     });
-    const targets = await until('a page target', async () => (await (await fetch(`http://127.0.0.1:${devtools}/json/list`)).json()).find((t) => t.type === 'page'));
-    const cdp = await Cdp.connect(targets.webSocketDebuggerUrl);
+    for (const note of browser.notes) process.stderr.write(`control-dashboard: ${note}\n`);
+    const cdp = browser.cdp;
     return { cdp, base, token: hub ? null : token, signIn: !!hub, issue, run, stop, work };
   } catch (e) {
-    stop();
+    await stop();
     throw e;
   }
 }
@@ -373,8 +381,10 @@ class Controller {
       this.signedIn = true;
       this.opened = true;
     }
-    // The token goes on the first load only; the page moves it to session storage.
-    const url = `${this.base}${path}${this.opened || !this.token ? '' : `${path.includes('?') ? '&' : '?'}t=${this.token}`}`;
+    // The key never goes in a URL (the server refuses one that carries it): it is put in this tab's session
+    // storage, where the page's key form would keep it, before the first page loads.
+    if (!this.opened && this.token) await this.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: keySeed(this.token) });
+    const url = `${this.base}${path}`;
     await this.cdp.send('Page.navigate', { url });
     this.opened = true;
     const want = readyText(found.page, params);
@@ -471,7 +481,7 @@ async function session(fn) {
     return await fn(ctl, map);
   } finally {
     s.cdp.close();
-    s.stop();
+    await s.stop();
   }
 }
 

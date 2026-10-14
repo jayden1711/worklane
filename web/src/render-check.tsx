@@ -2,7 +2,8 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { GoalGraph, DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { TailscaleAction, TailscaleData } from './api';
+import type { GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -18,6 +19,7 @@ import { Header } from './pages/Overview';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
+import { UpdaterSetupView } from './components/UpdaterSetup';
 import { UpdatesPanelView, type UpdatesPanelData } from './components/UpdatesPanel';
 import { TestRunsView, type TestRunsData } from './components/TestRuns';
 import { ThroughputPanel, ThroughputView } from './components/ThroughputPanel';
@@ -36,6 +38,10 @@ import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { RepoConfigForm } from './components/RepoConfigForm';
+import { ClaudeSigninView } from './components/ClaudeSignin';
+import { SetupScreensView, withScreen } from './components/SetupScreens';
+import { DiscordSetupView } from './components/DiscordSetup';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { GoalGraphView } from './components/GoalGraph';
@@ -52,6 +58,9 @@ import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
 import { ClaudeAccountView } from './components/ClaudeAccount';
+import { TailscaleSetupView } from './components/TailscaleSetup';
+export { tailscaleBusy, tailscaleStepEnded } from './components/TailscaleSetup';
+export { accountBusy } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
@@ -92,6 +101,8 @@ export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => 
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
 export { boundsOf, LABEL, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
+/** The Updater setup steps alone; `review` opens one step's review as the server answered it. */
+export const renderUpdaterSetup = (data: MachineData, review: Parameters<typeof UpdaterSetupView>[0]['initialReview'] = null) => renderToStaticMarkup(<UpdaterSetupView data={data} initialReview={review} />);
 export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
 export { duration } from './components/UpdatesPanel';
 export const renderLiveFeed = (items: FeedItem[], ended: boolean) => renderToStaticMarkup(<LiveFeedView items={items} ended={ended} />);
@@ -142,8 +153,12 @@ export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
 export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(<WaitingView w={w} {...(now !== undefined ? { now } : {})} />);
 export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);
-export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean } = {}) => renderToStaticMarkup(<FirstRunView f={f} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} onRecheck={() => {}} />);
+export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: PolicyChange[]; configChanges?: ConfigChange[]; rerun?: string; draftConfirming?: boolean; signin?: ClaudeSigninData; discord?: DiscordSetup; ghLogin?: GhLoginView } = {}) => renderToStaticMarkup(<FirstRunView f={f} rerun={o.rerun ?? null} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} initialPolicyChanges={o.policyChanges ?? null} initialConfigChanges={o.configChanges ?? null} initialDraftConfirming={!!o.draftConfirming} signin={o.signin ?? null} initialGhLogin={o.ghLogin ?? null} onRecheck={() => {}} {...(o.discord ? { discord: <DiscordSetupView v={o.discord} /> } : {})} />);
+export const renderClaudeSignin = (v: ClaudeSigninData, o: { confirming?: boolean } = {}) => renderToStaticMarkup(<ClaudeSigninView v={v} initialConfirming={!!o.confirming} onChanged={() => {}} />);
+export const renderDiscordSetup = (v: DiscordSetup, o: { bot?: DiscordBot; botError?: string; tokenConfirming?: boolean; plan?: DiscordIntakePlan; values?: Record<string, DiscordFormValue> } = {}) =>
+  renderToStaticMarkup(<DiscordSetupView v={v} bot={o.bot ?? null} botError={o.botError ?? null} initialTokenConfirming={!!o.tokenConfirming} initialPlan={o.plan ?? null} {...(o.values ? { initialValues: o.values } : {})} />);
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
+export const renderSetupScreens = (steps: SetupStepView[]) => renderToStaticMarkup(<SetupScreensView steps={withScreen(steps)} />);
 export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage local={local} />);
 export const renderKeyPage = () => renderToStaticMarkup(<KeyPage />);
 export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
@@ -159,10 +174,11 @@ export const renderMachineSlots = (slots: State['slots']) => renderToStaticMarku
 export const renderTestRuns = (data: TestRunsData, compact = false) => renderToStaticMarkup(<TestRunsView data={data} compact={compact} />);
 export { elapsed } from './pages/Board';
 export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
-export const renderAddProject = (data: AddProjectData) => renderToStaticMarkup(<AddProjectView data={data} />);
+export const renderAddProject = (data: AddProjectData, picker?: RepoPickerData | null) => renderToStaticMarkup(<AddProjectView data={data} picker={picker === undefined ? null : picker} />);
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
+export const renderTailscaleSetup = (data: TailscaleData, o: { confirming?: TailscaleAction } = {}) => renderToStaticMarkup(<TailscaleSetupView data={data} initialConfirming={o.confirming ?? null} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
@@ -183,3 +199,10 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
 };
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
+
+export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean } = {}) =>
+  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialMergePlan={o.mergePlan ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} />);
+
+// What a live panel keeps when a look fails (web/src/refresh.tsx), for the tests to call.
+export { afterLoad, NOTHING_YET } from './refresh';
+export { ApiError, isRefusal } from './api';
