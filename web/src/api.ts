@@ -780,7 +780,8 @@ export type SetupFix =
   | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  | { kind: 'gh-login'; label: string; command: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -845,6 +846,19 @@ export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fre
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
 /** Run a first-run Fix action after the person confirmed the plan it showed. */
 export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Connect GitHub (src/gh-login.ts): gh's device login, run by the server; only its one-time code reaches the page. */
+export interface GhLoginView {
+  state: 'idle' | 'waiting' | 'done' | 'failed' | 'expired' | 'cancelled';
+  code: string | null;
+  url: string | null;
+  startedAt: string | null;
+  expiresAt: string | null;
+  detail: string | null;
+  installed: boolean;
+}
+export const getGhLogin = () => api<GhLoginView>('/api/first-run/gh-login');
+export const startGhLogin = () => api<GhLoginView>('/api/first-run/gh-login', { method: 'POST', body: '{}' });
+export const cancelGhLogin = () => api<GhLoginView>('/api/first-run/gh-login', { method: 'DELETE' });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**

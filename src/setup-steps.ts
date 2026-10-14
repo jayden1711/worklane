@@ -83,6 +83,8 @@ export const MACHINE_PATHS: MachinePaths = {
   fullRunLock: FULL_RUN_LOCK,
 };
 export const HUB_UNIT = `${BRAND.cli}-dashboard-hub.service`;
+/** The hub in setup mode (src/hub-setup.ts; dashboards.sh --setup): before the sign-in App exists. */
+export const HUB_SETUP_UNIT = `${BRAND.cli}-dashboard-hub-setup.service`;
 
 /** What a server instance's steps read from it: its credentials and its home. */
 export interface InstanceFacts {
@@ -138,7 +140,9 @@ export type Fix =
   /** The Start button: the coordinator's service. */
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  /** WHY: Connect GitHub (src/gh-login.ts): gh's device login run for the person, its one-time code relayed to the page. */
+  | { kind: 'gh-login'; label: string; command: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -431,7 +435,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Run \`gh auth login\` in a terminal, then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'outside', url: 'https://github.com/login/device', label: "GitHub's device login", why: "GitHub's own login page", command: 'gh auth login --web' },
+    fix: { kind: 'gh-login', label: 'Connect GitHub', command: 'gh auth login --web' },
     network: true,
     detect: (k) => detectGithubLogin(k.p, k.c.repo),
   },
@@ -459,12 +463,14 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: 'Make a GitHub App by hand (Settings, Developer settings, GitHub Apps, New), then `credentials.sh dashboard-signin` and `dashboards.sh --client-id <id> --public-url <url> <name>`; before that, reach the dashboard through `ssh -N -L 4398:127.0.0.1:4398 <you>@<host>`.',
-    fix: { kind: 'outside', url: 'https://github.com/settings/apps/new', label: "GitHub's new-App page", why: "GitHub's create-App consent page" },
+    today: '`dashboards.sh --setup --public-url <url>` starts the hub in setup mode: open the URL, paste the one-time setup token from the file it names, and make the sign-in App through GitHub\'s manifest flow; setup mode then turns itself off, and `dashboards.sh <name>...` starts the hub with it. By hand instead: make the App on GitHub, `credentials.sh dashboard-signin`, then `dashboards.sh --client-id <id> --public-url <url> <name>`.',
+    fix: { kind: 'terminal', command: 'sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net', why: "root makes the hub's user and its setup-mode service; the page it serves, behind a one-time setup token from a root-only file, makes the sign-in App on GitHub" },
     detect: (k) => {
       const up = k.p.systemUnitActive(HUB_UNIT);
       if (up === null) return no('no systemd here to ask about the dashboard hub');
-      return up ? ok(`the dashboard hub (${HUB_UNIT}) is running with its sign-in App`) : no(`the dashboard hub (${HUB_UNIT}) isn't running`);
+      if (up) return ok(`the dashboard hub (${HUB_UNIT}) is running with its sign-in App`);
+      if (k.p.systemUnitActive(HUB_SETUP_UNIT)) return no(`the hub is in setup mode (${HUB_SETUP_UNIT}): open it and make the sign-in App`);
+      return no(`the dashboard hub (${HUB_UNIT}) isn't running`);
     },
   },
   {

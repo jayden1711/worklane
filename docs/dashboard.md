@@ -40,9 +40,11 @@ Each instance has its own port and token: run one `dashboard.sh` and one tunnel 
 To see every instance on the machine from one page and one tunnel, an admin reviews and runs, once:
 
 ```bash
-sudo bash scripts/setup/credentials.sh dashboard-signin          # first: the sign-in App's client secret (below)
-sudo bash scripts/setup/dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net   # first: the sign-in App (below)
+sudo bash scripts/setup/dashboards.sh [--machine-owner <login>] <name> [<name>...]
 ```
+
+The second command takes the sign-in App's client id and the public URL from where setup mode stored them; `--client-id` and `--public-url` override them (and are needed when the App was made by hand).
 
 - Each instance gets its own dashboard service, `worklane-dashboard-<name>.service`, running as `wl-<name>`. It's the only process that reads that instance's log and records answers in it. It replaces running `dashboard.sh` in a terminal; don't run both, because they use the same port.
 - A viewer user, `wl-dash`, runs the hub, `worklane-dashboard-hub.service`, on port 4399. The page shows an instance switcher, and every call, answers included, is forwarded to the selected instance's own dashboard, which applies its own checks.
@@ -75,7 +77,22 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 
 ### The sign-in App (the owner's step)
 
-Create a GitHub App used only for "Sign in with GitHub" (GitHub: Settings, Developer settings, GitHub Apps, New GitHub App):
+The hub can't sign anyone in before its sign-in App exists, and GitHub's manifest flow, which makes the App in a few clicks, needs a running hub to send the browser back to. Setup mode breaks that loop. With Tailscale HTTPS set up (below):
+
+```bash
+sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net
+```
+
+- It starts `worklane-dashboard-hub-setup.service` as `wl-dash`, on 127.0.0.1:4399 (the port `tailscale serve` forwards). It has no instances and no sign-in: it serves one page, which makes the sign-in App.
+- It prints the hub's URL (a line `setup-mode hub: <url>`) and the path of a one-time setup token, `~wl-dash/.local/state/worklane/dashboard-hub/setup-token`, 0600, `wl-dash`'s. Only someone with root on the machine can read it: `sudo cat` it and paste it into the page. The token is never printed, logged, put in a URL (a link carrying `?token=` is refused) or passed as an argument.
+- The token works once. The browser that used it gets a setup session: a `__Host-setup` cookie (HttpOnly, Secure, SameSite=Lax so GitHub's redirect back carries it) for 2 hours. The token file is deleted. Ten wrong tokens lock the page until the next `--setup`. Every form checks the `Origin` and the page's CSRF token.
+- The page asks which GitHub account or organization owns the App, then posts the manifest to GitHub: no permissions, no webhook, the callback `<public URL>/auth/callback`. GitHub sends the browser back with a one-time code. The hub exchanges it, and stores the client secret, a session secret, the client id and the public URL in `~wl-dash/.config/dashboard-signin/` (0700; each file 0400, `wl-dash` only). The App's private key isn't kept.
+- Setup mode then turns itself off: the process exits, and nothing answers on 4399 until the real hub starts. It also turns off if the client secret appears some other way (`credentials.sh dashboard-signin`). It won't start again while the secret exists: `--setup` is refused.
+- Then run `dashboards.sh <name>...` as above. It removes the setup-mode unit and starts the real hub with the stored client id and URL. The setup page shows the exact command.
+
+The first-run page's "Dashboard sign-in (GitHub App)" step shows the `--setup` command, and says when the hub is in setup mode.
+
+By hand instead, create a GitHub App used only for "Sign in with GitHub" (GitHub: Settings, Developer settings, GitHub Apps, New GitHub App):
 
 - **Callback URL:** `https://<machine>.<tailnet>.ts.net/auth/callback`, exactly the hub's public URL plus `/auth/callback`.
 - **Expire user authorization tokens:** on (the default).

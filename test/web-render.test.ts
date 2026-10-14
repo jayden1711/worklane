@@ -50,7 +50,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; ghLogin?: unknown }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
@@ -1219,8 +1219,21 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   // Fix, a provider's login: the command, and that the page notices when it's done.
   const claude = r.renderFirstRun(f, { open: 'claude-login' });
   assert.match(claude, /data-testid="first-run-outside"[\s\S]*?Anthropic(&#x27;|')s own login and consent page[\s\S]*?checks again every 15 s and marks it done[\s\S]*?<code[^>]*>claude auth login<\/code>/);
-  // ... and with a direct link where the provider has one (GitHub's device login).
-  assert.match(r.renderFirstRun(f, { open: 'gh-login' }), /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="first-run-outside-link"[^>]*>Open GitHub(&#x27;|')s device login/);
+  // Connect GitHub (src/gh-login.ts): the command it runs for you; owners get the button, writers are told why not.
+  const ghFix = (canAct: boolean, ghLogin?: unknown) => r.renderFirstRun({ ...f, canAct }, { open: 'gh-login', ...(ghLogin ? { ghLogin } : {}) });
+  const gh0 = { state: 'idle', code: null, url: null, startedAt: null, expiresAt: null, detail: null, installed: true };
+  assert.match(ghFix(true, gh0), /data-fix="gh-login"[^>]*>Connect GitHub<[\s\S]*?data-testid="gh-login" data-state="idle"[\s\S]*?<code[^>]*>gh auth login --web<\/code>[\s\S]*?never sees the token[\s\S]*?data-testid="gh-login-start"[^>]*>Connect GitHub</);
+  assert.match(ghFix(false), /data-testid="gh-login-refused"/);
+  assert.doesNotMatch(ghFix(false), /gh-login-start/);
+  // Waiting: the one-time code, GitHub's device page, Cancel.
+  const waiting = ghFix(true, { ...gh0, state: 'waiting', code: 'E286-95A6', url: 'https://github.com/login/device', startedAt: '2026-10-13T00:00:00Z', expiresAt: '2026-10-13T00:15:00Z' });
+  assert.match(waiting, /data-testid="gh-login-code"[^>]*>E286-95A6</);
+  assert.match(waiting, /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="gh-login-link"/);
+  assert.match(waiting, /data-testid="gh-login-cancel"/);
+  // Failed: why, and Try again; no gh: the Tools step.
+  assert.match(ghFix(true, { ...gh0, state: 'failed', detail: 'gh stopped (exit 1)' }), /data-testid="gh-login-detail"[^>]*>gh stopped \(exit 1\)<[\s\S]*?data-testid="gh-login-start"[^>]*>Try again</);
+  assert.match(ghFix(true, { ...gh0, installed: false }), /data-testid="gh-login-no-gh"/);
+  assert.match(ghFix(true, { ...gh0, state: 'done', detail: 'signed in' }), /data-testid="gh-login-done"/);
   // Fix with no screen yet: what a person does today, and that a screen is coming.
   const coming = f.setup!.groups.flatMap((g) => g.steps).find((s) => !s.done && s.fix.kind === 'coming')!;
   const comingHtml = r.renderFirstRun(f, { open: coming.id });

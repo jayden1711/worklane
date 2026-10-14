@@ -279,7 +279,11 @@ dash_args() {
   local id url user devices
   id="$(hub_option --client-id)"; url="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"
   id="${id:-$client_id}" url="${url:-$public_url}"
-  [ -n "$id" ] && [ -n "$url" ] || { echo "no dashboard hub yet to take its settings from: give add-project.sh --client-id <sign-in App client id> --public-url https://<host> (after credentials.sh dashboard-signin)"; return 1; }
+  # Else what the hub's setup mode stored with the sign-in App (dashboards.sh --setup), wl-dash's own files.
+  local signin; signin="$(home_of wl-dash 2>/dev/null)/.config/dashboard-signin"
+  if [ -z "$id" ] && [ -s "$signin/client-id" ]; then id="$(cat "$signin/client-id")"; fi
+  if [ -z "$url" ] && [ -s "$signin/public-url" ]; then url="$(cat "$signin/public-url")"; fi
+  [ -n "$id" ] && [ -n "$url" ] || { echo "no dashboard hub yet to take its settings from: make the sign-in App with dashboards.sh --setup, or give add-project.sh --client-id <sign-in App client id> --public-url https://<host> (after credentials.sh dashboard-signin)"; return 1; }
   printf '%s\n' --client-id "$id" --public-url "$url"
   [ -z "$user" ] || printf '%s\n' --console-user "$user"
   [ -z "$devices" ] || printf '%s\n' --console-devices "$devices"

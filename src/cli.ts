@@ -5,7 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
-import { initCommand, MODES, type Mode } from './init.js';
+import { engineRoot, initCommand, MODES, type Mode } from './init.js';
 import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
 import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
@@ -32,6 +32,7 @@ import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarnin
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
 import { DetachError, detachDashboard, detachedLines } from './dashboard-detach.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
+import { SetupOver, startSetupHub } from './hub-setup.js';
 import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
@@ -136,6 +137,11 @@ usage: ${BRAND.cli} <command> [options]
                                    port only, on this machine (docs/dashboard.md);
                                    --console-user: the admin user the owner terminal runs as
                                    from the Tailscale devices --console-devices lists (none: refused)
+  dashboard --hub-setup --public-url https://<host> --signin-dir dir [--port n] [--service]
+                                   the hub in setup mode, before sign-in exists (dashboards.sh --setup
+                                   runs it): one page, unlocked by a one-time setup token from a 0600
+                                   file, makes the sign-in App through GitHub's manifest flow, stores
+                                   its secret in --signin-dir, then exits; it won't start once that exists
   demo <dir>                       seed a demo project worked by the real coordinator, then
                                    open its dashboard: dashboard --root <dir>/shop
   report                           the report the coordinator would post now (since the last one)
@@ -656,6 +662,26 @@ async function main(argv: string[]): Promise<number> {
       const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
       // --service: run under a service manager: no browser, and the token stays in its file, out of the log.
       const service = flag(opts, '--service');
+      if (flag(opts, '--hub-setup')) {
+        // The hub in setup mode (src/hub-setup.ts): one page that makes the sign-in App, then exits (dashboards.sh --setup).
+        const publicUrl = option(opts, '--public-url');
+        const signinDir = option(opts, '--signin-dir');
+        if (!publicUrl || !signinDir) throw new Error('--hub-setup needs --public-url https://<host> and --signin-dir <dir>');
+        const portOpt = option(opts, '--port');
+        const next = `sudo bash ${join(engineRoot(), 'scripts', 'setup', 'dashboards.sh')}`;
+        let h: Awaited<ReturnType<typeof startSetupHub>>;
+        try {
+          h = await startSetupHub({ stateDir: join(stateDir(), 'dashboard-hub'), signinDir, publicUrl, port: portOpt ? Number(portOpt) : HUB_PORT, nextCommand: next });
+        } catch (e) {
+          if (!(e instanceof SetupOver)) throw e;
+          console.log(e.message);
+          return 0;
+        }
+        // INVARIANT: never the token itself: only the file it is in.
+        console.log(`${BRAND.name} dashboard hub, setup mode (served on ${h.url}, loopback only)\n  open: ${new URL(publicUrl).origin}\n  the one-time setup token is in ${h.tokenFile} (sudo cat it on this machine; it works once)\n  it turns itself off once the sign-in App is made`);
+        console.log(`setup mode off: ${await h.closed}`);
+        return 0;
+      }
       const hubArg = option(opts, '--hub');
       if (hubArg) {
         // One view over several instances, each served by its own dashboard as its own user (dashboard-hub.ts).
