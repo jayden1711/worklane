@@ -12,9 +12,17 @@
 #     which runs the installed engine's add-project.sh as root with exactly those (checked) arguments.
 #     And `claude-account status|switch`, the Claude account switch (claude-account.sh): status runs it; switch starts
 #     it as its own unit, taking the token from the asking instance's dashboard.
-#   - Lets each coordinator user wl-<name> run exactly those 28 commands as root (sudoers,
-#     listed one by one), and add-project with two arguments of its fixed shapes (a pattern; sudo 1.9.10 or
-#     later). The dashboard viewer wl-dash gets nothing.
+#     And the engine updater's setup: `install-updater` (the installed engine's updates.sh, no arguments),
+#     `set-update-channel release` (updates.json's channel, nothing else; following main is updates.sh --channel main,
+#     at a root shell) and `stage-update-signer <principal> ssh-ed25519 <public key>`, which records a release signer
+#     in /var/lib/worklane/pending-signers.json for an admin to confirm (`discard-update-signer` takes it back out).
+#     Nothing in the helper writes /etc/worklane/allowed_signers, the keys a release tag's signature is checked
+#     against: a staged key becomes a signer only through updates.sh --confirm-signer <fingerprint>, as root.
+#     And `tailscale install|up|serve|public-url`, which start tailscale.sh with that one word as its own unit: the
+#     pinned, signed install; `tailscale up` with no auth key; https 443 to the hub's sign-in port; the hub's URL.
+#   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
+#     listed one by one), and add-project, stage-update-signer and discard-update-signer with arguments of their
+#     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
@@ -54,8 +62,21 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 28 commands, and add-project <name> <owner/repo>"
+say "sudoers: ${users[*]} may run exactly the helper's 34 commands, add-project <name> <owner/repo> and stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
+if sudo_regex_ok; then
+  echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer and discard-update-signer rules are installed"
+  left_out='[]'
+else
+  echo "REFUSED: the add-project, stage-update-signer and discard-update-signer rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
+  left_out='["add-project","stage-update-signer","discard-update-signer"]'
+fi
+# For the dashboard (0644, written whole): which of the helper's commands this machine's sudo rule leaves out, so a
+# page shows the root command for them instead of a button that would only fail.
+printf '{"sudo":"%s","patterns_min":"%s","left_out":%s}\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN" "$left_out" > "$(dirname "$HELPER_RULES")/.helper-rules.json.tmp"
+chmod 0644 "$(dirname "$HELPER_RULES")/.helper-rules.json.tmp"
+mv -f "$(dirname "$HELPER_RULES")/.helper-rules.json.tmp" "$HELPER_RULES"
+echo "wrote $HELPER_RULES: $(cat "$HELPER_RULES")"
 
 say "check"
 for u in "${users[@]}"; do
@@ -65,14 +86,35 @@ for u in "${users[@]}"; do
   if sudo -n -l -U "$u" "$MACHINE_HELPER" set-test-slots 9 >/dev/null 2>&1; then echo "FAIL: $u may run set-test-slots 9" >&2; exit 1; fi
   sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account switch >/dev/null || { echo "FAIL: $u can't run claude-account switch" >&2; exit 1; }
   if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account switch --token-from x >/dev/null 2>&1; then echo "FAIL: $u may pass claude-account switch its own arguments" >&2; exit 1; fi
+  for ok in install up serve public-url; do
+    sudo -n -l -U "$u" "$MACHINE_HELPER" tailscale "$ok" >/dev/null || { echo "FAIL: $u can't run tailscale $ok" >&2; exit 1; }
+  done
+  for bad in "tailscale funnel" "tailscale funnel 443" "tailscale serve --funnel" "tailscale serve funnel on" "tailscale serve --bg --https=443 http://127.0.0.1:4399" "tailscale serve --set-path=/x http://127.0.0.1:4398" "tailscale serve http://0.0.0.0:4399" "tailscale serve --tcp=22 tcp://127.0.0.1:22" "tailscale up --advertise-exit-node" "tailscale up --advertise-routes=198.51.100.0/24" "tailscale up --ssh" "tailscale up --accept-routes" "tailscale up --login-server=https://x.example" "tailscale" "tailscale up --auth-key=tskey-auth-x" "tailscale up --authkey tskey-auth-x" "tailscale up x" "tailscale serve 4398" "tailscale serve --https=443 http://127.0.0.1:4398" "tailscale public-url https://x.example" "tailscale install 1.0.0" "tailscale status" "tailscale logout" "tailscale UP"; do
+    # shellcheck disable=SC2086 # each case is its words
+    if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+  done
   for bad in "add-project x" "add-project x o/r extra" "add-project X o/r" "add-project x o" "add-project x o/r/s" "add-project x;id o/r" "add-project -x o/r"; do
     # shellcheck disable=SC2086 # each case is its words
     if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
   done
-  if ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then
-    add_project_note="NOTE: this sudo ($(sudo -V | head -1)) doesn't match add-project's pattern (it needs 1.9.10 or later), so add-project from the dashboard is refused; run add-project.sh in a terminal instead"
+  sudo -n -l -U "$u" "$MACHINE_HELPER" install-updater >/dev/null || { echo "FAIL: $u can't run install-updater" >&2; exit 1; }
+  sudo -n -l -U "$u" "$MACHINE_HELPER" set-update-channel release >/dev/null || { echo "FAIL: $u can't run set-update-channel release" >&2; exit 1; }
+  # A public key of the right shape, made up for this check (all zero bytes): nothing is run, sudo only says whether it would.
+  probe_key="AAAAC3NzaC1lZDI1NTE5AAAAI$(printf 'A%.0s' $(seq 1 43))"
+  for bad in "install-updater --check x" "set-update-channel" "set-update-channel main" "set-update-channel beta" "set-update-channel release x" "stage-update-signer" "stage-update-signer owner@example.com" \
+    "stage-update-signer owner@example.com ssh-ed25519 ${probe_key}A" "stage-update-signer owner@example.com ssh-ed25519 ${probe_key%A}" "stage-update-signer owner@example.com ssh-rsa $probe_key" \
+    "stage-update-signer * ssh-ed25519 $probe_key" "stage-update-signer owner@example.com,other@example.com ssh-ed25519 $probe_key" "stage-update-signer owner@example.com cert-authority ssh-ed25519 $probe_key" \
+    "stage-update-signer owner@example.com ssh-ed25519 $probe_key extra" "add-update-signer owner@example.com ssh-ed25519 $probe_key" "confirm-update-signer owner@example.com ssh-ed25519 $probe_key" \
+    "remove-update-signer owner@example.com ssh-ed25519 $probe_key" "set-update-signers /tmp/x" "set-update-verify off"; do
+    # shellcheck disable=SC2086 # each case is its words; set -f: the * is a word, never a file list
+    if (set -f; sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1); then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+  done
+  if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" stage-update-signer owner@example.com ssh-ed25519 "$probe_key" >/dev/null 2>&1; then
+    echo "FAIL: sudo $(sudo_version) should match the stage-update-signer pattern, and $u can't run it" >&2; exit 1
+  fi
+  if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then
+    echo "FAIL: sudo $(sudo_version) should match the add-project pattern, and $u can't run it" >&2; exit 1
   fi
 done
 if id -u wl-dash >/dev/null 2>&1 && sudo -n -l -U wl-dash "$MACHINE_HELPER" set-slots 1 >/dev/null 2>&1; then echo "FAIL: wl-dash may run the helper" >&2; exit 1; fi
-[ -z "${add_project_note:-}" ] || echo "$add_project_note"
 echo "OK: each coordinator may run the helper's exact commands; nothing else, and not wl-dash"

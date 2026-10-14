@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { discordChannelsCommand, listDiscordChannels } from '../src/intake/discord-channels.js';
+import { API } from '../src/intake/discord.js';
 
 const TOKEN = 'MTAwMDAwMDAwMDAwMDAwMDAx.fake01.placeholder-bot-token-value';
 
@@ -71,6 +72,12 @@ function instances(o: { token?: boolean } = {}) {
  * them and every other console call meanwhile. WHY console, not process.stdout: the test runner reports through
  * the process's own stdout.
  */
+/** A fetch that sends what the listing asks of Discord's REST base to the fake server instead (the base itself is a constant). */
+const toFake = (api: string): typeof fetch => ((url: string | URL | Request, init?: RequestInit) => {
+  assert.ok(String(url).startsWith(`${API}/`), `the listing asked ${String(url)}`);
+  return fetch(`${api}${String(url).slice(API.length)}`, init);
+}) as typeof fetch;
+
 async function run(o: { api: string; instance?: string; dir: string; fetch?: typeof fetch }) {
   const out: string[] = [];
   const err: string[] = [];
@@ -83,7 +90,8 @@ async function run(o: { api: string; instance?: string; dir: string; fetch?: typ
   console.warn = console.info = console.debug = (...a: unknown[]) => void stray.push(text(a));
   let code: number;
   try {
-    code = await discordChannelsCommand({ ...o, sleep: async () => {} });
+    const { api, ...rest } = o;
+    code = await discordChannelsCommand({ ...rest, fetch: o.fetch ?? toFake(api), sleep: async () => {} });
   } finally {
     keys.forEach((k, i) => (console[k] = saved[i]!));
   }
@@ -137,7 +145,7 @@ test('discord channels: the token is never in stdout, stderr or a thrown error, 
       assert.equal(r.code, 1, `${mode}: fails`);
       assert.equal(r.err.length, 1, `${mode}: one line on stderr`);
       assert.deepEqual(leaks([...r.out, ...r.err, ...r.stray]), [], `${mode}: no token in any output`);
-      const thrown = await listDiscordChannels({ token: TOKEN, api: d.api, sleep: async () => {} }).then(
+      const thrown = await listDiscordChannels({ token: TOKEN, fetch: toFake(d.api), sleep: async () => {} }).then(
         () => null,
         (e: Error) => e,
       );

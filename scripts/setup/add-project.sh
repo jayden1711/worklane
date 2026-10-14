@@ -5,9 +5,13 @@
 #
 # The steps (each skipped, as "done", when it is done already, so a rerun picks up where an earlier one stopped):
 #   instance        instance.sh <name>, and the instance home as engine.sh makes it
-#   app             the agent's GitHub App, through the manifest flow (`worklane app-manifest`, through the dashboard
-#                   hub: two clicks on GitHub, as a machine owner). credentials.sh <name> github-app stays the
-#                   manual way; once it has run, this step is done.
+#   app             the agent's GitHub App, through GitHub's manifest flow only (`worklane app-manifest`, through the
+#                   dashboard hub: two clicks on GitHub, as a machine owner): its key, client secret and webhook
+#                   secret go straight to wl-<name>'s own 0400 files, never to a URL, a log, an argument or an event.
+#                   It never asks for an App made by hand; one already set up (credentials.sh) counts as done.
+#                   On a machine's first project there is no hub yet: this step starts it alone first
+#                   (dashboards.sh --no-instances), with the sign-in App the hub's setup mode stored
+#                   (dashboards.sh --setup); without one it stops, naming that command.
 #   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted (or on stdin), stored for
 #                   wl-<name>-agent only. Never echoed or logged.
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
@@ -123,10 +127,23 @@ done_app() {
   esac
   echo "the instance's GitHub App is set up (credentials.yaml github: kind app), $how"
 }
+start_first_hub() {
+  local signin args
+  signin="$(home_of wl-dash 2>/dev/null || true)/.config/dashboard-signin"
+  [ -s "$signin/client-secret" ] || { echo "no dashboard hub on this machine yet, and no sign-in App for one (the App is made through GitHub's manifest flow, which comes back to the hub): make the sign-in App first with sudo bash $here/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net (open the page it prints), then add the project again"; return 1; }
+  args="$(dash_args)" || { echo "$args"; return 1; }
+  echo "no dashboard hub on this machine yet: starting it, with no instance, for the App's manifest flow"
+  # shellcheck disable=SC2086 # one word per option, none with spaces
+  bash "$here/dashboards.sh" --no-instances $args
+}
 do_app() {
   local hub_token line rc
   hub_token="$(home_of wl-dash 2>/dev/null || true)/.local/state/worklane/dashboard-hub/dashboard-token"
-  [ -s "$hub_token" ] || { echo "no dashboard hub on this machine yet (no $hub_token): set it up with dashboards.sh, or make the App by hand: credentials.sh $name github-app <app-id> <installation-id> <key.pem> $repo"; return 1; }
+  # A machine's first project: no hub yet for GitHub to send the browser back to, and the hub's own step is the last
+  # one (its instance dashboard needs the checkout, which needs this App). So the hub alone starts here, with the
+  # sign-in App the hub's setup mode stored (dashboards.sh --setup); the dashboards step adds the instance at the end.
+  if [ ! -s "$hub_token" ] && [ ! -f "$HUB_UNIT" ]; then start_first_hub; fi
+  [ -s "$hub_token" ] || { echo "no dashboard hub on this machine yet (no $hub_token): the App is made through GitHub's manifest flow, which comes back to the hub; set the hub up with dashboards.sh first, then add the project again"; return 1; }
   # The CLI prints each GitHub click as "ask: {json}": passed on as this step's asks; the rest is its log.
   set +e
   "$ENGINE_CLI" app-manifest "$name" "$repo" --ask-lines --timeout "$timeout" ${public_url:+--public-url "$public_url"} 2>&1 | while IFS= read -r line; do
@@ -140,7 +157,7 @@ do_app() {
   return "$rc"
 }
 detail_app() { done_app; }
-alone_app() { echo "sudo $ENGINE_CLI app-manifest $name $repo; or by hand: sudo bash $here/credentials.sh $name github-app <app-id> <installation-id> <key.pem> $repo"; }
+alone_app() { echo "sudo $ENGINE_CLI app-manifest $name $repo"; }
 
 # --- claude-token
 done_claude_token() {
@@ -164,6 +181,9 @@ do_claude_token() {
   printf '%s' "$token" | install_claude_token "$agent"
   token=""
   claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token"; return 1; }
+  # What the first-run step reads (claude-account's status.json): this instance's agent users, as claude auth status
+  # finds each now. Never the token: its id (a hash prefix) and whether it is signed in. A later switch rewrites it.
+  bash "$here/claude-account.sh" status "$name" >/dev/null 2>&1 || true
 }
 detail_claude_token() { echo "stored for $agent only"; }
 
@@ -279,7 +299,11 @@ dash_args() {
   local id url user devices
   id="$(hub_option --client-id)"; url="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"
   id="${id:-$client_id}" url="${url:-$public_url}"
-  [ -n "$id" ] && [ -n "$url" ] || { echo "no dashboard hub yet to take its settings from: give add-project.sh --client-id <sign-in App client id> --public-url https://<host> (after credentials.sh dashboard-signin)"; return 1; }
+  # Else what the hub's setup mode stored with the sign-in App (dashboards.sh --setup), wl-dash's own files.
+  local signin; signin="$(home_of wl-dash 2>/dev/null || true)/.config/dashboard-signin"
+  if [ -z "$id" ] && [ -s "$signin/client-id" ]; then id="$(cat "$signin/client-id")"; fi
+  if [ -z "$url" ] && [ -s "$signin/public-url" ]; then url="$(cat "$signin/public-url")"; fi
+  [ -n "$id" ] && [ -n "$url" ] || { echo "no dashboard hub yet to take its settings from: make the sign-in App with dashboards.sh --setup, or give add-project.sh --client-id <sign-in App client id> --public-url https://<host> (after credentials.sh dashboard-signin)"; return 1; }
   printf '%s\n' --client-id "$id" --public-url "$url"
   [ -z "$user" ] || printf '%s\n' --console-user "$user"
   [ -z "$devices" ] || printf '%s\n' --console-devices "$devices"

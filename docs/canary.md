@@ -7,7 +7,7 @@ real one does (issue, plan, PR, green checks, merged) within a time limit.
 - **After an update**, the install isn't final until the canary passes. If the canary fails, or runs out of time, the
   updater rolls back the same way it does when services don't come up. It stops the services, restores every
   instance's migration backups, switches back to the previous engine and restarts the services. Then it holds the
-  commit (no retry until a newer commit, or until updates are turned off and on again) and raises a watchdog incident.
+  commit (no retry until a newer commit, or until an admin runs `updates.sh --release-hold` at a root shell) and raises a watchdog incident.
 - **The daily canary** checks the engine as it is now. If it fails, it raises the incident and rolls nothing back.
 - No other update starts while a canary runs.
 

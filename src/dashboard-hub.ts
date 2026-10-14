@@ -79,8 +79,15 @@ export const HUB_PORT = 4399;
 export const HUB_BREAK_GLASS_PORT = 4398;
 const NAME = /^[a-z][a-z0-9-]{0,40}$/;
 
-/** `a=/state/a,b=/state/b`: each instance's name and state dir (its token file is there). */
+/** `--hub -`: a hub with no instance yet (a machine's first project: dashboards.sh --no-instances). */
+export const NO_INSTANCES = '-';
+
+/**
+ * `a=/state/a,b=/state/b`: each instance's name and state dir (its token file is there). `-` alone: none yet, said
+ * outright, so a list that came out empty by mistake is still refused.
+ */
 export function parseHubArg(arg: string, port: (name: string) => number): HubInstance[] {
+  if (arg === NO_INSTANCES) return [];
   const out: HubInstance[] = [];
   for (const part of arg.split(',').filter(Boolean)) {
     const i = part.indexOf('=');
@@ -90,7 +97,7 @@ export function parseHubArg(arg: string, port: (name: string) => number): HubIns
     if (out.some((x) => x.name === name)) throw new Error(`--hub names ${name} twice`);
     out.push({ name, port: port(name), tokenFile: `${dir.replace(/[\\/]+$/, '')}/dashboard-token` });
   }
-  if (!out.length) throw new Error('--hub needs at least one instance');
+  if (!out.length) throw new Error(`--hub needs at least one instance (or ${NO_INSTANCES} alone for none yet)`);
   return out;
 }
 

@@ -4,10 +4,15 @@
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
+import { cancelGhLogin, getFirstRun, getGhLogin, runFirstRunAction, skipStep, startCoordinator, startGhLogin, type FirstRun, type GhLoginView, type FirstRunActionPlan, type PolicyChange, type ConfigChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State, type ClaudeSigninData } from '../api';
 import { navigate } from '../App';
+import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
+import { DiscordSetupPanel } from '../components/DiscordSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
+import { PolicyForm } from '../components/PolicyForm';
+import { RepoConfigForm } from '../components/RepoConfigForm';
+import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -154,6 +159,116 @@ function ActionPanel({ plan, canAct, initialConfirming = false, onDone }: { plan
   );
 }
 
+/** How often Connect GitHub asks where the login is, while it waits for the code to be typed on GitHub. */
+export const GH_POLL_MS = 2_000;
+
+/**
+ * WHY: Connect GitHub (audit row 8). The server runs `gh auth login --web` and relays only its one-time code; the person
+ * types it on GitHub's device page, and the step is done once `gh auth status` says so. The token stays in gh's store.
+ */
+export function GhLoginPanel({ canAct, command, initial = null, onDone }: { canAct: boolean; command: string; initial?: GhLoginView | null; onDone: () => void }) {
+  const [v, setV] = useState<GhLoginView | null>(initial);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const waiting = v?.state === 'waiting';
+  useEffect(() => {
+    if (initial || !canAct) return;
+    getGhLogin()
+      .then(setV)
+      .catch((e: Error) => setErr(e.message));
+  }, [initial, canAct]);
+  useEffect(() => {
+    if (!waiting || initial) return;
+    const t = window.setInterval(() => {
+      getGhLogin()
+        .then((n) => {
+          setV(n);
+          if (n.state === 'done') onDone();
+        })
+        .catch((e: Error) => setErr(e.message));
+    }, GH_POLL_MS);
+    return () => window.clearInterval(t);
+  }, [waiting, initial, onDone]);
+  const act = async (f: () => Promise<GhLoginView>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const n = await f();
+      setV(n);
+      if (n.state === 'done') onDone();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2.5" data-testid="gh-login" data-state={v?.state ?? 'loading'}>
+      <p className="text-[12.5px] text-ink-2">
+        This runs <code className="font-mono text-[12px] text-ink">{command}</code> on this machine for you. GitHub gives a one-time code to type on its device page; gh keeps the login in its own store, and this page never sees the token.
+      </p>
+      {!canAct ? (
+        <p className="text-[12.5px] text-ink-3" data-testid="gh-login-refused">
+          Only the instance's owners can connect GitHub here.
+        </p>
+      ) : v?.state === 'waiting' ? (
+        <div className="space-y-2 rounded-lg bg-blue-tint p-3" data-testid="gh-login-waiting">
+          {v.code ? (
+            <>
+              <p className="text-[12.5px] text-ink">Type this code on GitHub:</p>
+              <div className="select-all font-mono text-[22px] font-semibold tracking-[0.12em] text-ink" data-testid="gh-login-code">
+                {v.code}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a href={v.url ?? 'https://github.com/login/device'} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="gh-login-link">
+                  Open github.com/login/device
+                </a>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(cancelGhLogin)} data-testid="gh-login-cancel">
+                  Cancel
+                </Button>
+              </div>
+              <p className="text-[12px] text-ink-3">
+                This page checks every {GH_POLL_MS / 1000} s and marks the step done once GitHub has the code{v.expiresAt ? `; the code lasts until ${new Date(v.expiresAt).toLocaleTimeString()}` : ''}.
+              </p>
+            </>
+          ) : (
+            <p className="text-[12.5px] text-ink" data-testid="gh-login-starting">
+              Asking GitHub for a code…
+            </p>
+          )}
+        </div>
+      ) : v?.state === 'done' ? (
+        <p className="text-[12.5px] text-green" data-testid="gh-login-done">
+          {v.detail ?? 'Signed in.'} Checking that you can push…
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {v && v.state !== 'idle' && v.detail && (
+            <p className={cx('break-words text-[12.5px]', v.state === 'cancelled' ? 'text-ink-3' : 'text-red')} data-testid="gh-login-detail">
+              {v.detail}
+            </p>
+          )}
+          {v && !v.installed ? (
+            <p className="text-[12.5px] text-ink-2" data-testid="gh-login-no-gh">
+              gh isn't installed yet: the Tools step installs it.
+            </p>
+          ) : (
+            <Button size="sm" disabled={busy || !v} onClick={() => void act(startGhLogin)} data-testid="gh-login-start">
+              {busy ? 'Starting…' : v && v.state !== 'idle' ? 'Try again' : 'Connect GitHub'}
+            </Button>
+          )}
+        </div>
+      )}
+      {err && (
+        <p className="break-words text-[12.5px] text-red" data-testid="gh-login-error">
+          {err}
+        </p>
+      )}
+      <p className="text-[12px] text-ink-3">You can skip this and run the command in a terminal instead; the step turns done either way.</p>
+    </div>
+  );
+}
+
 /** What a step's Fix shows when it has no screen to open: today's way, a provider's page, or a terminal command. */
 function FixPanel({ s }: { s: SetupStepView }) {
   const f = s.fix;
@@ -187,10 +302,15 @@ function FixPanel({ s }: { s: SetupStepView }) {
   );
 }
 
-function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' ? s.fix.label : 'Fix';
+function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; onSkip?: (skip: boolean) => void }) {
+  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' ? s.fix.label : 'Fix';
+  // WHY: a form's values can be reviewed and changed whether or not the step is done (the policy starts valid), and a
+  // sign-in or the Discord step is rerunnable (another account, an expired login, another channel); any step opened from Settings' Setup list can be run
+  // again; a skipped step stays closed until the skip is undone.
+  const offered = rerun || (!s.skipped && (!s.done || (s.fix.kind === 'form' && s.fix.form !== 'setup-origin' && s.fix.form !== 'setup-config') || s.fix.kind === 'signin' || s.fix.kind === 'discord'));
   return (
-    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
+    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : s.skipped ? 'skipped' : 'todo'}>
       <div className="flex gap-3">
         <span className={cx('mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold', s.done ? 'bg-green-tint text-green' : s.optional ? 'bg-inset text-ink-3 shadow-hairline' : 'bg-red-tint text-red')} aria-hidden>
           {s.done ? '✓' : ''}
@@ -199,19 +319,31 @@ function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; 
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-[13px] font-medium text-ink">{s.title}</span>
             {s.optional && <span className="text-[11.5px] text-ink-3">optional</span>}
-            <Badge tone={s.done ? 'ok' : s.optional ? 'neutral' : 'warn'}>{s.done ? 'done' : 'not done'}</Badge>
+            <Badge tone={s.done ? 'ok' : s.optional || s.skipped ? 'neutral' : 'warn'}>{s.done ? 'done' : s.skipped ? 'skipped' : 'not done'}</Badge>
           </div>
           <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
         </div>
-        {!s.done && (
-          <Button size="sm" variant={open ? 'ghost' : 'outline'} className="shrink-0 self-start" onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
-            {label}
-          </Button>
-        )}
+        <div className="flex shrink-0 flex-wrap items-start justify-end gap-1.5 self-start">
+          {onSkip && !s.done && (
+            <Button size="sm" variant="ghost" onClick={() => onSkip(!s.skipped)} data-testid="first-run-skip" data-skipped={s.skipped}>
+              {s.skipped ? 'Undo skip' : 'Skip'}
+            </Button>
+          )}
+          {offered && (
+            <Button size="sm" variant={open || (s.done && (s.fix.kind === 'signin' || s.fix.kind === 'discord')) ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' ? 'Change' : 'Run again') : label}
+            </Button>
+          )}
+        </div>
       </div>
-      {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
+      {open && offered && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          {s.fix.kind === 'action' ? action : <FixPanel s={s} />}
+          {panel ? action : <FixPanel s={s} />}
+          {s.automation && (
+            <p className="mt-2.5 break-words border-t border-line pt-2 text-[12px] text-ink-3" data-testid="first-run-automation">
+              Without this page: <code className="font-mono text-[11.5px] text-ink-2">{s.automation}</code>
+            </p>
+          )}
         </div>
       )}
     </li>
@@ -295,8 +427,16 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; initialGhLogin?: GhLoginView | null }) {
+  const [skipError, setSkipError] = useState<string | null>(null);
+  const skip = (id: string, on: boolean) => {
+    setSkipError(null);
+    skipStep(id, on)
+      .then(() => onRecheck?.())
+      .catch((e: Error) => setSkipError(e.message));
+  };
   const [open, setOpen] = useState<string | null>(initialOpen);
+  const recheck = useCallback(() => onRecheck?.(), [onRecheck]);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
   const pct = setup?.total ? Math.round((setup.done / setup.total) * 100) : 0;
@@ -312,6 +452,17 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
   };
   return (
     <div className="space-y-5">
+      {f.setupMode && (
+        <Card className="space-y-1 p-4" data-testid="first-run-setup-mode">
+          <div className="text-[13px] font-medium text-ink">{f.configReady ? 'The config is here: opening the dashboard…' : 'Setup mode: this checkout has no config yet'}</div>
+          <p className="text-[12.5px] text-ink-2">Pick its GitHub repo, answer what auto-config asks, draft the config and merge its PR. The rest of the dashboard opens here on its own once the config is on the default branch and in this checkout.</p>
+        </Card>
+      )}
+      {skipError && (
+        <p className="break-words text-[12.5px] text-red" data-testid="first-run-skip-error">
+          {skipError}
+        </p>
+      )}
       {f.mode && (
         <p className="text-[12.5px] text-ink-2" data-testid="first-run-mode" data-mode={f.mode}>
           {MODE_LINE[f.mode]}
@@ -358,7 +509,35 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   s={s}
                   open={open === s.id}
                   onFix={() => fix(s)}
-                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : undefined}
+                  rerun={rerun === s.id}
+                  {...(f.canAct ? { onSkip: (on: boolean) => skip(s.id, on) } : {})}
+                  action={
+                    s.fix.kind === 'action' ? (
+                      <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'signin' ? (
+                      signin ? <ClaudeSigninView v={signin} onChanged={() => onRecheck?.()} /> : <ClaudeSigninPanel onDone={recheck} />
+                    ) : s.fix.kind === 'gh-login' ? (
+                      <GhLoginPanel canAct={!!f.canAct} command={s.fix.command} initial={initialGhLogin} onDone={recheck} />
+                    ) : s.fix.kind === 'discord' ? (
+                      (discord ?? <DiscordSetupPanel onChanged={() => onRecheck?.()} />)
+                    ) : s.fix.kind === 'form' && s.fix.form === 'policy' && f.policy ? (
+                      <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && s.fix.form === 'repo-config' && f.repoConfig ? (
+                      'error' in f.repoConfig ? (
+                        <p className="break-words text-[12.5px] text-ink-2" data-testid="repo-config-error">
+                          Not from here yet: {f.repoConfig.error}
+                        </p>
+                      ) : (
+                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onMerged={() => onRecheck?.()} />
+                      )
+                    ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
+                      <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && s.fix.form === 'setup-config' && f.setupMode ? (
+                      <SetupAutoConfig a={f.autoConfig} draft={f.draft} canEdit={!!f.canAct} onDone={() => onRecheck?.()} initialConfirming={initialDraftConfirming} />
+                    ) : (
+                      <FixPanel s={s} />
+                    )
+                  }
                 />
               ))}
             </ol>
@@ -366,7 +545,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
         </section>
       ))}
       <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} />
-      {f.autoConfig && <AutoConfigView a={f.autoConfig} />}
+      {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
           <div className="text-[13px] font-medium text-ink">init hasn't been run here</div>
@@ -404,8 +583,13 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
 export const firstRunRefusal = (state: Pick<State, 'canReadDigest' | 'user' | 'role'>) =>
   state.canReadDigest === false ? `the first-run checklist is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
+/** The step a link asked to open (Settings links here to run a step again): /first-run?open=<step>. */
+const openFromUrl = () => (typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('open'));
+
 export function FirstRunPage({ state }: { state: State }) {
   const refused = firstRunRefusal(state);
+  // WHY: Settings' Setup list opens one step here (?step=<id>), done or not, to run it again.
+  const [rerun] = useState(() => new URLSearchParams(window.location.search).get('step'));
   const [f, setF] = useState<FirstRun | { error: string } | null>(null);
   const [checking, setChecking] = useState(false);
   const load = useCallback(
@@ -420,12 +604,18 @@ export function FirstRunPage({ state }: { state: State }) {
     [refused],
   );
   useEffect(() => load(false), [load, state.lastId]);
-  // Live while open: a provider login done in another tab shows here without a click.
+  const setupMode = !!(f && 'setupMode' in f && f.setupMode);
+  const drafting = !!(f && 'draft' in f && f.draft?.running);
+  // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app.
+  useEffect(() => {
+    if (state.setupMode && f && !('error' in f) && f.setupMode === false) window.location.reload();
+  }, [f, state.setupMode]);
+  // Live while open: a provider login done in another tab shows here without a click; faster while setting up.
   useEffect(() => {
     if (refused) return;
-    const t = window.setInterval(() => load(false), POLL_MS);
+    const t = window.setInterval(() => load(false), drafting || setupMode ? 3_000 : POLL_MS);
     return () => window.clearInterval(t);
-  }, [load, refused]);
+  }, [load, refused, drafting, setupMode]);
   return (
     <div data-testid="page-first-run">
       <Header title="First run" sub={f && 'setup' in f && f.setup ? `${f.setup.done} of ${f.setup.total} steps done` : 'the guided setup, step by step'} />
@@ -437,7 +627,7 @@ export function FirstRunPage({ state }: { state: State }) {
         ) : !f ? null : 'error' in f ? (
           <div className="text-[13px] text-red">Can't load the checklist: {f.error}</div>
         ) : (
-          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} />
+          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={rerun ?? openFromUrl()} rerun={rerun} />
         )}
       </div>
     </div>

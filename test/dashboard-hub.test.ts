@@ -127,9 +127,26 @@ test('--hub names each instance once, with its state dir; the CLI refuses a malf
     { name: 'b', port: 4402, tokenFile: '/s/b/state/dashboard-token' },
   ]);
   for (const bad of ['', 'a', '=/x', 'A=/x', 'a=/x,a=/y']) assert.throws(() => parseHubArg(bad, port), /--hub/);
+  // WHY: a machine's first project needs the hub before any instance has a dashboard. None is said outright (-), so
+  // a list that came out empty by mistake is still refused, and - is never mixed with names.
+  assert.deepEqual(parseHubArg('-', port), []);
+  for (const bad of ['-,a=/x', 'a=/x,-', ',']) assert.throws(() => parseHubArg(bad, port), /--hub/);
   const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'dashboard', '--hub', 'Bad', '--service'], { encoding: 'utf8', env: childEnv(), timeout: 20_000 });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr + r.stdout, /--hub takes name=/);
+});
+
+test('dashboards.sh --no-instances: the hub alone, never with names, never over a hub that serves instances', () => {
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'dashboards.sh'), 'utf8');
+  const from = sh.indexOf('if [ -n "$no_instances" ]; then');
+  const block = sh.slice(from, sh.indexOf('\nfi\n', from));
+  assert.ok(from > 0);
+  assert.match(block, /\[ "\$#" -eq 0 \] \|\| \{ echo "\$usage" >&2; exit 2; \}/, 'no names with it');
+  assert.match(block, /served="\$\(hub_instances[^\n]*\n\s+\[ -z "\$served" \] \|\| \{[^\n]*exit 1; \}/, 'refused over a hub with instances');
+  assert.ok(from < sh.indexOf('ensure_user "$viewer"', from), 'checked before anything changes');
+  // Without the flag, names are still required.
+  assert.match(sh, /\{ \[ "\$#" -ge 1 \] \|\| \[ -n "\$no_instances" \]; \} && \[ -n "\$client_id" \]/);
+  assert.match(sh, /hub_arg="\$\{hub_arg:--\}"\n/, 'none is said outright to the engine');
 });
 
 test('the dashboards setup gives the viewer read of each token and traverse on the way, nothing more', () => {

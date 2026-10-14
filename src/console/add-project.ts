@@ -18,6 +18,7 @@
 // a time, so an ask belongs to exactly one run.
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from '../machine-owners.js';
+import { ADD_PROJECT_SCRIPT, HELPER_RULES, helperRules } from '../machine.js';
 import { MACHINE_EVENTS, machineRequests, type MachineRequest } from '../machine-requests.js';
 import { ADD_PROJECT_STEPS, type AddProjectStep as AddProjectStepName } from '../coordinator/add-project.js';
 import { ASK_EVENTS, asksFrom, mayAnswerAsk, type Ask, type Role } from './asks.js';
@@ -98,12 +99,25 @@ export function addProjectGate(who: { role: Role | null; requester: MachineReque
 }
 
 /** The view: whether the form is enabled (and why not), the machine owners, and the runs, newest first. */
-export function addProjectView(events: readonly StoredEvent[], who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string } = {}) {
-  const why = addProjectGate(who, o);
+/**
+ * When the machine helper can't run add-project here (this machine's sudo is older than 1.9.10, so machine-helper.sh
+ * left the rule out and recorded it): why, and the root command to run instead. Null when it can.
+ */
+export function addProjectManual(o: { helperRulesFile?: string } = {}): { sudo: string | null; why: string; script: string } | null {
+  const rules = helperRules(o.helperRulesFile ?? HELPER_RULES);
+  if (!rules || !rules.leftOut.includes('add-project')) return null;
+  return { sudo: rules.sudo, why: `this machine's sudo (${rules.sudo ?? 'its version unknown'}) is older than 1.9.10, so the machine helper's add-project rule isn't installed and the dashboard can't run it: run it at a root shell on the machine`, script: ADD_PROJECT_SCRIPT };
+}
+
+export function addProjectView(events: readonly StoredEvent[], who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string; helperRulesFile?: string } = {}) {
+  const manual = addProjectManual(o);
+  const why = manual ? manual.why : addProjectGate(who, o);
   const runs = addProjectRuns(events, who.role).reverse();
   const busy = runs.find((r) => r.status === 'pending' || r.status === 'running') ?? null;
   return {
     allowed: why === null && !busy,
+    /** Not through the helper on this machine: the root command instead (the page fills in the name and repo). */
+    manual,
     why: why ?? (busy ? `adding ${busy.name} is still running; one project at a time` : null),
     login: who.requester.login,
     machineOwners: machineOwners(o.ownersFile ?? MACHINE_OWNERS_FILE),

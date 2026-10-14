@@ -341,3 +341,45 @@ test('a helper that can\'t be put back is not a clean rollback: the reason, the 
   assert.equal(findings[0]!.kind, 'update_rollback');
   assert.match(findings[0]!.detail, /was rolled back and is held: rollback: the old engine's root helpers could NOT be put back/);
 });
+
+// The screen 9 review rule: no hold is released by anything a coordinator can run; only at a root shell. Here with the
+// sandbox rollback's own hold (#372's code above), kept in a real file, the real helper changing updates.json, and the
+// real updates-root.cjs releasing it.
+test('the sandbox rollback\'s hold survives set-update-channel and set-updates off/on run through the helper; only updates.sh --release-hold lifts it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sandbox-hold-'));
+  const etc = join(root, 'etc');
+  const varDir = join(root, 'var');
+  mkdirSync(etc);
+  mkdirSync(varDir);
+  const heldFile = join(varDir, 'update-held.json');
+  const fix = (src: string) => src.replace("const ETC = '/etc/worklane';", `const ETC = ${JSON.stringify(etc)};`).replace("const LOG = '/var/lib/worklane/machine-changes.jsonl';", `const LOG = ${JSON.stringify(join(varDir, 'changes.jsonl'))};`).replace("const PENDING = '/var/lib/worklane/pending-signers.json';", `const PENDING = ${JSON.stringify(join(varDir, 'pending.json'))};`).replace("const HELD = '/var/lib/worklane/update-held.json';", `const HELD = ${JSON.stringify(heldFile)};`);
+  mkdirSync(join(root, 'scripts', 'machine'), { recursive: true });
+  mkdirSync(join(root, 'scripts', 'setup'), { recursive: true });
+  const helper = join(root, 'scripts', 'machine', 'worklane-machine.cjs');
+  writeFileSync(helper, fix(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs'), 'utf8')));
+  // updates-root.cjs loads the updater beside it (#384's signers watch), so the engine's copy goes there too.
+  writeFileSync(join(root, 'scripts', 'machine', 'worklane-update.cjs'), fix(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs'), 'utf8')));
+  const rootSteps = join(root, 'scripts', 'setup', 'updates-root.cjs');
+  writeFileSync(rootSteps, fix(readFileSync(join(repoRoot, 'scripts', 'setup', 'updates-root.cjs'), 'utf8')));
+  writeFileSync(join(etc, 'updates.json'), `${JSON.stringify({ enabled: true, channel: 'main' })}\n`);
+  const m = machine({ alice: { before: passedBefore, says: { ok: false } } });
+  // The hold, as realDeps keeps it: the file. And updates.json's time, as realDeps used to read it, to show it no longer matters.
+  m.deps.hold = (e: { sha: string; at: string; failed: string[] }) => void writeFileSync(heldFile, `${JSON.stringify(e)}\n`);
+  m.deps.held = () => { try { return JSON.parse(readFileSync(heldFile, 'utf8')); } catch { return null; } };
+  m.deps.configChangedAt = () => statSync(join(etc, 'updates.json')).mtimeMs;
+  assert.equal(await u.run(m.deps), 'rolled_back');
+  const bytes = readFileSync(heldFile, 'utf8');
+  assert.equal(JSON.parse(bytes).sha, NEW, 'the sandbox rollback held the commit');
+  for (const args of [['set-update-channel', 'release'], ['set-updates', 'off'], ['set-updates', 'on'], ['set-update-channel', 'release']]) {
+    const r = spawnSync(process.execPath, [helper, ...args], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'wl-alice' } });
+    assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
+    assert.equal(readFileSync(heldFile, 'utf8'), bytes, `${args.join(' ')} left the hold as it was`);
+  }
+  // updates.json is now newer than the hold, and the commit is still held. (The fake machine reads its own config: main, on.)
+  assert.equal(await u.run(m.deps), 'held');
+  const released = spawnSync(process.execPath, [rootSteps, 'release-hold'], { encoding: 'utf8', env: { ...process.env, SUDO_USER: 'admin' } });
+  assert.equal(released.status, 0, released.stderr);
+  assert.match(released.stdout, /^held: bbbbbbbbbbbb, rolled back at .*the test sandbox check passed before the update and fails after it/);
+  assert.equal(m.deps.held(), null);
+  assert.notEqual(await u.run(m.deps), 'held', 'released: tried again');
+});

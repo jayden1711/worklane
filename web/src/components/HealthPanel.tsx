@@ -180,7 +180,7 @@ export function UpdateHold({ hold }: { hold: NonNullable<HealthView['updateHold'
   return (
     <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-update-held">
       <span className="font-medium text-red">{hold.migration ? 'Engine update rolled back: a migration failed' : 'Engine update rolled back'}</span>
-      {' '}({new Date(hold.at).toISOString().slice(0, 16).replace('T', ' ')} UTC{hold.sha ? `, ${hold.sha.slice(0, 12)}` : ''}): {hold.reason}. Every instance runs the previous engine; this commit is held until a newer one, or until you turn updates off and on.
+      {' '}({new Date(hold.at).toISOString().slice(0, 16).replace('T', ' ')} UTC{hold.sha ? `, ${hold.sha.slice(0, 12)}` : ''}): {hold.reason}. Every instance runs the previous engine; this commit is held until a newer one, or until an admin releases it at a root shell: sudo bash scripts/setup/updates.sh --release-hold.
     </div>
   );
 }

@@ -303,6 +303,8 @@ function Dashboard() {
   let page: React.ReactNode;
   // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
   if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
+  // WHY: setup mode (no config yet) serves the first-run page alone, whatever the address.
+  else if (state.setupMode) page = <FirstRunPage state={state} />;
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/waiting') page = <WaitingPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;

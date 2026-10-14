@@ -40,9 +40,11 @@ Each instance has its own port and token: run one `dashboard.sh` and one tunnel 
 To see every instance on the machine from one page and one tunnel, an admin reviews and runs, once:
 
 ```bash
-sudo bash scripts/setup/credentials.sh dashboard-signin          # first: the sign-in App's client secret (below)
-sudo bash scripts/setup/dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net   # first: the sign-in App (below)
+sudo bash scripts/setup/dashboards.sh [--machine-owner <login>] <name> [<name>...]
 ```
+
+The second command takes the sign-in App's client id and the public URL from where setup mode stored them; `--client-id` and `--public-url` override them (and are needed when the App was made by hand).
 
 - Each instance gets its own dashboard service, `worklane-dashboard-<name>.service`, running as `wl-<name>`. It's the only process that reads that instance's log and records answers in it. It replaces running `dashboard.sh` in a terminal; don't run both, because they use the same port.
 - A viewer user, `wl-dash`, runs the hub, `worklane-dashboard-hub.service`, on port 4399. The page shows an instance switcher, and every call, answers included, is forwarded to the selected instance's own dashboard, which applies its own checks.
@@ -75,7 +77,24 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 
 ### The sign-in App (the owner's step)
 
-Create a GitHub App used only for "Sign in with GitHub" (GitHub: Settings, Developer settings, GitHub Apps, New GitHub App):
+The hub can't sign anyone in before its sign-in App exists, and GitHub's manifest flow, which makes the App in a few clicks, needs a running hub to send the browser back to. Setup mode breaks that loop. With Tailscale HTTPS set up (below):
+
+```bash
+sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net
+```
+
+- It starts `worklane-dashboard-hub-setup.service` as `wl-dash`, on 127.0.0.1:4399 (the port `tailscale serve` forwards). It has no instances and no sign-in: it serves one page, which makes the sign-in App.
+- It prints the hub's URL (a line `setup-mode hub: <url>`) and the path of a one-time setup token, `~wl-dash/.local/state/worklane/dashboard-hub/setup-token`, 0600, `wl-dash`'s. Only someone with root on the machine can read it: `sudo cat` it and paste it into the page. The token is never printed, logged, put in a URL (a link carrying `?token=` is refused) or passed as an argument.
+- The token works once. The browser that used it gets a setup session: a `__Host-setup` cookie (HttpOnly, Secure, SameSite=Lax so GitHub's redirect back carries it) for 2 hours. The token file is deleted. Ten wrong tokens lock the page until the next `--setup`. Every form checks the `Origin` and the page's CSRF token.
+- The page asks which GitHub account or organization owns the App, then posts the manifest to GitHub: no permissions, no webhook, the callback `<public URL>/auth/callback`. GitHub sends the browser back with a one-time code. The hub exchanges it, and stores the client secret, a session secret, the client id and the public URL in `~wl-dash/.config/dashboard-signin/` (0700; each file 0400, `wl-dash` only). The App's private key isn't kept.
+- Setup mode then turns itself off: the process exits, and nothing answers on 4399 until the real hub starts. It also turns off if the client secret appears some other way (`credentials.sh dashboard-signin`). It won't start again while the secret exists: `--setup` is refused.
+- Then run `dashboards.sh <name>...` as above. It removes the setup-mode unit and starts the real hub with the stored client id and URL. The setup page shows the exact command.
+
+The first-run page's "Dashboard sign-in (GitHub App)" step shows the `--setup` command, and says when the hub is in setup mode.
+
+**A machine's first project.** The agents' App is made through the manifest flow, which comes back to the hub, and add-project starts the hub in its last step (an instance's own dashboard can't start before its checkout exists, and the checkout needs the App). So when the machine has no hub yet, add-project's App step starts the hub alone first, with `dashboards.sh --no-instances` and what setup mode stored, then goes on; its last step adds the instance to the hub as before. The order for a first project is: `dashboards.sh --setup`, the sign-in App, `add-project.sh <name> <owner/repo>` (which starts the hub, then asks for the two GitHub clicks). If there is no sign-in App yet, the App step stops and names the `--setup` command. `--no-instances` takes no names and is refused once the hub serves an instance. A second project is unchanged: the hub is there, and is never started alone.
+
+By hand instead, create a GitHub App used only for "Sign in with GitHub" (GitHub: Settings, Developer settings, GitHub Apps, New GitHub App):
 
 - **Callback URL:** `https://<machine>.<tailnet>.ts.net/auth/callback`, exactly the hub's public URL plus `/auth/callback`.
 - **Expire user authorization tokens:** on (the default).
@@ -96,9 +115,11 @@ It asks for the client secret (not shown), writes it to `~wl-dash/.config/dashbo
 
 Instead of creating an App by hand, `sudo worklane app-manifest <name> <owner/repo>` makes the instance's agent App, and `sudo worklane app-manifest <name> <owner/repo> --signin --public-url https://<machine>.<tailnet>.ts.net` makes the sign-in App. With the hub running, it prints a link. A machine owner opens it, signed in to the dashboard, and approves the App on GitHub. The link works once and lasts 10 minutes. GitHub then sends the browser back to the hub's `/setup/app-manifest/callback`. The hub exchanges the code, and the command writes the result for its one user, at the paths above: the agent App's key for `wl-<name>` (0400), or the sign-in App's client secret for `wl-dash`. Neither is ever logged. For the agent App, it then prints the install link: install the App on exactly `<owner/repo>`. It finds the installation and runs the same check as `credentials.sh` (`app-permissions.mjs`), refusing an installation that reaches any other repo. Only after that check passes does it write `credentials.yaml`. The agent App asks for contents, issues, pull requests and checks write, plus actions and metadata read: never Workflows, Administration or Actions write. `credentials.sh` stays the manual fallback.
 
+The Setup console's Add project is the screen for the agent App (first-run screen 5). Pick the repo from the list, or type a private one as owner/name: GitHub lists only public repos to the dashboard, which keeps no GitHub token. Add project then makes the App through the manifest flow only, and GitHub's install page opens with that repo preselected; an installation that reaches any other repo is refused. GitHub's one-time code is exchanged by the hub and used once; the App's private key, client secret and webhook secret go straight to the coordinator user's own files (`~wl-<name>/.config/<name>-app/`, each 0400 in a 0700 directory) and never to a URL, a log, an argument, an event or the repo. The screen is optional: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>` runs the same steps at a root shell, and adding the same project again picks up where it stopped.
+
 ### Tailscale HTTPS (the owner's step)
 
-The hub is reachable only over your tailnet, never the public internet:
+The hub is reachable only over your tailnet, never the public internet. The steps are below by hand; [Tailscale and HTTPS from the dashboard](#tailscale-and-https-from-the-dashboard) does the same from the Machine page, and `scripts/setup/tailscale.sh` from a terminal.
 
 1. In the Tailscale admin console, under DNS, enable **MagicDNS** and **HTTPS certificates**.
 2. On the machine, forward HTTPS on the tailnet to the hub's sign-in port:
@@ -193,14 +214,104 @@ A submit is recorded as the machine request `add-project <name> <owner/repo>` (`
 
 The view then follows the run live, step by step, in the script's order: instance, app, claude-token, checkout, policy, service, test-user, machine-helper, dashboards. Each step's line from the script is an `add_project.step` event in the instance's log, so every step is on record. What it needs from you shows in the same view, as asks: GitHub's two approve links (create the App, then install it on exactly that repo), and the agent's Claude token (from `claude setup-token`), pasted into the dashboard's password box. The coordinator hands the token to the script once, on its input, for the agent user only, and deletes its copy; it's never in an event or a log, and never shown again. If a step fails, the view names it and the command to retry it. Fix what it says and add the same project again: the steps already done are skipped.
 
+**On a machine whose sudo is older than 1.9.10** (the first sudo that reads a rule's `^...$` arguments as a pattern), `machine-helper.sh` doesn't install the helper's `add-project` rule. It prints `REFUSED` for it and records this in `/etc/worklane/helper-rules.json`. Add project then shows no button that could only fail at sudo. It shows why, and the root command to run on the machine, with the name and repo you type filled in: `sudo bash /opt/worklane/current/scripts/setup/add-project.sh <name> <owner/repo>`. The server refuses a submit with the same command, and a run that sudo refuses on a machine set up before that record says so too.
+
+## First-run screens: skip, run again, or automate
+
+The First run page (`/first-run`) lists every setup step, each with its state checked live. A step that the page can fix has a screen of its own: a button that shows its plan, a form, or Start. Every screen works three ways:
+
+- **Skip it.** An owner can press **Skip** on any step that isn't done. The page then shows it as skipped and stops counting it as left; **Undo skip** brings it back. A skip changes only the page: `worklane doctor` and `worklane init` still check the step.
+- **Run it again later.** Settings has a **Setup screens** list with each screen's state. Its link opens that step on the first-run page (`/first-run?step=<id>`), even when the step is done, so it can be run again.
+- **Do it without the page.** Each screen names the command or config key that does the same thing, and the table below lists them all. The test `test/setup-automation.test.ts` checks that the table and the page agree.
+
+**A config change from the page (a checkout).** The first-run page acts on the config the checkout has now, read again on each request, not the one the dashboard started with. The Repo config form proposes a change as a PR from a branch of its own (`worklane/config-...`). Once it has, **Merge PR #n here** shows the `gh pr merge` command and, on Confirm, merges that PR (only an open one from the form's own branch into the default branch). It then fast-forwards the checkout's default branch to origin's (`src/checkout-sync.ts`). It is only ever a fast-forward: never a reset, a merge commit or a rebase. It is refused, with why and the `git pull --ff-only` to run, if the checkout has uncommitted changes to tracked files, has commits origin doesn't, or is on another branch. The next step reads the new config with no restart and no `git pull`. Setup mode's own merge already brought its config in the same way (a fetch and `git merge --ff-only`, as `init` does).
+
+**Before the config exists (setup mode).** A checkout with no `.worklane/` yet has no config for the dashboard to load. In that case `worklane dashboard --root <repo>` starts in setup mode and prints `http://127.0.0.1:<port>/first-run`, with no key in it, and the path of the dashboard key file (only you can read it). The page asks for the key once, in a hidden field or by choosing that file, sends it as a header and keeps it in that tab only. `worklane init` offers to open the same page when it stops at the repo config. Setup mode works like this:
+
+- The first-run page is the whole dashboard, and every address shows it.
+- From the page you can:
+  - pick the repo's GitHub origin;
+  - answer auto-config's questions;
+  - draft the config, which runs the project's commands on a scratch copy of the default branch, so it asks for a confirmation first;
+  - merge the setup PR that the draft opens.
+- Start is refused until the config exists.
+- Once the merged config is in the checkout, the normal dashboard takes over at the same address with the same key, and the page reloads.
+
+| step | mode | without the page |
+|---|---|---|
+| Tools: git, gitleaks, claude (and gh, locally) | local, server | `worklane init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened` |
+| Signed in to Claude | local | `claude auth login (in a terminal, as this user)` |
+| The agents' Claude login | server | `scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step)` |
+| Signed in to GitHub (gh), able to push | local | `gh auth login --web (in a terminal, as this user)` |
+| The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
+| The agents' GitHub App | server | `sudo bash scripts/setup/add-project.sh <name> <owner/repo> (its app step: the App through the manifest flow, installed on that one repo)` |
+| Default branch known | local | `git fetch origin <branch>, then git remote set-head origin --auto` |
+| Auto-config questions answered | local | `worklane init --answer <id>=<choice> (or answer init's questions in a terminal)` |
+| .worklane/ valid and on the default branch | local, server | `worklane init (drafts the config and proposes it as a PR), then gh pr merge <number>, then worklane init again (it fast-forwards)` |
+| Hooks for local runs installed | local | `worklane install` |
+| Owners and writers set | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Required checks named | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Budget, models, guardrails, review levels | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
+| Pre-commit secret scan | local | `worklane install --git-hooks` |
+| Guardrail fingerprints fetched | local, server | `worklane guardrails refresh` |
+| Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
+| The instance's policy | server | `the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch` |
+| Discord intake and chat | server | `sudo bash scripts/setup/credentials.sh <name> intake-discord (the bot token), then intake.yaml in the instance home (guild, channels, owners, people; docs/intake.md) and a restart of the instance` |
+| Reachable over Tailscale (HTTPS) | server | `sudo bash scripts/setup/tailscale.sh install, then up, serve and public-url (one step each; status reads only)` |
+| Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
+| The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
+| The coordinator running | local | `worklane up` |
+
+## Tailscale and HTTPS from the dashboard
+
+The first-run wizard's Tailscale screen, for a server. It is the Machine page's **Tailscale and HTTPS** card (`/machine#tailscale`; the first-run step "Reachable over Tailscale (HTTPS)" opens it, and it stays there to run again). It's optional: on a machine without Tailscale, or if you never confirm a step, nothing changes and the hub keeps its URL.
+
+It's visible only to machine owners: the server sends everyone else none of its data (`GET /api/tailscale`, `src/tailscale-setup.ts`), and a local checkout has no such screen. It shows whether tailscale is installed and up (what `scripts/setup/tailscale.sh status --json` says, read as the instance's own user), the hub's URL now, and four steps in order. Each step shows what it changes first and needs a second click; each is a machine request, gated like any machine change (an owner here who is a machine owner, signed in, on an allowed device; or the break-glass), audited, one at a time:
+
+| Step | Machine request | What runs, as root | Without the dashboard |
+| --- | --- | --- | --- |
+| Install Tailscale | `tailscale install` | Tailscale's apt repository for this distribution, its signing key checked against the fingerprint pinned in `scripts/setup/lib.sh`, then the pinned version of the package. No install script. A tailscale already there is left alone. | `sudo bash scripts/setup/tailscale.sh install` |
+| Log this machine in | `tailscale up` | `tailscale up` with no auth key. It prints a login link and waits 10 minutes. | `sudo bash scripts/setup/tailscale.sh up` |
+| Put the hub on HTTPS | `tailscale serve` | `tailscale serve --bg --https=443 http://127.0.0.1:4399`, and nothing else. | `sudo bash scripts/setup/tailscale.sh serve` |
+| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...` |
+
+The dashboard never runs any of it: the coordinator runs the machine helper, which takes exactly those four commands (two fixed words each; no auth key, flag, URL or port can be passed) and starts the step as its own unit, `worklane-tailscale.service`. The card follows the step from the script's progress file, `/var/lib/worklane/tailscale/steps.jsonl`.
+
+**The login link** goes to the owner only. The script writes it to `/var/lib/worklane/tailscale/login-url`, mode 0400, owned by the asking instance's coordinator user, and deletes it when `up` ends. The dashboard serves it only to a machine owner, only while `up` waits, and only if it is exactly Tailscale's login page (`https://login.tailscale.com/a/<id>`); it shows as an "Open Tailscale's login page" button. The link is never in an event, an audit entry, the journal or the machine changes log. No auth key is used anywhere on this path.
+
+**Two things stay on other sites.** MagicDNS and HTTPS certificates are turned on in Tailscale's admin console (DNS); until they are, the HTTPS step says so and links there. After the URL step, set the sign-in App's callback URL on GitHub to exactly `https://<name>/auth/callback`: sign-in at the new URL fails until you do. The hub restarts for that step, so a session at the old URL ends; the break-glass still works.
+
+What it can never do:
+
+- Turn on Tailscale Funnel, or publish anything outside your tailnet. There is no funnel command on this path, `tailscale serve` is tailnet-only, and the hub itself listens on `127.0.0.1`. The card shows Funnel's state read-only; if Funnel is already on, the HTTPS and URL steps do nothing until an admin turns it off (`tailscale funnel reset`).
+- Choose what is forwarded or where: the serve step is one fixed command to the hub's sign-in port. It never forwards the break-glass port (4398) and never replaces something else already on 443.
+- Change what `tailscale up` exposes: it is run with no flags (no exit node, routes, SSH, login server or auth key).
+- Set the hub's URL to anything but this machine's own `*.ts.net` name, which the script reads from `tailscale status` on the machine; nobody types it.
+- Install a package that isn't signed by the pinned key.
+
+## Discord: the bot's token, invite link and channels
+
+On a server instance, the First run page's **Discord** step (`src/intake/discord-setup.ts`; Settings links to it, and it opens again on a finished step as Change) sets up the chat bot. It is optional. Opening it, loading the bot's channels and reviewing a change write nothing; each write is an owner's, confirmed first, and audited (refusals too). Writers read where it stands. docs/intake.md section 10.1 has the script for each part.
+
+What it can change, all as the instance's coordinator user (the user its dashboard runs as), and nothing as root:
+
+- **The token.** Paste the token opens a paste box: a `paste_secret` ask for the credential `intake-discord` (`POST /api/first-run/discord/token-ask`). The value goes through the setup console's secret route, from the browser straight to `~/.config/<name>-secrets/intake-discord` (0400, in a 0700 directory), is refused unless it is shaped like a bot token, and `credentials.yaml` `intake.discord_token` is then pointed at the file through the same code as `credentials.sh <name> intake-discord` (`setDiscordToken`, `src/instance.ts`).
+- **`intake.yaml`**, in the instance home (0600): only `discord.enabled`, `guild`, `channels`, `asks_channel`, `ops_channel`, `chat_channels`, `dashboard_url` and `superfan.enabled`, `channel`, `machine_channel`, picked from the bot's own list. Review (`POST /api/first-run/discord/intake`) returns the exact diff and writes nothing; Confirm sends back that review's hash, and the server writes only if the file and the bot's list still give that very change. The result must pass the intake schema; a superfan channel is never one the bot reads.
+
+What it can never do: read or show the token (the dashboard's process never opens the token file; the bot's application id, its invite link and its channels come from a child process, `<cli> discord channels --instance <name> --json`, which reads the token itself, asks only Discord's own API (its base URL is a constant: nothing can point it at another host) and prints names and ids only, `GET /api/first-run/discord/channels`, owners only; the child is always the installed engine's own `cli.js`, by absolute path: no PATH lookup, option, environment variable, config key or request changes which program runs); write any other file, or any other key of `intake.yaml` (who may send, people, owners and trusted stay by hand); post, read or change anything on Discord (the child process makes GET requests only); restart the instance (it shows the command); or run anything as root. A hub forwards these calls to the instance's own dashboard like every other, so the hub's user never holds the token either.
+
+The invite link asks for exactly four permissions (View Channels, Send Messages, Create Public Threads, Send Messages in Threads; integer `309237648384`) and the `bot` scope. Creating the bot and turning on its Message Content Intent stay in Discord's developer portal: the step links there, and says whether the intent is on once the bot's view is loaded.
+
 ## Switching the agents' Claude account
 
 Every agent on a machine uses one Claude login, stored for each agent user (each instance's agent user, which channel chat runs as too, and its eval user). To move them all to another account, on the machine:
 
 ```
 sudo bash scripts/setup/claude-account.sh switch          # every instance; or name some
-sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry
+sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry; or name some
 ```
+
+What `status` finds is kept in `/var/lib/worklane/claude-account/status.json` (root's, 0644; token ids, never a token). The first-run page's "The agents' Claude login" step reads it. add-project and `credentials.sh <name> claude` refresh their instance's records once its token is in, and a switch rewrites it.
 
 The switch:
 
@@ -235,6 +346,57 @@ A viewer's board leaves out everything about runs and agents (the run, its resou
 Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
 The Settings page's **Model routing** panel (part of `GET /api/settings`, owners and writers) lists every task type in agents.yaml `routing` (src/routing.ts): the model or value in effect and where it came from: the default in code, a role's model that stands in for it, the agents.yaml key (an older `model_routing` or `eval_routing` key is flagged with its new name), or the instance's policy.yaml. It is read-only: its "Change it" snippet is the `routing:` block to edit in agents.yaml through a pull request.
+
+### Updater setup
+
+At the top of the machine settings, **Updater setup** sets the engine updater up from the page (the first-run page's "Engine updater set up" step opens it). It has three steps, and nothing changes until you review one and confirm it. Skip any of them, or all of them, and the machine stays as it is.
+
+1. **The updater.** Installs `/usr/local/libexec/worklane-update` and its 10-minute timer, with updates off. An existing `updates.json` is kept.
+2. **Release signers.** Lists the keys in `/etc/worklane/allowed_signers` with their fingerprints. On the release channel the updater installs only a release tag whose signature verifies against one of them.
+3. **Channel.** Shows what the updater follows. A new install follows `release` (signed release tags). If the machine is on `main`, the page offers **Follow releases**; it never offers `main`.
+
+The on/off switch is the **Engine updates** row in the table below, as before.
+
+**Adding a signer takes two people's worth of access: the dashboard, then a root shell.** Those keys are the root of trust for engine updates, so a dashboard session alone can't add one, whoever holds it.
+
+1. On the page, type the signer's principal (its email) and paste the public key (`ssh-ed25519 AAAA...`, the line of the `.pub` file). **Review to stage** shows the exact principal, the whole key and its fingerprint; **Stage this signer** records it in `/var/lib/worklane/pending-signers.json`. Staging changes nothing in `allowed_signers`: a staged key is trusted for nothing.
+2. The page then shows the staged signer with the exact command to run **as root on the machine**:
+
+   ```bash
+   sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer SHA256:<the fingerprint the page shows>
+   ```
+
+   Check that fingerprint against your own key first (`ssh-keygen -lf <key>.pub` prints the same). The command applies only a staged signer with exactly that fingerprint. It prints who staged it (the coordinator user, and so the instance) with its principal and key, then asks you to **type the principal**: anything else, or nothing, adds nothing. Then it appends one line (the signers already there stay as they are), and clears it from the pending list. A fingerprint that matches nothing staged adds nothing.
+3. A staged signer waits 24 hours, then is dropped; **Discard** takes it out sooner. At most 4 wait at once.
+
+Staging a signer raises its own incident ("A release signer was staged for engine updates"), with the principal, the fingerprint, and the coordinator user and instance that staged it, so an owner hears of a request before anyone is asked to confirm it. Whenever a signer is added, by this route or by `updates.sh --signer`, the watchdog raises an incident ("A release signer was added for engine updates") with the principal and the key's fingerprint: it shows on the Health page and is posted once to the ops channel. It closes by itself a day later. If you didn't add it, turn engine updates off, remove its line at a root shell, and find out who did.
+
+**The signers file is watched.** On every run (every 10 minutes, whether updates are on or off) the updater hashes the signers file and compares it with the hash it last recorded in `/var/lib/worklane/signers-state.json`. `updates.sh --signer` and `--confirm-signer` record the new hash as they append, so their change is expected. Any other change (a hand edit, another tool, a file that was tampered with or deleted) is reported once: a `signers_changed` line in the update log (the Machine page's Engine updates table), a line in the unit's journal (`journalctl -u worklane-update.service`), and a red incident, "The release signers file changed outside updates.sh", each with the old and new hash, the number of signer lines before and after, and the key fingerprints added and removed. It needs no coordinator to notice or record; the post to the ops channel is made by a coordinator's watchdog, like every incident.
+
+While such a change is unacknowledged, **no release is installed**: the release channel is held (the main channel checks no tag signature, so it is not). Look at the file, put it right if the change isn't yours, then acknowledge it as root on the machine:
+
+```bash
+sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers
+```
+
+It prints the file's hash and every key fingerprint it now holds, records them, and lifts the hold; the updater's next run closes the incident. The first run on a machine with nothing recorded just records the file, with no alert.
+
+What the page can change, and as whom: each confirmed step is one command of the root-owned machine helper (`install-updater`, `set-update-channel release`, `stage-update-signer` or `discard-update-signer <principal> ssh-ed25519 <public key>`), recorded by this instance's dashboard and run by its coordinator through `sudo -n`. Only an owner of the instance who is also a machine owner, on an allowed device, can confirm one. The dashboard itself never runs sudo and never writes these files.
+
+**Holds.** A commit the updater rolled back is held: it is not tried again until a newer commit lands, or until an admin releases it at a root shell with `sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold`, which shows what was held and why, moves the hold aside and logs it. Nothing on this page releases a hold: neither the channel nor the on/off switch, nor anything else a coordinator can run through the machine helper.
+
+What it can never do: add a signer, or remove or replace one (the helper never writes `allowed_signers`; only `updates.sh` does, as root, and only by adding a line); stage a wildcard, a list or an option such as `cert-authority`, or any key type but ed25519; move a machine to the `main` channel; point the updater at another signers file; change the required checks; or turn signature or check verification off.
+
+The same from a terminal, as root, from the engine's checkout:
+
+```bash
+sudo bash scripts/setup/updates.sh                                                    # install (off)
+sudo bash scripts/setup/updates.sh --signer <principal> ssh-ed25519 <public key>      # add one release signer, directly
+sudo bash scripts/setup/updates.sh --confirm-signer SHA256:<fingerprint>              # add the one staged from the page
+sudo bash scripts/setup/updates.sh --channel release                                  # or: main (a root shell only)
+```
+
+Any other kind of key, or removing one, is an edit of `/etc/worklane/allowed_signers` by hand (one line per key: `<principal> <key type> <public key>`, root:root 0644). The two signer rules in the machine helper's sudoers file are written as patterns, which sudo reads as such only from 1.9.10. `machine-helper.sh` checks this machine's sudo: on an older one it does not install those two, says so (`REFUSED: ...`), and installs every other rule. Staging from the page is then refused; use `--signer` at a root shell.
 
 Above the machine settings, the **Updates** panel (`GET /api/updates`, owners and writers) says where the engine stands: the version and commit installed now, the last update, any rollback or held commit with its reason (a canary that failed says so), and the canary's last result: passed or failed (or timed out), after an update or the daily one, how long it took, and a link to its PR. See [canary.md](canary.md) for setting the canary up.
 

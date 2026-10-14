@@ -20,8 +20,21 @@
 #     tailscale serve forwards over HTTPS, and the owner's break-glass port
 #     4398 (the token, on this machine only), which it never forwards.
 #
-#   bash scripts/setup/credentials.sh dashboard-signin      (first, once)
-#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+#   bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net      (first, once)
+#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
+#
+#   --setup: before the sign-in App exists (the hub can't start without it). Starts the hub in setup mode
+#     (worklane-dashboard-hub-setup.service, as wl-dash, loopback port 4399, no instances): one page that makes the
+#     sign-in App through GitHub's manifest flow and stores its client secret, client id and the public URL for wl-dash
+#     only (0400), then turns itself off. Only the machine's owner gets in: the page asks for a one-time setup token from
+#     a 0600 file of wl-dash's, which this prints the path of (sudo cat it; it is never printed, logged or put in a
+#     URL). Refused once the sign-in secret exists. Then run this again without --setup: --client-id and --public-url
+#     default to what setup mode stored. By hand instead: credentials.sh dashboard-signin, then --client-id.
+#
+#   --no-instances: the hub alone, with no instance yet, for a machine's first project: add-project.sh runs it before
+#     its App step, because GitHub's manifest flow comes back to the hub, and an instance's dashboard can't start
+#     before its checkout exists. Takes no names, and is refused once the hub serves any instance (it would drop
+#     them). add-project's last step then runs this script with the names, as before.
 #
 #   --machine-owner: the GitHub logins that may change the machine itself from the dashboard (the slot caps, engine
 #     updates), comma-separated. Written to /etc/worklane/machine-owners.json, root:root 0644. An instance's owners
@@ -39,10 +52,12 @@
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] --client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]"
-client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set=""
+usage="usage: dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
+client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --setup) setup=1; shift ;;
+    --no-instances) no_instances=1; shift ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
     --console-user) console_user="${2:-}"; shift 2 ;;
@@ -53,9 +68,93 @@ while [ "$#" -gt 0 ]; do
     *) break ;;
   esac
 done
-[ "$#" -ge 1 ] && [ -n "$client_id" ] && [ -n "$public_url" ] || { echo "$usage" >&2; exit 2; }
+[ -z "$machine_owner_set" ] || machine_owners_json "$machine_owner" >/dev/null || exit 2
+# Write each unit to a dotted temp name, validate it under its real name, then move it into place.
+put() {
+  local file="$1" tmp="/etc/systemd/system/.$1.tmp" check
+  shift
+  "$@" > "$tmp"; chmod 0644 "$tmp"
+  check="$(mktemp -d)/$file"; cp "$tmp" "$check"
+  if ! systemd-analyze verify "$check"; then rm -f "$tmp" "$check"; echo "$file invalid; nothing installed" >&2; exit 1; fi
+  rm -f "$check"
+  mv -f "$tmp" "/etc/systemd/system/$file"
+  echo "installed /etc/systemd/system/$file"
+}
+
+wait_for() { for _ in $(seq 1 30); do [ -s "$1" ] && return 0; sleep 1; done; echo "no $1 after 30 s; see journalctl -u $2" >&2; exit 1; }
+
+viewer=wl-dash
+setup_unit=worklane-dashboard-hub-setup.service
+url_ok() { [[ "$1" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin, as browsers reach it through tailscale serve (https://<machine>.<tailnet>.ts.net)" >&2; exit 2; }; }
+
+if [ -n "$setup" ]; then
+  [ "$#" -eq 0 ] && [ -n "$public_url" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances" ] || { echo "$usage" >&2; exit 2; }
+  url_ok "$public_url"
+  [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
+  say "viewer user $viewer (runs the hub; holds no credential)"
+  ensure_user "$viewer"
+  signin_dir="$(home_of "$viewer")/.config/dashboard-signin"
+  hub_state="$(home_of "$viewer")/.local/state/worklane/dashboard-hub"
+  # Setup mode is for before the sign-in App: once its secret is in place there is nothing to set up.
+  if sudo -u "$viewer" test -e "$signin_dir/client-secret"; then
+    echo "the sign-in App's secret is in $signin_dir already: setup mode is off. Start the hub with it: dashboards.sh <name>..." >&2
+    exit 1
+  fi
+  setup_unit_text() {
+    cat <<EOF
+[Unit]
+Description=worklane dashboard hub, setup mode: makes the sign-in GitHub App, then stops (loopback only)
+After=network.target
+
+[Service]
+Type=simple
+User=$viewer
+Group=$viewer
+WorkingDirectory=~
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/worklane dashboard --hub-setup --service --public-url $public_url --signin-dir $signin_dir
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$(home_of "$viewer")
+PrivateTmp=yes
+EOF
+  }
+  put "$setup_unit" setup_unit_text
+  say "the hub in setup mode, as $viewer"
+  # A fresh token each run: the old one (if any) goes, and the hub writes a new one (0600) as it starts.
+  rm -f "$hub_state/setup-token"
+  systemctl daemon-reload
+  systemctl stop "$setup_unit" 2>/dev/null || true
+  systemctl start "$setup_unit"
+  for _ in $(seq 1 30); do sudo -u "$viewer" test -s "$hub_state/setup-token" && break; sleep 1; done
+  sudo -u "$viewer" test -s "$hub_state/setup-token" || { echo "no setup token after 30 s; see journalctl -u $setup_unit" >&2; exit 1; }
+  [ "$(stat -c '%U %a' "$hub_state/setup-token")" = "$viewer 600" ] || { echo "the setup token file isn't $viewer's 0600: stopping setup mode" >&2; systemctl stop "$setup_unit"; exit 1; }
+  echo
+  echo "setup-mode hub: $public_url"
+  echo "  open it there: tailscale serve --bg --https=443 http://127.0.0.1:4399 first (GitHub sends the browser back to that URL)"
+  echo "  the one-time setup token, for the page: sudo cat $hub_state/setup-token"
+  echo "  it makes the sign-in App with GitHub, then turns itself off; then: dashboards.sh [--machine-owner <login>] <name>..."
+  exit 0
+fi
+
+signin_dir="$(home_of "$viewer" 2>/dev/null || true)/.config/dashboard-signin"
+# What setup mode stored, when not given: the App's client id and the hub's public URL (each wl-dash's, 0400).
+if [ -z "$client_id" ] && [ -s "$signin_dir/client-id" ]; then client_id="$(cat "$signin_dir/client-id")"; fi
+if [ -z "$public_url" ] && [ -s "$signin_dir/public-url" ]; then public_url="$(cat "$signin_dir/public-url")"; fi
+# --no-instances: the hub alone, for a machine's first project (add-project.sh runs it before the App step). Never
+# with names, and never over a hub that serves instances already: that would drop them from it.
+if [ -n "$no_instances" ]; then
+  [ "$#" -eq 0 ] || { echo "$usage" >&2; exit 2; }
+  served="$(hub_instances | tr '\n' ' ')"
+  [ -z "$served" ] || { echo "--no-instances: the hub serves ${served% } already; run dashboards.sh with them" >&2; exit 1; }
+fi
+{ [ "$#" -ge 1 ] || [ -n "$no_instances" ]; } && [ -n "$client_id" ] && [ -n "$public_url" ] || { echo "$usage" >&2; echo "(no --client-id or --public-url, and none stored by --setup in $signin_dir)" >&2; exit 2; }
 [[ "$client_id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "--client-id: the sign-in App's client id (letters, digits, dots, dashes)" >&2; exit 2; }
-[[ "$public_url" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin, as browsers reach it through tailscale serve (https://<machine>.<tailnet>.ts.net)" >&2; exit 2; }
+url_ok "$public_url"
 if [ -n "$console_user" ]; then
   [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
   [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
@@ -64,12 +163,9 @@ if [ -n "$console_devices" ]; then
   [ -n "$console_user" ] || { echo "--console-devices goes with --console-user" >&2; exit 2; }
   [[ "$console_devices" =~ ^[a-z0-9:.,-]+$ ]] || { echo "--console-devices: Tailscale tags (tag:x) and/or node names, comma-separated, lowercase" >&2; exit 2; }
 fi
-[ -z "$machine_owner_set" ] || machine_owners_json "$machine_owner" >/dev/null || exit 2
 [ -z "$console_user" ] || [ -n "$console_devices" ] || echo "note: no --console-devices, so the owner terminal refuses every device until you list yours" >&2
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
 [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
-viewer=wl-dash
-signin_dir="$(home_of "$viewer")/.config/dashboard-signin"
 for f in client-secret session-secret; do
   [ -s "$signin_dir/$f" ] || { echo "no $signin_dir/$f: run credentials.sh dashboard-signin first" >&2; exit 1; }
 done
@@ -111,7 +207,7 @@ EOF
 hub_unit() {
   cat <<EOF
 [Unit]
-Description=worklane dashboard hub: sign-in with GitHub, one view over $*, forwarding to each instance's own dashboard
+Description=worklane dashboard hub: sign-in with GitHub, one view over ${*:-no instance yet}, forwarding to each instance's own dashboard
 After=network.target
 
 [Service]
@@ -147,19 +243,6 @@ PrivateTmp=yes
 EOF
 }
 
-# Write each unit to a dotted temp name, validate it under its real name, then move it into place.
-put() {
-  local file="$1" tmp="/etc/systemd/system/.$1.tmp" check
-  shift
-  "$@" > "$tmp"; chmod 0644 "$tmp"
-  check="$(mktemp -d)/$file"; cp "$tmp" "$check"
-  if ! systemd-analyze verify "$check"; then rm -f "$tmp" "$check"; echo "$file invalid; nothing installed" >&2; exit 1; fi
-  rm -f "$check"
-  mv -f "$tmp" "/etc/systemd/system/$file"
-  echo "installed /etc/systemd/system/$file"
-}
-
-wait_for() { for _ in $(seq 1 30); do [ -s "$1" ] && return 0; sleep 1; done; echo "no $1 after 30 s; see journalctl -u $2" >&2; exit 1; }
 
 if [ -n "$machine_owner_set" ]; then
   say "machine owners: who may change the machine from the dashboard"
@@ -192,7 +275,15 @@ for name in "$@"; do
   hub_arg="${hub_arg:+$hub_arg,}$name=$state"
 done
 
+# No instance yet: said outright to the engine (--hub -), which refuses an empty list.
+hub_arg="${hub_arg:--}"
 say "the hub, as $viewer"
+# Setup mode is over (the sign-in secret is in place): its unit goes, and the real hub takes its port.
+if [ -e "/etc/systemd/system/$setup_unit" ]; then
+  systemctl disable --now "$setup_unit" 2>/dev/null || true
+  rm -f "/etc/systemd/system/$setup_unit"
+  echo "removed /etc/systemd/system/$setup_unit (setup mode)"
+fi
 put worklane-dashboard-hub.service hub_unit "$@"
 systemctl daemon-reload
 systemctl enable --now worklane-dashboard-hub.service
