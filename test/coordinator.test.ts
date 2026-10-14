@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { tiersFor } from '../src/testrun/run.js';
 import assert from 'node:assert/strict';
-import { REAL_CHROME_TIMEOUT, realChromeTests } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests } from './browser-helpers.js';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -3010,7 +3010,8 @@ test('a browser: check the coordinator cannot run (no app declared) fails the at
 const chrome = findChrome(process.env.CHROME);
 realChromeTests();
 
-test('a change touching the app\'s UI runs its flows in a real browser: VERIFIED lists them, the PR gets a BROWSER CHECKS section, and a browser claim is backed', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('a change touching the app\'s UI runs its flows in a real browser: VERIFIED lists them, the PR gets a BROWSER CHECKS section, and a browser claim is backed', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const server = `"${process.execPath}" -e "require('http').createServer((q, s) => s.end('<p data-testid=ok>ok</p>')).listen(Number(process.env.PORT), '127.0.0.1')"`;
   const port = await freePort();
   const t = await openPr({ worker: workerSaying('Guarded totals against non-positive quantities. Checked the totals page in the browser.') }, {
@@ -3063,7 +3064,8 @@ createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.en
   return { check: verify.checks.find((x) => x.check === 'browser home')!, lines, worktrees, port };
 }
 
-test('the browser baseline: an error the base already logs is not new, so the flow passes; the base worktree is gone afterwards', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('the browser baseline: an error the base already logs is not new, so the flow passes; the base worktree is gone afterwards', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const r = await browserBaselineRun({ extra: [] });
   assert.equal(r.check.status, 'pass', `${r.check.tail}\n${r.lines.join('\n')}`);
   assert.ok(r.lines.some((l) => /^ {2}- before the change \(base `[0-9a-f]{12}`\): 2\/2 steps held, 1 console error\(s\)/.test(l)), r.lines.join('\n'));
@@ -3072,7 +3074,8 @@ test('the browser baseline: an error the base already logs is not new, so the fl
   assert.equal(await portInUse(r.port), false);
 });
 
-test('the browser baseline: an error the change adds fails the flow, naming only the new one', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+test('the browser baseline: an error the change adds fails the flow, naming only the new one', { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const r = await browserBaselineRun({ extra: ['new-error.js'] });
   assert.equal(r.check.status, 'fail');
   assert.match(r.check.tail ?? '', /new console error: cart broke/);
@@ -3080,7 +3083,8 @@ test('the browser baseline: an error the change adds fails the flow, naming only
   assert.doesNotMatch(r.worktrees, /browser-base/);
 });
 
-test("the browser baseline: an app that won't start at base is said, and the flow is judged with none (every error counts)", { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async () => {
+test("the browser baseline: an app that won't start at base is said, and the flow is judged with none (every error counts)", { skip: skip || (!chrome && 'no Chrome or Chromium on this machine'), timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const r = await browserBaselineRun({ extra: ['serve-ok.js'], needsReady: true });
   assert.equal(r.check.status, 'fail', 'no silent pass for want of a baseline');
   assert.match(r.check.tail ?? '', /new console error: legacy warning/);

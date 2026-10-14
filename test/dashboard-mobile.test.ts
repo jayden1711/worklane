@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { webUiSkip } from './browser-helpers.js';
+import { oneChromeAtATime, webUiSkip } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 const dir = join(repoRoot, 'scripts', 'dev');
@@ -55,7 +55,8 @@ type Out = { line: number; ok: boolean; error?: string; value?: Record<string, u
 
 // Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise, but never in CI (CI_REQUIRE_WEB).
 const chrome = ctl.findChrome(process.env.CHROME);
-test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, and the navigation opens from the menu button', { skip: webUiSkip(chrome), timeout: 600_000 }, (t) => {
+test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, and the navigation opens from the menu button', { skip: webUiSkip(chrome), timeout: 600_000 }, async (t) => {
+  await oneChromeAtATime(t);
   const cmds: string[] = [];
   const what = new Map<number, { page: string; check: string }>();
   const add = (page: string, check: string, c: object) => {
