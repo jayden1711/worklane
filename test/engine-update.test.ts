@@ -22,6 +22,9 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   buildCommand(url: string, sha: string, state?: string): string[];
   installTree(sha: string, opt?: string, buildDir?: string, owner?: string): void;
   run(deps: object): Promise<string>;
+  journalLine(event: string, sha: string | null, reason: unknown): string;
+  makeNote(o: { readState(): unknown; writeState(s: unknown): void; log(e: Record<string, unknown>): void; print(line: string): void }): (event: string, sha: string | null, reason: string) => string;
+  realDeps(print?: (line: string) => void): { note(event: string, sha: string | null, reason: string): string };
   BUILD_SCRIPT: string;
 };
 
@@ -302,6 +305,48 @@ test('redact: tokens, keys and secret assignments in a journal never reach the l
   const text = [`token ghp_${'b'.repeat(36)}`, `Authorization: Bearer abcdefghijklmnop`, 'API_KEY=hunter2hunter2', 'password: "x y z"', '-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----', 'sk-ant-api03-abcdefghijk'].join('\n');
   const r = u.redact(text);
   for (const leak of ['ghp_', 'abcdefghijklmnop', 'hunter2', 'x y z', 'MIIE', 'sk-ant-api03']) assert.ok(!r.includes(leak), leak);
+});
+
+test('the journal: every run prints the event, the short sha and the reason; updates.jsonl still gets it once', async () => {
+  const sha = 'b9634df0'.padEnd(40, '1');
+  const why = 'required check "Claude sign-in probe (real users)" hasn\'t run on this commit';
+  assert.equal(u.journalLine('waiting', sha, why), `waiting b9634df: ${why}`);
+  assert.equal(u.journalLine('refused', sha, 'check "test" ended failure'), 'refused b9634df: check "test" ended failure');
+  assert.equal(u.journalLine('held', sha, 'rolled back at 2026-10-13T01:00:00Z; held until a newer commit'), 'held b9634df: rolled back at 2026-10-13T01:00:00Z; held until a newer commit');
+  assert.equal(u.journalLine('waiting', null, 'no release tag vX.Y.Z yet'), 'waiting: no release tag vX.Y.Z yet', 'no commit to name');
+  assert.equal(u.journalLine('build_failed', sha, 'npm ERR!\n  code 1\n'), 'build_failed b9634df: npm ERR! code 1', 'one line');
+  assert.ok(u.journalLine('refused', sha, 'x'.repeat(5000)).length < 1100, 'capped');
+  // No secret reaches the journal: a clone URL's credentials, a token in a build's output.
+  const leaky = u.journalLine('refused', null, `updates.json repo_url isn't a GitHub repository: https://someone:hunter2hunter2@git.example.com/x.git token=abc123abc123 ghp_${'b'.repeat(36)}`);
+  for (const leak of ['hunter2', 'someone', 'abc123', 'ghp_']) assert.ok(!leaky.includes(leak), `${leak}: ${leaky}`);
+  assert.match(leaky, /https:\/\/\[redacted\]@git\.example\.com\/x\.git/);
+
+  // The updater's own note (realDeps wires this one): three runs waiting on the same commit for the same reason.
+  let state: unknown = null;
+  const logs: Record<string, unknown>[] = [];
+  const out: string[] = [];
+  const note = u.makeNote({ readState: () => state, writeState: (s) => (state = s), log: (e) => logs.push(e), print: (l) => out.push(l) });
+  for (let i = 0; i < 3; i++) assert.equal(note('waiting', sha, why), 'waiting');
+  assert.deepEqual(out, Array(3).fill(`waiting b9634df: ${why}`), 'the journal says why on every run');
+  assert.deepEqual(logs, [{ event: 'waiting', to: sha, reason: why }], 'updates.jsonl: once per commit and reason');
+  note('refused', sha, 'check "test" ended failure');
+  assert.equal(out.at(-1), 'refused b9634df: check "test" ended failure');
+  assert.equal(logs.length, 2, 'a new event or reason is logged again');
+
+  // A whole run, through run(): what reaches stdout for a wait carries the commit and the reason.
+  const m = machine({ fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', ahead_by: 1, behind_by: 0 } : { check_runs: [ok('test', { status: 'in_progress', conclusion: null })] }) });
+  const printed: string[] = [];
+  let st: unknown = null;
+  const deps = { ...m.deps, note: u.makeNote({ readState: () => st, writeState: (s) => (st = s), log: () => {}, print: (l) => printed.push(l) }) };
+  assert.equal(await u.run(deps), 'waiting');
+  assert.equal(await u.run(deps), 'waiting');
+  assert.deepEqual(printed, Array(2).fill(`waiting ${NEW.slice(0, 7)}: required check "test" is in_progress`));
+});
+
+test('the installed updater prints one line per run: the note\'s line with its reason, else the bare result', () => {
+  const src = readFileSync(updaterSrc, 'utf8');
+  assert.match(src, /note: makeNote\(\{[^\n]*\bprint \}\),/, 'realDeps: the note prints through the same print as the result');
+  assert.match(src, /run\(realDeps\(print\)\)\.then\(\n\s+\(r\) => said \|\| print\(r\),/, 'never the bare word after a line that says why');
 });
 
 /** A built tree as tsc and npm leave it: the bin targets 0644, some files private. */

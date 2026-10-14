@@ -12,6 +12,7 @@ import { recordable } from '../test-durations.js';
 import { cacheDirs } from './cache.js';
 import type { TestRunConfig, TestRunTier } from './config.js';
 import type { HelperState } from './helper.js';
+import type { SandboxState } from './sandbox-watch.js';
 import { newRunId, SetupStepError, type RunDatabase, type RunHost } from './host.js';
 import { waitTestSlot } from './slots.js';
 import { createWorkspace, runEnv } from './workspace.js';
@@ -60,12 +61,17 @@ export interface TestRunResult {
 }
 
 export interface SetupFailure {
-  /** helper, create, changed-files, caches, shared, db-start, or "setup step <n> (<command>)". */
+  /** helper, sandbox, create, changed-files, caches, shared, db-start, or "setup step <n> (<command>)". */
   step: string;
   detail: string;
   /** The last lines of its stderr, redacted; '' when it said nothing there. */
   stderr: string;
 }
+
+/** The setup step of a run refused because the sandbox's check is failing (./sandbox-watch.ts), and what its check says. */
+export const SANDBOX_STEP = 'sandbox';
+export const SANDBOX_OFF =
+  "test runs are off on this instance: the test sandbox failed its own check, so no test run starts. The coordinator checks it again by itself (every 5 minutes at most) and runs this commit's tests once it passes: nothing to restart, and this check is replaced then. An admin can see every line with `sudo bash scripts/setup/test-user.sh check <name>`";
 
 /** The machine-wide full-run lock: test runs take it shared, agents' and other full runs exclusive. */
 export const FULL_RUN_LOCK = `/run/lock/${BRAND.cli}-full-run.lock`;
@@ -87,6 +93,8 @@ export interface TestRunDeps {
   now?: () => number;
   /** The helper's protocol, asked once at coordinator start (./helper.ts): when not ok, no run starts. */
   helper?: HelperState;
+  /** INVARIANT: read before every run (./sandbox-watch.ts): while the sandbox's check is failing, no run starts. */
+  sandbox?: SandboxState;
   /** test_run.select: imports's plan for a change (tests inject one); default ./select.ts importsPlan. */
   plan?: (repo: string, sha: string, changed: readonly string[]) => Plan;
   /** Directories left out of the workspace (tests.yaml checkout.sparse_exclude), unless a tier of the run sets full_checkout. */
@@ -179,6 +187,13 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   // An outdated helper: nothing is started (no slot, no lock, no workspace), and the result says why and the fix.
   if (d.helper && !d.helper.ok) {
     const setup: SetupFailure = { step: 'helper', detail: String(redact(d.helper.detail)).slice(0, 1500), stderr: tail(d.helper.stderr) };
+    failAll(`not run: ${setup.detail}`);
+    emit('testrun.finished', { id, sha: req.sha, kind: req.kind, prs: req.prs, ok: false, outcome: 'error', results: results.map((r) => ({ tier: r.tier, ok: r.ok })), detail: setup.detail });
+    return { id, sha: req.sha, kind: req.kind, ok: false, tiers: results, outcome: 'error', setup };
+  }
+  // INVARIANT: a sandbox whose check is failing runs nothing (no slot, no lock, no workspace): the result says why.
+  if (d.sandbox && !d.sandbox.ok) {
+    const setup: SetupFailure = { step: SANDBOX_STEP, detail: SANDBOX_OFF, stderr: String(redact(d.sandbox.detail)).slice(0, 1800) };
     failAll(`not run: ${setup.detail}`);
     emit('testrun.finished', { id, sha: req.sha, kind: req.kind, prs: req.prs, ok: false, outcome: 'error', results: results.map((r) => ({ tier: r.tier, ok: r.ok })), detail: setup.detail });
     return { id, sha: req.sha, kind: req.kind, ok: false, tiers: results, outcome: 'error', setup };

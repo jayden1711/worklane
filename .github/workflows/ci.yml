@@ -2,7 +2,7 @@ name: ci
 # The fast checks, on every pull request and every push to main: test, desktop, agentshield, push-gate, denylist,
 # and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. The slow checks (the bootstrap
 # on each OS, the real systemd and real users jobs) are ci-slow.yml's: on main they run in batches, on main's newest
-# commit at most every 30 minutes (ci-batch.yml), and on a PR only when it touches what they exercise. The engine
+# commit, one batch at a time (ci-batch.yml), and on a PR only when it touches what they exercise. The engine
 # updater requires both sets green on the exact main commit it installs (UPDATE_DEFAULT_CHECKS in
 # scripts/setup/lib.sh; test/update-checks.test.ts keeps them in step), so it installs only batched commits.
 on:

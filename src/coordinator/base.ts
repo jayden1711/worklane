@@ -20,6 +20,8 @@ import { type FileIndex } from '../hotspots.js';
 import { runIssue } from '../run-record.js';
 import { emergencyStop } from '../slots.js';
 import type { PushGuard } from '../push-guard.js';
+import type { DeployGate } from '../deploy-gate/gate.js';
+import type { TestRuns } from './pr-batch.js';
 import { removeWorktree, type WorktreeOptions } from '../worktrees.js';
 import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
@@ -98,6 +100,20 @@ export abstract class CoordinatorBase {
   /** Why a run stops now: the shutdown, or an emergency stop. */
   protected haltError(): Halted {
     return this.stopped ? new ShuttingDown() : new Halted();
+  }
+
+  /**
+   * INVARIANT: while the test sandbox's check is failing (PrTestRuns.ready, src/testrun/sandbox-watch.ts), the test-run
+   * service and the deploy gate are as absent as they were when a failed check meant none was set up: batches wait, a
+   * red main is not re-run through it, the deploy branch doesn't move. Only the PRs' own runs go to the service then,
+   * to be refused with a check that says test runs are off. Read at each use: they go on when the check passes.
+   */
+  protected get liveTestRuns(): TestRuns | null {
+    return this.d.prTestRuns?.ready() === false ? null : (this.d.testRuns ?? null);
+  }
+
+  protected get liveDeployGate(): DeployGate | undefined {
+    return this.d.prTestRuns?.ready() === false ? undefined : this.d.deployGate;
   }
 
   /** Open-model providers that hit their usage or rate limit, by label: skipped (their runs fall back) until then (ms). */

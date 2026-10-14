@@ -144,7 +144,7 @@ function checks(): Check[] {
 
 /** Every check run a push to main creates, but the shards (their summary jobs gate them). */
 const pushChecks = () => checks().filter((c) => c.push && c.tier !== 'pr-only' && !(c.key in SHARDS)).map((c) => c.name).sort();
-/** Every check run each batch on main creates (on main's newest commit, at most every 30 minutes). */
+/** Every check run each batch on main creates (on main's newest commit, one batch at a time). */
 const batchChecks = () => checks().filter((c) => c.batch).map((c) => c.name).sort();
 /** Every check run every pull request creates, but the shards (their summary jobs gate them). */
 const prChecks = () => checks().filter((c) => c.pr && c.tier !== 'slow' && !(c.key in SHARDS)).map((c) => c.name).sort();
@@ -194,7 +194,7 @@ test('a batch runs every slow job: scope lists every slow job\'s key for a dispa
   assert.equal(wf.concurrency['cancel-in-progress'], "${{ github.event_name == 'pull_request' }}", 'a batch is never cancelled: the updater refuses a cancelled check');
 });
 
-test('ci-batch.yml looks every 30 minutes and whenever a ci-slow.yml run ends, and never fails its own check', () => {
+test('ci-batch.yml looks whenever a ci.yml or ci-slow.yml run ends and every 30 minutes, and never fails its own check', () => {
   const slowName = (parse(readFileSync(join(repoRoot, '.github', 'workflows', batch.SLOW_WORKFLOW), 'utf8')) as { name: string }).name;
   const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'ci-batch.yml'), 'utf8')) as {
     on: { schedule: { cron: string }[]; workflow_dispatch: unknown; workflow_run: { workflows: string[]; types: string[] } };
@@ -202,7 +202,7 @@ test('ci-batch.yml looks every 30 minutes and whenever a ci-slow.yml run ends, a
   };
   assert.deepEqual(wf.on.schedule, [{ cron: '*/30 * * * *' }]);
   assert.ok('workflow_dispatch' in wf.on);
-  assert.deepEqual(wf.on.workflow_run, { workflows: [slowName], types: ['completed'] });
+  assert.deepEqual(wf.on.workflow_run, { workflows: [slowName, 'ci'], types: ['completed'] });
   assert.deepEqual(Object.keys(wf.jobs), ['batch']);
   const run = (wf.jobs.batch!.steps ?? []).map((s) => s.run ?? '').join('\n');
   assert.match(run, /^node scripts\/ci\/batch\.mjs$/m);

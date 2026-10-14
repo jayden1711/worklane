@@ -3,22 +3,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parse } from 'yaml';
 import { repoRoot } from './helpers.js';
 
 type Verdict = 'good' | 'bad' | 'pending' | 'skip' | 'untested';
 type Step = { state: 'found'; culprit: string; good: string | null } | { state: 'wait' | 'test'; sha: string } | { state: 'range'; from: string; to: string };
+type FakeGh = { get(path: string): Promise<unknown>; write(method: string, path: string, body?: unknown): Promise<unknown> };
 type Run = { id: number; event: string; head_branch: string; head_sha: string; status: string; conclusion: string | null; created_at: string; html_url?: string };
 const script = join(repoRoot, 'scripts', 'ci', 'batch.mjs');
 const b = (await import(pathToFileURL(script).href)) as {
   SLOW_JOBS: Record<string, string[]>;
   BISECT_PREFIX: string;
+  TURN_WAIT_MS: number;
+  TURN_POLL_MS: number;
   batchToStart(runs: Run[], head: string, branch?: string): { start: boolean; why: string };
+  olderRuns(gh: FakeGh, R: string, runId: number): Promise<number[]>;
+  batchStep(o: { gh: FakeGh; R: string; branch: string; runId?: number; first?: { head: string; runs: Run[] } | null; say: (line: string) => void; sleep: (ms: number) => Promise<void> }): Promise<'started' | 'nothing'>;
   lastBatches(runs: Run[], branch?: string): { last: Run | null; green: Run | null };
   firstParentLine(cmp: unknown, good: string, bad: string): { sha: string; subject: string }[] | null;
   verdictOf(runs: { status: string; conclusion: string | null; started_at: string | null; id: number }[], dispatched?: boolean): Verdict;
@@ -87,6 +93,143 @@ test('batchToStart: once per commit, never while a batch is queued or running; a
   assert.equal(b.batchToStart([run({ head_sha: head, created_at: '2026-10-13T01:00:00Z', event: 'pull_request', head_branch: 'feature' })], head).start, true, 'a PR run is not a batch');
 });
 
+test('batchToStart: no time spacing: a batch that ended a minute ago doesn\'t hold back the next commit\'s', () => {
+  const head = sha(9);
+  const justEnded = run({ head_sha: sha(8), created_at: new Date(Date.now() - 6 * 60_000).toISOString() });
+  assert.deepEqual(b.batchToStart([justEnded], head), { start: true, why: `${head.slice(0, 7)} has had no batch` });
+  assert.deepEqual(b.batchToStart([{ ...justEnded, conclusion: 'failure' }], head).start, true, 'whatever it ended as');
+  // Still one at a time, and once per commit, however recent.
+  assert.match(b.batchToStart([{ ...justEnded, status: 'in_progress', conclusion: null }], head).why, /is in_progress/);
+  assert.match(b.batchToStart([{ ...justEnded, head_sha: head }], head).why, /has had its batch/);
+});
+
+/**
+ * batchStep against an in-process GitHub: `slow` are ci-slow.yml's runs, `mine` this workflow's runs still going
+ * (by id), `onSleep` what happens in the world while the step sleeps. `first` is what the run read when it began.
+ */
+type StepWorld = { head: string; slow: Run[]; mine: number[] };
+function stepWorld(o: { head: string; slow: Run[]; mine?: number[]; onSleep?: (w: StepWorld, n: number) => void }) {
+  const w: StepWorld = { head: o.head, slow: [...o.slow], mine: [...(o.mine ?? [])] };
+  const said: string[] = [];
+  const sleeps: number[] = [];
+  const dispatched: string[] = [];
+  const asked: string[] = [];
+  const gh: FakeGh = {
+    get: async (path) => {
+      asked.push(path);
+      if (path === '/r/commits/main') return { sha: w.head };
+      if (path.startsWith('/r/actions/workflows/ci-slow.yml/runs?')) return { workflow_runs: [...w.slow] };
+      if (path.startsWith('/r/actions/workflows/ci-batch.yml/runs?status=in_progress')) return { workflow_runs: w.mine.map((id) => ({ id, status: 'in_progress' })) };
+      if (path.startsWith('/r/actions/workflows/ci-batch.yml/runs?status=queued')) return { workflow_runs: [] };
+      throw new Error(`no fake for ${path}`);
+    },
+    write: async (method, path, body) => {
+      assert.equal(`${method} ${path}`, 'POST /r/actions/workflows/ci-slow.yml/dispatches');
+      assert.deepEqual(body, { ref: 'main', inputs: { job: 'all', sha: '' } });
+      dispatched.push(w.head);
+      w.slow.push(run({ head_sha: w.head, created_at: '2026-10-13T02:00:00Z', status: 'queued', conclusion: null }));
+      return null;
+    },
+  };
+  const first = { head: w.head, runs: [...w.slow] };
+  const step = (runId: number) =>
+    b.batchStep({
+      gh,
+      R: '/r',
+      branch: 'main',
+      runId,
+      first,
+      say: (l) => said.push(l),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        o.onSleep?.(w, sleeps.length);
+      },
+    });
+  return { w, said, sleeps, dispatched, asked, step };
+}
+
+test('batchStep: a look when ci ends on main, or when a batch ends, starts the newest commit\'s batch at once; never a second one', async () => {
+  // The incident's shape: the last batch ended minutes ago on an older commit; main's tip has had none.
+  const s = stepWorld({ head: sha(9), slow: [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })] });
+  assert.equal(await s.step(500), 'started');
+  assert.deepEqual([s.dispatched, s.sleeps], [[sha(9)], []], 'no waiting');
+  assert.match(s.said.join('\n'), /batch: started on main/);
+  // One running (the last commit of a burst lands meanwhile): nothing now; the look when it ends starts the next.
+  const busy = stepWorld({ head: sha(10), slow: [run({ head_sha: sha(9), created_at: '2026-10-13T01:00:00Z', status: 'in_progress', conclusion: null })] });
+  assert.equal(await busy.step(501), 'nothing');
+  assert.deepEqual([busy.dispatched, busy.asked], [[], []], 'nothing to start: decided on what the run read, nothing more asked');
+  busy.w.slow[0] = { ...busy.w.slow[0]!, status: 'completed', conclusion: 'success' };
+  const next = stepWorld({ head: sha(10), slow: busy.w.slow });
+  assert.equal(await next.step(502), 'started');
+  assert.deepEqual(next.dispatched, [sha(10)], 'main\'s newest commit, without the schedule');
+  // Already batched: nothing.
+  const had = stepWorld({ head: sha(9), slow: [run({ head_sha: sha(9), created_at: '2026-10-13T01:00:00Z', conclusion: 'failure' })] });
+  assert.equal(await had.step(503), 'nothing');
+  assert.deepEqual(had.dispatched, []);
+});
+
+test('batchStep: two looks at once never start a batch each: the newer lets the older finish, then reads again', async () => {
+  const slow = [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })];
+  // A batch ends as ci finishes on main: runs 499 and 500 both read "no batch on the tip, none running". 499 starts
+  // it while 500 gives it its turn; 500 then reads again and starts nothing.
+  const a = stepWorld({
+    head: sha(9),
+    slow,
+    mine: [499, 500, 777],
+    onSleep: (w) => {
+      w.slow.push(run({ head_sha: w.head, created_at: '2026-10-13T02:00:00Z', status: 'queued', conclusion: null }));
+      w.mine = [500, 777];
+    },
+  });
+  assert.equal(await a.step(500), 'nothing');
+  assert.deepEqual([a.dispatched, a.sleeps], [[], [b.TURN_POLL_MS]], 'a newer run (777) and itself (500) are not waited for');
+  assert.match(a.said.at(-1)!, /is queued/);
+  // The oldest run waits on nobody, but still decides on a fresh read: an older run that finished between this
+  // run's first read and now may have started the batch.
+  const o = stepWorld({ head: sha(9), slow, mine: [500, 600] });
+  o.w.slow.push(run({ head_sha: sha(9), created_at: '2026-10-13T02:00:00Z', status: 'queued', conclusion: null }));
+  assert.equal(await o.step(500), 'nothing');
+  assert.deepEqual([o.dispatched, o.sleeps], [[], []]);
+  // Main moved on while it gave way: the batch goes to the newest commit.
+  const m = stepWorld({ head: sha(9), slow, mine: [499, 500], onSleep: (w) => ((w.head = sha(10)), (w.mine = [500])) });
+  assert.equal(await m.step(500), 'started');
+  assert.deepEqual(m.dispatched, [sha(10)]);
+  // An older run stuck for a minute is not waited for any longer: at most TURN_WAIT_MS, then a fresh read decides.
+  const stuck = stepWorld({ head: sha(9), slow, mine: [499, 500] });
+  assert.equal(await stuck.step(500), 'started');
+  assert.equal(stuck.sleeps.reduce((n, x) => n + x, 0), b.TURN_WAIT_MS);
+  assert.ok(b.TURN_WAIT_MS <= 60_000, 'a minute at most: the run\'s check on main\'s tip is never in progress for long');
+});
+
+test('ci-batch.yml: it looks when ci.yml ends on a push to main, never for a pull request\'s run, and only ever runs main\'s own script', () => {
+  const read = (f: string) => readFileSync(join(repoRoot, '.github', 'workflows', f), 'utf8');
+  const wf = parse(read('ci-batch.yml')) as {
+    on: { schedule: { cron: string }[]; workflow_run: { workflows: string[]; types: string[] } };
+    jobs: { batch: { if: string; 'timeout-minutes': number; steps: { uses?: string; with?: Record<string, unknown>; run?: string }[] } };
+  };
+  const ci = parse(read('ci.yml')) as { name: string; on: { push: { branches: string[] }; workflow_dispatch?: unknown } };
+  assert.deepEqual(wf.on.workflow_run, { workflows: [(parse(read('ci-slow.yml')) as { name: string }).name, ci.name], types: ['completed'] });
+  assert.deepEqual(ci.on.push.branches, ['main'], 'ci.yml runs on every push to main');
+  assert.ok(!('workflow_dispatch' in ci.on), 'the workflow_dispatch clause below can only be a ci-slow.yml batch or bisect run');
+  assert.deepEqual(wf.on.schedule, [{ cron: '*/30 * * * *' }], 'the schedule stays, as a backstop');
+  // The guard, clause by clause: anything a pull request's run could match is absent.
+  const clauses = wf.jobs.batch.if.replace(/\s+/g, ' ').trim();
+  assert.equal(
+    clauses,
+    "github.event_name != 'workflow_run' || github.event.workflow_run.event == 'workflow_dispatch' || (github.event.workflow_run.name == 'ci' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == github.event.repository.default_branch && github.event.workflow_run.head_repository.full_name == github.repository)",
+  );
+  assert.equal(ci.name, 'ci', 'the name the guard compares');
+  // Its code is the default branch's, with no credentials left behind; the triggering run's ref or sha is never used.
+  const text = read('ci-batch.yml').replace(/^\s*#.*$/gm, '');
+  const checkouts = wf.jobs.batch.steps.filter((x) => (x.uses ?? '').startsWith('actions/checkout@'));
+  assert.deepEqual(checkouts.map((x) => x.with), [{ ref: '${{ github.event.repository.default_branch }}', 'persist-credentials': false }]);
+  assert.doesNotMatch(text, /workflow_run\.(head_sha|head_commit|pull_requests)|workflow_run\.head_branch \}\}/);
+  assert.deepEqual(wf.jobs.batch.steps.map((x) => x.run).filter(Boolean), ['node scripts/ci/batch.mjs']);
+  // A short job: its check lands on main's tip, where an in-progress check reads as pending to the updater and a merge.
+  assert.equal(wf.jobs.batch['timeout-minutes'], 10);
+  assert.ok(b.TURN_WAIT_MS <= 60_000);
+});
+
 test('lastBatches: the newest finished batch, and the newest green one before it on another commit', () => {
   const runs = [
     run({ head_sha: sha(1), created_at: '2026-10-13T01:00:00Z' }),
@@ -118,6 +261,7 @@ test('firstParentLine: from the red batch back to the green one along first pare
 // ---------- whole runs, against a fake GitHub ----------
 
 const REPO = 'example-org/engine';
+const RUN_ID = 4242; // this run of ci-batch.yml, as the script and the fake GitHub know it
 type Req = { method: string; path: string; body: Record<string, unknown> | null };
 type World = {
   head: string;
@@ -150,6 +294,7 @@ function fakeGitHub(w: World) {
       if (req.method === 'GET' && p === '') return json(res, 200, { default_branch: 'main' });
       if (req.method === 'GET' && p === '/commits/main') return json(res, 200, { sha: w.head });
       if (req.method === 'GET' && p === '/actions/workflows/ci-slow.yml/runs') return json(res, 200, { workflow_runs: [...w.runs].reverse() });
+      if (req.method === 'GET' && p === '/actions/workflows/ci-batch.yml/runs') return json(res, 200, { workflow_runs: u.searchParams.get('status') === 'in_progress' ? [{ id: RUN_ID, status: 'in_progress' }] : [] });
       if (req.method === 'GET' && p === '/git/matching-refs/heads/ci-bisect/') return json(res, 200, [...w.refs].map(([name, s]) => ({ ref: `refs/heads/${name}`, object: { sha: s } })));
       if (req.method === 'GET' && p === '/issues') return json(res, 200, w.issues);
       let m = /^\/actions\/runs\/(\d+)\/jobs$/.exec(p);
@@ -206,7 +351,7 @@ async function tick(port: number, dry = false): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'ci-batch-'));
   writeFileSync(join(dir, 'summary.md'), '');
   const child = spawn(process.execPath, [script, ...(dry ? ['--dry-run'] : [])], {
-    env: { PATH: process.env.PATH ?? '', GITHUB_TOKEN: 't', GITHUB_REPOSITORY: REPO, GITHUB_API_URL: `http://127.0.0.1:${port}`, GITHUB_STEP_SUMMARY: join(dir, 'summary.md') },
+    env: { PATH: process.env.PATH ?? '', GITHUB_TOKEN: 't', GITHUB_REPOSITORY: REPO, GITHUB_API_URL: `http://127.0.0.1:${port}`, GITHUB_STEP_SUMMARY: join(dir, 'summary.md'), GITHUB_RUN_ID: String(RUN_ID) },
   });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
@@ -305,6 +450,21 @@ test('a new main commit with no batch gets one, dispatched on main; a dry run on
     // Queued now: the next run starts nothing.
     await tick(port);
     assert.equal(w.writes.length, 1);
+  });
+});
+
+test('a whole run minutes after the last batch ended: the new main commit\'s batch is dispatched at once', async () => {
+  const w = world(2, 2);
+  // The last batch (green) started 6 minutes ago and has ended; main has a newer commit with no batch.
+  w.runs[1]!.conclusion = 'success';
+  w.runs[1]!.created_at = new Date(Date.now() - 6 * 60_000).toISOString();
+  w.line.push(sha(40));
+  w.head = sha(40);
+  await withFake(w, async (port) => {
+    const out = await tick(port);
+    assert.match(out, /batch: started on main/);
+    assert.doesNotMatch(out, /wait/);
+    assert.deepEqual(w.writes, [{ method: 'POST', path: '/actions/workflows/ci-slow.yml/dispatches', body: { ref: 'main', inputs: { job: 'all', sha: '' } } }]);
   });
 });
 

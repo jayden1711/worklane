@@ -19,7 +19,9 @@
 //     Installing an older commit than the tip logs a "chose" line: the commit, and why each newer one was skipped.
 //     On the engine repo the slow checks run in batches (.github/workflows/ci-batch.yml: main's newest commit, at
 //     most every 30 minutes), so only a batched commit can have every required check: one the batch skipped reads
-//     as pending ("hasn't run"), is waited for until pending_wait_minutes, then passed over, and never installed.
+//     as "hasn't run" and is never installed. Such a commit isn't waited for when nothing is in flight on it (a
+//     required check hasn't run, and no check on it is queued or running, 10 minutes or more after it landed): an
+//     older fully green commit goes in at once. Otherwise a busy main, whose tip is rarely the batched commit, would keep every batched one waiting.
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
@@ -44,7 +46,10 @@
 // renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the machine doesn't
 // have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
 // the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
-// Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl.
+// Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl (a wait
+// or refusal once per commit and reason). Every run also prints one line to stdout, the journal: the result, and for
+// a wait, refusal, hold or failed build the commit and the reason (`waiting b9634df: required check "x" hasn't run
+// on this commit`), secrets redacted.
 // Stuck: when the machine has stayed on one engine commit for updates.json "stuck_alert_minutes" (default 120) while
 // what it follows has moved on, it raises one watchdog incident (update_stuck: the installed commit, the newest one,
 // how long, and the reason it gives now), once per episode, and resolves it when an install succeeds or there is
@@ -88,6 +93,8 @@ const STUCK_ALERT_MIN = 120; // updates.json stuck_alert_minutes
 const STUCK_INCIDENT = 'update_stuck'; // the watchdog incident's kind (src/watchdog/incidents.ts KINDS); its key is 'engine'
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
 const CHECK_PAGES_MAX = 10; // pages of 100 check runs read for one commit
+const IDLE_AFTER_MS = 10 * 60_000; // WHY: a commit's checks take a moment to appear; before this, "nothing running" isn't idle
+const JOURNAL_MAX = 1000; // characters of one stdout line (journalLine)
 const VERDICT_TTL_MS = 60 * 60_000; // how long an older commit's red verdict is reused before GitHub is asked again
 
 // ---------- decisions (pure) ----------
@@ -221,7 +228,10 @@ const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.fai
  * one; an older commit's final red verdict is reused for VERDICT_TTL_MS (deps.verdicts/saveVerdicts, optional), so a
  * long red streak doesn't spend the API's hourly limit (the tip is always asked). A pending commit, or one GitHub
  * gave no answer for, stops the scan to wait for it, until it has been on main pendingWaitMs; after that it is
- * passed over for an older one. Returns { chosen, skipped } | { wait, reason, skipped } | { none: true, skipped },
+ * passed over for an older one. An idle commit (evaluateChecks: a required check hasn't run and nothing on it is
+ * queued or running, IDLE_AFTER_MS or more after it landed) is passed over at once: nothing in flight will make it green, and waiting on it would only
+ * keep an older green commit out. Below the tip its verdict is remembered like a red one (only main's newest commit
+ * gets a batch). What may be installed is unchanged: only a commit whose checks are all green. Returns { chosen, skipped } | { wait, reason, skipped } | { none: true, skipped },
  * skipped being the newer commits passed over: [{ sha, reason, held?, pending? }].
  */
 async function chooseCommit(deps, cfg, api, cands, held) {
@@ -243,7 +253,9 @@ async function chooseCommit(deps, cfg, api, cands, held) {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
       const data = await checkRunsOf(deps, api, c.sha);
       v = data ? evaluateChecks(data.check_runs, cfg.required_checks) : { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
-      if (!v.ok && v.final && i > 0) {
+      // WHY: idle only once the commit has been on main a while: just landed, its checks may not have appeared yet.
+      if (v.idle && !(now - Date.parse(c.date || '') >= IDLE_AFTER_MS)) v = { ...v, idle: false };
+      if (!v.ok && (v.final || v.idle) && i > 0) {
         kept[c.sha] = { reason: v.reason, at: new Date(now).toISOString() };
         changed = true;
       }
@@ -255,12 +267,12 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     let pending = false;
     if (!v.final) {
       const landed = Date.parse(c.date || '');
-      if (v.noAnswer || !(now - landed >= waitMs)) {
+      if (v.noAnswer || !(v.idle || now - landed >= waitMs)) {
         out = { wait: c, reason: v.reason, skipped };
         break;
       }
       pending = true;
-      v = { ...v, reason: `${v.reason}, still ${Math.round(waitMs / 60_000)}+ minutes after it landed (pending_wait_minutes)` };
+      v = { ...v, reason: now - landed >= waitMs ? `${v.reason}, still ${Math.round(waitMs / 60_000)}+ minutes after it landed (pending_wait_minutes)` : `${v.reason}, and none of its checks is queued or running` };
     }
     skipped.push({ sha: c.sha, reason: v.reason, ...(v.held ? { held: true } : {}), ...(pending ? { pending: true } : {}) });
   }
@@ -278,6 +290,8 @@ const GREEN = new Set(['success', 'neutral', 'skipped']);
 /**
  * Every check on the commit complete and green, and every required check present and successful.
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
+ * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
+ * will bring it (a slow check that only runs in batches, on a commit with no batch).
  */
 function evaluateChecks(runs, required) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
@@ -288,7 +302,7 @@ function evaluateChecks(runs, required) {
   }
   for (const name of required) {
     const r = latest.get(name);
-    if (!r) return { ok: false, final: false, reason: `required check "${name}" hasn't run on this commit` };
+    if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit` };
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
     if (r.conclusion === 'skipped') return { ok: false, final: true, reason: `required check "${name}" was skipped` };
     if (r.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" ended ${r.conclusion}` };
@@ -359,7 +373,35 @@ function redact(text) {
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted key]')
     .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, '[redacted]')
     .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [redacted]')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@') // WHY: a clone URL can carry user:token@
     .replace(/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1$2[redacted]');
+}
+
+/**
+ * One journal line for a run's result: the event, the commit's short sha and the reason, on one line, secrets
+ * redacted (a reason can quote updates.json's repo_url or a build's output), capped.
+ * `waiting b9634df: required check "x" hasn't run on this commit`
+ */
+function journalLine(event, sha, reason) {
+  const why = redact(String(reason == null ? '' : reason)).replace(/\s+/g, ' ').trim();
+  const line = `${event}${sha ? ` ${short(sha)}` : ''}${why ? `: ${why}` : ''}`;
+  return line.length > JOURNAL_MAX ? `${line.slice(0, JOURNAL_MAX)}…` : line;
+}
+
+/**
+ * deps.note: a refusal or wait goes to updates.jsonl once per commit and reason (state remembers the last one), not
+ * every 10 minutes, and to the journal (print) on every run, so `journalctl -u` always says why it isn't updating.
+ */
+function makeNote({ readState, writeState, log, print }) {
+  return (event, sha, reason) => {
+    const last = readState() || {};
+    if (last.event !== event || last.sha !== sha || last.reason !== reason) {
+      log({ event, to: sha, reason });
+      writeState({ event, sha, reason });
+    }
+    print(journalLine(event, sha, reason));
+    return event;
+  };
 }
 
 /** The last lines of a text, capped. */
@@ -1003,7 +1045,7 @@ function saveJson(file, value, mode) {
   fs.renameSync(tmp, file);
 }
 
-function realDeps() {
+function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
   const readJson = (f) => {
     try {
       return JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -1084,21 +1126,19 @@ function realDeps() {
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log,
-    /** A refusal or wait is logged once per commit and reason, not every 10 minutes. */
-    note: (event, sha, reason) => {
-      const last = readJson(STATE) || {};
-      if (last.event !== event || last.sha !== sha || last.reason !== reason) {
-        log({ event, to: sha, reason });
-        fs.writeFileSync(STATE, JSON.stringify({ event, sha, reason }), { mode: 0o644 });
-      }
-      return event;
-    },
+    note: makeNote({ readState: () => readJson(STATE), writeState: (st) => fs.writeFileSync(STATE, JSON.stringify(st), { mode: 0o644 }), log, print }),
   };
 }
 
 if (require.main === module) {
-  run(realDeps()).then(
-    (r) => process.stdout.write(`${r}\n`),
+  // WHY: one line per run in the journal. A noted result (waiting, refused, held, ...) printed its own, with the reason.
+  let said = false;
+  const print = (line) => {
+    said = true;
+    process.stdout.write(`${line}\n`);
+  };
+  run(realDeps(print)).then(
+    (r) => said || print(r),
     (e) => {
       try {
         fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), event: 'error', reason: String(e && e.message ? e.message : e).slice(0, 500) })}\n`);
@@ -1110,4 +1150,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { stuckStep, stuckAlertMs, STUCK_INCIDENT, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

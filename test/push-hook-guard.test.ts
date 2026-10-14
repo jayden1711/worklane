@@ -1,0 +1,223 @@
+// The push gate's first-time-setup hatch (PUSH_GATE_BOOTSTRAP) and git's pre-push hook are a person's, never an
+// agent's: the guardrails refuse every way an agent's tool call sets, passes or stores the hatch or swaps the hook,
+// and no agent or project command starts with the hatch in its environment.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BRAND } from '../src/brand.js';
+import { GuardrailsConfig, TestsConfig } from '../src/config/schema.js';
+import { exampleContext } from '../src/guardrails/check.js';
+import { evaluate } from '../src/guardrails/engine.js';
+import { PUSH_GATE_HATCH_ENV, withoutPushGateHatch } from '../src/guardrails/push-hook.js';
+import { runHook } from '../src/hook.js';
+import { childEnv, projectCommand } from '../src/os/index.js';
+import { projectEnvProblem, safeProjectEnv } from '../src/project-env.js';
+import { agentEnv, runAsEnv } from '../src/runner.js';
+import { exampleProject, repoRoot } from './helpers.js';
+
+const cfg = GuardrailsConfig.parse({ version: 1 });
+const verdict = (tool: string, input: Record<string, unknown>, agent = true, cwd = '/p') => evaluate({ tool, input, cwd }, cfg, exampleContext(cfg, '/p', agent));
+const bash = (command: string, agent = true, cwd = '/p') => verdict('Bash', { command }, agent, cwd);
+const H = PUSH_GATE_HATCH_ENV;
+
+test('the hatch has the name the push gate hook reads, and the hook knows the agent marker the runner sets', () => {
+  const hook = readFileSync(join(repoRoot, 'scripts', 'push-gate-hook.mjs'), 'utf8');
+  assert.match(hook, new RegExp(`^const HATCH = '${H}';$`, 'm'));
+  assert.match(hook, new RegExp(`^const AGENT_MARKER = '${BRAND.envPrefix}_AGENT';$`, 'm'));
+  assert.equal(agentEnv({}, 'cli')[`${BRAND.envPrefix}_AGENT`], '1');
+});
+
+test('an agent may not set, export or pass the hatch, in any wrapper', () => {
+  for (const c of [
+    `${H}=1 git push origin HEAD`,
+    `${H}=1 git push`,
+    `${H}=1`,
+    `export ${H}=1`,
+    `export ${H}=1 && git push`,
+    `export ${H}; ${H}=1; git push`,
+    `declare -x ${H}=1; git push`,
+    `env ${H}=1 git push`,
+    `/usr/bin/env ${H}=1 git push origin HEAD:refs/heads/x`,
+    `sudo env ${H}=1 git push`,
+    `sh -c '${H}=1 git push'`,
+    `bash -lc "export ${H}=1; git push"`,
+    `zsh -c 'env ${H}=1 git push'`,
+    `eval "${H}=1 git push"`,
+    `echo $(${H}=1 git push)`,
+    `(${H}=1 git push)`,
+    `{ ${H}=1 git push; }`,
+    `git status && ${H}=1 git push`,
+    `timeout 60 env ${H}=1 git push`,
+    `xargs env ${H}=1 git push < /dev/null`,
+    `${H.toLowerCase()}=1 git push`,
+    `"PUSH_GATE_BOOT""STRAP"=1 git push`,
+    `export PUSH_GATE_BOOT\\STRAP=1`,
+    `set -a; ${H}=1; set +a; git push`,
+    `fish -c 'set -x ${H} 1; git push'`,
+    `node -e "process.env.${H}='1'; require('child_process').execSync('git push')"`,
+    `python3 -c "import os; os.environ['${H}']='1'; os.system('git push')"`,
+    `npm_config_x=1 npm run push --${H}=1`,
+    `git -c alias.p='!${H}=1 git push' p`,
+    `git -c core.pager='${H}=1 git push' log`,
+    `rg --pre 'env ${H}=1 git push' x`,
+    `grep -rn ${H} docs && git push`,
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-gate-hatch'], c);
+});
+
+test('an agent may not store the hatch where a later shell or push would read it', () => {
+  for (const c of [
+    `echo 'export ${H}=1' >> ~/.zshrc`,
+    `echo ${H}=1 >> .env`,
+    `printf '${H}=1\\n' | tee -a ~/.bashrc`,
+    `echo ${H}=1 | sudo tee -a /etc/environment`,
+    `cat >> ~/.profile <<EOF\nexport ${H}=1\nEOF`,
+    `sed -i 's/^#x/export ${H}=1/' ~/.zshenv`,
+    `git config --global alias.p '!${H}=1 git push'`,
+    `git config core.sshCommand '${H}=1 ssh'`,
+    `launchctl setenv ${H} 1`,
+    `echo '${H}=1 git push' > push.sh`,
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-gate-hatch'], c);
+  const write = (file_path: string, content: string, agent = true) => verdict('Write', { file_path, content }, agent);
+  for (const f of ['/home/example/.zshrc', '/home/example/.bashrc', '/home/example/.profile', '/p/.env', '/p/.env.local', '/p/ci.env', '/p/.envrc', '/home/example/.config/fish/config.fish', '/home/example/.config/environment.d/x.conf', '/etc/environment', '/etc/profile.d/x.sh']) {
+    assert.deepEqual([write(f, `export ${H}=1\n`).decision, write(f, `export ${H}=1\n`).rule], ['deny', 'push-gate-hatch'], f);
+  }
+  assert.equal(verdict('Edit', { file_path: '.env', old_string: 'A=1', new_string: `A=1\n${H}=1` }).rule, 'push-gate-hatch');
+  assert.equal(verdict('MultiEdit', { file_path: '/p/.env', edits: [{ old_string: 'A=1', new_string: `${H}=1` }] }).rule, 'push-gate-hatch');
+  assert.equal(write('/p/.env.local', 'WORKERS=4\n').decision, 'none', 'an env file without the hatch');
+});
+
+test('an agent may not skip or swap the pre-push hook', () => {
+  for (const c of [
+    'git push --no-verify',
+    'git push --no-verify origin HEAD:refs/heads/x',
+    'git -C . push origin HEAD --no-verify',
+    'git -c core.hooksPath=/dev/null push',
+    'git -c core.hookspath=/tmp/h push origin HEAD',
+    'git -ccore.hooksPath=/tmp/h push',
+    'git -C /p -c core.hooksPath= push',
+    'H=/tmp/h git --config-env=core.hooksPath=H push',
+    'git --config-env core.hooksPath=H push',
+    'git config core.hooksPath /tmp/h',
+    'git config --local core.hooksPath .githooks',
+    'git config --global core.hooksPath /tmp/h',
+    'git config set core.hooksPath /tmp/h',
+    'git config --unset core.hooksPath',
+    'git config --worktree core.hooksPath /tmp/h',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp/h git push',
+    'export GIT_CONFIG_KEY_3=core.hooksPath',
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/tmp/h'\" git push",
+    'GIT_CONFIG_GLOBAL=/tmp/cfg git push',
+    'env GIT_CONFIG_SYSTEM=/tmp/cfg git push origin HEAD',
+    'export GIT_CONFIG_GLOBAL=/tmp/cfg; git push',
+    "sh -c 'git -c core.hooksPath=/dev/null push'",
+    "bash -c 'git push --no-verify'",
+    'rm .git/hooks/pre-push',
+    'rm -rf .git/hooks',
+    'mv .git/hooks .git/hooks.off',
+    'echo "exit 0" > .git/hooks/pre-push',
+    'cp /tmp/pre-push .git/hooks',
+    'chmod -x .git/hooks/pre-push; touch .git/hooks/pre-push',
+    'ln -sf /usr/bin/true .git/hooks/pre-push',
+    'echo "exit 0" > /repo/.git/worktrees/a/hooks/pre-push',
+    'sed -i s/x/y/ .git/hooks/push-gate-hook.mjs',
+    'printf "[core]\\n\\thooksPath = /tmp/h\\n" >> .git/config',
+    'echo "[core]" >> ~/.gitconfig',
+    'tee -a ~/.config/git/config < /tmp/cfg',
+    'echo x >> .git/config.worktree',
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+  // A relative write from inside the git dir.
+  assert.equal(bash('echo "exit 0" > hooks/pre-push', true, '/p/.git').rule, 'push-hook-bypass');
+  assert.equal(bash('echo x > pre-push', true, '/p/.git/hooks').rule, 'push-hook-bypass');
+  for (const f of ['/p/.git/hooks/pre-push', '.git/hooks/push-gate-hook.mjs', '/p/.git/config', '/home/example/.gitconfig', '/home/example/.config/git/config', '/p/.git/worktrees/a/config.worktree']) {
+    assert.equal(verdict('Write', { file_path: f, content: 'x' }).rule, 'push-hook-bypass', f);
+    assert.equal(verdict('Edit', { file_path: f, old_string: 'a', new_string: 'b' }).rule, 'push-hook-bypass', f);
+  }
+});
+
+test('what stays frictionless for an agent: plain pushes and commits, reading about the hatch, its own tests and docs', () => {
+  for (const c of [
+    'git push',
+    'git push origin HEAD:refs/heads/task',
+    'git push -n origin HEAD',
+    'git commit -q -m fix',
+    'git commit --no-verify -m fix',
+    'git config --get core.hooksPath',
+    'git config --list',
+    'git config get core.hooksPath',
+    'git config pull.rebase false',
+    'GIT_CONFIG_GLOBAL=/dev/null npm test',
+    `grep -rn ${H} docs scripts`,
+    `rg -n ${H}`,
+    `grep -c ${H} CONTRIBUTING.md | head -1`,
+    `cat CONTRIBUTING.md | grep ${H}`,
+    `git grep -n ${H}`,
+    `git log -S${H} --oneline`,
+    `git commit -m "Docs: when ${H} applies"`,
+    'node --test dist/test/push-gate-hook.test.js',
+    'npm run check:push',
+    'ls .git/hooks',
+    'cat .git/hooks/pre-push',
+    'cat .git/config',
+    'echo hooks > notes/config',
+  ]) assert.equal(bash(c).decision, 'none', c);
+  // Source, tests and docs may say the name: only files a shell or push reads its environment from are closed.
+  for (const f of ['/p/CONTRIBUTING.md', '/p/scripts/push-gate-hook.mjs', '/p/test/push-gate-hook.test.ts', '/p/docs/environment.md']) {
+    assert.equal(verdict('Write', { file_path: f, content: `${H}=1 git push` }).decision, 'none', f);
+  }
+});
+
+test("a person's own session keeps the hatch and its hooks: none of this applies outside an agent run", () => {
+  for (const c of [`${H}=1 git push`, `export ${H}=1`, `echo 'export ${H}=1' >> ~/.zshrc`, 'git push --no-verify', 'git -c core.hooksPath=/dev/null push', 'git config core.hooksPath .githooks', 'rm .git/hooks/pre-push']) {
+    assert.equal(bash(c, false).decision, 'none', c);
+  }
+  assert.equal(verdict('Write', { file_path: '/home/example/.zshrc', content: `export ${H}=1` }, false).decision, 'none');
+  assert.equal(verdict('Write', { file_path: '/p/.git/hooks/pre-push', content: 'x' }, false).decision, 'none');
+});
+
+test('the hook path: an agent session is denied, the same call in a person\'s session is not', async () => {
+  const { dir } = exampleProject();
+  const input = { hook_event_name: 'PreToolUse', cwd: dir, tool_name: 'Bash', tool_input: { command: `${H}=1 git push origin HEAD` } };
+  const env = { HOME: mkdtempSync(join(tmpdir(), 'home-')), [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: mkdtempSync(join(tmpdir(), 'state-')) };
+  const agent = await runHook('pre-tool-use', input, { ...env, [`${BRAND.envPrefix}_AGENT`]: '1' });
+  const out = JSON.parse(agent.stdout ?? '{}') as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+  assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny', agent.stdout);
+  assert.match(out.hookSpecificOutput?.permissionDecisionReason ?? '', /push-gate-hatch: PUSH_GATE_BOOTSTRAP is the push gate's first-time-setup hatch/);
+  const swap = await runHook('pre-tool-use', { ...input, tool_input: { command: 'git -c core.hooksPath=/dev/null push' } }, { ...env, [`${BRAND.envPrefix}_AGENT`]: '1' });
+  assert.match(swap.stdout ?? '', /"permissionDecision":"deny".*push-hook-bypass/);
+  const person = await runHook('pre-tool-use', input, env);
+  assert.deepEqual([person.exitCode, person.stdout], [0, undefined], 'no objection in a person\'s session');
+});
+
+test('no agent starts with the hatch: not from the coordinator\'s environment, a project\'s env, or a caller\'s extras', () => {
+  const base = { PATH: '/usr/bin', HOME: '/home/example', [H]: '1' };
+  assert.equal(H in agentEnv(base, 'cli'), false, 'not passed through');
+  assert.equal(H in agentEnv(base, 'api_key', { [H]: '1', KEEP: 'x' }), false, 'not even when a caller hands it in');
+  assert.equal(agentEnv(base, 'cli', { KEEP: 'x' }).KEEP, 'x');
+  const lower = agentEnv(base, 'cli', { [H.toLowerCase()]: '1' });
+  assert.deepEqual(Object.keys(lower).filter((k) => k.toUpperCase() === H), [], 'any spelling of its case (Windows)');
+  const asUser = runAsEnv({ PATH: '/usr/bin', [H]: '1' }, { user: 'shop-agent', home: '/home/user' });
+  assert.equal(H in asUser, false, 'nor as the agent user');
+  assert.equal(asUser.HOME, '/home/user');
+  // A project's committed env (tests.yaml) can't name it.
+  assert.match(projectEnvProblem(H) ?? '', /harness or the system/);
+  assert.equal(TestsConfig.safeParse({ version: 1, runner: { kind: 'command', changed: 'x', full: 'x' }, env: { [H]: '1' } }).success, false);
+  assert.deepEqual(safeProjectEnv({ [H]: '1', WORKERS: '4' }), { WORKERS: '4' });
+  assert.deepEqual(withoutPushGateHatch({ A: '1', [H]: '1' }), { A: '1' });
+});
+
+test('project commands the engine runs (checks, tests) do not inherit the hatch from the engine\'s own environment', () => {
+  const before = process.env[H];
+  process.env[H] = '1';
+  try {
+    assert.equal(H in childEnv(), false);
+    assert.equal(H in childEnv({ [H]: '1' }), false);
+    assert.equal(H in projectCommand('true').env, false);
+    assert.equal(H in projectCommand('true', undefined, { [H]: '1', WORKERS: '4' }).env, false);
+    assert.equal(process.env[H], '1', "the engine's own environment is left alone");
+  } finally {
+    if (before === undefined) delete process.env[H];
+    else process.env[H] = before;
+  }
+});

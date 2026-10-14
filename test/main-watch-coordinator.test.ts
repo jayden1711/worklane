@@ -54,7 +54,7 @@ function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: Tes
   }
   const gh = watchApi(f);
   const clock = { t: Date.now() };
-  const prTestRuns = o.listing ? ({ tick: async () => ({ started: [], cancelled: [] }), idle: async () => undefined, stop: () => undefined, recover: async () => [], listing: o.listing } as unknown as PrTestRuns) : undefined;
+  const prTestRuns = o.listing ? ({ tick: async () => ({ started: [], cancelled: [] }), idle: async () => undefined, stop: () => undefined, recover: async () => [], ready: () => true, listing: o.listing } as unknown as PrTestRuns) : undefined;
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), {
     prPollMs: 0,
     autoMerge: () => true,
