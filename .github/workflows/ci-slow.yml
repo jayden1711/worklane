@@ -579,11 +579,15 @@ jobs:
             sudo truncate -s 0 "$argvlog"
             pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[0-9]* \([0-9a-f]\{32\}\)$/\1/p')"
             [ -n "$pw" ] || { echo "$which: db-start printed no password" >&2; exit 1; }
-            # The recorded docker calls of db-start: how many carry the password, and how many were "docker run".
-            echo "$which shim $(sudo grep -cF -- "$pw" "$argvlog" || true) $(sudo grep -c '^run ' "$argvlog" || true)" >> "$RUNNER_TEMP/seen"
-            sudo grep '^run ' "$argvlog" | cut -c1-240 | sed "s/^/  $which, docker argv recorded: /" || true
+            # db-start's recorded docker calls, copied out with no value on any command line. WHY: a sudo grep for the
+            # password put it in sudo's own journal line; every search with the value runs only after the watch and
+            # the journal are taken, and never through sudo.
+            sudo cat "$argvlog" > "$RUNNER_TEMP/argv-$which.log"
             touch "$w/stop"; wait "$watcher" || true
             sudo journalctl --since "$since" -o verbose --no-pager > "$RUNNER_TEMP/journal-$which.txt"
+            # How many recorded docker calls carry the password, and how many were "docker run".
+            echo "$which shim $(grep -cF -- "$pw" "$RUNNER_TEMP/argv-$which.log" || true) $(grep -c '^run ' "$RUNNER_TEMP/argv-$which.log" || true)" >> "$RUNNER_TEMP/seen"
+            grep '^run ' "$RUNNER_TEMP/argv-$which.log" | cut -c1-240 | sed "s/^/  $which, docker argv recorded: /" || true
             for secret in canary pw; do
               seen="$(grep -cF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" || true) $(grep -cF -- "${!secret}" "$RUNNER_TEMP/journal-$which.txt" || true)"
               echo "$which helper: the $secret in argv/units as nobody, in the journal: $seen (lines)"
