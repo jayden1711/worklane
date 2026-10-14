@@ -16,7 +16,9 @@ import { acceptedEncoding, COMPRESSIBLE_API, mayCompressApi } from '../src/dashb
 import { EventCache } from '../src/events/cache.js';
 import { EventLog } from '../src/events/log.js';
 import { prsView, checkResults } from '../src/projection.js';
-import type { EventType } from '../src/events/types.js';
+import type { EventType, StoredEvent } from '../src/events/types.js';
+import { boardView } from '../src/board.js';
+import { trustView } from '../src/trust.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 import { writeSyntheticLog } from './synthetic-events.js';
 
@@ -298,4 +300,39 @@ test('the synthetic log is the same for the same seed, and each payload its sche
   assert.equal(read(4, 'a.db'), read(4, 'b.db'));
   assert.notEqual(read(4, 'c.db'), read(5, 'd.db'));
   assert.ok(readFileSync(join(dir, 'a.db')).length > 0);
+});
+
+/** The log as an array that counts each pass over it (an iteration, or a method that walks it). */
+function counted(events: StoredEvent[]) {
+  const walks = new Set<string | symbol>([Symbol.iterator, 'filter', 'map', 'forEach', 'reduce', 'some', 'every', 'find', 'findIndex', 'findLast', 'flatMap', 'slice', 'entries']);
+  const n = { passes: 0 };
+  const proxy = new Proxy([...events], {
+    get(t, k, r) {
+      if (walks.has(k)) n.passes++;
+      return Reflect.get(t, k, r) as unknown;
+    },
+  });
+  return { proxy, n };
+}
+
+test('the Board and the trust view pass over the log a fixed number of times, not once per card or per failure', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'speed-log-'));
+  const now = new Date('2026-06-01T13:00:00Z');
+  const passes = (count: number) => {
+    const f = join(dir, `${count}.db`);
+    writeSyntheticLog(f, { count, seed: 11 });
+    const all = new EventLog(f).read();
+    const b = counted(all);
+    const board = boardView({ events: b.proxy, instance: 'x', role: 'owner', canReadDigest: true, live: [], slots: { cap: 2, running: 0 }, now });
+    const t = counted(all);
+    trustView(t.proxy, { agents: 2, now });
+    const red = all.filter((e) => e.type === 'merge.main_result' && (e.payload as { outcome: string }).outcome === 'red').length;
+    return { board: b.n.passes, cards: board.cards.length, trust: t.n.passes, red };
+  };
+  const small = passes(1500);
+  const big = passes(6000);
+  assert.ok(big.cards > small.cards + 10, `more cards on the bigger log (${small.cards}, ${big.cards})`);
+  assert.ok(big.red > small.red, `more main-red failures on the bigger log (${small.red}, ${big.red})`);
+  assert.equal(big.board, small.board, `the Board's passes over the log: ${small.board} for ${small.cards} cards, ${big.board} for ${big.cards}`);
+  assert.equal(big.trust, small.trust, `the trust view's passes: ${small.trust} for ${small.red} failures, ${big.trust} for ${big.red}`);
 });
