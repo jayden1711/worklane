@@ -448,29 +448,34 @@ function sudoersWithSudo(version: string | null) {
   return spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), 'wl-alpha'], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
 }
 
-test('the signer rules, written as patterns, are installed only for sudo 1.9.10 or later; below, they are left out, said so, and every other rule stays', { skip: !posix && 'bash' }, () => {
-  const k = /\^(stage|discard)-update-signer /g;
+test('the pattern rules (add-project, stage-update-signer, discard-update-signer) are installed only for sudo 1.9.10 or later; below, they are left out, said so, and every other rule stays', { skip: !posix && 'bash' }, () => {
+  const k = /\^(stage-update-signer|discard-update-signer|add-project) /g;
+  // The command lines alone, each without its list punctuation: what differs is which commands, not where the list ends.
+  const commands = (rule: string) => rule.split('\n').filter((l) => !l.startsWith('#')).map((l) => l.replace(/,? \\$/, '').replace(/^Cmnd_Alias WORKLANE_MACHINE = /, '    ').trim()).filter(Boolean);
   for (const v of ['1.9.10', '1.9.10p1', '1.9.15p5', '1.9.17', '1.10.0', '2.0.0']) {
     const r = sudoersWithSudo(v);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal((r.stdout.match(k) ?? []).length, 2, `sudo ${v}: both signer rules`);
+    assert.deepEqual((r.stdout.match(k) ?? []).map((x) => x.trim()), ['^stage-update-signer', '^discard-update-signer', '^add-project'], `sudo ${v}: all three pattern rules`);
     assert.doesNotMatch(r.stdout, /^# Not here/m);
   }
+  const newer = commands(sudoersWithSudo('1.9.10').stdout).filter((l) => !/\^(stage-update-signer|discard-update-signer|add-project) /.test(l));
   for (const v of ['1.9.9', '1.9.9p2', '1.9.5p2', '1.8.31', '1.9.0', null]) {
     const r = sudoersWithSudo(v);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal((r.stdout.match(k) ?? []).length, 0, `sudo ${v}: no signer rule`);
-    assert.match(r.stdout, new RegExp(`^# Not here: stage-update-signer and discard-update-signer\\. This sudo \\(${(v ?? '').replace(/p\d+$/, '')}\\) is older than 1\\.9\\.10 and would read their patterns as literal text\\.$`, 'm'));
+    assert.equal((r.stdout.match(k) ?? []).length, 0, `sudo ${v}: no pattern rule`);
+    assert.match(r.stdout, new RegExp(`^# Not here: add-project, stage-update-signer and discard-update-signer\\. This sudo \\(${(v ?? '').replace(/p\d+$/, '')}\\) is older than 1\\.9\\.10 and would read their patterns as literal text\\.$`, 'm'));
     // Every other rule is there as on a newer sudo.
-    const newer = sudoersWithSudo('1.9.10').stdout.split('\n').filter((l) => !/(stage|discard)-update-signer/.test(l) && !l.startsWith('#'));
-    assert.deepEqual(r.stdout.split('\n').filter((l) => !l.startsWith('#')), newer.map((l) => l.replace(/, \\$/, ', \\')), `sudo ${v}: the rest unchanged`);
+    assert.deepEqual(commands(r.stdout), newer, `sudo ${v}: the rest unchanged`);
     if (spawnSync('visudo', ['--version']).status === 0) {
       const f = join(mkdtempSync(join(tmpdir(), 'sudoers-')), 'rule');
       writeFileSync(f, r.stdout);
       assert.equal(spawnSync('visudo', ['-cf', f]).status, 0, `sudo ${v}: visudo accepts the rule without them`);
     }
   }
-  // machine-helper.sh says which it did, and refuses (to stderr) to install them on an older sudo.
+  // machine-helper.sh says which it did, refuses (to stderr) to install them on an older sudo, and records it for the dashboard.
   const sh = readFileSync(join(setup, 'machine-helper.sh'), 'utf8');
-  assert.match(sh, /^if sudo_regex_ok; then\n  echo "sudo \$\(sudo_version\): \$SUDO_REGEX_MIN or later, so the stage-update-signer and discard-update-signer rules are installed"\nelse\n  echo "REFUSED: the stage-update-signer and discard-update-signer rules are NOT installed\./m);
+  assert.match(sh, /^if sudo_regex_ok; then\n  echo "sudo \$\(sudo_version\): \$SUDO_REGEX_MIN or later, so the add-project, stage-update-signer and discard-update-signer rules are installed"\n  left_out='\[\]'\nelse\n  echo "REFUSED: the add-project, stage-update-signer and discard-update-signer rules are NOT installed\./m);
+  assert.match(sh, /left_out='\["add-project","stage-update-signer","discard-update-signer"\]'/);
+  assert.match(sh, /^mv -f "\$\(dirname "\$HELPER_RULES"\)\/\.helper-rules\.json\.tmp" "\$HELPER_RULES"$/m);
+  assert.match(readFileSync(join(setup, 'lib.sh'), 'utf8'), /^HELPER_RULES=\/etc\/worklane\/helper-rules\.json$/m);
 });

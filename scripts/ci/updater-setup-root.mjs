@@ -486,17 +486,20 @@ writeFileSync(CONFIG, `${JSON.stringify({ ...JSON.parse(readFileSync(CONFIG, 'ut
 // ---- the signer rules and this runner's sudo
 const sudoV = sh('sudo', ['-V']).split('\n')[0];
 const rule = readFileSync('/etc/sudoers.d/worklane-machine', 'utf8');
-assert.ok(rule.includes('^stage-update-signer ') && rule.includes('^discard-update-signer '), 'the signer rules are installed');
-console.log(`OK: ${sudoV} on this runner (1.9.10 or later): the stage-update-signer and discard-update-signer rules are installed`);
+assert.ok(rule.includes('^stage-update-signer ') && rule.includes('^discard-update-signer ') && rule.includes('^add-project '), 'the pattern rules are installed');
+const recorded = JSON.parse(readFileSync('/etc/worklane/helper-rules.json', 'utf8'));
+assert.deepEqual(recorded.left_out, [], 'helper-rules.json records nothing left out');
+assert.equal(owner('/etc/worklane/helper-rules.json'), '0:0 644');
+console.log(`OK: ${sudoV} on this runner (1.9.10 or later): the add-project, stage-update-signer and discard-update-signer rules are installed; helper-rules.json: ${JSON.stringify(recorded)}`);
 // The same rule, made with a stand-in sudo reporting 1.9.9: those two left out, the rest there, and visudo accepts it.
 const fake = mkdtempSync('/var/lib/wl-fake-sudo-');
 writeFileSync(join(fake, 'sudo'), '#!/bin/sh\n[ "$1" = -V ] && echo "Sudo version 1.9.9" && exit 0\nexit 1\n', { mode: 0o755 });
 const older = execFileSync('bash', ['-c', 'source "$1"; machine_sudoers wl-ci', '_', '/opt/worklane/current/scripts/setup/lib.sh'], { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } });
-assert.ok(!older.includes('^stage-update-signer ') && !older.includes('^discard-update-signer ') && older.includes('# Not here: stage-update-signer and discard-update-signer. This sudo (1.9.9)') && older.includes('install-updater') && older.includes('^add-project '), older);
+assert.ok(!older.includes('^stage-update-signer ') && !older.includes('^discard-update-signer ') && !older.includes('^add-project ') && older.includes('# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (1.9.9)') && older.includes('install-updater') && older.includes('tailscale public-url'), older);
 writeFileSync(join(fake, 'rule'), older);
 assert.equal(spawnSync('visudo', ['-cf', join(fake, 'rule')]).status, 0, 'visudo accepts the rule without them');
 rmSync(fake, { recursive: true, force: true });
-console.log('OK: with a stand-in sudo reporting 1.9.9, the rule leaves out stage-update-signer and discard-update-signer, keeps the rest, and visudo accepts it');
+console.log('OK: with a stand-in sudo reporting 1.9.9, the rule leaves out add-project, stage-update-signer and discard-update-signer, keeps the rest, and visudo accepts it');
 
 rmSync(work, { recursive: true, force: true });
 console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), the channel set to release and never to main, a signer staged in the root-owned pending list (at most 4) with the signers file untouched and its tag still refused; adding or confirming a signer, and every other argument list, refused. As root: updates.sh --confirm-signer added only the staged signer with the matching fingerprint, appended, and cleared it; an expired one and a wrong fingerprint added nothing; --signer and --channel main worked; each signer added reads as a watchdog alert. The updater's watch: a signers file written by hand was reported once (update log, journal, a red incident) and held until --acknowledge-signers; the appends through updates.sh were not reported; a later hand-added line was`);

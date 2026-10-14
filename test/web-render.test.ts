@@ -1665,6 +1665,23 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
   assert.match(view(ownerRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
 });
 
+test('Add project on an older sudo: no submit, why, and the root command to run instead; the name and repo fields still there to fill it', () => {
+  const ownersFile = machineOwnersFile('ada');
+  const f = join(mkdtempSync(join(tmpdir(), 'helper-rules-')), 'helper-rules.json');
+  writeFileSync(f, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer'] }));
+  const html = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile, helperRulesFile: f }));
+  assert.match(html, /data-testid="add-project" data-enabled="no"/);
+  assert.doesNotMatch(html, /data-testid="add-project-submit"|data-testid="add-project-disabled"/, 'no button that could only fail, and no bare refusal');
+  assert.match(html, /data-testid="add-project-manual"[\s\S]*?this machine(&#x27;|')s sudo \(1\.9\.9\) is older than 1\.9\.10[\s\S]*?data-testid="add-project-manual-command"[^>]*>sudo bash \/opt\/worklane\/current\/scripts\/setup\/add-project\.sh &lt;name&gt; &lt;owner\/repo&gt;</);
+  for (const id of ['add-project-name', 'add-project-repo']) assert.doesNotMatch(html.match(new RegExp(`<input[^>]*data-testid="${id}"[^>]*>`))![0], /disabled=""/, `${id} can be filled in`);
+  // On 1.9.10 or later, as before.
+  const g = join(mkdtempSync(join(tmpdir(), 'helper-rules-')), 'helper-rules.json');
+  writeFileSync(g, JSON.stringify({ sudo: '1.9.15', patterns_min: '1.9.10', left_out: [] }));
+  const ok = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile, helperRulesFile: g }), null);
+  assert.match(ok, /data-testid="add-project-submit"/);
+  assert.doesNotMatch(ok, /data-testid="add-project-manual"/);
+});
+
 test("Add project's repo picker: the account's repos to pick from, the ones the App can't work on shown disabled with why; the script it stands for; hidden when adding isn't allowed", () => {
   const ownersFile = machineOwnersFile('ada');
   const data = addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile });

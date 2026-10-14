@@ -732,6 +732,8 @@ export interface AddProjectData {
   machineOwners: string[];
   /** Newest first. */
   runs: AddProjectRun[];
+  /** When the machine helper can't run add-project here (an older sudo): why, and the root script to run instead; absent from older servers. */
+  manual?: { sudo: string | null; why: string; script: string } | null;
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
 /** Add project's repo picker (GET /api/add-project/repos, src/setup/repo-picker.ts): an account's repos to pick from. */
