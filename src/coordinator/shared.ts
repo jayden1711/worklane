@@ -111,7 +111,10 @@ export interface CoordinatorDeps {
    * `name`: the instance's name, as the dashboard hub knows it (a setup step's one-time link names it).
    */
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number; roleOf?: RoleOf; typingMs?: number; name?: string };
-  /** The fast test runs on every open PR (src/coordinator/test-runs.ts); absent: tests.yaml has no test_run, or no sandbox. */
+  /**
+   * The fast test runs on every open PR (src/coordinator/test-runs.ts); absent: tests.yaml has no test_run. While the
+   * sandbox's check is failing it refuses every run, and `testRuns` and `deployGate` below count as absent.
+   */
   prTestRuns?: PrTestRuns;
   /**
    * The test-run service (src/testrun/: startTestRun, postChecks) for PR-mode batching (tests.yaml land.pr_batch).
