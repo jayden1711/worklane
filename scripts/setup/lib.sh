@@ -81,9 +81,10 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 30
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 34
 # allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8, claude-account status,
-# claude-account switch, install-updater, set-update-channel release) as root, and nothing else.
+# claude-account switch, install-updater, set-update-channel release, tailscale install, tailscale up, tailscale serve,
+# tailscale public-url) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
 #
 # And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
@@ -109,8 +110,11 @@ machine_sudoers() {
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
   cmds+=("$MACHINE_HELPER claude-account status" "$MACHINE_HELPER claude-account switch")
   cmds+=("$MACHINE_HELPER install-updater" "$MACHINE_HELPER set-update-channel release")
+  # Tailscale (tailscale.sh): four fixed commands. sudo matches a listed command's arguments exactly, so none takes an
+  # auth key, a flag, a URL or a port.
+  cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
   cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
-  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
+  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -122,6 +126,46 @@ machine_sudoers() {
 helper_instances() {
   [ -f "$MACHINE_SUDOERS" ] || return 0
   sed -n 's/^\(wl-[-a-z0-9, ]*\) ALL=(root) NOPASSWD: WORKLANE_MACHINE$/\1/p' "$MACHINE_SUDOERS" | tr ',' '\n' | sed -e 's/^ *wl-//' -e 's/ *$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true
+}
+
+# Tailscale for the dashboard hub (tailscale.sh). The install is pinned: Tailscale's own apt repository for this
+# distribution, every package checked by apt against the one signing key whose fingerprint is here, and this version.
+# Change the version and the fingerprint only in a reviewed commit, the fingerprint only to one Tailscale publishes.
+#   fingerprint: the primary key of https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg ("Tailscale Inc. (Package
+#   repository signing key)"), as fetched 2026-10-13: the same key file (sha256
+#   3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39) for ubuntu jammy and noble and debian bookworm.
+#   version: the newest in that repository's Packages index (dists/noble/main/binary-amd64) on the same day.
+TAILSCALE_VERSION=1.104.1
+TAILSCALE_SIGNER_FPR=2596A99EAAB33821893C0A79458CA832957F5868
+TAILSCALE_REPO=https://pkgs.tailscale.com/stable
+TAILSCALE_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
+TAILSCALE_LIST=/etc/apt/sources.list.d/tailscale.list
+TAILSCALE_BIN=/usr/bin/tailscale
+OS_RELEASE=/etc/os-release
+# What the steps leave for the dashboard: steps.jsonl (root's, 0644: one JSON line per step change, never a link or a
+# key) and, while `up` waits, login-url (0400, the asking coordinator's user alone: the dashboard shows it to a machine
+# owner and to nobody else).
+TAILSCALE_DIR=/var/lib/worklane/tailscale
+TAILSCALE_LOCK=/run/lock/worklane-tailscale.lock
+# The hub's sign-in port, the only one tailscale serve may forward to (dashboards.sh; never 4398, the break-glass).
+HUB_PORT=4399
+BREAK_GLASS_PORT=4398
+# How long `tailscale up` waits for the owner to log in, and `tailscale serve` for tailscaled, in seconds.
+TAILSCALE_UP_SECONDS=600 TAILSCALE_SERVE_SECONDS=30
+# The login link `tailscale up` prints, strictly: Tailscale's own login host and a short id. Anything else is not
+# relayed (and a key is not a link: one is never asked for, taken or printed).
+tailscale_login_url_ok() { [[ "$1" =~ ^https://login\.tailscale\.com/a/[A-Za-z0-9]{6,64}$ ]]; }
+# A line of tailscale's output with every link and key taken out, for the journal and steps.jsonl.
+tailscale_redact() { sed -E -e 's#https?://[^[:space:]"]+#[a link, not logged]#g' -e 's#tskey-[A-Za-z0-9_-]+#[a key, not logged]#g'; }
+# stdin to a file of this owner, group and mode: a dotted temp name next to it, made empty with that owner and mode
+# first, then moved into place.
+put_file() {
+  local owner="$1" group="$2" mode="$3" file="$4" tmp
+  tmp="$(dirname "$file")/.$(basename "$file").tmp"
+  rm -f "$tmp"
+  install -o "$owner" -g "$group" -m "$mode" /dev/null "$tmp"
+  cat > "$tmp"
+  mv -f "$tmp" "$file"
 }
 
 # The dashboard hub's unit, as dashboards.sh writes it, and one option of its ExecStart (nothing when it has none).

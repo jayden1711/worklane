@@ -600,6 +600,7 @@ jobs:
     # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step. Last,
     # another instance gets its App through the manifest flow itself (wizard screen 5), with GitHub's conversion faked
     # and a stand-in hub for the owner's sign-in: no real App is made.
+    # Last, Tailscale for the hub through the same helper (tailscale.sh): the real signed install, then a stand-in CLI.
     name: add-project (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
@@ -1014,9 +1015,215 @@ jobs:
           if grep -qFf "$F/never" "$F/run4.jsonl" "$F/run4.err" "$F/requests.log" "$F/server.log"; then echo "a secret or the code was echoed" >&2; exit 1; fi
           if sudo grep -qFf "$F/never" /var/lib/worklane/machine-changes.jsonl "$h/.local/state/worklane/instances/delta/credentials.yaml" || sudo journalctl --no-pager | grep -qFf "$F/never"; then echo "a secret or the code reached a log" >&2; exit 1; fi
           if sudo grep -rqFf "$F/never" /etc/systemd/system /var/lib/worklane; then echo "a secret or the code reached a unit or the machine's state" >&2; exit 1; fi
+      # Tailscale for the hub (scripts/setup/tailscale.sh), through the machine helper as the coordinator, the way the
+      # dashboard's requests reach it. The install is the real one: Tailscale's signed apt repository, with the key
+      # and the version lib.sh pins. Nobody can log a CI machine in to a tailnet, so from `up` on the tailscale CLI is
+      # a stand-in (scripts/ci/tailscale-stand-in.cjs) that prints a login link and waits, as the real one does.
+      - name: "tailscale: sudo and the helper take exactly four commands and refuse every other; with no tailscale a step changes nothing"
+        run: |
+          for a in install up serve public-url; do sudo -n -l -U wl-ci "$HELPER" tailscale "$a"; done
+          # Refused twice over: by the sudoers rule (so the helper never starts), and by the helper itself when root runs it.
+          refused() {
+            if sudo -n -l -U wl-ci "$HELPER" "$@" >/dev/null 2>&1; then echo "the sudoers rule allows: $*" >&2; exit 1; fi
+            if sudo -u wl-ci sudo -n "$HELPER" "$@" < /dev/null >/dev/null 2>&1; then echo "it ran as the coordinator: $*" >&2; exit 1; fi
+            local rc=0
+            sudo "$HELPER" "$@" < /dev/null >/dev/null 2>&1 || rc=$?
+            [ "$rc" = 2 ] || { echo "the helper gave $rc, not a refusal (2), to: $*" >&2; exit 1; }
+          }
+          refused tailscale
+          refused tailscale up --auth-key=tskey-auth-kCIexample-0123456789abcdef
+          refused tailscale up --auth-key tskey-auth-kCIexample-0123456789abcdef
+          refused tailscale up --authkey=tskey-auth-kCIexample-0123456789abcdef
+          refused tailscale up --login-server=https://example.test
+          refused tailscale up --for ci
+          refused tailscale up extra
+          refused tailscale "up --auth-key=tskey-auth-kCIexample-0123456789abcdef"
+          refused tailscale serve 4398
+          refused tailscale serve --https=443 http://127.0.0.1:4398
+          refused tailscale serve reset
+          refused tailscale funnel
+          # Nothing that could turn on Funnel, choose what serve forwards or where, or change what `up` exposes.
+          refused tailscale funnel 443
+          refused tailscale funnel --bg --https=443 http://127.0.0.1:4399
+          refused tailscale --funnel
+          refused tailscale serve --funnel
+          refused tailscale serve funnel on
+          refused tailscale serve --bg --https=443 http://127.0.0.1:4399
+          refused tailscale serve --https=8443
+          refused tailscale serve --set-path=/x http://127.0.0.1:4398
+          refused tailscale serve --set-path / http://203.0.113.5:80
+          refused tailscale serve http://0.0.0.0:4399
+          refused tailscale serve --tcp=22 tcp://127.0.0.1:22
+          refused tailscale up --advertise-exit-node
+          refused tailscale up --advertise-routes=198.51.100.0/24
+          refused tailscale up --ssh
+          refused tailscale up --accept-routes
+          refused tailscale up --exit-node=203.0.113.1
+          refused tailscale up --operator=wl-ci
+          refused tailscale up --timeout=600s
+          refused tailscale public-url --name other
+          # The rule itself names no funnel command, no flag and no target.
+          if sudo grep -Eiq 'funnel|tailscale [a-z-]+ [^,\]' /etc/sudoers.d/worklane-machine; then echo "the sudoers rule has more than the four bare commands" >&2; exit 1; fi
+          [ "$(sudo grep -o 'worklane-machine tailscale [a-z-]*' /etc/sudoers.d/worklane-machine | sort | tr '\n' ' ')" = "worklane-machine tailscale install worklane-machine tailscale public-url worklane-machine tailscale serve worklane-machine tailscale up " ]
+          refused tailscale public-url https://elsewhere.example.test
+          refused tailscale install 1.0.0
+          refused tailscale install --allow-unauthenticated
+          refused tailscale status
+          refused tailscale logout
+          refused tailscale UP
+          for a in install up serve public-url; do
+            if sudo -n -l -U wl-dash "$HELPER" tailscale "$a" 2>/dev/null; then echo "wl-dash may run tailscale $a" >&2; exit 1; fi
+            if sudo -n -l -U wl-ci-agent "$HELPER" tailscale "$a" 2>/dev/null; then echo "the agent user may run tailscale $a" >&2; exit 1; fi
+          done
+          # The four themselves, as root but not as a coordinator through sudo: refused too (an admin runs tailscale.sh).
+          rc=0; sudo "$HELPER" tailscale up < /dev/null > "$F/ts-root.txt" 2>&1 || rc=$?
+          [ "$rc" = 2 ] && grep -q 'tailscale here is for a coordinator, through sudo' "$F/ts-root.txt"
+          # None of that ran or logged anything.
+          if sudo grep -q '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl; then echo "a refused tailscale command was logged as run" >&2; exit 1; fi
+          sudo test ! -e /var/lib/worklane/tailscale
+          if command -v tailscale; then echo "this runner already has tailscale: the steps below assume it doesn't" >&2; exit 1; fi
+          # A machine with no tailscale: a step fails saying so and the hub keeps its URL.
+          hub=/etc/systemd/system/worklane-dashboard-hub.service
+          sudo cp "$hub" "$F/hub-before.service"
+          ended() { sudo grep -q "\"step\":\"$1\",\"state\":\"\(done\|failed\)\"" /var/lib/worklane/tailscale/steps.jsonl 2>/dev/null; }
+          sudo -u wl-ci sudo -n "$HELPER" tailscale public-url < /dev/null
+          for _ in $(seq 1 30); do ended public-url && break; sleep 1; done
+          sudo tail -n 1 /var/lib/worklane/tailscale/steps.jsonl | jq -e '.step=="public-url" and .state=="failed" and (.detail|test("tailscale isn.t installed on this machine"))'
+          sudo cmp "$hub" "$F/hub-before.service"
+          for _ in $(seq 1 30); do systemctl is-active -q worklane-tailscale.service || break; sleep 1; done
+      - name: "tailscale install: a pinned key that isn't the repository's is refused by the real gpg check, and nothing is installed (a throwaway copy)"
+        run: |
+          # The shipped check, unchanged, told to expect another key: a copy outside the checkout, deleted right after.
+          p="$RUNNER_TEMP/pin-probe" && mkdir -p "$p" && cp -r scripts/setup "$p/setup"
+          sed -i 's/^TAILSCALE_SIGNER_FPR=.*/TAILSCALE_SIGNER_FPR=0000000000000000000000000000000000000000/' "$p/setup/lib.sh"
+          grep -qx 'TAILSCALE_SIGNER_FPR=0000000000000000000000000000000000000000' "$p/setup/lib.sh"
+          rc=0; sudo bash "$p/setup/tailscale.sh" install > "$F/ts-pin.txt" 2>&1 || rc=$?
+          cat "$F/ts-pin.txt"; rm -rf "$p"
+          [ "$rc" = 1 ]
+          # Its progress file goes too: the next step waits for the real install's own last line, not this one's.
+          sudo grep -q '"step":"install","state":"failed"' /var/lib/worklane/tailscale/steps.jsonl && sudo rm -f /var/lib/worklane/tailscale/steps.jsonl
+          fpr="$(sed -n 's/^TAILSCALE_SIGNER_FPR=//p' scripts/setup/lib.sh)"
+          # It names the key the repository really serves, which is the one this commit pins.
+          grep -qF "install failed: the signing key fetched isn't the pinned one (pinned 0000000000000000000000000000000000000000, got $fpr); nothing installed" "$F/ts-pin.txt"
+          sudo test ! -e /usr/bin/tailscale && sudo test ! -e /etc/apt/sources.list.d/tailscale.list && sudo test ! -e /usr/share/keyrings/tailscale-archive-keyring.gpg
+          git diff --exit-code -- scripts/setup
+      - name: "tailscale install, through the helper: the real package from Tailscale's signed apt repository, the pinned key and version"
+        run: |
+          s=/var/lib/worklane/tailscale/steps.jsonl
+          ended() { sudo grep -q "\"step\":\"$1\",\"state\":\"\(done\|failed\)\"" "$s" 2>/dev/null; }
+          sudo -u wl-ci sudo -n "$HELPER" tailscale install < /dev/null | tee "$F/ts-install.txt"
+          grep -q 'started tailscale install as worklane-tailscale.service' "$F/ts-install.txt"
+          for _ in $(seq 1 150); do ended install && break; sleep 2; done
+          sudo cat "$s"
+          sudo tail -n 1 "$s" | jq -e '.step=="install" and .state=="done"'
+          [ "$(sudo stat -c '%U %a' "$s")" = "root 644" ]
+          v="$(sed -n 's/^TAILSCALE_VERSION=//p' scripts/setup/lib.sh)"; fpr="$(sed -n 's/^TAILSCALE_SIGNER_FPR=//p' scripts/setup/lib.sh)"
+          [ "$(dpkg-query -W -f='${Version}' tailscale)" = "$v" ]
+          [ "$(/usr/bin/tailscale version | head -1)" = "$v" ]
+          # apt's only source for it is Tailscale's repository, tied to the one key, which is the pinned one.
+          code="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+          grep -qxF "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu $code main" /etc/apt/sources.list.d/tailscale.list
+          [ "$(stat -c '%U %G %a' /usr/share/keyrings/tailscale-archive-keyring.gpg)" = "root root 644" ]
+          [ "$(gpg --show-keys --with-colons --with-fingerprint /usr/share/keyrings/tailscale-archive-keyring.gpg | awk -F: '$1 == "pub" { p = 1 } $1 == "fpr" && p { print $10; p = 0 }')" = "$fpr" ]
+          apt-cache policy tailscale | tee "$F/ts-policy.txt"
+          grep -q "https://pkgs.tailscale.com/stable/ubuntu $code/main" "$F/ts-policy.txt"
+          systemctl is-active tailscaled
+          sudo grep -q '"by":"wl-ci","what":"tailscale","from":null,"to":"install"' /var/lib/worklane/machine-changes.jsonl
+          for _ in $(seq 1 30); do systemctl is-active -q worklane-tailscale.service || break; sleep 1; done
+      - name: "tailscale up, through the helper (a stand-in tailscale from here): no auth key, and the login link for the asking coordinator's user only"
+        run: |
+          sudo systemctl stop tailscaled
+          sudo install -o root -g root -m 0755 scripts/ci/tailscale-stand-in.cjs /usr/bin/tailscale
+          d=/var/lib/worklane/tailscale
+          ended() { sudo grep -q "\"step\":\"$1\",\"state\":\"\(done\|failed\)\"" "$d/steps.jsonl" 2>/dev/null; }
+          sudo -u wl-ci sudo -n "$HELPER" tailscale up < /dev/null
+          for _ in $(seq 1 60); do sudo test -s "$d/login-url" && break; sleep 1; done
+          # The link: tailscale's own, in a file of the asking coordinator's user alone.
+          [ "$(sudo stat -c '%U %G %a' "$d/login-url")" = "wl-ci root 400" ]
+          sudo cmp "$d/login-url" /var/lib/ci-tailscale/last-url
+          sudo -u wl-ci cat "$d/login-url" | grep -qE '^https://login\.tailscale\.com/a/[0-9a-f]{16}$'
+          for u in wl-dash wl-ci-agent wl-beta wl-gamma; do
+            if sudo -u "$u" cat "$d/login-url" >/dev/null 2>&1; then echo "$u can read the login link" >&2; exit 1; fi
+          done
+          id="$(sudo sed 's#.*/##' "$d/login-url")"; echo "::add-mask::$id"; [ "${#id}" = 16 ]
+          # The id to look for goes in a file of the runner's, never on a sudo command line (sudo logs those to the journal).
+          (umask 077; printf '%s\n' "$id" > "$F/ts-link-id")
+          # A second step while this one waits is refused: one at a time.
+          if sudo -u wl-ci sudo -n "$HELPER" tailscale serve < /dev/null 2> "$F/ts-busy.txt"; then echo "a second tailscale step started" >&2; exit 1; fi
+          grep -q 'a tailscale step is already running' "$F/ts-busy.txt"
+          leaked() { sudo journalctl --no-pager > "$F/journal.txt" 2>&1 || true; sudo grep -qFf "$F/ts-link-id" "$F/journal.txt" "$d/steps.jsonl" /var/lib/worklane/machine-changes.jsonl; }
+          if leaked; then echo "the login link is in the journal, the steps or the changes log" >&2; exit 1; fi
+          sudo grep -q '"step":"up","state":"waiting"' "$d/steps.jsonl"
+          # The owner logs in (the stand-in's way): the machine is on the tailnet under a name, with a certificate.
+          net=ts.net; name="ci-box.tail0ci.$net"; echo "TS_NAME=$name" >> "$GITHUB_ENV"
+          printf '{"BackendState":"Running","Self":{"DNSName":"%s."},"CertDomains":["%s"]}\n' "$name" "$name" | sudo tee /var/lib/ci-tailscale/login.json >/dev/null
+          for _ in $(seq 1 60); do ended up && break; sleep 1; done
+          sudo cat "$d/steps.jsonl"
+          sudo tail -n 1 "$d/steps.jsonl" | jq -e --arg n "$name" '.step=="up" and .state=="done" and .detail=="on the tailnet as \($n)"'
+          sudo test ! -e "$d/login-url"
+          if leaked; then echo "the login link is in the journal, the steps or the changes log" >&2; exit 1; fi
+          rm -f "$F/journal.txt" "$F/ts-link-id"
+          # tailscale up got a timeout and nothing else: no key as an argument or in its environment.
+          [ "$(sudo jq -c 'select(.args[0]=="up")' /var/lib/ci-tailscale/calls)" = '{"args":["up","--timeout=600s"],"authkey_env":false}' ]
+          if sudo grep -q 'tskey' /var/lib/ci-tailscale/calls "$d/steps.jsonl"; then echo "a key reached tailscale or the steps" >&2; exit 1; fi
+          for _ in $(seq 1 30); do systemctl is-active -q worklane-tailscale.service || break; sleep 1; done
+      - name: "tailscale serve and public-url, through the helper: https 443 to the hub's sign-in port only; the hub's URL through dashboards.sh, its other settings kept"
+        run: |
+          d=/var/lib/worklane/tailscale; hub=/etc/systemd/system/worklane-dashboard-hub.service
+          ended() { sudo grep -q "\"step\":\"$1\",\"state\":\"\(done\|failed\)\"" "$d/steps.jsonl" 2>/dev/null; }
+          idle() { for _ in $(seq 1 60); do systemctl is-active -q worklane-tailscale.service || return 0; sleep 1; done; return 1; }
+          # Funnel already on from before (the stand-in's serve config says so): status shows it, serve and public-url do
+          # nothing, and the config is byte for byte as it was. Then it is off again, as an admin would turn it off.
+          printf '{"AllowFunnel":{"%s:443":true}}' "$TS_NAME" | sudo tee /var/lib/ci-tailscale/serve.json >/dev/null
+          sudo cp /var/lib/ci-tailscale/serve.json "$F/ts-funnel.json"
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.funnel and (.serve|not)'
+          for a in serve public-url; do
+            sudo -u wl-ci sudo -n "$HELPER" tailscale "$a" < /dev/null
+            for _ in $(seq 1 60); do ended "$a" && break; sleep 1; done
+            sudo tail -n 1 "$d/steps.jsonl" | jq -e --arg a "$a" '.step==$a and .state=="failed" and (.detail|test("Tailscale Funnel is on for this machine.*never turns Funnel on or off"))'
+            idle
+          done
+          sudo cmp /var/lib/ci-tailscale/serve.json "$F/ts-funnel.json"
+          sudo cmp "$hub" "$F/hub-before.service"
+          if sudo jq -e 'select(.args[0]=="serve" and .args[1]=="--bg")' /var/lib/ci-tailscale/calls >/dev/null; then echo "serve ran with Funnel on" >&2; exit 1; fi
+          if sudo grep -q funnel /var/lib/ci-tailscale/calls; then echo "tailscale was given a funnel command" >&2; exit 1; fi
+          sudo rm -f /var/lib/ci-tailscale/serve.json
+          sudo -u wl-ci sudo -n "$HELPER" tailscale serve < /dev/null
+          for _ in $(seq 1 60); do ended serve && break; sleep 1; done
+          sudo cat "$d/steps.jsonl"
+          sudo tail -n 1 "$d/steps.jsonl" | jq -e '.step=="serve" and .state=="done"'
+          if sudo grep -q AllowFunnel /var/lib/ci-tailscale/serve.json; then echo "serve turned Funnel on" >&2; exit 1; fi
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.serve and (.funnel|not)'
+          [ "$(sudo jq -sc 'map(.args) | map(select(.[0]=="serve" and .[1]=="--bg"))' /var/lib/ci-tailscale/calls)" = '[["serve","--bg","--https=443","http://127.0.0.1:4399"]]' ]
+          if sudo grep -q '4398' /var/lib/ci-tailscale/serve.json; then echo "the break-glass port is forwarded" >&2; exit 1; fi
+          idle
+          # The hub's URL: this machine's tailnet name, and nothing else about the hub changes.
+          sudo cmp "$hub" "$F/hub-before.service"
+          old="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$F/hub-before.service")" && [ -n "$old" ] && [ "$old" != "https://$TS_NAME" ]
+          sudo -u wl-ci sudo -n "$HELPER" tailscale public-url < /dev/null
+          for _ in $(seq 1 120); do ended public-url && break; sleep 1; done
+          sudo cat "$d/steps.jsonl"
+          sudo tail -n 1 "$d/steps.jsonl" | jq -e --arg n "$TS_NAME" --arg o "$old" '.step=="public-url" and .state=="done" and (.detail|contains("URL is now https://\($n) (it was \($o)). To sign in there, set the sign-in App"))'
+          sed "s# --public-url $old# --public-url https://$TS_NAME#" "$F/hub-before.service" > "$F/hub-want.service"
+          sudo cmp "$hub" "$F/hub-want.service"
+          idle
+          for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
+          # What the screen reads, as the coordinator (no root): installed, on the tailnet, served, and the hub's URL.
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | tee "$F/ts-status.json"
+          jq -e --arg n "$TS_NAME" '.installed and .state=="Running" and .name==$n and .https and .serve and (.break_glass_forwarded|not) and .hub_url=="https://\($n)"' "$F/ts-status.json"
+          # Again: already that URL, so dashboards.sh isn't run and the hub isn't restarted.
+          sudo rm -f "$d/steps.jsonl"
+          since="$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)"
+          sudo -u wl-ci sudo -n "$HELPER" tailscale public-url < /dev/null
+          for _ in $(seq 1 60); do ended public-url && break; sleep 1; done
+          sudo tail -n 1 "$d/steps.jsonl" | jq -e '.state=="done" and (.detail|test("is already https://"))'
+          [ "$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)" = "$since" ]
+          [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 9 ]
       - name: the units and the fake's log, on failure
         if: failure()
         run: |
+          sudo cat /var/lib/worklane/tailscale/steps.jsonl || true
+          sudo journalctl --no-pager -n 80 -u worklane-tailscale.service -u tailscaled.service || true
           tail -n 80 "$F2"/*.log || true
           sudo journalctl --no-pager -n 60 -u worklane-gamma.service || true
           sudo systemctl --no-pager status worklane-ci.service worklane-dashboard-ci.service worklane-dashboard-hub.service worklane-beta.service || true
