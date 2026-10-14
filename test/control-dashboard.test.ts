@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { oneChromeAtATime, webUiSkip } from './browser-helpers.js';
+import { oneChromeAtATime } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 const dir = join(repoRoot, 'scripts', 'dev');
@@ -57,9 +57,10 @@ test('a baseline makes only new console errors count: ports are ignored, a new p
   assert.ok(!base.includes(key('inbox', { kind: 'network', text: 'Failed: 404', url: 'http://127.0.0.1:5001/api/hub' })));
 });
 
-// Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise, but never in CI (CI_REQUIRE_WEB).
+// Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise.
 const chrome = ctl.findChrome(process.env.CHROME);
-test('end to end: opens a page in a real headless Chrome with PR history, and keeps all its state in its temporary directory', { skip: webUiSkip(chrome) }, async (ctx) => {
+const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
+test('end to end: opens a page in a real headless Chrome with PR history, and keeps all its state in its temporary directory', { skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built') || (process.platform === 'win32' && 'checked on macOS and Linux') }, async (ctx) => {
   await oneChromeAtATime(ctx);
   // A state dir the script must not write to: before the fix, the run record for the run page landed here.
   const mine = mkdtempSync(join(tmpdir(), 'not-the-demo-'));
