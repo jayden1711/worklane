@@ -3,6 +3,8 @@
 import type { StoredEvent } from './events/types.js';
 import { batchSummaries } from './coordinator/pr-batch.js';
 import { hygieneLine, type HygieneCounts } from './pr-hygiene.js';
+import { DIRECT_LAND_REFUSED } from './direct-land.js';
+import { localDay } from './local-day.js';
 
 export type TaskStatus =
   | 'triage'
@@ -81,7 +83,14 @@ export interface Projection {
   baseline: { sha: string; failing: string[]; at: string } | null;
   deploys: { env: string; sha: string; status: 'requested' | 'verified' | 'failed'; why?: string; at: string }[];
   coordinator: { instance: string; startedAt: string; lastTick: string | null } | null;
-  errors: { at: string; where: string; message: string }[];
+  /**
+   * The coordinator's errors still current, newest first, one per place and message: how many times, first and last
+   * (`at` is the last). An error is current until a later tick ends with no error from the same place, or the
+   * coordinator starts again after a tick (CoordinatorErrors).
+   */
+  errors: CoordinatorError[];
+  /** Errors that are no longer current (a later tick or a restart cleared them), newest first: history only. */
+  earlierErrors: CoordinatorError[];
   activity: { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }[];
   /** Agent runs in flight (started, not finished), and the most recent finished ones. */
   runs: { active: Run[]; recent: Run[] };
@@ -96,6 +105,78 @@ export interface Projection {
   emergency: { lastStop: { at: string; by: string; reason: string; running: number } | null; lastResume: string | null };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
 }
+
+/** Errors the coordinator records, grouped by where and message. */
+export interface CoordinatorError {
+  where: string;
+  message: string;
+  kind: string;
+  count: number;
+  first: string;
+  last: string;
+  /** The last time (the same as `last`). */
+  at: string;
+}
+
+/**
+ * Which coordinator errors are still current, as the log is folded. Each tick runs every step and catches each
+ * step's error on its own (src/coordinator.ts tick), so a `coordinator.tick` doesn't mean every step worked: an error
+ * from a place clears only at a tick that ends with no new error from that place. A restart (`coordinator.started`)
+ * after a tick clears the rest. A refused direct land and a config error are recorded once for a standing
+ * condition, not on every tick: they stay until a restart that came after a tick (or, for a refused direct land, a
+ * land that pushed: src/direct-land.ts directLandProblem). A config error recorded during start-up, before
+ * `coordinator.started`, so stays through that start.
+ */
+class CoordinatorErrors {
+  private current = new Map<string, CoordinatorError & { standing: boolean; ticked: boolean }>();
+  private earlier: CoordinatorError[] = [];
+  /** Places with an error since the last tick. */
+  private erred = new Set<string>();
+
+  error(at: string, where: string, message: string, kind: string) {
+    const key = `${where}\n${message}`;
+    const standing = kind === DIRECT_LAND_REFUSED || kind === 'config';
+    const g = this.current.get(key);
+    if (g) {
+      g.count++;
+      g.last = g.at = at;
+      g.ticked = false;
+      // Newest last: the map's order is the order shown (reversed).
+      this.current.delete(key);
+      this.current.set(key, g);
+    } else this.current.set(key, { where, message, kind, count: 1, first: at, last: at, at, standing, ticked: false });
+    this.erred.add(where);
+  }
+
+  tick() {
+    for (const [key, g] of this.current) {
+      if (g.standing) g.ticked = true;
+      else if (!this.erred.has(g.where)) this.retire(key);
+    }
+    this.erred.clear();
+  }
+
+  started() {
+    for (const [key, g] of this.current) if (!g.standing || g.ticked || g.kind === DIRECT_LAND_REFUSED) this.retire(key);
+    this.erred.clear();
+  }
+
+  landed() {
+    for (const [key, g] of this.current) if (g.kind === DIRECT_LAND_REFUSED) this.retire(key);
+  }
+
+  private retire(key: string) {
+    const g = this.current.get(key)!;
+    this.current.delete(key);
+    this.earlier.push(plain(g));
+    if (this.earlier.length > 40) this.earlier.splice(0, this.earlier.length - 20);
+  }
+
+  view(): { errors: CoordinatorError[]; earlierErrors: CoordinatorError[] } {
+    return { errors: [...this.current.values()].slice(-20).reverse().map(plain), earlierErrors: this.earlier.slice(-20).reverse() };
+  }
+}
+const plain = (g: CoordinatorError): CoordinatorError => ({ where: g.where, message: g.message, kind: g.kind, count: g.count, first: g.first, last: g.last, at: g.at });
 
 export interface Run {
   issue: number;
@@ -219,7 +300,8 @@ export function summarize(e: StoredEvent): string {
   }
 }
 
-export function project(events: StoredEvent[], today = new Date().toISOString().slice(0, 10)): Projection {
+/** `today`: the day (YYYY-MM-DD) "today" counts, in this machine's local time (src/local-day.ts). */
+export function project(events: StoredEvent[], today = localDay()): Projection {
   const tasks = new Map<number, Task>();
   const decisions = new Map<string, Decision>();
   const deploys: Projection['deploys'] = [];
@@ -228,7 +310,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
   let landedToday = 0;
   let baseline: Projection['baseline'] = null;
   let coordinator: Projection['coordinator'] = null;
-  const errors: Projection['errors'] = [];
+  const errors = new CoordinatorErrors();
   const active = new Map<string, Run>();
   const recent: Run[] = [];
   const queue = new Map<number, Projection['landQueue'][number]>();
@@ -304,7 +386,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       case 'run.cost': {
         const usd = Number(p.usd);
         if (t) t.costUsd += usd;
-        if (e.ts.startsWith(today)) {
+        if (localDay(e.ts) === today) {
           spendToday += usd;
           spendByRole[String(p.role)] = (spendByRole[String(p.role)] ?? 0) + usd;
         }
@@ -340,7 +422,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
         } else if (p.outcome === 'landed') {
           t!.landed = String(p.landed);
           t!.status = 'landed';
-          if (e.ts.startsWith(today)) landedToday++;
+          if (localDay(e.ts) === today) landedToday++;
         } else if (p.outcome === 'pr_opened') {
           // PR mode: the change is out for review, not blocked.
           t!.status = 'in_review';
@@ -392,12 +474,17 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
       }
       case 'coordinator.started':
         coordinator = { instance: String(p.instance), startedAt: e.ts, lastTick: null };
+        errors.started();
         break;
       case 'coordinator.tick':
         if (coordinator) coordinator.lastTick = e.ts;
+        errors.tick();
         break;
       case 'coordinator.error':
-        errors.push({ at: e.ts, where: String(p.where), message: String(p.message) });
+        errors.error(e.ts, String(p.where), String(p.message), String(p.kind ?? 'error'));
+        break;
+      case 'land.batch':
+        if (p.outcome === 'landed') errors.landed();
         break;
     }
     // Read models that sit beside the per-task fold.
@@ -476,7 +563,7 @@ export function project(events: StoredEvent[], today = new Date().toISOString().
     baseline,
     deploys: deploys.slice(-50).reverse(),
     coordinator,
-    errors: errors.slice(-20).reverse(),
+    ...errors.view(),
     activity,
     runs: { active: [...active.values()], recent: recent.slice(-50).reverse() },
     landQueue: [...queue.values()].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt)),

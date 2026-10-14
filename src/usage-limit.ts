@@ -7,6 +7,7 @@
 // seconds), the `|<unix seconds>` older clients append to "usage limit reached", or the text's "resets 3pm
 // (Area/City)" / "resets in 2h 30m". None: DEFAULT_PAUSE_MS, the length of the subscription's shortest window.
 import type { StoredEvent } from './events/types.js';
+import { localDay } from './local-day.js';
 
 /** With no reset time in claude's message: the subscription's five-hour window. */
 export const DEFAULT_PAUSE_MS = 5 * 3600_000;
@@ -122,7 +123,7 @@ export function pauseOf(events: StoredEvent[]): UsagePause | null {
   return p;
 }
 
-/** What the dashboard shows of an instance's usage: the pause in force, and today's runs and limit hits (UTC day). */
+/** What the dashboard shows of an instance's usage: the pause in force, and today's runs and limit hits (this machine's local day, src/local-day.ts). */
 export interface UsageView {
   paused: UsagePause | null;
   today: { runs: number; limitHits: number };
@@ -131,15 +132,17 @@ export interface UsageView {
 }
 
 export function usageView(events: StoredEvent[], now = Date.now()): UsageView {
-  const day = new Date(now).toISOString().slice(0, 10);
+  const day = localDay(now);
   let runs = 0;
   let limitHits = 0;
   let lastHit: string | null = null;
   for (const e of events) {
     if (e.type === 'usage.limit_hit') lastHit = e.ts;
-    if (!e.ts.startsWith(day)) continue;
-    if (e.type === 'run.started') runs++;
-    else if (e.type === 'usage.limit_hit' || (e.type === 'run.finished' && (e.payload as { reason?: string }).reason === 'rate_limited')) limitHits++;
+    const run = e.type === 'run.started';
+    const hit = e.type === 'usage.limit_hit' || (e.type === 'run.finished' && (e.payload as { reason?: string }).reason === 'rate_limited');
+    if ((!run && !hit) || localDay(e.ts) !== day) continue;
+    if (run) runs++;
+    else limitHits++;
   }
   return { paused: pauseOf(events), today: { runs, limitHits }, lastHit };
 }
