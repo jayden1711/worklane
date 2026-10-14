@@ -130,7 +130,7 @@ test('bootstrap: idempotent: with everything in place it installs nothing, sets 
     assert.equal(r.code, 0, r.out);
     for (const what of ['node v24.21.0', 'gitleaks 8.30.1', 'claude 2.1.296', 'worklane 0.4.1']) assert.match(r.out, new RegExp(`ok: ${what}`));
   }
-  const calls = m.calls().filter((c) => !/--version|^node |^gitleaks |^claude /.test(c));
+  const calls = m.calls().filter((c) => !/--version|--help|^node |^gitleaks |^claude /.test(c));
   assert.deepEqual(calls, [`worklane init --mode local ${m.repo}`, `worklane doctor --root ${m.repo}`, `worklane init --mode local ${m.repo}`, `worklane doctor --root ${m.repo}`], 'the same steps each time, and no install');
 });
 
@@ -160,13 +160,70 @@ test("bootstrap: doctor's result is the script's; on success it ends with the ne
   assert.equal(r.code, 0);
   assert.match(r.out, /next: worklane up --root/);
   assert.match(r.out, /Setting up a project by\s+hand/);
-  assert.deepEqual(passing.calls().filter((c) => c.startsWith('worklane ') && !c.includes('--version')).map((c) => c.split(' ')[1]), ['init', 'doctor'], 'nothing past init and doctor');
+  assert.deepEqual(passing.calls().filter((c) => c.startsWith('worklane ') && !/--version|--help/.test(c)).map((c) => c.split(' ')[1]), ['init', 'doctor'], 'nothing past init and doctor');
   // init stopping (a login missing, say) is the script's result, and doctor doesn't run after it.
   const stopped = released(machine({ have: installed({ worklane: 'case "$1" in --version) echo 0.4.1 ;; init) exit 1 ;; *) exit 0 ;; esac' }) }));
   const s = stopped.run(stopped.repo);
   assert.equal(s.code, 1);
   assert.match(s.out, /init stopped \(exit 1\): fix what it says, then run this again; it picks up where it stopped/);
   assert.ok(!stopped.calls().some((c) => c.startsWith('worklane doctor')), 'no doctor after init stopped');
+});
+
+/** WHY: an engine with the wizard (`dashboard --detach`, src/dashboard-detach.ts), standing in: it prints the URL last. */
+const wizardEngine = (more = '') => `case "$1" in --version) echo 0.5.0 ;; --help) echo "  dashboard --detach [--port n] [--no-open]" ;; ${more} dashboard) echo "dashboard for $4"; echo "http://127.0.0.1:4317/first-run" ;; *) exit 0 ;; esac`;
+const engineCalls = (m: ReturnType<typeof machine>) => m.calls().filter((c) => c.startsWith('worklane ') && !/--version|--help/.test(c));
+
+test('bootstrap, local: ends with the one wizard URL from the dashboard in the background; no checklist in the terminal; a rerun prints the same and installs nothing', { skip }, () => {
+  const m = released(machine({ have: installed({ npm: 'echo "npm must not run" >&2; exit 9', worklane: wizardEngine() }) }));
+  const outs = [m.run(m.repo), m.run(m.repo)];
+  for (const r of outs) {
+    assert.equal(r.code, 0, r.out);
+    const lines = r.out.trim().split('\n');
+    assert.equal(lines.at(-1), 'http://127.0.0.1:4317/first-run', 'the last line is the URL');
+    assert.equal(lines.filter((l) => /:\/\//.test(l)).length, 1, 'and the only URL printed');
+    assert.doesNotMatch(r.out, /no first-run wizard/);
+  }
+  assert.deepEqual(engineCalls(m), [`worklane dashboard --detach --root ${m.repo} --no-open`, `worklane dashboard --detach --root ${m.repo} --no-open`], 'no terminal here: no browser; and no init or doctor');
+  // The dashboard's own failure (a port another program holds, say) is the script's.
+  const busy = released(machine({ have: installed({ worklane: wizardEngine('dashboard) echo "dashboard --detach: port 4317 answers" >&2; exit 1 ;;') }) }));
+  assert.equal(busy.run(busy.repo).code, 1);
+  // A dry run plans it, and starts nothing.
+  const dry = released(machine({ have: installed({ worklane: wizardEngine() }) }));
+  assert.match(dry.run('--dry-run', dry.repo).out, /would run: worklane dashboard --detach --root \S+ --no-open/);
+  assert.deepEqual(engineCalls(dry), []);
+});
+
+test('bootstrap, local, an engine without the wizard (an older pinned release): the checklist runs in the terminal, and it says why', { skip }, () => {
+  const m = released(machine({ have: installed() }));
+  const r = m.run(m.repo);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /this engine \(0\.4\.1\) has no first-run wizard to open yet: the checklist runs here instead/);
+  assert.deepEqual(engineCalls(m).map((c) => c.split(' ')[1]), ['init', 'doctor']);
+});
+
+test('bootstrap --config: unattended, the same end: init --yes with the file\'s answers, doctor, then the same one URL; the file is data, never run', { skip }, () => {
+  const m = released(machine({ have: installed({ worklane: wizardEngine() }) }));
+  const cfg = join(m.dir, 'setup.conf');
+  const pwned = join(m.dir, 'pwned');
+  writeFileSync(cfg, ['# the wizard, as a file', 'mode=local', 'answer=package-manager=npm', 'answer=test-command=custom:make test', ''].join('\r\n'));
+  for (let i = 0; i < 2; i++) {
+    const r = m.run('--config', cfg, m.repo);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(r.out.trim().split('\n').at(-1), 'http://127.0.0.1:4317/first-run', 'the same URL as the wizard path');
+  }
+  const once = [`worklane init --mode local --yes --answer package-manager=npm --answer test-command=custom:make test ${m.repo}`, `worklane doctor --root ${m.repo}`, `worklane dashboard --detach --root ${m.repo} --no-open`];
+  assert.deepEqual(engineCalls(m), [...once, ...once]);
+  assert.doesNotMatch(m.run('--config', cfg, m.repo).out, /no terminal to ask on/, 'its mode counts as given');
+
+  const bad = (text: string) => (writeFileSync(cfg, text), m.run('--config', cfg, m.repo));
+  assert.match(bad('mode=local\nbogus=1\n').out, /setup\.conf:2: unknown key bogus/);
+  assert.match(bad('mode=cloud\n').out, /setup\.conf:1: mode is local or server, not cloud/);
+  assert.match(bad('answer=nothing\n').out, /answer is <question id>=<choice>/);
+  const evil = bad(`$(touch ${pwned})\nmode=$(touch ${pwned})\n`);
+  assert.notEqual(evil.code, 0);
+  assert.equal(existsSync(pwned), false, 'nothing in the file runs');
+  assert.match(m.run('--config', join(m.dir, 'none.conf'), m.repo).out, /--config: no readable file/);
+  assert.match(bad('mode=server\n').out, /server mode is the hardened multi-user Linux setup/, 'server mode is --hardened, from the file too');
 });
 
 test('bootstrap --mode: local is this path; server is the hardened one; with no terminal to ask on, local, said so', { skip }, () => {
@@ -235,17 +292,36 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   assert.match(r.out, /first machine owner: @ada-lovelace/);
   assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n', 'written as the first machine owner');
   assert.deepEqual(readFileSync(ran, 'utf8').trim().split('\n').map((l) => l.trim()), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
-  assert.match(r.out, new RegExp(`^dashboard: https://${esc(box)}$`, 'm'), "the dashboard's URL, this machine's Tailscale name");
-  assert.match(r.out, /sign in with GitHub as @ada-lovelace\. Everything after this first install happens there/);
-  assert.match(r.out, new RegExp(`no sign-in App yet[\\s\\S]*app-manifest shop acme/shop --signin --public-url https://${esc(box)}`), 'how to make the sign-in App');
-  assert.match(r.out, /dashboards\.sh --machine-owner ada-lovelace --client-id/);
+  // No sign-in App yet: the one URL is the hub's break-glass wizard, on this machine; the key stays in its file.
+  const end = (out: string) => out.slice(out.lastIndexOf('\n== the dashboard')).trim().split('\n');
+  assert.equal(end(r.out).at(-1), 'http://127.0.0.1:4398/first-run', 'the last line: the wizard on the hub');
+  assert.equal(end(r.out).filter((l) => /:\/\//.test(l)).length, 1, 'the only URL it ends with');
+  assert.match(r.out, /no sign-in App yet[\s\S]*app-manifest shop acme\/shop\s+--signin --public-url <the hub's https origin>/, 'how to make the sign-in App');
+  assert.match(r.out, /ssh -N -L 4398:127\.0\.0\.1:4398 <you>@<this-host>/);
+  assert.match(r.out, /asks once for the hub's key: it is in \S+\/\.local\/state\/worklane\/dashboard-hub\/dashboard-token/);
 
   // A rerun with someone else keeps the list as it is.
   const again = run('--machine-owner', 'grace', '--public-url', 'https://hub.example.test', 'shop', 'acme/shop');
   assert.equal(again.code, 0, again.out);
   assert.match(again.out, /machine owners already set, kept as they are/);
   assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n');
-  assert.match(again.out, /^dashboard: https:\/\/hub\.example\.test$/m, '--public-url wins');
+  assert.equal(end(again.out).at(-1), 'http://127.0.0.1:4398/first-run', 'no sign-in App: the break-glass still, whatever the public URL');
+
+  // With the sign-in App set up, signed-in people use the hub's public origin: the same URL on every rerun.
+  const viewer = join(m.dir, 'viewer');
+  mkdirSync(join(viewer, '.config', 'dashboard-signin'), { recursive: true });
+  writeFileSync(join(viewer, '.config', 'dashboard-signin', 'client-secret'), 'x');
+  m.stub('getent', `[ "$2" = wl-dash ] && echo "wl-dash:x:990:990::${viewer}:/usr/sbin/nologin"`);
+  for (let i = 0; i < 2; i++) {
+    const signed = run('--public-url', 'https://hub.example.test', 'shop', 'acme/shop');
+    assert.equal(signed.code, 0, signed.out);
+    assert.equal(end(signed.out).at(-1), 'https://hub.example.test/first-run');
+    assert.equal(end(signed.out).filter((l) => /:\/\//.test(l)).length, 1);
+    assert.match(signed.out, /sign-in App is set up: sign in with GitHub as @ada-lovelace/);
+  }
+  const tail = run('shop', 'acme/shop');
+  assert.equal(end(tail.out).at(-1), `https://${box}/first-run`, "with no --public-url, this machine's Tailscale name");
+  rmSync(join(m.bin, 'getent'));
 
   // With nobody to name (gh not signed in) and no one to ask, it stops before any script runs.
   rmSync(owners);

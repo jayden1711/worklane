@@ -1,0 +1,35 @@
+id: worklane-110
+base: 8eea5ce4500e92b9d10e5ea1282ce9817d2c5e35
+title: "Direct land: a rejected evaluator verdict holds for the owner (safety floor)"
+body: >-
+  **Outcome:** in `land_mode: direct`, a rejected evaluator verdict
+  (`patch_correct: false`) on any attempt holds the change for the owner instead
+  of landing below L3.
+
+
+  **Sources:** src/coordinator.ts (the build loop's last-attempt path and
+  `land.queued`), src/review.ts (`computeLevel`), src/instance.ts /
+  src/settings.ts (to make sure no setting can loosen it).
+
+
+  **Constraints:** safety floor: no instance setting, policy or repo config can
+  loosen it (config rejects such a key); PR mode is unchanged (readiness already
+  needs approval at the exact head).
+
+
+  **Deliverable:**
+
+
+  The test fails on main: a direct-mode task whose final attempt is rejected
+  currently lands at L1/L2.
+
+
+  **Review point:** L3 (safety floor): waits for the owner.
+done_when:
+  - test: test/direct-land-rejected.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 110
+  merge: 5e2f5ec2fd047c43a1d79f1a0b416502372d9842
