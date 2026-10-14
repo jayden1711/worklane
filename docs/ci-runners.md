@@ -53,7 +53,8 @@ A repo under a personal account has no runner groups, so GitHub can't limit a ru
 | `worklane-ci-<name>-firewall.service` | Loads `/etc/worklane-ci/<name>.nft`: an nftables table that applies to the runner user's packets only. The runners and their Docker are bound to it (`BindsTo=`), so neither runs without it. |
 | `worklane-ci.slice` | A slice for all CI on the machine: `AllowedCPUs` and a matching `CPUQuota`, `MemoryMax` with no swap, and CPU and IO weights below `worklane.slice`'s. |
 | `worklane-ci-<name>-docker@<i>.service` | A rootless Docker daemon for runner `<i>`, as the runner user. There is no root daemon and no `docker` group. |
-| `worklane-ci-<name>@<i>.service` | Runner `<i>`. It takes one job per start, then exits, and systemd starts it again. Before every start, as root, `reset` removes the last job's containers, build cache and volumes and makes the runner directory, workspace and home new. |
+| `worklane-ci-<name>-reset@<i>.service` | Before every start of runner `<i>` (the runner requires it), as root and outside the runner's sandbox: `reset` removes the last job's containers, build cache and volumes and makes the runner directory, workspace and home new. |
+| `worklane-ci-<name>@<i>.service` | Runner `<i>`. It takes one job per start, then exits, and systemd starts it again, the reset first. |
 | `/opt/worklane-ci` | The pinned runner and Docker releases, root-owned, checked against pinned sha256 sums. |
 | `/usr/local/libexec/worklane-ci` | The job hooks (`scripts/setup/ci-runner/job-hook.sh`) and the reset (`scripts/setup/ci-runner/reset.sh`), root-owned. They change only when `install` runs again, never with an engine update. |
 | `/var/lib/worklane-ci/<name>` | Per runner: its registration (root-only) and the runner user's directories. |

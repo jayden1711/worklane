@@ -49,6 +49,8 @@ jobs:
           sudo useradd --create-home --shell /bin/bash wl-shop
           sudo chmod 0750 "$(getent passwd wl-shop | cut -d: -f6)"
           sudo install -d -m 0755 /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane
+          # A file in each place the runner user must not reach: its jobs must not see these.
+          for d in /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /root "$(getent passwd wl-shop | cut -d: -f6)"; do sudo touch "$d/.ci-sentinel"; done
           # A service on this machine, as nobody, on every address: reachable by others, by the runner user on none.
           port=18080
           sudo -u nobody nohup python3 -m http.server "$port" --bind 0.0.0.0 --directory /tmp > /dev/null 2>&1 &
@@ -78,8 +80,11 @@ jobs:
           sudo grep -qx "url=https://github.com/$REPO" "$reg"
           sudo grep -qx 'labels=box' "$reg"
           sudo grep -qx 'disableupdate=yes' "$reg"
-          if sudo grep -rIlF "$tok" /var/lib/worklane-ci /opt/worklane-ci /etc/worklane-ci /etc/systemd/system /usr/local/libexec/worklane-ci "$RUNNER_TEMP/install.log"; then echo "the token was written there" >&2; exit 1; fi
+          # The pattern from a file: on sudo's command line the token would land in the journal (sudo logs commands).
+          printf '%s\n' "$tok" > "$RUNNER_TEMP/token.pattern"
+          if sudo grep -rIlF -f "$RUNNER_TEMP/token.pattern" /var/lib/worklane-ci /opt/worklane-ci /etc/worklane-ci /etc/systemd/system /usr/local/libexec/worklane-ci "$RUNNER_TEMP/install.log"; then echo "the token was written there" >&2; exit 1; fi
           if sudo journalctl --no-pager | grep -qF "$tok"; then echo "the token is in the journal" >&2; exit 1; fi
+          rm -f "$RUNNER_TEMP/token.pattern"
           sudo nft list table inet "worklane_ci_$NAME"
       - name: jobs through the stand-in runner (a trusted one, four untrusted ones refused before their first step, a trusted one again)
         run: |
@@ -122,8 +127,13 @@ jobs:
           grep -q '^ci-trust: not running this job here: ref refs/heads/feature, not refs/heads/main$' "$RUNNER_TEMP/runner.log"
           grep -q "^ci-trust: not running this job here: workflow $REPO/.github/workflows/ci-slow.yml@refs/heads/feature, " "$RUNNER_TEMP/runner.log"
           grep -q "^ci-trust: not running this job here: repository someone/example-repo, not $REPO$" "$RUNNER_TEMP/runner.log"
+          # No write a job tried reached the machine.
+          written="$(sudo find /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /var/lib/worklane-test /root "$(getent passwd wl-shop | cut -d: -f6)" "/var/lib/worklane-ci/$NAME/reg-1" -maxdepth 1 -name '.ci-written-*' 2> /dev/null || true)"
+          if [ -n "$written" ]; then echo "a job wrote: $written" >&2; exit 1; fi
       - name: check; then a second install changes nothing, asks for no token, and leaves the idle runner running
         run: |
+          # The runner back to idle after the last job (its reset done), so the second install below finds it idle.
+          for _ in $(seq 180); do [ "$(sudo journalctl -u "worklane-ci-${NAME}@1.service" -o cat --no-pager | grep -c '^STANDIN idle$')" -ge 7 ] && break; sleep 1; done
           sudo bash scripts/setup/ci-runner.sh check "$REPO" --name "$NAME" | tee "$RUNNER_TEMP/check.log"
           tail -n 1 "$RUNNER_TEMP/check.log" | grep -qx 'OK: all checks passed'
           for p in 'is refused 127.0.0.1 9' 'is refused 10.255.255.1 9' 'is refused 100.100.100.100 80' 'reaches github.com 443'; do grep -q "^PASS wl-ci-$NAME $p" "$RUNNER_TEMP/check.log"; done
@@ -155,7 +165,8 @@ jobs:
         if: failure()
         run: |
           docker_unit="worklane-ci-${NAME}-docker"
-          units=("worklane-ci-${NAME}@1.service" "${docker_unit}@1.service" "worklane-ci-${NAME}-firewall.service")
+          reset_unit="worklane-ci-${NAME}-reset"
+          units=("worklane-ci-${NAME}@1.service" "${reset_unit}@1.service" "${docker_unit}@1.service" "worklane-ci-${NAME}-firewall.service")
           sudo systemctl --no-pager status "${units[@]}" worklane-ci.slice || true
           sudo journalctl --no-pager -n 200 "${units[@]/#/--unit=}" || true
           sudo nft list ruleset || true

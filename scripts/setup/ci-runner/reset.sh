@@ -1,7 +1,7 @@
 #!/bin/bash
-# Before every start of a CI runner, as root (its unit's ExecStartPre=+), installed root:root 0755 by
-# scripts/setup/ci-runner.sh as /usr/local/libexec/worklane-ci/reset. The runner takes one job per start
-# (run.sh --once), so this gives every job what an ephemeral runner gets:
+# Before every start of a CI runner, as root (worklane-ci-<name>-reset@<i>.service, which the runner's unit
+# requires), installed root:root 0755 by scripts/setup/ci-runner.sh as /usr/local/libexec/worklane-ci/reset. The
+# runner takes one job per start (run.sh --once), so this gives every job what an ephemeral runner gets:
 #   1. no container, image build cache, volume or network the last job left (removed through the runner's own
 #      rootless daemon, first, so nothing still running can write into what is made next);
 #   2. a new runner directory: the pinned release's scripts and this runner's registration, with bin/ and
@@ -50,9 +50,11 @@ done
 printf 'LANG=C.UTF-8\n' > "$base/runner/.env"
 find "$base/runner" -mindepth 1 -maxdepth 1 ! -name bin ! -name externals -exec chown -R "$user:$user" {} +
 
-# 3. The machine's pinned Node (node.sh) as actions/setup-node's tool-cache entry, in the new workspace.
+# 3. The machine's pinned Node (node.sh) as actions/setup-node's tool-cache entry, in the new workspace: only a
+#    release node.sh unpacked (/opt/node-v<version>-linux-<arch>, linked from /usr/local/bin), never whatever else
+#    /usr/local/bin/node is (its prefix could be all of /usr/local).
 node="$(readlink -f /usr/local/bin/node 2>/dev/null || true)"
-if [ -n "$node" ] && [ -x "$node" ]; then
+if [[ "$node" =~ ^/opt/node-v[0-9]+\.[0-9]+\.[0-9]+-linux-(x64|arm64)/bin/node$ ]] && [ -x "$node" ]; then
   v="$("$node" --version)"; v="${v#v}"
   case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) arch="" ;; esac
   if [ -n "$arch" ] && [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

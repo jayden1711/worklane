@@ -132,6 +132,7 @@ libexec=/usr/local/libexec/worklane-ci
 runner_dir="/opt/worklane-ci/actions-runner-$runner_version"
 docker_dir="/opt/worklane-ci/docker-$docker_version"
 docker_unit_name="worklane-ci-$name-docker@.service"
+reset_unit_name="worklane-ci-$name-reset@.service"
 runner_unit_name="worklane-ci-$name@.service"
 fw_unit_name="worklane-ci-$name-firewall.service"
 fw_table="worklane_ci_${name//-/_}"
@@ -250,13 +251,30 @@ WantedBy=multi-user.target
 EOF
 }
 
+# The reset, as root, before every start of runner %i: a unit of its own, with no sandbox, so it works on the real
+# directories (in the runner's own unit, even a "+" command sees the runner's read-only binds). The runner Requires=
+# it, so each start of the runner, the automatic ones after each job included, starts it again first.
+reset_unit() {
+  cat <<EOF
+[Unit]
+Description=reset CI runner %i of $repo before its next job: no containers, a new runner directory, workspace and home
+Requires=worklane-ci-$name-docker@%i.service
+After=worklane-ci-$name-docker@%i.service
+
+[Service]
+Type=oneshot
+ExecStart=$libexec/reset $name %i
+TimeoutStartSec=300
+EOF
+}
+
 runner_unit() {
   cat <<EOF
 [Unit]
 Description=GitHub Actions runner %i for $repo, as $user: one job per start, then a new runner, workspace and home
 Wants=network-online.target
-Requires=worklane-ci-$name-docker@%i.service
-After=network-online.target $fw_unit_name worklane-ci-$name-docker@%i.service
+Requires=worklane-ci-$name-docker@%i.service worklane-ci-$name-reset@%i.service
+After=network-online.target $fw_unit_name worklane-ci-$name-docker@%i.service worklane-ci-$name-reset@%i.service
 BindsTo=$fw_unit_name
 
 [Service]
@@ -280,10 +298,8 @@ Environment=WORKLANE_CI_STATE=/run/worklane-ci-$name-%i
 RuntimeDirectory=worklane-ci-$name-%i
 RuntimeDirectoryMode=0700
 UMask=0077
-# As root, before every start: no containers left, a new runner directory, workspace and home.
-ExecStartPre=+$libexec/reset $name %i
 ExecStart=/bin/bash $root/%i/runner/run.sh --once
-# One job, then exit: start again (and so reset) for the next.
+# One job, then exit: start again (after worklane-ci-$name-reset@%i, as root) for the next.
 Restart=always
 RestartSec=10
 TimeoutStartSec=300
@@ -343,6 +359,7 @@ if [ -n "$print" ]; then
   echo "# $fw_file (uid: the runner user's, once it exists)"; firewall_rules '<uid>'; echo
   echo "# /etc/systemd/system/$fw_unit_name"; firewall_unit; echo
   echo "# /etc/systemd/system/$docker_unit_name"; docker_unit; echo
+  echo "# /etc/systemd/system/$reset_unit_name"; reset_unit; echo
   echo "# /etc/systemd/system/$runner_unit_name   (instances 1..$count)"; runner_unit; echo
   echo "# $libexec/job-started.sh and job-completed.sh (scripts/setup/ci-runner/job-hook.sh)"; cat "$files_dir/job-hook.sh"; echo
   echo "# $libexec/reset (scripts/setup/ci-runner/reset.sh)"; cat "$files_dir/reset.sh"; echo
@@ -436,7 +453,7 @@ network_checks() {
 
 # Everything else check reports: the caps against the instances', the units, rootless Docker, the pinned version.
 service_checks() {
-  local fail=0 ci_mem ci_w wl_w u m i reg
+  local fail=0 ci_mem ci_w wl_w u m i reg st
   ci_mem="$(systemctl show worklane-ci.slice -p MemoryMax --value)"
   ci_w="$(systemctl show worklane-ci.slice -p CPUWeight --value)"
   if [[ "$ci_mem" =~ ^[0-9]+$ ]]; then echo "PASS worklane-ci.slice MemoryMax=$ci_mem"; else echo "FAIL worklane-ci.slice has no memory cap ($ci_mem)"; fail=1; fi
@@ -454,9 +471,16 @@ service_checks() {
   for reg in "$root"/reg-*; do
     [ -d "$reg" ] || continue
     i="${reg##*/reg-}"
-    for u in "worklane-ci-$name-docker@$i.service" "worklane-ci-$name@$i.service"; do
-      if systemctl is-active -q "$u"; then echo "PASS $u is active"; else echo "FAIL $u is not active (journalctl -u $u)"; fail=1; fi
-    done
+    u="worklane-ci-$name-docker@$i.service"
+    if systemctl is-active -q "$u"; then echo "PASS $u is active"; else echo "FAIL $u is not active (journalctl -u $u)"; fail=1; fi
+    # Between two jobs the runner is briefly starting again (auto-restart, then its reset): up, not failed.
+    u="worklane-ci-$name@$i.service"
+    st="$(systemctl show "$u" -p ActiveState --value)/$(systemctl show "$u" -p SubState --value)"
+    case "$st" in
+      active/*) echo "PASS $u is active" ;;
+      activating/auto-restart | activating/start | activating/start-pre) echo "PASS $u is starting its next run ($st)" ;;
+      *) echo "FAIL $u is $st (journalctl -u $u -u worklane-ci-$name-reset@$i.service)"; fail=1 ;;
+    esac
     if docker_as_user "$i" info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then echo "PASS runner $i's Docker is rootless, as $user"; else echo "FAIL runner $i's Docker isn't up or isn't rootless"; fail=1; fi
   done
   return "$fail"
@@ -481,7 +505,7 @@ stop_all() {
     [ -d "$reg" ] || continue
     i="${reg##*/reg-}"
     systemctl disable --now "worklane-ci-$name@$i.service" "worklane-ci-$name-docker@$i.service" 2>/dev/null || true
-    systemctl reset-failed "worklane-ci-$name@$i.service" "worklane-ci-$name-docker@$i.service" 2>/dev/null || true
+    systemctl reset-failed "worklane-ci-$name@$i.service" "worklane-ci-$name-reset@$i.service" "worklane-ci-$name-docker@$i.service" 2>/dev/null || true
   done
 }
 
@@ -594,10 +618,11 @@ install_cmd() {
     install -d -o root -g root -m 0755 "$root/$i/runner/bin" "$root/$i/runner/externals"
   done
 
-  say "units: worklane-ci.slice (CPUs $cpus, CPUQuota $((ncpus * 100))%, MemoryMax $memory_max, CPU weight $cpu_weight), $docker_unit_name, $runner_unit_name"
+  say "units: worklane-ci.slice (CPUs $cpus, CPUQuota $((ncpus * 100))%, MemoryMax $memory_max, CPU weight $cpu_weight), $docker_unit_name, $reset_unit_name, $runner_unit_name"
   units_changed=0
   put worklane-ci.slice slice; [ "$put_changed" = 0 ] || units_changed=1
   put "$docker_unit_name" docker_unit; [ "$put_changed" = 0 ] || units_changed=1
+  put "$reset_unit_name" reset_unit; [ "$put_changed" = 0 ] || units_changed=1
   put "$runner_unit_name" runner_unit; [ "$put_changed" = 0 ] || units_changed=1
   systemctl daemon-reload
 
@@ -661,7 +686,7 @@ remove_cmd() {
   done
   token=""; unset token
   say "units, the firewall, files, ACLs and the user"
-  rm -f "/etc/systemd/system/$runner_unit_name" "/etc/systemd/system/$docker_unit_name"
+  rm -f "/etc/systemd/system/$runner_unit_name" "/etc/systemd/system/$reset_unit_name" "/etc/systemd/system/$docker_unit_name"
   systemctl disable --now "$fw_unit_name" 2>/dev/null || true
   nft delete table inet "$fw_table" 2>/dev/null || true
   rm -f "/etc/systemd/system/$fw_unit_name" "$fw_file"
