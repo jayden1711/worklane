@@ -1,6 +1,7 @@
 // Every action is a typed event. Projections (task state, dashboard,
 // reports) are folds over these; nothing keeps private state.
 import { z } from 'zod';
+import { STAGES } from '../stage-label.js';
 
 const issue = z.number().int().positive();
 const sha = z.string().regex(/^[0-9a-f]{7,40}$/);
@@ -238,7 +239,8 @@ export const EventSchemas = {
     issue: issue.nullable(),
     role: z.string(),
     instance: z.string(),
-    stage: z.enum(['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'environment/harness']),
+    /** plan and review: set by code from the run's trace (src/stage-label.ts traceStage); absent from older events, which still read. */
+    stage: z.enum(STAGES),
     reason: z.string(),
     by: z.enum(['code', 'judge']),
   }),
