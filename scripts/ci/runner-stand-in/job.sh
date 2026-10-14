@@ -9,12 +9,14 @@ bad() { echo "PROBE $j FAIL $*"; fail=1; }
 try() { local out; if out="$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>&1)"; then echo connected; elif [ -z "$out" ]; then echo "timed out"; else echo "${out##*$'\n'}"; fi; }
 refused() { case "$1" in *"No route to host"* | *"Permission denied"*) return 0 ;; *) return 1 ;; esac; }
 
-# Files: none of worklane's, no other user's home, not this runner's registration. Reaching one means writing to it
-# or seeing anything inside it: /root, under ProtectHome=tmpfs, is an empty read-only tmpfs, which is fine.
+# Files: none of worklane's, no other user's home, not this runner's registration. The CI job put a .ci-sentinel in
+# each beforehand: the job must not see it, nor anything else inside. Each write tried here (.ci-written-<job>) must
+# not reach the machine: the CI job looks for them afterwards (a private, empty tmpfs such as ProtectHome= mounts on
+# /root may take them, and goes with the job).
 for p in /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /var/lib/worklane-test "/home/$DEMO_USER" /root "$REG_DIR"; do
-  if [ -w "$p" ]; then bad "can write $p"
-  elif [ -r "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then bad "sees inside $p: $(ls -A "$p" | head -n 3 | tr '\n' ' ')"
-  else ok "can't reach $p"; fi
+  if [ -e "$p/.ci-sentinel" ] || [ -n "$(ls -A "$p" 2>/dev/null)" ]; then bad "sees inside $p: $(ls -A "$p" 2>/dev/null | head -n 3 | tr '\n' ' ')"
+  else ok "can't see inside $p"; fi
+  : > "$p/.ci-written-$j" 2>/dev/null || true
 done
 if [ "$HOME" = /home/runner ] && [ -w "$HOME" ]; then ok "HOME is /home/runner, writable"; else bad "HOME is $HOME"; fi
 if compgen -G "$HOME/marker-*" >/dev/null; then bad "an earlier job's file is in HOME: $(ls "$HOME")"; else ok "HOME is new"; fi
