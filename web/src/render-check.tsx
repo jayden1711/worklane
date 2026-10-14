@@ -9,6 +9,7 @@ import { ChatAnswerView } from './components/ChatPanel';
 import { ComposerMic, MicInterim } from './voice/Mic';
 import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount } from './voice/VoiceSettings';
 import { TalkStatus } from './voice/TalkBack';
+import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice/VoiceControl';
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
@@ -112,6 +113,10 @@ export const renderVoiceSettingsVoices = (prefs: VoicePrefs, voices: VoiceCount)
 export { mayTalk } from './voice/TalkBack';
 export { countVoices } from './voice/VoiceSettings';
 export { pickVoice, spokenText, stopSpeaking, TalkBack, CODE_OMITTED, SECRET_OMITTED, NO_LOCAL_VOICE } from './voice/talk';
+export const renderVoiceBanner = (view: BannerView | null) => renderToStaticMarkup(<VoiceBanner view={view} onConfirm={() => {}} onCancel={() => {}} />);
+export const renderVoiceButton = (show: boolean, support: Support | null, listening = false) => renderToStaticMarkup(<VoiceButton show={show} support={support} listening={listening} onToggle={() => {}} />);
+export const renderVoiceControl = (state: State, prefs: VoicePrefs) => renderToStaticMarkup(<VoiceControl state={state} prefs={prefs} ctor={null} />);
+export { approvalFor, bannerText, CONFIRM_WINDOW_MS, mayUseVoice, parseHeard, tabState, voiceActive, VoiceCommands } from './voice/commands';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderIntake = (data: IntakeViewData, view?: string) => renderToStaticMarkup(<IntakeReports data={data} {...(view ? { view } : {})} />);
 export const renderIntakeHealth = (health: IntakeViewData['health']) => renderToStaticMarkup(<IntakeHealthSection health={health} />);

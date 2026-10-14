@@ -28,6 +28,9 @@ import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, loca
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { answerDecision, auditWrite } from './decide.js';
+import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
+import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
+import { INTAKE_FILE } from './intake/config.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
@@ -125,6 +128,8 @@ export interface DashboardOptions {
    * none when unset, so every person the hub names is refused.
    */
   roleOf?: RoleOf;
+  /** The instance's intake.yaml (in its home): voice intake is taken only when it turns voice on. None: no voice intake. */
+  intakeFile?: string;
   /** The instance this server serves (recorded in the audit); none for a checkout. */
   instance?: string;
   /**
@@ -308,7 +313,7 @@ const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(ne
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf } {
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string } {
   const i = instance ? loadInstance(instance, dir) : null;
   const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
@@ -317,7 +322,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
   const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: GITHUB_API })) : undefined;
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}), ...(i ? { intakeFile: join(i.home, INTAKE_FILE) } : {}) };
 }
 
 /**
@@ -857,6 +862,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const state = (who: Who) => {
     const events = readEvents(opts.eventsDb);
     const p = project(events);
+    const posted = events.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>);
     const slots = slotStatus(opts.slotsDir);
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
@@ -870,7 +876,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       ...p,
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
       activity: isWriter(who.role) ? p.activity : viewerActivity(events),
-      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role) })),
+      // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
+      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
       canReadIntake: mayReadIntake(who.role),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
@@ -1463,15 +1470,45 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/decide' && req.method === 'POST') {
-          const body = (await readBody(req)) as { id?: string; answer?: string };
+          const body = (await readBody(req)) as { id?: string; answer?: string; voice?: unknown };
+          // Said by voice (src/voice.ts): the claim only adds checks, here (an owner, a focused and visible tab) and in
+          // the decide path (approve only, never what voice may not approve). Every voice refusal is audited too.
+          const claim = voiceClaim(body);
+          const id = String(body.id ?? '');
+          const refusedByVoice = (status: number, error: string) => (audit(who, 'voice.refused', { action: 'decision.answered', id, why: error, by: BY_VOICE }), json(res, status, { error }));
+          if (claim.voice) {
+            const no = voiceRefusal(who, claim, repo);
+            if (no) return refusedByVoice(403, no);
+          }
           const log = new EventLog(opts.eventsDb);
+          let r: ReturnType<typeof answerDecision>;
           try {
             // The one decide path (src/decide.ts): a chat-thread answer goes through it too.
-            const r = answerDecision(log, { id: String(body.id ?? ''), answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo });
-            return r.ok ? json(res, 200, { ok: true, event: r.event }) : json(res, r.status, { error: r.error });
+            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, ...(claim.voice ? { voice: true } : {}) });
           } finally {
             log.close();
           }
+          if (!r.ok) return claim.voice ? refusedByVoice(r.status, r.error) : json(res, r.status, { error: r.error });
+          return json(res, 200, { ok: true, event: r.event });
+        }
+        // A spoken idea the owner confirmed (src/intake/voice.ts): left for the coordinator's intake, which takes it
+        // through the same triage and approval as a Discord message. Voice only, owners only, focused and visible.
+        if (url.pathname === '/api/voice/intake' && req.method === 'POST') {
+          const body = (await readBody(req)) as { text?: unknown; voice?: unknown };
+          const claim = voiceClaim(body);
+          if (!claim.voice) return json(res, 400, { error: 'this route takes only spoken ideas; file anything else on GitHub or through the Ask panel' });
+          const no = voiceRefusal(who, claim, repo) ?? voiceIntakeRefusal(opts.intakeFile);
+          if (no) {
+            audit(who, 'voice.refused', { action: 'intake.voice', why: no, by: BY_VOICE });
+            return json(res, 403, { error: no });
+          }
+          const text = typeof body.text === 'string' ? body.text.trim() : '';
+          if (!text) return json(res, 400, { error: 'nothing was said' });
+          if (text.length > VOICE_MAX_CHARS) return json(res, 400, { error: `the idea is over ${VOICE_MAX_CHARS} characters` });
+          const { id: voiceId } = submitVoiceIntake({ stateDir: opts.stateDir, text, by: who.login });
+          // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
+          audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
+          return json(res, 200, { ok: true, id: voiceId });
         }
         if (url.pathname === '/api/views') {
           if (req.method === 'GET') return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);

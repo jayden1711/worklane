@@ -5,6 +5,8 @@ import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, Hea
 import { hub, instanceScope, keyMissing, loadIncidents, needsSignIn, onLoopback, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
 import { Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
+import { VoiceControl } from './voice/VoiceControl';
+import { useVoicePrefs } from './voice/prefs';
 import { MainWatchAlert } from './components/Protection';
 import { UsageBanner, useNow, useUsage } from './components/Usage';
 import { ago, Kbd, cx } from './components/ui';
@@ -257,6 +259,7 @@ function Dashboard() {
   const [nav, setNav] = useState(false);
   useEffect(() => setNav(false), [path]);
   const health = useHealth();
+  const [voice] = useVoicePrefs();
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -342,6 +345,7 @@ function Dashboard() {
         </NavDrawer>
         <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
         {state && <ChatPanel cli={state.brand.cli} role={state.role} />}
+        {state && <VoiceControl state={state} prefs={voice} />}
       </div>
     </NavMenu.Provider>
   );

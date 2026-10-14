@@ -4,10 +4,10 @@
 // repo, so no agent can read who is trusted or change it. See docs/intake.md.
 import { z } from 'zod';
 
-export const SOURCES = ['discord', 'bug-store', 'alerts', 'github'] as const;
+export const SOURCES = ['discord', 'bug-store', 'alerts', 'github', 'voice'] as const;
 export type Source = (typeof SOURCES)[number];
 
-/** Who sent it, as the source identifies them: a Discord user id, a store row's reporter id, or an alert's kind. */
+/** Who sent it, as the source identifies them: a Discord user id, a store row's reporter id, an alert's kind, or (voice) the owner's GitHub login. */
 export interface Sender {
   source: Source;
   id: string;
@@ -221,6 +221,17 @@ export const IntakeConfig = z.strictObject({
     })
     .prefault({}),
   /**
+   * Voice intake (src/intake/voice.ts): an idea an owner of the instance spoke on the dashboard and confirmed there,
+   * within 10 s, from a focused and visible tab, taken through the same triage and approval as a Discord message.
+   * Its sender is never trusted: what it drafts waits for an owner's approval. Off by default; each owner also turns
+   * it on in their own browser (Settings, Voice).
+   */
+  voice: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+    })
+    .prefault({}),
+  /**
    * Replies worded by the casual replier role from the redacted message and the engine's facts, each checked in
    * code before it is sent (src/intake/replier.ts). Off: the engine's fixed replies.
    */
@@ -313,5 +324,6 @@ export function intakeWarnings(cfg: IntakeConfig): string[] {
  */
 export function isTrusted(sender: Sender, cfg: IntakeConfig): boolean {
   // A source no longer configured (a report stored before it was removed) is trusted for nobody.
-  return (cfg.trusted[sender.source] as string[] | undefined)?.includes(sender.id) ?? false;
+  // WHY: voice has no trusted list: a spoken idea always waits for an owner's approval.
+  return (cfg.trusted as Partial<Record<string, string[]>>)[sender.source]?.includes(sender.id) ?? false;
 }

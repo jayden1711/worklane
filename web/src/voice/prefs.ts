@@ -1,5 +1,6 @@
 // WHY: the voice preferences are this browser's (whether this device can recognize on-device is too), so
 // they live in its storage, and no setting about the microphone or the voice reaches the server. All start off.
+// (Voice intake and approvals has a server side of its own: intake.yaml voice.enabled, and owners only, there too.)
 import { useEffect, useState } from 'react';
 
 export interface VoicePrefs {
@@ -11,9 +12,11 @@ export interface VoicePrefs {
   talkBack: boolean;
   /** Let talk-back use the browser's network voices (they send the text to the browser's vendor). Off: on-device voices only. */
   allowNetworkVoices: boolean;
+  /** Spoken ideas to intake and "approve <n>", each sent only on a spoken or clicked confirm (owners only). Off until an owner turns it on. */
+  voiceCommands: boolean;
 }
 
-export const VOICE_DEFAULTS: VoicePrefs = { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false };
+export const VOICE_DEFAULTS: VoicePrefs = { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, voiceCommands: false };
 const KEY = 'dash-voice';
 const CHANGED = 'dash-voice-changed';
 
@@ -21,7 +24,7 @@ export function readVoicePrefs(): VoicePrefs {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Record<keyof VoicePrefs, unknown>>;
     // INVARIANT: only a stored `true` turns any of them on; anything else (missing, unreadable, odd) is the default, off.
-    return { dictation: raw.dictation === true, allowCloud: raw.allowCloud === true, talkBack: raw.talkBack === true, allowNetworkVoices: raw.allowNetworkVoices === true };
+    return { dictation: raw.dictation === true, allowCloud: raw.allowCloud === true, talkBack: raw.talkBack === true, allowNetworkVoices: raw.allowNetworkVoices === true, voiceCommands: raw.voiceCommands === true };
   } catch {
     return { ...VOICE_DEFAULTS };
   }
