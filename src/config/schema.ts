@@ -72,6 +72,13 @@ export const ProjectConfig = z.strictObject({
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
   /**
+   * The plan gate for size:M/L tasks (src/plan-mode.ts): `always` holds every plan, with its acceptance criteria, for
+   * an owner's approval (on the issue, the dashboard, or "approve plan <n>" in its Discord thread) before any worker
+   * runs; `risky` and `off` hold only a plan the merge policy's checks would hold (high-risk or design-level): an
+   * ordinary plan builds at once, a high-risk or design-level one always waits. Smaller tasks have no plan.
+   */
+  plan_gate: z.enum(['always', 'risky', 'off']).default('always'),
+  /**
    * PR mode: the checks that must pass on a PR's exact head (names as GitHub shows them) before it is marked
    * ready. None configured: nothing is ever marked ready.
    */
