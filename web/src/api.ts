@@ -1109,7 +1109,7 @@ export interface ClaudeAccountData {
   canPasteToken: boolean;
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
 }
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
@@ -1160,10 +1160,10 @@ export interface TailscaleData {
   run: { step: TailscaleAction; startedAt: string; status: 'running' | 'waiting' | 'done' | 'failed' | 'stalled'; detail: string; lines: TailscaleStepLine[] } | null;
   /** Tailscale's login page for the waiting `up`: sent to machine owners only, never stored by the page. */
   loginUrl: string | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
   script: { status: string; steps: string[] };
 }
-export const getTailscale = () => api<TailscaleData>('/api/tailscale');
+export const getTailscale = (fresh = false) => api<TailscaleData>(`/api/tailscale${fresh ? '?fresh=1' : ''}`);
 export const tailscaleAction = (action: TailscaleAction) => api<{ ok: boolean }>('/api/machine/tailscale', { method: 'POST', body: JSON.stringify({ action, confirm: true }) });
 
 export interface SavedView { name: string; filters: Filters }
