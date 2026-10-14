@@ -10,13 +10,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { asks } from '../src/console/asks.js';
-import { startHub } from '../src/dashboard-hub.js';
+import { signInFromFiles, startHub } from '../src/dashboard-hub.js';
 import { SESSION_COOKIE, STATE_COOKIE } from '../src/dashboard-auth.js';
 import { EventLog } from '../src/events/log.js';
 import { currentUser } from '../src/os/index.js';
-import { APP_SECRET, FAKE_PEM, fakeGitHub as fake } from './fake-github.js';
+import { APP_SECRET, FAKE_PEM, fakeGitHub as fake, WEBHOOK_SECRET } from './fake-github.js';
 import {
   AGENT_APP_PERMISSIONS,
+  AGENT_SECRET_FILES,
   agentKeyDir,
   appManifest,
   availableAppName,
@@ -176,6 +177,15 @@ test('the agent App: manifest, machine-owner callback, key 0400 for the coordina
     assert.equal(statSync(dirname(key)).mode & 0o777, 0o700);
     assert.equal(statSync(key).uid, process.getuid!());
 
+    // The App's client secret and webhook secret, as GitHub returned them: beside the key, the same way.
+    for (const [file, value] of [[AGENT_SECRET_FILES.clientSecret, APP_SECRET], [AGENT_SECRET_FILES.webhookSecret, WEBHOOK_SECRET]] as const) {
+      const f = join(dirname(key), file);
+      assert.equal(readFileSync(f, 'utf8'), value, file);
+      assert.equal(statSync(f).mode & 0o777, 0o400, `${file} 0400`);
+      assert.equal(statSync(f).uid, process.getuid!(), `${file} the coordinator's`);
+    }
+    assert.deepEqual(readdirSync(dirname(key)).filter((f) => f.endsWith('.tmp')), [], 'no temp file left');
+
     // credentials.yaml: the App, with its other settings kept.
     const y = readFileSync(creds, 'utf8');
     assert.match(y, /github:\s*\n?\s*kind: app/);
@@ -185,9 +195,9 @@ test('the agent App: manifest, machine-owner callback, key 0400 for the coordina
     assert.match(y, /discord_token: \/somewhere\/discord-token/);
     assert.match(s.lines.join('\n'), /OK: the key works, the installation reaches only the instance repo/, 'the real app-permissions.mjs ran');
 
-    // Never logged, never in an ask.
-    const everything = [out, ...s.lines, ...s.asked.map((a) => `${a.title} ${a.detail} ${a.url}`)].join('\n');
-    for (const secret of [PEM.split('\n')[1]!, APP_SECRET]) assert.ok(!everything.includes(secret), 'no key material in any output');
+    // Never logged, never in an ask: no key material, no secret, and not the one-time conversion code either.
+    const everything = [out, ...s.lines, ...s.asked.map((a) => `${a.title} ${a.detail} ${a.url}`), JSON.stringify(r)].join('\n');
+    for (const secret of [PEM.split('\n')[1]!, APP_SECRET, WEBHOOK_SECRET, 'mcode1']) assert.ok(!everything.includes(secret), `no ${secret.slice(0, 6)}… in any output`);
   } finally {
     await s.close();
   }
@@ -203,8 +213,11 @@ test('an installation that reaches another repo is refused, and credentials.yaml
     const run = runAppManifest({ instance: 'alpha', repo: REPO, kind: 'agent' }, s.deps());
     const p = await s.startPage((await s.waitAsk(1)).url, ada);
     s.gh.codes.set('mcode2', { slug: `alpha-${BRAND.cli}`, id: 91 });
+    // An App without a webhook secret (GitHub may make none for an inactive webhook): nothing is stored for one.
+    s.gh.state.webhookSecret = null;
     assert.equal((await s.open(`${PUBLIC}${MANIFEST_CALLBACK_PATH}?code=mcode2&state=${p.state}`, ada)).status, 200);
     await s.waitAsk(2);
+    assert.deepEqual(readdirSync(agentKeyDir(s.home, 'alpha')).sort(), [AGENT_SECRET_FILES.clientSecret, AGENT_SECRET_FILES.key].sort(), 'the key and client secret, no webhook secret');
     s.gh.state.reaches = [REPO, 'example/other'];
     s.gh.state.installed = true;
     const r = await run;
@@ -347,4 +360,29 @@ test('a taken App name gets a short suffix', async () => {
   assert.equal(await availableAppName('alpha-y', { api: 'http://gh', fetch: f }), 'alpha-y');
   assert.equal(await availableAppName('alpha-x', { api: 'http://gh', fetch: f, suffix: () => String(++n).padStart(4, '0') }), 'alpha-x-0002');
   assert.ok(appManifest({ kind: 'signin', name: 'n', repo: REPO, publicUrl: PUBLIC }).name.length <= 34);
+});
+
+// WHY: the hub's sign-in read neither of the variables the manifest flow and the coordinator take GitHub's bases
+// from, so on a real host with a fake GitHub (the add-project CI job) nobody could sign in to finish a manifest flow.
+test("the hub's sign-in takes GitHub's bases from the same variables as the manifest flow; unset, GitHub itself", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'amf-signin-'));
+  writeFileSync(join(dir, 'client-secret'), 'c\n');
+  writeFileSync(join(dir, 'session-secret'), `${'s'.repeat(48)}\n`);
+  const names = [`${BRAND.envPrefix}_GITHUB_API`, `${BRAND.envPrefix}_GITHUB_WEB`] as const;
+  const saved = names.map((n) => process.env[n]);
+  try {
+    for (const n of names) delete process.env[n];
+    const plain = signInFromFiles({ clientId: CLIENT_ID, publicUrl: PUBLIC, dir });
+    assert.deepEqual([plain.api, plain.web], [undefined, undefined], 'unset: sign-in goes to github.com');
+    process.env[names[0]] = 'http://127.0.0.1:8999';
+    process.env[names[1]] = 'http://127.0.0.1:8998';
+    const faked = signInFromFiles({ clientId: CLIENT_ID, publicUrl: PUBLIC, dir });
+    assert.deepEqual([faked.api, faked.web], ['http://127.0.0.1:8999', 'http://127.0.0.1:8998']);
+    assert.equal(faked.clientSecret, 'c');
+  } finally {
+    names.forEach((n, i) => {
+      if (saved[i] === undefined) delete process.env[n];
+      else process.env[n] = saved[i];
+    });
+  }
 });

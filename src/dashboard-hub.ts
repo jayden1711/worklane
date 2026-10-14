@@ -29,6 +29,7 @@ import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie
 import { attachTerminal } from './console/terminal-server.js';
 import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
 import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
+import { BRAND } from './brand.js';
 import { currentUser } from './os/index.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
 import { isMachineOwner } from './machine-owners.js';
@@ -113,7 +114,12 @@ export function signInFromFiles(o: { clientId: string; publicUrl: string; dir: s
       throw new Error(`can't read ${join(o.dir, f)}: install it with credentials.sh dashboard-signin`);
     }
   };
-  return { clientId: o.clientId, clientSecret: read('client-secret'), sessionSecret: read('session-secret'), publicUrl: u.origin };
+  // WHY: the manifest flow, the coordinator and the setup scripts already read GitHub's bases from these two variables
+  // (a fake GitHub in CI); sign-in read neither, so no CI run on a real host could ever sign a machine owner in to
+  // finish a manifest flow. Only whoever writes the hub's unit (root) can set them.
+  const api = process.env[`${BRAND.envPrefix}_GITHUB_API`];
+  const web = process.env[`${BRAND.envPrefix}_GITHUB_WEB`];
+  return { clientId: o.clientId, clientSecret: read('client-secret'), sessionSecret: read('session-secret'), publicUrl: u.origin, ...(api ? { api } : {}), ...(web ? { web } : {}) };
 }
 
 const readToken = (i: HubInstance): string | null => {
