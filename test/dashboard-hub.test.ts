@@ -103,6 +103,10 @@ test('an answer through the hub is recorded by that instance\'s own server, in i
 
 test('the hub streams an instance\'s changes, and says when an instance isn\'t answering', async () => {
   const s = await setup();
+  const squatter = createServer((_q, r) => {
+    r.writeHead(401, { 'content-type': 'application/json' });
+    r.end('{"error":"not this instance"}');
+  });
   try {
     const res = await fetch(`${s.base}/api/i/b/stream`, { headers: s.hh });
     const reader = res.body!.getReader();
@@ -124,10 +128,6 @@ test('the hub streams an instance\'s changes, and says when an instance isn\'t a
     await s.a.stop();
     // Regression (#312): another server tries to take the stopped instance's port, as a live dashboard or another
     // test file's could; the hub's answer must not change. When the test let the port go, this one answered 401.
-    const squatter = createServer((_q, r) => {
-      r.writeHead(401, { 'content-type': 'application/json' });
-      r.end('{"error":"not this instance"}');
-    });
     squatter.on('error', () => {});
     await new Promise<void>((r) => {
       squatter.once('error', () => r());
@@ -138,8 +138,9 @@ test('the hub streams an instance\'s changes, and says when an instance isn\'t a
     const down = await fetch(`${s.base}/api/i/a/state`, { headers: s.hh });
     assert.equal(down.status, 502);
     assert.match(((await down.json()) as { error: string }).error, /isn't answering/);
-    squatter.close();
   } finally {
+    squatter.closeAllConnections();
+    squatter.close();
     await s.h.close();
     await s.b.d.close();
     await s.a.held.close();
