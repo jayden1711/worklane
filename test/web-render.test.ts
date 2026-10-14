@@ -51,7 +51,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string } }): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -2827,4 +2827,49 @@ test("no effect in the web app returns a member call's value: React calls it as 
     for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
   }
   assert.deepEqual(bad, []);
+});
+
+/** The markup with each reserved slot's contents taken out (its own tag, and so its fixed size, kept). */
+function withoutReserved(html: string): string {
+  let out = html;
+  for (;;) {
+    const at = out.search(/<(\w+)[^>]*data-reserved="[^"]*"[^>]*>/);
+    if (at < 0) return out;
+    const open = /<(\w+)[^>]*>/.exec(out.slice(at))!;
+    const tag = open[1]!;
+    let depth = 0;
+    const re = new RegExp(`<(/?)${tag}\\b[^>]*>`, 'g');
+    re.lastIndex = at;
+    let end = -1;
+    for (let m; (m = re.exec(out)); ) {
+      depth += m[1] ? -1 : 1;
+      if (depth === 0) {
+        end = m.index;
+        break;
+      }
+    }
+    assert.ok(end > 0, `unclosed reserved <${tag}>`);
+    out = `${out.slice(0, at)}${open[0].replace('data-reserved', 'data-was-reserved')}${out.slice(end)}`;
+  }
+}
+
+test("the Repo config form: no input moves when GitHub's checks answer arrives after mount", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const loading = r.renderRepoConfigForm(c);
+  assert.match(loading, /data-testid="repo-config-checks-status"[^>]*>checking GitHub…</);
+  const states = {
+    'checks arrived': r.renderRepoConfigForm(c, { seenLoaded: true, seen: ['ci/test', 'ci/lint', 'ci/e2e', 'ci/docs', 'ci/build', 'ci/typecheck'] }),
+    'no checks ran': r.renderRepoConfigForm(c, { seenLoaded: true, seenNote: 'GitHub ran no checks on its tip' }),
+    'GitHub refused': r.renderRepoConfigForm(c, { seenLoaded: true, seenNote: "GitHub didn't answer: HTTP 502" }),
+  };
+  assert.match(states['no checks ran'], /data-testid="repo-config-checks-status"[^>]*>GitHub ran no checks on its tip</);
+  assert.match(states['checks arrived'], /data-check="ci\/typecheck"/);
+  // Everything above each field is the same markup before and after, apart from what is inside the reserved slots.
+  const inputs = [...loading.matchAll(/<input[^>]*data-testid="([a-z-]+)"/g)].map((m) => m[1]!);
+  assert.ok(inputs.includes('repo-config-check-name') && inputs.includes('repo-config-budget'), inputs.join(', '));
+  const above = (html: string, id: string) => withoutReserved(html.slice(0, html.indexOf(`data-testid="${id}"`)));
+  for (const [what, html] of Object.entries(states)) for (const id of inputs) assert.equal(above(html, id), above(loading, id), `${id} moves once ${what}`);
+  // And the slots are of a fixed size: one truncated line, and a list that scrolls in its own height.
+  assert.match(loading, /class="block h-5 truncate[^"]*" data-reserved="status"/);
+  assert.match(loading, /class="h-\[4\.75rem\] overflow-y-auto[^"]*" data-reserved="checks"/);
 });
