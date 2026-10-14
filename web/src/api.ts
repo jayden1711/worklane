@@ -161,7 +161,7 @@ export interface PrsView {
   refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
   /** Tasks held on a hotspot (another task is changing the same files): still held (until null), or released. */
-  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
+  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null; kind?: 'files' | 'dependency' }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
   /** The latest stale-PR pass: its counts and their line; null before the first (absent from an older server). */
