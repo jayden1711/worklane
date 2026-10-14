@@ -21,6 +21,7 @@ import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
+import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
 import { deliveryMetrics } from '../src/merge-metrics.js';
@@ -54,6 +55,7 @@ interface Render {
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
+  renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
@@ -1786,4 +1788,75 @@ test('learnings: each cause with its sightings and stages; Promote only for an o
   const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
   assert.doesNotMatch(writer, /learning-promote/);
   assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
+});
+
+test('Tailscale and HTTPS: a machine owner sees the state, the four steps with what each changes and its script, and the login link only while up waits; anyone else nothing', () => {
+  const ownersFile = machineOwnersFile('ada');
+  // Put together here so the repo holds no tailnet name, even a made-up one (the denylist's rule).
+  const name = ['box', 'tail0example', 'ts', 'net'].join('.');
+  const link = 'https://login.tailscale.com/a/0123456789abcdef';
+  const st = (over: Partial<TailscaleStatus> = {}): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: true, other443: false, breakGlassForwarded: false, hubUrl: 'https://hub.example.test', ...over });
+  const none = st({ installed: false, version: null, state: null, name: null, https: false, serve: false });
+  const dirOf = (lines: object[], url?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'tailscale-render-'));
+    if (lines.length) writeFileSync(join(dir, 'steps.jsonl'), lines.map((l) => JSON.stringify({ at: new Date().toISOString(), ...l })).join('\n') + '\n');
+    if (url) writeFileSync(join(dir, 'login-url'), `${url}\n`);
+    return dir;
+  };
+  const view = (login: string, status: TailscaleStatus | null, dir = dirOf([])) => tailscaleView({ status, dir, events: [], who: { role: 'owner', requester: ownerRequester(login) }, instance: 'shop', ownersFile });
+  const steps = (html: string) => [...html.matchAll(/data-testid="tailscale-step" data-step="([a-z-]+)" data-done="(true|false)" data-next="(true|false)"/g)].map((m) => `${m[1]}:${m[2] === 'true' ? 'done' : m[3] === 'true' ? 'next' : 'later'}`);
+
+  // No tailscale: says so, offers the install, and nothing else can be run yet.
+  const fresh = r.renderTailscaleSetup(view('ada', none));
+  assert.match(fresh, /data-testid="tailscale-setup" data-next="install"/);
+  assert.match(fresh, /Tailscale is not installed on this machine\. It is optional: without it the hub stays where it is\./);
+  assert.match(fresh, /Nothing here runs until you confirm a step; leave it alone and the hub keeps its URL\./);
+  assert.match(fresh, /data-testid="tailscale-hub-url"[^>]*>The hub&#x27;s URL now: <span[^>]*>https:\/\/hub\.example\.test</);
+  assert.deepEqual(steps(fresh), ['install:next', 'up:later', 'serve:later', 'public-url:later']);
+  assert.equal([...fresh.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 3, 'only the install can be asked for');
+  assert.equal([...fresh.matchAll(/data-testid="tailscale-step-command"/g)].length, 4, 'each step names its script');
+  assert.match(fresh, /sudo bash scripts\/setup\/tailscale\.sh install/);
+  assert.match(fresh, /data-testid="tailscale-script"/);
+  assert.doesNotMatch(fresh, /data-testid="tailscale-login"|data-testid="tailscale-step-confirm"|data-testid="tailscale-run"/);
+
+  // Asked for: what it changes, as root, before a second click.
+  const confirming = r.renderTailscaleSetup(view('ada', none), { confirming: 'install' });
+  assert.match(confirming, /data-testid="tailscale-step-confirm"[\s\S]*As root, through the machine helper[\s\S]*signing key[\s\S]*version 1\.104\.1 \(pinned\)[\s\S]*no install script[\s\S]*data-testid="tailscale-step-confirm-run"/);
+
+  // up is waiting: the login page is a button, for the owner.
+  const waitingLines = [{ step: 'up', state: 'started', detail: '' }, { step: 'up', state: 'running', detail: 'tailscale up (no auth key): it prints a login link and waits' }, { step: 'up', state: 'waiting', detail: 'the login link is in shop\'s dashboard, shown to machine owners only' }];
+  const needsLogin = st({ state: 'NeedsLogin', name: null, https: false, serve: false });
+  const waiting = r.renderTailscaleSetup(view('ada', needsLogin, dirOf(waitingLines, link)));
+  assert.match(waiting, /data-testid="tailscale-run" data-step="up" data-status="waiting"/);
+  assert.match(waiting, new RegExp(`<a href="${link.replace(/[/.]/g, '\\$&')}" target="_blank" rel="noreferrer" referrerPolicy="no-referrer"[^>]*data-testid="tailscale-login-link">Open Tailscale&#x27;s login page</a>`));
+  assert.equal([...waiting.matchAll(/login\.tailscale\.com/g)].length, 1, 'the link is the button and nothing else');
+  assert.equal([...waiting.matchAll(/data-testid="tailscale-step-run"/g)].length, 3, 'the running step has no button');
+  assert.doesNotMatch(waiting, /<button(?![^>]*disabled="")[^>]*data-testid="tailscale-step-run"/, 'no second step while one runs');
+  // Anyone who isn't a machine owner: nothing at all, the link included.
+  assert.equal(r.renderTailscaleSetup(view('ivy', needsLogin, dirOf(waitingLines, link))), '');
+
+  // On the tailnet without HTTPS certificates: serve waits, with Tailscale's own page to turn them on.
+  const noCert = r.renderTailscaleSetup(view('ada', st({ https: false, serve: false })));
+  assert.deepEqual(steps(noCert), ['install:done', 'up:done', 'serve:next', 'public-url:later']);
+  assert.match(noCert, /data-testid="tailscale-step-blocked"[^>]*>Not yet: your tailnet doesn&#x27;t issue an HTTPS certificate/);
+  assert.match(noCert, /<a href="https:\/\/login\.tailscale\.com\/admin\/dns"[^>]*data-testid="tailscale-step-link">Open Tailscale&#x27;s DNS settings<\/a>/);
+
+  // Served: the URL step says what the new URL is, what restarts, and the callback to set on GitHub.
+  const url = r.renderTailscaleSetup(view('ada', st()), { confirming: 'public-url' });
+  assert.deepEqual(steps(url), ['install:done', 'up:done', 'serve:done', 'public-url:next']);
+  assert.match(url, new RegExp(`the hub&#x27;s URL becomes https://${name.replace(/\./g, '\\.')} \\(now https://hub\\.example\\.test\\), through dashboards\\.sh`));
+  assert.match(url, new RegExp(`callback URL to exactly https://${name.replace(/\./g, '\\.')}/auth/callback`));
+  assert.match(url, /dashboards\.sh --client-id/);
+  // All done: nothing is next; each step can be run again.
+  const done = r.renderTailscaleSetup(view('ada', st({ hubUrl: `https://${name}` })));
+  assert.match(done, /data-testid="tailscale-setup" data-next="none"/);
+  assert.equal([...done.matchAll(/Run again…/g)].length, 4);
+  // Off an allowed device: read-only, and it says why.
+  const away = r.renderTailscaleSetup(tailscaleView({ status: none, dir: dirOf([]), events: [], who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, instance: 'shop', ownersFile }));
+  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the console&#x27;s allowed devices/);
+  assert.equal([...away.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 4);
+  // The engine has no setup script: it says so and offers no step.
+  const old = r.renderTailscaleSetup(view('ada', null));
+  assert.match(old, /no Tailscale setup script yet/);
+  assert.doesNotMatch(old, /data-testid="tailscale-steps"/);
 });

@@ -65,6 +65,7 @@ import { type DetectCache, type SetupContext, type SetupProbe } from './setup-st
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -168,6 +169,9 @@ export interface DashboardOptions {
   machineOwnersFile?: string;
   /** Where claude-account.sh writes status.json and switch.jsonl (src/claude-account.ts); the system's when unset (tests). */
   claudeAccountDir?: string;
+  /** Where tailscale.sh writes steps.jsonl and the login link, and what its status says (src/tailscale-setup.ts); the system's when unset (tests). */
+  tailscaleDir?: string;
+  tailscaleStatus?: () => Promise<TailscaleStatus | null>;
   /** What the first-run page's live checks ask of the machine (src/setup-steps.ts); the real one when unset (tests). */
   setupProbe?: SetupProbe;
   /** The machine paths and instance facts those checks read (tests). */
@@ -820,6 +824,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
   // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
   let actionRunning: string | null = null;
+  // What tailscale.sh status says (src/tailscale-setup.ts), kept 3 s (it runs tailscale twice); asked afresh before a step is recorded.
+  let tailscaleCache: { at: number; status: TailscaleStatus | null } | null = null;
+  const tailscaleNow = async (fresh = false) => {
+    if (!fresh && tailscaleCache && Date.now() - tailscaleCache.at < 3_000) return tailscaleCache.status;
+    const status = await (opts.tailscaleStatus ?? tailscaleStatus)();
+    tailscaleCache = { at: Date.now(), status };
+    return status;
+  };
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -1410,6 +1422,44 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             log.close();
           }
           audit(who, 'machine.claude_account', { action, request: r.id });
+          return json(res, 200, { ok: true, pending: true, request: r });
+        }
+        // Tailscale and HTTPS for the hub (src/tailscale-setup.ts): the machine owners' screen, on a server instance only.
+        // What tailscale says now, the four steps, the last one's progress, and, while `up` waits, its login link: for
+        // a machine owner (or the break-glass) and nobody else, and never in an event or the audit.
+        if (url.pathname === `/api/${DEVICE_VIEWS.tailscale}` && req.method === 'GET') {
+          res.setHeader('cache-control', 'no-store');
+          // A local checkout has no hub, and anyone but a machine owner has no screen: both are told only that (the
+          // Machine page asks on every visit, so this is an answer, not an error).
+          if (!opts.instance || !mayViewTailscale(accountRequester, opts.machineOwnersFile)) return json(res, 200, noTailscaleView(who.login, opts.instance ?? null));
+          const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
+          return json(res, 200, tailscaleView({ status: await tailscaleNow(), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
+        }
+        // Run one step: a machine request (`tailscale <step>`, two fixed words) that the coordinator runs through the
+        // machine helper, after the owner confirmed what the screen showed. Every request and refusal is audited.
+        if (url.pathname === '/api/machine/tailscale' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { action?: unknown; confirm?: unknown };
+          // The audit names the step only when it is one of the four: anything else a caller sent is never written down.
+          const action = isTailscaleAction(body.action) ? body.action : 'not a step';
+          const refused = (status: number, error: string) => {
+            audit(who, 'machine.tailscale_refused', { action, why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!opts.instance) return refused(404, 'Tailscale for the hub is set up on a server instance; this is a local checkout');
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) who are machine owners may set up Tailscale; @${who.login} is a ${who.role}`);
+          if (body.confirm !== true) return refused(400, 'a Tailscale step changes this machine: review what it shows, then confirm it ({"confirm": true})');
+          const log = new EventLog(opts.eventsDb);
+          let r: MachineRequest;
+          try {
+            r = requestTailscale(log, { action: body.action, status: await tailscaleNow(true), requester: accountRequester, dir: opts.tailscaleDir ?? TAILSCALE_DIR, ...ownersOpt });
+          } catch (e) {
+            if (e instanceof MachineRequestError) return refused(e.status, e.message);
+            throw e;
+          } finally {
+            log.close();
+          }
+          tailscaleCache = null;
+          audit(who, 'machine.tailscale', { action, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
         }
         // The new account's token, for the running switch: its own body handling, so the value never reaches readBody,

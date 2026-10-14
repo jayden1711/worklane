@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -30,7 +30,7 @@ export function slotCeiling(): number {
   return typeof max === 'function' ? max() : max;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>. Nothing else. */
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, tailscale install|up|serve|public-url, add-project <name> <owner/repo>. Nothing else. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -62,6 +62,14 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     usage: 'claude-account status|switch',
     allows: (a) => a.length === 1 && (a[0] === 'status' || a[0] === 'switch'),
     run: (a, exec) => claudeAccount(a[0] as 'status' | 'switch', exec),
+  },
+  {
+    command: 'tailscale',
+    what: "Tailscale for the dashboard hub: install it (the signed apt repository, pinned), log this machine in (no auth key; the login link goes to a machine owner only), forward https 443 to the hub's sign-in port, or set the hub's URL to this machine's tailnet name",
+    usage: 'tailscale install|up|serve|public-url',
+    // One fixed word and nothing after it: no auth key, flag, URL or port (the helper and its sudoers rule take exactly these four).
+    allows: (a) => a.length === 1 && (a[0] === 'install' || a[0] === 'up' || a[0] === 'serve' || a[0] === 'public-url'),
+    run: (a, exec) => tailscaleStep(a[0] as 'install' | 'up' | 'serve' | 'public-url', exec),
   },
   {
     command: 'add-project',

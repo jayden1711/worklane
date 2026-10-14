@@ -722,8 +722,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'most',
-    today: 'Install Tailscale and log in; in the admin console turn on MagicDNS and HTTPS certificates; `tailscale serve --bg --https=443 http://127.0.0.1:4399`; pass --public-url to dashboards.sh.',
-    fix: { kind: 'outside', url: 'https://login.tailscale.com/admin/dns', label: "Tailscale's DNS settings", why: "Tailscale's login and admin-console toggles are its own pages" },
+    today: "The Machine page's Tailscale and HTTPS panel walks it (a machine owner's): install, log in, serve, the hub's URL. Without the dashboard, as root: `scripts/setup/tailscale.sh install`, `up`, `serve`, then `public-url` (dashboards.sh --public-url). MagicDNS and HTTPS certificates are turned on in Tailscale's admin console. Skipping it changes nothing: the hub keeps its URL.",
+    fix: { kind: 'screen', path: '/machine#tailscale', label: "the Machine page's Tailscale and HTTPS panel" },
     detect: (k) => detectTailscale(k.p) ?? no('not on a tailnet: the dashboard stays on this machine'),
   },
   {

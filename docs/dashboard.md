@@ -98,7 +98,7 @@ Instead of creating an App by hand, `sudo worklane app-manifest <name> <owner/re
 
 ### Tailscale HTTPS (the owner's step)
 
-The hub is reachable only over your tailnet, never the public internet:
+The hub is reachable only over your tailnet, never the public internet. The steps are below by hand; [Tailscale and HTTPS from the dashboard](#tailscale-and-https-from-the-dashboard) does the same from the Machine page, and `scripts/setup/tailscale.sh` from a terminal.
 
 1. In the Tailscale admin console, under DNS, enable **MagicDNS** and **HTTPS certificates**.
 2. On the machine, forward HTTPS on the tailnet to the hub's sign-in port:
@@ -192,6 +192,27 @@ The Setup console's **Add project** sets up a new instance on this machine: a na
 A submit is recorded as the machine request `add-project <name> <owner/repo>` (`POST /api/machine/add-project`; the view is `GET /api/add-project`, `src/console/add-project.ts`), with an audit entry; a refused one is audited too. The dashboard never runs it. The coordinator runs the machine helper, which runs the installed engine's `scripts/setup/add-project.sh` as root. One project at a time.
 
 The view then follows the run live, step by step, in the script's order: instance, app, claude-token, checkout, policy, service, test-user, machine-helper, dashboards. Each step's line from the script is an `add_project.step` event in the instance's log, so every step is on record. What it needs from you shows in the same view, as asks: GitHub's two approve links (create the App, then install it on exactly that repo), and the agent's Claude token (from `claude setup-token`), pasted into the dashboard's password box. The coordinator hands the token to the script once, on its input, for the agent user only, and deletes its copy; it's never in an event or a log, and never shown again. If a step fails, the view names it and the command to retry it. Fix what it says and add the same project again: the steps already done are skipped.
+
+## Tailscale and HTTPS from the dashboard
+
+The first-run wizard's Tailscale screen, for a server. It is the Machine page's **Tailscale and HTTPS** card (`/machine#tailscale`; the first-run step "Reachable over Tailscale (HTTPS)" opens it, and it stays there to run again). It's optional: on a machine without Tailscale, or if you never confirm a step, nothing changes and the hub keeps its URL.
+
+It's visible only to machine owners: the server sends everyone else none of its data (`GET /api/tailscale`, `src/tailscale-setup.ts`), and a local checkout has no such screen. It shows whether tailscale is installed and up (what `scripts/setup/tailscale.sh status --json` says, read as the instance's own user), the hub's URL now, and four steps in order. Each step shows what it changes first and needs a second click; each is a machine request, gated like any machine change (an owner here who is a machine owner, signed in, on an allowed device; or the break-glass), audited, one at a time:
+
+| Step | Machine request | What runs, as root | Without the dashboard |
+| --- | --- | --- | --- |
+| Install Tailscale | `tailscale install` | Tailscale's apt repository for this distribution, its signing key checked against the fingerprint pinned in `scripts/setup/lib.sh`, then the pinned version of the package. No install script. A tailscale already there is left alone. | `sudo bash scripts/setup/tailscale.sh install` |
+| Log this machine in | `tailscale up` | `tailscale up` with no auth key. It prints a login link and waits 10 minutes. | `sudo bash scripts/setup/tailscale.sh up` |
+| Put the hub on HTTPS | `tailscale serve` | `tailscale serve --bg --https=443 http://127.0.0.1:4399`, and nothing else. | `sudo bash scripts/setup/tailscale.sh serve` |
+| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...` |
+
+The dashboard never runs any of it: the coordinator runs the machine helper, which takes exactly those four commands (two fixed words each; no auth key, flag, URL or port can be passed) and starts the step as its own unit, `worklane-tailscale.service`. The card follows the step from the script's progress file, `/var/lib/worklane/tailscale/steps.jsonl`.
+
+**The login link** goes to the owner only. The script writes it to `/var/lib/worklane/tailscale/login-url`, mode 0400, owned by the asking instance's coordinator user, and deletes it when `up` ends. The dashboard serves it only to a machine owner, only while `up` waits, and only if it is exactly Tailscale's login page (`https://login.tailscale.com/a/<id>`); it shows as an "Open Tailscale's login page" button. The link is never in an event, an audit entry, the journal or the machine changes log. No auth key is used anywhere on this path.
+
+**Two things stay on other sites.** MagicDNS and HTTPS certificates are turned on in Tailscale's admin console (DNS); until they are, the HTTPS step says so and links there. After the URL step, set the sign-in App's callback URL on GitHub to exactly `https://<name>/auth/callback`: sign-in at the new URL fails until you do. The hub restarts for that step, so a session at the old URL ends; the break-glass still works.
+
+What it can never do: forward the break-glass port (4398), replace something else already on 443, set the hub's URL to anything but this machine's own `*.ts.net` name, or install a package that isn't signed by the pinned key.
 
 ## Switching the agents' Claude account
 

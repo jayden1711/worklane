@@ -901,6 +901,56 @@ export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-accoun
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
 
+/** Tailscale and HTTPS for the hub (src/tailscale-setup.ts), as GET /api/tailscale serves it to a machine owner. */
+export type TailscaleAction = 'install' | 'up' | 'serve' | 'public-url';
+export interface TailscaleStatus {
+  installed: boolean;
+  version: string | null;
+  pinnedVersion: string | null;
+  state: string | null;
+  name: string | null;
+  https: boolean;
+  serve: boolean;
+  other443: boolean;
+  breakGlassForwarded: boolean;
+  hubUrl: string | null;
+}
+export interface TailscaleStepView {
+  id: TailscaleAction;
+  title: string;
+  done: boolean;
+  blocked: string | null;
+  changes: string[];
+  command: string;
+  link: { url: string; label: string } | null;
+}
+export interface TailscaleStepLine {
+  at: string;
+  step: TailscaleAction;
+  state: 'started' | 'running' | 'waiting' | 'done' | 'failed';
+  detail: string;
+}
+export interface TailscaleData {
+  machineOwner: boolean;
+  machineOwners: string[];
+  login: string;
+  instance: string;
+  /** Whether this person may run a step (the server checks again). */
+  allowed: boolean;
+  why: string | null;
+  busy: string | null;
+  status: TailscaleStatus | null;
+  steps: TailscaleStepView[];
+  next: TailscaleAction | null;
+  run: { step: TailscaleAction; startedAt: string; status: 'running' | 'waiting' | 'done' | 'failed' | 'stalled'; detail: string; lines: TailscaleStepLine[] } | null;
+  /** Tailscale's login page for the waiting `up`: sent to machine owners only, never stored by the page. */
+  loginUrl: string | null;
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  script: { status: string; steps: string[] };
+}
+export const getTailscale = () => api<TailscaleData>('/api/tailscale');
+export const tailscaleAction = (action: TailscaleAction) => api<{ ok: boolean }>('/api/machine/tailscale', { method: 'POST', body: JSON.stringify({ action, confirm: true }) });
+
 export interface SavedView { name: string; filters: Filters }
 export interface Filters { owner?: string; status?: string; level?: string; label?: string; text?: string }
 
