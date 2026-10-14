@@ -6,46 +6,68 @@
 
 **Know who's on every task.**
 
-Open-source harness for running a crew of Claude agents on a real codebase: parallel workers, an independent evaluator, a shared GitHub Issues backlog, and a live dashboard showing who owns every task.
+Worklane is an open-source harness that runs a crew of Claude agents on a real codebase. Workers run in parallel, each in its own git worktree, and take `ready` issues from your GitHub backlog. An independent evaluator checks each change against the issue's `done_when` contract. A plain-code coordinator (not a model) claims the work, enforces budgets and lands each change, as a PR or straight to main. A live dashboard shows who owns every task, and what's waiting for you.
 
-> **Status: pre-alpha.** The coordinator, harness-run checks, the independent evaluator, separate OS users for agents, Claude Code's sandbox and repo-scoped credentials work. Not yet used on a project day to day.
+> **Status: pre-1.0.** Expect breaking changes between releases.
 
-## What it is
+## Install
 
-- **Parallel workers**, each in its own git worktree, picking up `ready` issues from a GitHub Issues backlog that humans and agents share.
-- **A deterministic coordinator** (plain code, not an LLM) that claims work, enforces budgets, retries, and moves state. Agents never hold GitHub write tokens; they propose actions and the coordinator validates and performs them.
-- **An independent evaluator** with fresh context and read-only access that writes a failing reproduction test first, then judges the change against the issue's `done_when` contract.
-- **Risk-based review levels** computed from what a change touches, so docs fixes land on their own and money-path changes wait for a human.
-- **A land queue** (direct-to-main or PRs) that batches compatible changes and bisects on failure.
-- **Guardrails that block the few truly dangerous things** (signing from a live wallet, writing to the production database) and nothing else.
-- **One append-only event log** that the dashboard, reports and decision inbox all read from.
-
-See [docs/design.md](docs/design.md) for the architecture and [docs/prior-art.md](docs/prior-art.md) for what we borrowed and from where.
-
-## Quick start
-
-On a Mac (with Homebrew) or Linux, from a checkout of this repo:
+From a checkout of this repo, on macOS or Linux (on Windows, use WSL2), pointing at a repo you've checked out:
 
 ```sh
-bash scripts/bootstrap.sh ~/code/your-repo   # Node.js (22.13+, or installs 24 LTS), gitleaks, Claude Code and the engine (pinned, checked),
-                                             # then `worklane install` in your repo and `worklane doctor`
-worklane up --root ~/code/your-repo          # the coordinator, as a service for your user
-worklane dashboard --root ~/code/your-repo   # the dashboard
+bash scripts/bootstrap.sh ~/code/your-repo
 ```
 
-Docker, a shared hardened server, your first issue and where to look: [docs/quickstart.md](docs/quickstart.md). To try it without a repo: `worklane demo /tmp/worklane-demo`.
+On a Debian or Ubuntu server, where each project runs as users of its own, run it as root instead:
 
-## Secret scanning
+```sh
+sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
+```
 
-- **CI and agent sessions:** gitleaks scans every commit (agents can't commit unscanned) and every session transcript.
-- **Humans:** opt in with `npx worklane install --git-hooks`, which adds a gitleaks pre-commit hook for every worktree of the repo. Without it, human commits are still scanned in CI.
+Either way, the command installs pinned, checksum-checked tools and the engine, then prints one URL: the dashboard's first-run wizard. That's where every setup step after the install happens. The URL never carries a key: the page asks for it once, and the key stays in a file only you can read.
 
-## Using it responsibly
+[docs/quickstart.md](docs/quickstart.md) is the getting-started guide. It covers what each wizard screen does, the server path (Tailscale, setup mode, the GitHub Apps), your first project, engine updates, Discord, and where to look when something's wrong. It also covers the current limits:
+- A fresh server with no https origin gets no URL yet.
+- The engine release pinned in the script (`ENGINE_TAG`) can predate the wizard, as it does until the next release. Locally, the command then says so and runs the checklist in the terminal instead. A server install gets that older engine. The guide shows how to install the engine from a build of this checkout locally.
 
-Worklane runs the Claude Code CLI you already have, with your own login or API key, on your own machine and repositories. It has no sign-in flow and never touches credentials. You're responsible for using it within your Anthropic plan's terms; see [docs/auth.md](docs/auth.md).
+Once it's installed, you can look around without a repo of your own. The demo uses scripted agents and needs no login:
+
+```sh
+worklane demo /tmp/worklane-demo
+```
+
+## Safety model
+
+- **Agents hold no write credentials.** They propose actions, and the coordinator validates and performs them. Agents never get a GitHub write token or a production write credential. On a server, each project's coordinator and agents run as separate OS users ([separate-users.md](docs/separate-users.md)).
+- **Sandboxed test runs.** On a server, a project's tests run as a test user of their own, in a transient unit with a read-only system. That user can't read the engine's state, credentials or any other project, and its runs get no credentials of the harness's. Each run is wiped afterwards, and the wipe checks that nothing is left ([test-runs.md](docs/test-runs.md)).
+- **Root steps only through the helper's allowlist.** The dashboard never runs sudo. A machine change made from the page is one of a fixed list of commands of a root-owned helper, each allowed by name in sudoers. Anything else stays at a root shell: running the setup scripts, adding a release signer, releasing an update hold.
+- **No secrets in URLs, command lines or logs.**
+  - Tokens are pasted into a hidden field or prompt and go straight to a file only their user can read.
+  - The dashboard key goes in a header, and any URL carrying a key is refused.
+  - Test-run variables reach the sandbox on stdin, never in an argv.
+  - gitleaks scans every agent commit and every session transcript.
+- **Signed updates.** On the release channel (a new install's default), the engine updater installs only a release tag whose signature verifies against `/etc/worklane/allowed_signers`. A signer is added only at a root shell; the dashboard can only stage one. An update waits for running work, and rolls back and holds the commit if a service or the test sandbox fails afterwards.
+- **Voice is off by default, for owners only, and heard on-device.** An owner can speak an idea or `approve <issue number>`. Nothing happens until they say "confirm" within 10 seconds or click the banner. A spoken idea goes through the same triage as a Discord message and becomes an Inbox decision. By voice, a decision can only be approved, never a held high-risk merge, a plan held for a high-risk reason, or a delegation; those take a click. The server checks all of this again ([intake.md](docs/intake.md#25-voice-the-dashboard)).
+- **Protected changes wait for a human.** Review levels come from what a change touches, so a docs fix can land on its own, while money-path and auth changes wait for an owner.
+- **Very little is blocked, and everything is verified.** Only a few things are refused outright: signing from a live wallet, writing to the production database. Everything else gets checks the harness runs itself.
+
+## What's out of scope
+
+- **A hosted service.** Worklane runs on your own machine or server, with no backend of its own.
+- **Your Claude login.** Agents run through the Claude Code CLI you install, with your own login or API key. You're responsible for using it within your Anthropic plan's terms ([auth.md](docs/auth.md)).
+- **Code hosts other than GitHub.** The backlog, PRs, Apps and checks are GitHub's.
+- **Native Windows agents.** On Windows, agents need WSL2. Without it, Windows gets the dashboard and Issues only.
+- **Deploying your app.** The deploy gate decides which commit production may deploy; your host does the deploying ([deploy-gate.md](docs/deploy-gate.md)).
+
+## Learn more
+
+- [docs/quickstart.md](docs/quickstart.md): getting started.
+- [docs/design.md](docs/design.md): the architecture.
+- [docs/prior-art.md](docs/prior-art.md): what we borrowed, and from where.
+- [docs/dashboard.md](docs/dashboard.md): every dashboard page.
 
 ## License
 
 [Apache-2.0](LICENSE). Third-party code is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Contributions require a [DCO sign-off](CONTRIBUTING.md#sign-off). Please read the [Code of Conduct](CODE_OF_CONDUCT.md) and report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+Contributions require a [DCO sign-off](CONTRIBUTING.md#sign-off). Please read the [Code of Conduct](CODE_OF_CONDUCT.md), and report vulnerabilities as described in [SECURITY.md](SECURITY.md).

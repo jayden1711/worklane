@@ -204,7 +204,14 @@ The page shows the exact change to `intake.yaml` before writing it. Who may send
 
 ## Voice (optional)
 
-The dashboard can take your voice in the Ask panel: dictation into the question box, answers read aloud, and a wake word. All of it is **off by default** and **for owners only**. You turn each part on under **Settings → Voice**, and the setting is kept in that browser. Recognition and voices are **on-device**: without on-device recognition the mic stays off and says why, and without an on-device voice nothing is read aloud, unless you allow the cloud fallback or network voices. Dictation only fills the box for you to review; it never sends. No wake-word model ships with it, so the wake word stays off until one is installed ([wake-word.md](wake-word.md)).
+The dashboard can take your voice. In the Ask panel, it can dictate into the question box, read answers aloud, and listen for a wake word. With the voice button beside Ask, you can speak an idea or `approve <issue number>`. All of it is **off by default** and **for owners only**. You turn each part on under **Settings → Voice**, and the setting is kept in that browser.
+
+**Voice intake and approvals** also need `voice.enabled: true` in the instance's `intake.yaml`.
+- **Nothing acts on its own.** What was heard shows on a 10-second banner, and nothing happens until you say "confirm" within that window or click the banner.
+- **A spoken idea** goes through the same triage as a Discord message and becomes an Inbox decision.
+- **By voice, a decision can only be approved.** A held high-risk merge, a plan held for a high-risk reason, or a delegation takes a click.
+
+See [intake.md](intake.md#25-voice-the-dashboard). Recognition and voices are **on-device**: without on-device recognition the mic stays off and says why, and without an on-device voice nothing is read aloud, unless you allow the cloud fallback or network voices. Dictation only fills the box for you to review; it never sends. No wake-word model ships with it, so the wake word stays off until one is installed ([wake-word.md](wake-word.md)).
 
 ## When something's wrong
 
