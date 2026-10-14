@@ -46,6 +46,8 @@ export const KINDS = {
   disk_full: { title: 'Disk almost full', severity: 'red' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
+  // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.
+  update_sandbox_unconfirmed: { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.

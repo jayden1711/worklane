@@ -524,6 +524,8 @@ jobs:
           rm -rf "$r"
       - name: a red main tip doesn't block the updater, as root (the newest green first-parent commit; its verdict memo root-owned)
         run: sudo "$(command -v node)" scripts/ci/updater-lookback-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
+      - name: a sandbox check that fails after an update rolls it back, as root, with every root helper put back (bytes, owner, group, mode)
+        run: sudo "$(command -v node)" scripts/ci/updater-sandbox-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
       - name: the database image, pinned to the digest it has today
         run: |
           docker pull -q postgres:17-alpine
