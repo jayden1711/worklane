@@ -36,7 +36,7 @@
 // helper change once made every coordinator's startup sandbox check fail from inside its unit, while it passed from
 // a shell). So before switching, the updater asks each instance for its last startup verdict (`sandbox-status
 // --instance <name> --json`, the new engine's, run as the instance's user like migrate: root never opens an
-// instance's event log), and after the restart it waits, updates.json "sandbox_wait_minutes" at most (default 5),
+// instance's event log), and after the restart it waits, updates.json "sandbox_wait_minutes" at most (default 10),
 // for a verdict newer than the restart. An instance that passed before and fails after rolls the update back as an
 // unhealthy service does (backups, helpers, the old engine, restart) and holds the commit; the rollback's reason
 // names the instance and the check's own words, redacted. That rollback's order: stop the services, put the
@@ -44,9 +44,10 @@
 // owner and mode kept), switch /opt/worklane/current back, and only then restart, so the old engine never starts
 // beside a helper of another protocol. A helper that can't be put back is the first thing the reason says.
 // An instance with no test runs, with no verdict before, or
-// already failing before, is never waited for and never rolls anything back. No verdict in time: the install stands
-// and an incident says the check couldn't be confirmed (updates.json "sandbox_on_timeout": "hold" rolls back and
-// holds instead).
+// already failing before, is never waited for and never rolls anything back. No verdict in time from one that
+// passed before: rolled back and held too (updates.json "sandbox_on_timeout": "hold", the default: an engine whose
+// test runs can't be shown to work isn't kept). "sandbox_on_timeout": "stand" keeps the install instead and raises
+// an incident that says the check couldn't be confirmed.
 // The canary (updates.json "canary": { "instance", "repo", "time_limit_minutes" }, docs/canary.md): a scratch-repo
 // instance that gets a tiny issue each day and after every install, filed and read with the engine's `canary` command
 // as that instance's user. It must go issue -> plan -> PR -> green checks -> merged within the time limit (default
@@ -94,7 +95,7 @@ const CANARY_LIMIT_MIN = 120;
 const LOOKBACK = 20; // updates.json max_lookback: first-parent commits looked at, from main's tip back
 const LOOKBACK_MAX = 100;
 const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
-const SANDBOX_WAIT_MIN = 5; // updates.json sandbox_wait_minutes: how long a restarted instance has to say its sandbox check's result
+const SANDBOX_WAIT_MIN = 10; // updates.json sandbox_wait_minutes: how long a restarted instance has to say its sandbox check's result
 const SANDBOX_POLL_MS = 10_000;
 const SANDBOX_INCIDENT = 'update_sandbox_unconfirmed'; // the watchdog incident for a verdict that never came (key: the instance)
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
@@ -523,7 +524,10 @@ function parseSandbox(out) {
   return { configured: j.configured === true, last };
 }
 
-/** updates.json sandbox_wait_minutes, in ms: a number above 0, else 5 minutes. */
+/** updates.json sandbox_on_timeout: "stand" only when it says so; anything else, and unset, is "hold". */
+const sandboxOnTimeout = (cfg) => (cfg && cfg.sandbox_on_timeout === 'stand' ? 'stand' : 'hold');
+
+/** updates.json sandbox_wait_minutes, in ms: a number above 0, else 10 minutes. */
 function sandboxWaitMs(cfg) {
   const n = cfg && cfg.sandbox_wait_minutes;
   return (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : SANDBOX_WAIT_MIN) * 60_000;
@@ -792,7 +796,7 @@ async function update(deps, cfg) {
   if (after.h === 'healthy') {
     // Up and steady isn't working: an instance whose test sandbox check passed before must pass it again.
     const sandbox = await verifySandbox(deps, cfg, instances, sandboxBefore, head, restartedAt);
-    const onTimeout = cfg.sandbox_on_timeout === 'hold' ? 'hold' : 'proceed';
+    const onTimeout = sandboxOnTimeout(cfg);
     if (sandbox.failed.length || (sandbox.unconfirmed.length && onTimeout === 'hold')) {
       const failed = [
         ...sandbox.failed.map((f) => `rollback: the test sandbox check passed before the update and fails after it: ${f.instance}: ${f.detail}`),
@@ -1161,4 +1165,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

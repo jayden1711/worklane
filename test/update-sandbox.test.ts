@@ -27,6 +27,7 @@ const u = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'w
   parseSandbox(out: unknown): Status;
   sandboxVerdict(before: Status, after: Status, restartedAt: number): 'skip' | 'wait' | 'pass' | 'fail';
   sandboxWaitMs(cfg: unknown): number;
+  sandboxOnTimeout(cfg: unknown): 'hold' | 'stand';
   SANDBOX_INCIDENT: string;
   SANDBOX_POLL_MS: number;
   HELPERS: Helper[];
@@ -169,42 +170,51 @@ test('no test runs configured, no result before, unreadable before, or already f
   for (const [name, s] of Object.entries(specs)) assert.equal(u.sandboxVerdict(s.before, { configured: true, last: { ok: false, detail: FAIL, at: at(T0 + 1) } }, T0), 'skip', name);
 });
 
-test('no result in time: the install stands and an incident says it couldn\'t be confirmed; the wait is bounded and configurable', async () => {
+test('no result in time, by default: rolled back and held after 10 minutes; the wait is bounded and configurable', async () => {
+  assert.equal(u.sandboxOnTimeout({}), 'hold', 'the default');
+  assert.equal(u.sandboxWaitMs({}), 10 * MIN, 'the default');
+  for (const junk of [0, -1, '3', null]) assert.equal(u.sandboxWaitMs({ sandbox_wait_minutes: junk }), 10 * MIN);
+  for (const v of [undefined, null, 'hold', 'proceed', 'STAND', true]) assert.equal(u.sandboxOnTimeout({ sandbox_on_timeout: v }), 'hold', String(v));
+  assert.equal(u.sandboxOnTimeout({ sandbox_on_timeout: 'stand' }), 'stand', 'the one opt-out');
+  // Nothing set in updates.json: alice passed before and never says after the restart.
   const m = machine({ alice: { before: passedBefore, says: 'never' }, bob: { before: passedBefore, says: { ok: true } } });
+  assert.equal(await u.run(m.deps), 'rolled_back');
+  assert.equal(m.engine(), OLD, 'an engine whose test runs can\'t be shown to work isn\'t kept');
+  assert.equal(m.held()!.sha, NEW);
+  assert.equal(m.last('rolled_back')!.reason, 'rollback: no test sandbox result from alice within 10 minutes of the restart (sandbox_on_timeout: hold)');
+  assert.equal(m.last('installed'), undefined);
+  assert.deepEqual(m.calls.slice(-5), ['stop on bbbb', 'restore alice', 'restore bob', 'syncHelpers aaaa', 'switchTo aaaa', 'restart on aaaa'].slice(-5), 'the same rollback: backups, helpers, the old engine');
+  const waited = m.clock() - m.restartedAt()!;
+  // The clock also carries the old engine's restart and settle after the rollback (about half a minute).
+  assert.ok(waited >= 10 * MIN && waited < 12 * MIN, `the default 10 minutes, then it stops: ${waited}`);
+  // A shorter wait from updates.json.
+  const short = machine({ alice: { before: passedBefore, says: 'never' } }, { sandbox_wait_minutes: 2 });
+  assert.equal(await u.run(short.deps), 'rolled_back');
+  assert.equal(short.last('rolled_back')!.reason, 'rollback: no test sandbox result from alice within 2 minutes of the restart (sandbox_on_timeout: hold)');
+  const w = short.clock() - short.restartedAt()!;
+  assert.ok(w >= 2 * MIN && w < 4 * MIN, String(w));
+  // A failure doesn't wait out the others' timeout, and is what the reason gives.
+  const f = machine({ alice: { before: passedBefore, says: 'never' }, bob: { before: passedBefore, says: { ok: false } } });
+  assert.equal(await u.run(f.deps), 'rolled_back');
+  assert.equal(f.last('rolled_back')!.reason, `rollback: the test sandbox check passed before the update and fails after it: bob: ${FAIL}`);
+  assert.ok(f.clock() - f.restartedAt()! < 3 * MIN, 'rolled back at the first failure');
+});
+
+test('sandbox_on_timeout: stand: no result in time keeps the install and raises an incident that says it couldn\'t be confirmed', async () => {
+  const m = machine({ alice: { before: passedBefore, says: 'never' }, bob: { before: passedBefore, says: { ok: true } } }, { sandbox_on_timeout: 'stand' });
   assert.equal(await u.run(m.deps), 'installed');
-  assert.equal(m.engine(), NEW, 'kept: no evidence of a regression');
+  assert.equal(m.engine(), NEW);
   assert.equal(m.held(), null);
   assert.deepEqual(m.last('installed')!.sandbox, { passed: ['bob'], unconfirmed: ['alice'] });
   assert.equal(m.incidents.length, 2);
   assert.equal(m.incidents[0], `resolve ${u.SANDBOX_INCIDENT} bob`);
-  assert.match(m.incidents[1]!, /^raise update_sandbox_unconfirmed alice: after the update to bbbbbbb, alice gave no test sandbox result within 5 minutes of its restart/);
+  assert.match(m.incidents[1]!, /^raise update_sandbox_unconfirmed alice: after the update to bbbbbbb, alice gave no test sandbox result within 10 minutes of its restart/);
   const waited = m.clock() - m.restartedAt()!;
-  assert.ok(waited >= 5 * MIN && waited < 6 * MIN, `the default 5 minutes, then it stops: ${waited}`);
-  assert.equal(u.sandboxWaitMs({}), 5 * MIN);
-  for (const junk of [0, -1, '3', null]) assert.equal(u.sandboxWaitMs({ sandbox_wait_minutes: junk }), 5 * MIN);
-  // A shorter wait from updates.json.
-  const short = machine({ alice: { before: passedBefore, says: 'never' } }, { sandbox_wait_minutes: 1 });
-  assert.equal(await u.run(short.deps), 'installed');
-  const w = short.clock() - short.restartedAt()!;
-  assert.ok(w >= 1 * MIN && w < 2 * MIN, String(w));
-  assert.match(short.incidents[0]!, /within 1 minutes of its restart/);
+  assert.ok(waited >= 10 * MIN && waited < 11 * MIN, String(waited));
   assert.deepEqual(KINDS.update_sandbox_unconfirmed, { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' });
-});
-
-test('sandbox_on_timeout: hold: no result in time rolls back and holds; a failure still names the failing instance', async () => {
-  const m = machine({ alice: { before: passedBefore, says: 'never' } }, { sandbox_on_timeout: 'hold', sandbox_wait_minutes: 2 });
-  assert.equal(await u.run(m.deps), 'rolled_back');
-  assert.equal(m.engine(), OLD);
-  assert.equal(m.held()!.sha, NEW);
-  assert.equal(m.last('rolled_back')!.reason, 'rollback: no test sandbox result from alice within 2 minutes of the restart (sandbox_on_timeout: hold)');
-  // Anything but "hold" proceeds.
-  const other = machine({ alice: { before: passedBefore, says: 'never' } }, { sandbox_on_timeout: 'rollback-please', sandbox_wait_minutes: 1 });
-  assert.equal(await u.run(other.deps), 'installed');
-  // A failure doesn't wait out the others' timeout, and is what the reason gives.
-  const f = machine({ alice: { before: passedBefore, says: 'never' }, bob: { before: passedBefore, says: { ok: false } } }, { sandbox_on_timeout: 'hold' });
+  // A failure still rolls back, whatever the timeout setting.
+  const f = machine({ alice: { before: passedBefore, says: { ok: false } } }, { sandbox_on_timeout: 'stand' });
   assert.equal(await u.run(f.deps), 'rolled_back');
-  assert.equal(f.last('rolled_back')!.reason, `rollback: the test sandbox check passed before the update and fails after it: bob: ${FAIL}`);
-  assert.ok(f.clock() - f.restartedAt()! < 2 * MIN, 'rolled back at the first failure');
 });
 
 test('the command: the new engine\'s sandbox-status as the instance\'s own user, and its answer; no answer is unknown, never a verdict', () => {
