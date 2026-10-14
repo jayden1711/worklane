@@ -6,6 +6,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import type { EventPayload } from '../src/events/types.js';
+import { BRAND } from '../src/brand.js';
 import { prsView } from '../src/projection.js';
 import { waitingOnYou } from '../src/digest.js';
 import { commitAll, coordinator, fixture, readAll, skip } from './repro-state-graph/harness.js';
@@ -91,6 +92,7 @@ test('depends on: a cycle is reported once on each issue in it, and neither star
 test("ownership: a running task's plan files hold a task that would change them, until the first one ends", { skip }, async () => {
   const f = fixture();
   f.cfg.project.hotspots = []; // no hotspots: only the plan's files are owned
+  f.cfg.project.plan_gate = 'risky'; // WHY: this plan holds nothing risky, so it builds at once (#334); the gated path is the next test
   f.cfg.agents.roles.workers!.count = 2;
   const a = f.backlog.open({ title: 'Add a.js', body: `Add a.js and wire it into totals.${DONE}`, author: 'example-owner', labels: ['ready', 'size:M'] });
   const g = gate();
@@ -112,9 +114,38 @@ test("ownership: a running task's plan files hold a task that would change them,
   assert.deepEqual(order, ['start a.js', 'end a.js', 'start b.js', 'end b.js'], 'b ran only after a ended and released its files');
 });
 
+test("ownership: under the default plan gate, an approved plan's files are owned from the moment the task starts again", { skip }, async () => {
+  const f = fixture();
+  f.cfg.project.hotspots = [];
+  f.cfg.agents.roles.workers!.count = 2;
+  assert.equal(f.cfg.project.plan_gate, 'always');
+  const a = f.backlog.open({ title: 'Add a.js', body: `Add a.js and wire it into totals.${DONE}`, author: 'example-owner', labels: ['ready', 'size:M'] });
+  const g = gate();
+  const order: string[] = [];
+  const c = coordinator(f, workers({ 'a.js': g.p }, order));
+  await c.tick();
+  await c.idle();
+  assert.equal((f.log.read(0, ['plan.posted']).at(-1)!.payload as { held: boolean }).held, true, 'held for approval: nothing runs, nothing is owned');
+  f.backlog.humanComment(a, 'example-owner', `/${BRAND.cli} approve`);
+  const b = f.backlog.open({ title: 'Add b.js', body: `Add b.js and register it in \`src/price.js\`.${DONE}`, author: 'example-owner', labels: ['ready'] });
+  for (let i = 0; i < 5 && !order.includes('start a.js'); i++) {
+    await c.tick();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(order.includes('start a.js'), 'the approved plan is built');
+  assert.deepEqual(f.log.read(0, ['hotspot.held']).map((e) => e.payload), [{ issue: b, by: a, files: ['src/price.js'], reason: `waits for #${a}: both change src/price.js` }]);
+  assert.ok(!order.includes('start b.js'));
+  g.open();
+  await c.idle();
+  await c.tick();
+  await c.idle();
+  assert.deepEqual(order, ['start a.js', 'end a.js', 'start b.js', 'end b.js']);
+});
+
 test('ownership: a task whose plan names a file a running task owns waits before building, then builds once it is free', { skip }, async () => {
   const f = fixture();
   f.cfg.project.hotspots = ['src/price.js'];
+  f.cfg.project.plan_gate = 'risky'; // WHY: b's plan must build at once (#334) for its in-task wait to be reached
   f.cfg.agents.roles.workers!.count = 2;
   const a = f.backlog.open({ title: 'Add a.js', body: `Add a.js and register it in src/price.js.${DONE}`, author: 'example-owner', labels: ['ready'] });
   const b = f.backlog.open({ title: 'Add b.js', body: `Add b.js and wire it into totals.${DONE}`, author: 'example-owner', labels: ['ready', 'size:M'] });
