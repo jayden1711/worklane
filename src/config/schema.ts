@@ -7,6 +7,7 @@ import type { RoutedRun } from '../model-routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
+import { PreviewConfig } from '../preview/config.js';
 import { SparseExclude } from '../checkout.js';
 import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
 
@@ -611,6 +612,8 @@ export const TestsConfig = z.strictObject({
   test_run: TestRunConfig.optional(),
   /** The pre-deploy gate (src/deploy-gate/, docs/deploy-gate.md); absent: off. */
   deploy_gate: DeployGateConfig.optional(),
+  /** docs/previews.md: PR previews; absent or not enabled, off. */
+  preview: PreviewConfig.optional(),
 }).superRefine((t, ctx) => {
   for (const p of deployGateProblems(t.deploy_gate, t.test_run ? t.test_run.tiers.map((x) => x.name) : null)) ctx.addIssue({ code: 'custom', path: p.path, message: p.message });
 });
