@@ -228,6 +228,7 @@
   "test/update-helpers.test.ts": 913,
   "test/update-lookback.test.ts": 307,
   "test/update-migrate.test.ts": 10,
+  "test/update-sandbox.test.ts": 800,
   "test/usage-limit.test.ts": 4477,
   "test/vacuity.test.ts": 510,
   "test/viewer-events.test.ts": 6422,
