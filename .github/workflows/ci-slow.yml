@@ -1635,7 +1635,7 @@ jobs:
           if systemctl --user is-active -q "$label"; then echo "down left $label running" >&2; exit 1; fi
           pkill -f "dashboard --service --root $RUNNER_TEMP/alpha" || true
       # ---------------------------------------------------------------- server mode
-      - name: "server mode: the one command (bootstrap --hardened, as root) with this commit's engine; it ends with one URL"
+      - name: "server mode: the one command (bootstrap --hardened, as root) with this commit's engine; with no https origin yet, no URL: the reason and the fix, exit 4"
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q acl
           sha="$(git rev-parse HEAD)"
@@ -1652,18 +1652,17 @@ jobs:
           sudo sed -i "s/^ENGINE_TAG=.*/ENGINE_TAG=$sha/" "$b/scripts/bootstrap.sh"
           [ "$(sudo git -C "$b" diff --name-only)" = scripts/bootstrap.sh ]
           echo "BOOT=$b" >> "$GITHUB_ENV"
-          sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner ci example/alpha 2>&1 | tee "$F/server-install.log"
+          rc=0; sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner ci example/alpha > "$F/server-install.log" 2>&1 || rc=$?
+          tail -n 15 "$F/server-install.log"
           [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
           id wl-ci && id wl-ci-agent
           jq -e '.owners == ["ci-owner"]' /etc/worklane/machine-owners.json
-          u="$(tail -n 1 "$F/server-install.log")"
-          [ "$u" = http://127.0.0.1:4398/first-run ] || { echo "the install's last line: $u" >&2; exit 1; }
-          closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/server-install.log")"
-          [ "$(grep -c '://' <<< "$closing")" = 1 ]
-          # The URL answers on a fresh server, right after the install, before any project (owner, #393): the page.
-          code="$(curl -s -o "$F/fresh-page.html" -w '%{http_code}' "$u" || true)"
-          [ "$code" = 200 ] || { echo "GET $u right after the install: HTTP $code" >&2; exit 1; }
-          grep -q '<div id="root"></div>' "$F/fresh-page.html"
+          # No https origin (no Tailscale here, no --public-url): a URL here would answer nothing (#393, #402). So no URL
+          # at all: the reason and the fix, exit 4, and nothing started.
+          [ "$rc" = 4 ] || { echo "expected exit 4 with no origin, got $rc" >&2; exit 1; }
+          grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/server-install.log"
+          if tail -n 1 "$F/server-install.log" | grep -qE '^https?://'; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
+          if systemctl is-active -q worklane-dashboard-hub-setup.service; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
           # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token).
           sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
       - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
@@ -1687,13 +1686,44 @@ jobs:
             sudo install -d "/etc/systemd/system/$u.service.d"
             printf '[Service]\nEnvironment=NODE_OPTIONS=%s CI_LOOPBACK_GITHUB_PORT=8999\n' "$LOOPBACK?port=8999" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
-      # Screen 3 (server): the hub's setup mode makes the sign-in App. Not in Chrome: its page takes writes only from the
-      # hub's https origin (tailscale serve, which a runner can't have), and its form posts to github.com itself. These
-      # are the requests that browser makes, with that origin, as the add-project job's proof makes them.
-      - name: "server, screen 3: the sign-in App through the hub's setup mode (its one-time token from a 0600 file, never in a URL)"
+      # The hub's https origin, as tailscale serve gives it, played on this runner the way #402's proof does: the name
+      # hub.example.test on this machine, real TLS from a CA the system trusts, forwarded to the hub's port 4399. It
+      # carries nothing to GitHub or any outside service (those stay the fake's, through the loopback stand-in).
+      - name: "server mode: the install command again with the origin given and served: it starts setup mode and ends with one URL that answers 200, no token in it or the log"
         run: |
-          u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h=http://127.0.0.1:4399
-          sudo bash scripts/setup/dashboards.sh --setup --public-url "$pub" | tee "$F/setup1.log"
+          pub=https://hub.example.test
+          sudo apt-get install -y -q socat > /dev/null
+          t="$RUNNER_TEMP/tls" && mkdir -p "$t"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/ca.key" -out "$t/ca.pem" -subj /CN=ci-hub-ca -days 2 -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign 2>/dev/null
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/leaf.key" -out "$t/leaf.csr" -subj /CN=hub.example.test 2>/dev/null
+          printf 'subjectAltName=DNS:hub.example.test\nextendedKeyUsage=serverAuth\n' > "$t/ext"
+          openssl x509 -req -in "$t/leaf.csr" -CA "$t/ca.pem" -CAkey "$t/ca.key" -CAcreateserial -out "$t/leaf.pem" -days 2 -extfile "$t/ext" 2>/dev/null
+          sudo cp "$t/ca.pem" /usr/local/share/ca-certificates/ci-hub-ca.crt && sudo update-ca-certificates > /dev/null
+          echo '127.0.0.1 hub.example.test' | sudo tee -a /etc/hosts > /dev/null
+          sudo sh -c "nohup socat openssl-listen:443,reuseaddr,fork,cert=$t/leaf.pem,key=$t/leaf.key,verify=0 tcp:127.0.0.1:4399 > $t/socat.log 2>&1 &"
+          echo "TLS=$t" >> "$GITHUB_ENV"
+          rc=0; sudo bash "$BOOT/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner --public-url "$pub" ci example/alpha > "$F/server-install-setup.log" 2>&1 || rc=$?
+          tail -n 15 "$F/server-install-setup.log"
+          [ "$rc" = 0 ] || { echo "exit $rc" >&2; exit 1; }
+          systemctl is-active worklane-dashboard-hub-setup.service
+          u="$(tail -n 1 "$F/server-install-setup.log")"
+          [ "$u" = "$pub/" ] || { echo "the install's last line: $u" >&2; exit 1; }
+          closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/server-install-setup.log")"
+          [ "$(grep -c '://' <<< "$closing")" = 1 ]
+          [ "$(curl -s -o "$F/setup-page.html" -w '%{http_code}' "$u")" = 200 ]
+          grep -q 'This hub is in setup mode' "$F/setup-page.html"
+          tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
+          [ "$(sudo stat -c '%U %a' "$tf")" = "wl-dash 600" ]
+          # The token as a pattern file, never an argument (the argv sampler would catch it, and so would ps).
+          if sudo grep -qFf "$tf" "$F/server-install-setup.log" || printf '%s\n' "$u" | sudo grep -qFf "$tf"; then echo "the setup token was printed or is in the URL" >&2; exit 1; fi
+          echo "SETUP_URL=$u" >> "$GITHUB_ENV"
+      # Screen 3 (server): the hub's setup mode makes the sign-in App, at the URL the install printed. Over curl, not
+      # Chrome: its manifest form posts to github.com itself, which nothing here may reach. These are that browser's
+      # requests, with that origin, and GitHub's redirect back (the fake converts the code).
+      - name: "server, screen 3: the sign-in App through the hub's setup mode, at the install's URL (its one-time token from a 0600 file, never in a URL)"
+        run: |
+          u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h="${SETUP_URL%/}"
+          [ "$h" = "$pub" ]
           systemctl is-active "$u"
           tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
           [ "$(sudo stat -c '%U %a' "$tf")" = "wl-dash 600" ]
@@ -1737,14 +1767,26 @@ jobs:
           sudo rm -f "$dd/stand-in.conf" && sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-hub.service
           for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do systemctl is-active "$u.service"; done
           node --input-type=module -e 'const f = await import(process.argv[1]); process.stdout.write(f.APP_SECRET + "\n" + f.WEBHOOK_SECRET + "\n");' "file://$GITHUB_WORKSPACE/dist/test/fake-github.js" > "$F/app-secrets"
-      - name: "server mode: the install command again ends with the same one URL, now the hub's wizard; it answers, given the hub's key"
+      # With the hub up, the install command ends with the hub's own wizard URL: its https origin while that answers, else
+      # the owner's break-glass on the machine. People sign in at the origin with GitHub, which no CI runner can do (the
+      # hub's sign-in hosts are constants), so the walk goes on through the break-glass: the origin stops answering
+      # (tailscale serve's stand-in goes), and the same command must then print the break-glass URL, which the walk opens.
+      - name: "server mode: the install command again: the hub's wizard at its https origin; with the origin gone, the break-glass, which the walk uses"
         run: |
-          sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash "$BOOT/scripts/bootstrap.sh" --hardened --after-credentials --yes ci example/alpha > "$F/server-install2.log" 2>&1 || { cat "$F/server-install2.log"; exit 1; }
-          tail -n 12 "$F/server-install2.log"
+          boot() { sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash "$BOOT/scripts/bootstrap.sh" --hardened --after-credentials --yes ci example/alpha > "$F/$1" 2>&1 || { cat "$F/$1"; exit 1; }; tail -n 12 "$F/$1"; }
+          one_url() { closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/$1")"; [ "$(grep -c '://' <<< "$closing")" = 1 ]; }
+          boot server-install2.log
+          [ "$(tail -n 1 "$F/server-install2.log")" = https://hub.example.test/first-run ]
+          one_url server-install2.log
+          [ "$(curl -s -o /dev/null -w '%{http_code}' https://hub.example.test/first-run)" = 200 ]
+          sudo pkill -f 'socat openssl-listen:443'
+          # The signal: the origin refusing connections once the stand-in has exited (bounded at 10 s).
+          for _ in $(seq 1 10); do curl -s -o /dev/null https://hub.example.test/ || break; sleep 1; done
+          boot server-install3.log
           hk="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
           (umask 077; sudo cat "$hk" > "$F/hub-key")
-          u="$(bash scripts/ci/wizard-url.sh "$F/server-install2.log" "$F/hub-key" /api/i/ci/first-run | tail -n 1)"
-          [ "$u" = "$(tail -n 1 "$F/server-install.log")" ]
+          u="$(bash scripts/ci/wizard-url.sh "$F/server-install3.log" "$F/hub-key" /api/i/ci/first-run | tail -n 1)"
+          [ "$u" = http://127.0.0.1:4398/first-run ]
           echo "SERVER_URL=$u" >> "$GITHUB_ENV"
       - name: "server mode, in the browser through the hub: Claude, Protect, the policy, Discord skipped, Tailscale, the updater, every automation line, rerun from Settings, the project's dashboard (screens 2, 6-9, 11)"
         run: node scripts/ci/wizard-e2e.mjs server "$GITHUB_WORKSPACE/dist" "$SERVER_URL" "$F/hub-key" "$F/browser" ci | tee "$F/walk-server.jsonl"
