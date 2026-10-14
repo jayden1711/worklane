@@ -539,28 +539,31 @@ async function serverMachine() {
     await waitFor(tid('updater-setup'), 30_000);
     return text(`${tid('updater-setup')} [data-testid="updater-step"][data-step="1"]`);
   };
-  const confirmUpdater = async (button) => {
+  /**
+   * Review, confirm, then wait for the machine request to END. The signal is the request's own row under "Requested
+   * here" (newest first) leaving pending/running. Run 38536879337 asserted when the page first read "installed",
+   * while the step's own unit was still running (it enables the timer last): a race in the test.
+   */
+  const confirmUpdater = async (button, args) => {
     await click(button);
     await waitFor(tid('updater-review'));
     await click(tid('updater-confirm'));
-    await waitText(tid('updater-message'), /^requested: /);
+    await until('the request accepted', async () => (await text(tid('updater-message'))) ?? null, 30_000, 300);
+    const said = (await text(tid('updater-message'))) ?? '';
+    assert.match(said, /^requested: /, `the confirm: ${said}`);
+    // Async by design (the coordinator's tick, then the step's own unit); the signal: the request row's final status.
+    const row = await until(`the request "${args}" to end`, async () => {
+      await open('/machine');
+      const r = await evaluate(`(() => { const r = [...document.querySelectorAll('[data-testid="machine-request-row"]')].find((x) => x.innerText.includes(${JSON.stringify(args)})); return r ? { status: r.getAttribute('data-status'), text: r.innerText.replace(/\\s+/g, ' ') } : null; })()`);
+      return r && !['pending', 'running'].includes(r.status) ? r : null;
+    }, 300_000, 3000);
+    assert.equal(row.status, 'done', `the request ended ${row.status}: ${row.text}`);
   };
   await screen('screen 9: the updater installed from the Machine page (off until turned on)', async () => {
     await updaterState();
-    await confirmUpdater(tid('updater-install'));
-    let seen = '';
-    try {
-      // Async by design (the coordinator's tick); the signal: the page's updater step reading installed.
-      await until('the updater installed', async () => /installed, updates off/.test((seen = (await updaterState()) ?? '')), 240_000, 3000);
-    } catch (e) {
-      const files = sh('sudo', ['ls', '-la', '/etc/worklane', '/usr/local/libexec']).out;
-      const asWl = sh('sudo', ['-u', `wl-${instance}`, 'cat', '/etc/worklane/updates.json']);
-      // The machine request's own result, as the page lists it under "Requested here", and the coordinator's sandbox.
-      const main = ((await text('main')) ?? '').replace(/\s+/g, ' ');
-      const at = main.indexOf('Requested here');
-      const sandbox = sh('systemctl', ['show', '-p', 'ProtectSystem,PrivateTmp,ReadWritePaths', `worklane-${instance}.service`]).out.replace(/\n/g, ' ');
-      throw new Error(`${e.message}; the page's step 1: ${seen.replace(/\s+/g, ' ')}; requested here: ${at < 0 ? '(none listed)' : main.slice(at, at + 1200)}; on the machine: ${files.replace(/\s+/g, ' ')}; updates.json as wl-${instance}: ${asWl.status} ${asWl.err}; the coordinator's unit: ${sandbox}`);
-    }
+    await confirmUpdater(tid('updater-install'), 'install-updater');
+    // The request has ended done: everything checked once.
+    assert.match((await updaterState()) ?? '', /installed, updates off/);
     assert.equal(stat('/usr/local/libexec/worklane-update'), 'root 755');
     assert.equal(stat('/etc/worklane/updates.json'), 'root 644');
     const cfg = JSON.parse(sudoOk('cat', '/etc/worklane/updates.json'));
@@ -576,12 +579,10 @@ async function serverMachine() {
     await updaterState();
     await type(tid('updater-signer-principal'), 'release@example.com');
     await type(tid('updater-signer-key'), pub);
-    await confirmUpdater(tid('updater-signer-review'));
-    // Async by design (the coordinator's tick); the signal: the staged signer and its root command on the page.
-    const cmd = await until('the staged signer and its root command', async () => {
-      await updaterState();
-      return text(tid('updater-pending-command'));
-    }, 240_000, 3000);
+    await confirmUpdater(tid('updater-signer-review'), 'stage-update-signer');
+    // The stage request has ended done: the staged signer and its root command, read once.
+    await updaterState();
+    const cmd = (await text(tid('updater-pending-command'))) ?? '';
     const m = cmd.trim().match(/^sudo bash (\S+\/scripts\/setup\/updates\.sh) --confirm-signer (SHA256:\S+)$/);
     assert.ok(m, `the root command: ${cmd}`);
     assert.ok(sh('sudo', ['test', '-e', '/etc/worklane/allowed_signers']).status !== 0 || !sudoOk('cat', '/etc/worklane/allowed_signers').includes(pub), 'staging trusts nothing');
@@ -589,20 +590,19 @@ async function serverMachine() {
     sudoOk('bash', m[1], '--confirm-signer', m[2]);
     assert.ok(sudoOk('cat', '/etc/worklane/allowed_signers').includes(`release@example.com ${pub}`));
     assert.equal(stat('/etc/worklane/allowed_signers'), 'root 644');
-    // The signal: the page listing the signer the root step added (it re-reads the signers file).
-    await until('the signer listed on the page', async () => {
-      await updaterState();
-      return (await text(tid('updater-signers')))?.includes('release@example.com');
-    }, 60_000, 3000);
+    // The root step has returned: a fresh load of the page reads the signers file, once.
+    await updaterState();
+    assert.ok((await text(tid('updater-signers')))?.includes('release@example.com'), 'the page lists the signer');
     return { fingerprint: m[2] };
   });
   await screen('screen 9: follow releases (the channel from the page)', async () => {
     await updaterState();
     if ((await attr(tid('updater-channel'), 'data-channel')) !== 'release') {
-      await confirmUpdater(tid('updater-release'));
-      // Async by design (the coordinator's tick); the signal: the page's channel reading release.
-      await until('the release channel', async () => (await updaterState()) && (await attr(tid('updater-channel'), 'data-channel')) === 'release', 240_000, 3000);
+      await confirmUpdater(tid('updater-release'), 'set-update-channel release');
     }
+    // A new install starts on release, so the button may have nothing to do: the page and the file read once.
+    await updaterState();
+    assert.equal(await attr(tid('updater-channel'), 'data-channel'), 'release');
     assert.equal(JSON.parse(sudoOk('cat', '/etc/worklane/updates.json')).channel, 'release');
     return { channel: 'release' };
   });
