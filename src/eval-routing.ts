@@ -2,6 +2,7 @@
 // and a cheap verdict that isn't a confident pass is judged once more by the stronger model. No model is
 // asked which model should judge.
 import type { Level } from './review.js';
+import { ROUTING, route } from './routing.js';
 
 export interface EvalRouting {
   /** Judges changes at `cheap_levels` (docs-only, tests-only, comment-only by default). */
@@ -11,7 +12,11 @@ export interface EvalRouting {
   escalate: boolean;
 }
 
-export const DEFAULT_EVAL_ROUTING: EvalRouting = { cheap_model: 'sonnet', cheap_levels: ['L0'], escalate: true };
+export const DEFAULT_EVAL_ROUTING: EvalRouting = { cheap_model: ROUTING.eval_cheap.default, cheap_levels: ROUTING.eval_cheap_levels.default, escalate: ROUTING.eval_escalate.default };
+
+export function evalRouting(agents: Parameters<typeof route>[0]): EvalRouting {
+  return { cheap_model: route(agents, 'eval_cheap').value, cheap_levels: route(agents, 'eval_cheap_levels').value, escalate: route(agents, 'eval_escalate').value };
+}
 
 /**
  * The level used to route the evaluation: the computed review level, except that a comment-only change routes

@@ -1,6 +1,7 @@
 // The chat channel's words: what is posted for a decision or a setup-console ask, and how a reply in its thread is
 // read. Code, not a model, writes every post and reads every reply. What a post may carry is fixed here:
-// - a decision: its question, options and recommendation, in its own thread, answered by a reply there;
+// - a decision: its question, options and recommendation, in its own thread, answered by a reply there; a held
+//   plan: its acceptance criteria and the issue's link, answered by an admin ("approve plan <n>" names it);
 // - a high-risk merge (an L3 landing decision, or a PR the merge policy left to an owner): with discord.owners set,
 //   a thread that only those owners answer, with "approve <number>"; without, a notice and links only;
 // - a secret (or a root step): a link to the dashboard's setup console only, nothing of the ask itself; with
@@ -10,6 +11,7 @@ import type { Ask } from '../console/asks.js';
 import type { EventPayload } from '../events/types.js';
 import { redactString } from '../events/redact.js';
 import { REPLY_CHARS } from './discord.js';
+import { ACCEPTANCE_RECEIPT } from '../plan-mode.js';
 import { NEVER_FROM_CHAT } from './people.js';
 import { DEFAULT_PAUSE_MS, resetWords, type UsagePause } from '../usage-limit.js';
 
@@ -51,8 +53,15 @@ export function mainWatchPost(u: Pick<EventPayload<'main_watch.unaccounted'>, 's
  * What a decision posts. A high-risk merge: with Discord owners (`owners`), a thread they approve in by its number;
  * without, only a notice with links. Never its options as answerable by anyone else.
  */
-export function decisionPost(q: Pick<EventPayload<'decision.asked'>, 'id' | 'kind' | 'issue' | 'question' | 'options' | 'recommendation'>, o: { dashboardUrl: string; repo: string; owners?: boolean }): ChannelPost {
+export function decisionPost(q: Pick<EventPayload<'decision.asked'>, 'id' | 'kind' | 'issue' | 'question' | 'options' | 'recommendation'> & { receipts?: string[] }, o: { dashboardUrl: string; repo: string; owners?: boolean }): ChannelPost {
   const on = q.issue !== null ? ` on #${q.issue}` : '';
+  // A held plan (the plan gate): its acceptance criteria, the issue with the full plan, and "approve plan <n>".
+  if (q.kind === 'plan' && q.issue !== null) {
+    const acceptance = (q.receipts ?? []).filter((r) => r.startsWith(ACCEPTANCE_RECEIPT)).map((r) => `- ${oneLine(redactString(r.slice(ACCEPTANCE_RECEIPT.length)))}`);
+    const free = `${oneLine(redactString(q.question))} No code is written before an admin approves. Acceptance criteria:\n${acceptance.length ? acceptance.join('\n') : '- none given'}`;
+    const tail = `\nFull plan: https://github.com/${o.repo}/issues/${q.issue}\nOptions: ${q.options.join(' / ')}.${q.options.includes(q.recommendation) ? ` Recommended: ${q.recommendation}.` : ''}\nReply in this thread with exactly one option; "approve plan ${q.issue}" approves it too.`;
+    return { kind: 'thread', name: clip(oneLine(`plan${on}: ${q.question}`), 90), text: fit(`Decision needed (plan${on}): `, free, tail) };
+  }
   if (NEVER_FROM_CHAT.has(q.kind)) {
     const gh = q.issue !== null ? ` https://github.com/${o.repo}/issues/${q.issue}` : '';
     if (o.owners && q.issue !== null) {
@@ -95,17 +104,24 @@ export function askPost(a: Ask, o: { dashboardUrl: string; owners?: boolean }): 
  * The option a reply chooses, or why it chooses none. A reply chooses an option only when its first word is that
  * option (case aside, `/cli` or punctuation around it allowed) and it names no other option anywhere: "approve" or
  * "Approve, looks good" choose approve; "approve or reject?", "yes" or "I wouldn't approve" choose nothing.
+ * On a held plan (`plan`: its issue's number), "approve plan <n>" is the same as "approve" when n is that number,
+ * and chooses nothing (`wrongNumber`) when it names another.
  */
-export function parseChoice(text: string, options: string[]): { answer: string } | { ambiguous: true } {
-  const words = text
+export function parseChoice(text: string, options: string[], o: { plan?: number } = {}): { answer: string } | { ambiguous: true; wrongNumber?: number } {
+  let words = text
     .toLowerCase()
     .replace(/^\s*\/\S+\s+/, '')
     .split(/\s+/)
     .map((w) => w.replace(/^[,.!?;:"'()[\]{}*_~`]+|[,.!?;:"'()[\]{}*_~`]+$/g, ''))
     .filter(Boolean);
-  const hit = options.find((o) => o.toLowerCase() === words[0]);
+  if (o.plan !== undefined && words[1] === 'plan') {
+    const n = /^#?(\d{1,9})$/.exec(words[2] ?? '');
+    if (n && Number(n[1]) !== o.plan) return { ambiguous: true, wrongNumber: Number(n[1]) };
+    if (n) words = [words[0]!, ...words.slice(3)];
+  }
+  const hit = options.find((x) => x.toLowerCase() === words[0]);
   if (!hit) return { ambiguous: true };
-  const others = options.filter((o) => o !== hit).map((o) => o.toLowerCase());
+  const others = options.filter((x) => x !== hit).map((x) => x.toLowerCase());
   if (words.slice(1).some((w) => others.includes(w))) return { ambiguous: true };
   return { answer: hit };
 }

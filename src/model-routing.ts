@@ -5,16 +5,16 @@
 // researcher's, else the workers'): its held-out score dropped on haiku. The stage-label judge stays on sonnet:
 // on haiku it missed a case of its eval in two samples of three. Decision-thread questions and picks stay on sonnet:
 // on haiku their held-out score dropped (21/22 on sonnet to 19/22, 3 samples). The evaluator's model is
-// tiered separately (src/eval-routing.ts). The repo's agents.yaml `model_routing` overrides any of these; the
+// tiered separately (src/eval-routing.ts). The repo's agents.yaml `routing` overrides any of these (defaults: src/routing.ts); the
 // instance's `model_cap` (policy.yaml settings) caps every run's model at a tier (in the coordinator's runner,
 // so no run escapes it), never raises one.
-import type { AgentsConfig } from './config/schema.js';
 import { OPTIMIZE_LABEL } from './optimize.js';
+import { route } from './routing.js';
 
 export const MODEL_TIERS = ['haiku', 'sonnet', 'opus'] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
-/** Kinds of run routed here (not the evaluator, which eval_routing tiers). */
+/** Kinds of run routed here (not the evaluator, which the eval_* keys of routing tier). */
 export type RoutedRun = 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer' | 'reflection';
 
 export interface ModelRouting {
@@ -39,32 +39,24 @@ export interface ModelRouting {
   reflection: string;
 }
 
-export const DEFAULT_HIGH_RISK_LABELS = ['size:L', 'money-path', 'review:L3', 'high-risk'];
+export { DEFAULT_HIGH_RISK_LABELS } from './routing.js';
 
-/**
- * The routing for a config: the repo's model_routing over the defaults. A repo that names its workers' model or
- * hard_issues_model and no model_routing.build keeps those for builds.
- */
-export function modelRouting(agents: Pick<AgentsConfig, 'roles' | 'model_routing'>): ModelRouting {
-  const r = agents.model_routing ?? {};
-  const workers = agents.roles.workers;
+export function modelRouting(agents: Parameters<typeof route>[0]): ModelRouting {
+  const v = <K extends keyof ModelRouting>(k: K) => route(agents, k).value as ModelRouting[K];
   return {
-    build: r.build ?? workers?.model ?? 'sonnet',
-    build_high_risk: r.build_high_risk ?? workers?.hard_issues_model ?? 'opus',
-    high_risk_labels: r.high_risk_labels ?? DEFAULT_HIGH_RISK_LABELS,
-    escalate_after: r.escalate_after ?? 2,
-    planner: r.planner ?? 'sonnet',
-    research: r.research ?? agents.roles.researcher?.model ?? 'sonnet',
-    // Stays on its current model: on haiku its held-out score dropped (20/20 to 19/20; model routing PR).
-    intake_triage: r.intake_triage ?? agents.roles.researcher?.model ?? workers?.model ?? 'sonnet',
-    intake_replier: r.intake_replier ?? 'haiku',
-    intake_summary: r.intake_summary ?? 'haiku',
-    // Stays on sonnet: on haiku its held-out score dropped (21/22 to 19/22).
-    intake_thread: r.intake_thread ?? 'sonnet',
-    stage_judge: r.stage_judge ?? 'sonnet',
-    eval_answer: r.eval_answer ?? 'sonnet',
-    // A few lines from a rejection and a diff: the cheap tier.
-    reflection: r.reflection ?? 'haiku',
+    build: v('build'),
+    build_high_risk: v('build_high_risk'),
+    high_risk_labels: v('high_risk_labels'),
+    escalate_after: v('escalate_after'),
+    planner: v('planner'),
+    research: v('research'),
+    intake_triage: v('intake_triage'),
+    intake_replier: v('intake_replier'),
+    intake_summary: v('intake_summary'),
+    intake_thread: v('intake_thread'),
+    stage_judge: v('stage_judge'),
+    eval_answer: v('eval_answer'),
+    reflection: v('reflection'),
   };
 }
 

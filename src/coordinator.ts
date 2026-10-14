@@ -18,6 +18,7 @@ import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
 import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
+import { evalRouting } from './eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REFLECTION_SCHEMA, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
 import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
@@ -52,7 +53,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { hostedChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { Learnings } from './coordinator/learnings.js';
+import { SuperfanWatch } from './coordinator/superfan.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { resetWords } from './usage-limit.js';
@@ -77,7 +78,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends Learnings {
+export class Coordinator extends SuperfanWatch {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -132,6 +133,7 @@ export class Coordinator extends Learnings {
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
+    await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
     if (this.stopped) return;
@@ -152,6 +154,7 @@ export class Coordinator extends Learnings {
     await this.gardenerRun;
     await this.feedbackChecksRun;
     await this.optimizeRun;
+    await this.superfanRun;
     await this.prBatchIdle();
   }
 
@@ -234,6 +237,7 @@ export class Coordinator extends Learnings {
     this.d.deployGate?.stop();
     this.d.previews?.stop();
     this.prBatchStop();
+    this.superfanStop();
   }
 
   /** What a shutdown still waits on: the tick step, tasks and live runs (named in the log when it runs out of time). */
@@ -1446,7 +1450,7 @@ export class Coordinator extends Learnings {
     const judged = await judge({
       level: evalLevel({ files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, tampered }),
       strongModel: role.model,
-      routing: this.d.cfg.agents.eval_routing,
+      routing: evalRouting(this.d.cfg.agents),
       changed,
       stateDir: this.d.stateDir,
       verdictOf: (r) => (r.reason === 'succeeded' && r.structured ? { patch_correct: (r.structured as Out)?.patch_correct === true, confidence: (r.structured as Out)?.confidence ?? 'low' } : null),

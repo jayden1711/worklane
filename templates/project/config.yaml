@@ -18,6 +18,11 @@ land_mode: pr               # direct (fast-forward to the default branch) | pr
 # listed here passed on the exact commit the evaluator approved. Names as GitHub shows
 # them, e.g. ["test", "build (ubuntu-latest)"]. Empty: nothing is ever marked ready.
 required_checks: []
+# size:M/L tasks are planned first; the plan, with its acceptance criteria, is posted on the issue and in its
+# Discord decision thread. always: every plan waits for an owner's approval ("approve plan <n>" in the thread, the
+# dashboard, or the issue) before any code is written | risky or off: only a high-risk or design-level plan waits
+# (off never skips those); an ordinary plan builds at once. size:S and unsized tasks have no plan.
+# plan_gate: always
 # Branch protection to set on the default branch (advice only; init reports it, nothing applies it): require the
 # checks above, not strict by default (a PR needn't be up to date with main first). Post-merge CI on main and the
 # main watch catch what strict would have, without PRs queueing to merge main in. true opts this repo in.
