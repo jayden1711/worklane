@@ -8,6 +8,22 @@
 #                                 [--signer <principal> ssh-ed25519 <public key>] [--confirm-signer SHA256:<fingerprint>]
 #                                 [--acknowledge-signers]
 #       (repeat --check for each required check)
+#   bash scripts/setup/updates.sh --add-check "name" [--add-check "name" ...]
+#
+#   --add-check        adds required checks to an EXISTING /etc/worklane/updates.json, and does only that: it installs,
+#                      restarts and enables nothing (so it never puts this checkout's updater over a newer installed
+#                      one), and takes no other option. Each name is appended to required_checks after the ones there;
+#                      none is removed or moved, no other key changes, and every byte of the file stays as it was but
+#                      the new entries. A name already listed is said and skipped, so running it twice changes nothing.
+#                      A name that is empty, has a newline or another control character, starts or ends with a space,
+#                      or has unbalanced parentheses (a name split at a comma) is refused, and then nothing is changed.
+#                      It prints the list before and after, and writes a dotted temp file in /etc/worklane with the
+#                      file's own owner and mode, then moves it into place. With no updates.json it refuses and says to
+#                      run updates.sh without --add-check first: a missing file means the updater isn't installed, and
+#                      an edit-only option that installed it would be the surprise it exists to avoid.
+#                      A name the defaults below don't hold gets a warning: the updater installs a commit only when every
+#                      required check ran on it and passed, so a check main never runs, or runs only on pull requests
+#                      (dco, ci-runner (real systemd)), means nothing is ever installed.
 #
 # These are an admin's, at a root shell, and go through scripts/setup/updates-root.cjs, the only code that
 # writes /etc/worklane/allowed_signers (it only ever adds a line). Each is checked before anything is installed.
@@ -35,7 +51,7 @@
 #     rolls back if any isn't active and steady within 2 minutes.
 #   - /etc/worklane/updates.json (root:root 0644): enabled (false), channel ("release"), allowed_signers, the repo
 #     and branch to follow (this checkout's origin, main), and the required checks (each --check, or the defaults
-#     below). An existing file keeps its values, its channel included.
+#     below). An existing file keeps its values, its channel included; --add-check adds checks to it.
 #   - /etc/worklane/allowed_signers (root:root 0644, yours to create: --signer, --confirm-signer, or by hand): one
 #     line per key allowed to sign releases, `<email> <public key>` (git's allowed signers format). Without it the
 #     release channel installs nothing.
@@ -44,6 +60,8 @@ source "$(dirname "$0")/lib.sh"
 as_root "$@"
 # Check names hold commas ("test (macos-latest, 22)"), so each is its own argument: nothing is ever split.
 checks=()
+add_checks=()
+others=0   # any option but --add-check, which takes none beside it
 channel=""
 signer=()
 confirm=""
@@ -52,7 +70,9 @@ release_hold=""
 # An absolute path: node's require takes a relative one for a package name.
 root_steps="$(cd "$(dirname "$0")" && pwd)/updates-root.cjs"
 while [ "$#" -gt 0 ]; do
+  [ "$1" = --add-check ] || others=$((others + 1))
   case "$1" in
+    --add-check) [ "$#" -ge 2 ] && [[ "$2" != --* ]] || { echo "--add-check needs a check name" >&2; exit 2; }; add_checks+=("$2"); shift 2 ;;
     --check) checks+=("${2:?--check needs a check name}"); shift 2 ;;
     --channel) [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--channel needs release or main" >&2; exit 2; }; channel="$2"; shift 2 ;;
     --signer) [ "$#" -ge 4 ] || { echo "--signer needs <principal> ssh-ed25519 <public key>" >&2; exit 2; }; signer=("$2" "$3" "$4"); shift 4 ;;
@@ -63,8 +83,17 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
-[ "${#checks[@]}" -gt 0 ] || checks=("${UPDATE_DEFAULT_CHECKS[@]}")
 command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
+if [ "${#add_checks[@]}" -gt 0 ]; then
+  # The edit alone: nothing below (the updater, its units, the timer) runs.
+  [ "$others" -eq 0 ] || { echo "--add-check only edits /etc/worklane/updates.json and takes no other option; run it on its own. Nothing was installed or changed." >&2; exit 2; }
+  for n in "${add_checks[@]}"; do
+    known=""; for d in "${UPDATE_DEFAULT_CHECKS[@]}"; do [ "$n" != "$d" ] || known=1; done
+    [ -n "$known" ] || echo "WARNING: \"$n\" isn't one of the checks a batched main commit gets (UPDATE_DEFAULT_CHECKS in scripts/setup/lib.sh). The updater installs a commit only when every required check ran on it and passed: if main never runs this one, or runs it only on pull requests, nothing is ever installed." >&2
+  done
+  exec node "$root_steps" add-checks "${add_checks[@]}"
+fi
+[ "${#checks[@]}" -gt 0 ] || checks=("${UPDATE_DEFAULT_CHECKS[@]}")
 # Checked before anything is installed: a channel there is, a signer of the exact shape, a fingerprint that is staged.
 if [ -n "$channel" ]; then
   node "$root_steps" check channel "$channel" 2>/dev/null || { echo "--channel is release or main, not $channel" >&2; exit 2; }
@@ -110,7 +139,7 @@ fi
 chown root:root /etc/worklane/updates.json
 # A file written by the comma-splitting version holds fragments like "test (macos-latest" and "22)",
 # which never match a real check: the updater would wait forever. Say so (the file is kept as it is).
-node -e 'const c = JSON.parse(require("fs").readFileSync("/etc/worklane/updates.json", "utf8")).required_checks || []; const bad = c.filter((n) => (n.match(/\(/g) || []).length !== (n.match(/\)/g) || []).length); if (bad.length) { console.error("WARNING: /etc/worklane/updates.json required_checks has split names: " + JSON.stringify(bad) + ". Fix them by hand (or remove the file and run this again)."); }' || true
+node -e 'const { unbalanced } = require(process.argv[1]); const c = JSON.parse(require("fs").readFileSync("/etc/worklane/updates.json", "utf8")).required_checks || []; const bad = c.filter(unbalanced); if (bad.length) { console.error("WARNING: /etc/worklane/updates.json required_checks has split names: " + JSON.stringify(bad) + ". Fix them by hand (or remove the file and run this again)."); }' "$root_steps" || true
 chmod 0644 /etc/worklane/updates.json
 cat /etc/worklane/updates.json
 install -d -o root -g root -m 0755 /var/lib/worklane

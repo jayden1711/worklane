@@ -7,6 +7,7 @@
 //   updates-root.cjs confirm-signer SHA256:<fingerprint>                updates.sh --confirm-signer
 //   updates-root.cjs acknowledge-signers                                updates.sh --acknowledge-signers
 //   updates-root.cjs release-hold                                       updates.sh --release-hold
+//   updates-root.cjs add-checks <name> [<name> ...]                     updates.sh --add-check <name> ...
 //   updates-root.cjs check <one of the above...>                        whether it would be accepted; changes nothing
 //
 // /etc/worklane/allowed_signers lists the keys a release tag's signature is checked against: the root of trust for
@@ -29,6 +30,11 @@
 // what was held and why, moves the hold file aside (update-held.released.json, kept), and logs it. Nothing a
 // coordinator or the dashboard can run releases a hold: not set-updates, not set-update-channel.
 //
+// add-checks appends names to updates.json's required_checks and does nothing else: no name there is removed or
+// moved, no other key is touched, and every byte of the file stays as it was but the new entries (spliced into the
+// list's own text, never a re-serialised file). A name already listed is reported and skipped. Written to a dotted
+// temp file beside it with the file's own owner and mode, then renamed over it.
+//
 // Every signer added, by either route, is one line in the machine change log (/var/lib/worklane/machine-changes.jsonl,
 // what: updates.allowed_signers), which the watchdog turns into an alert on the ops channel and the Health page.
 'use strict';
@@ -46,7 +52,8 @@ const PENDING = helper.PENDING;
 const SIGNERS_STATE = watch.SIGNERS_STATE; // the updater's record of the signers file's hash
 const HELD = '/var/lib/worklane/update-held.json'; // the updater's: the rolled-back commit it won't retry
 
-const USAGE = 'usage: updates-root.cjs [check] channel release|main | add-signer <principal> ssh-ed25519 <public key> | confirm-signer SHA256:<fingerprint> | acknowledge-signers | release-hold';
+const USAGE = 'usage: updates-root.cjs [check] channel release|main | add-signer <principal> ssh-ed25519 <public key> | confirm-signer SHA256:<fingerprint> | acknowledge-signers | release-hold | add-checks <name> [<name> ...]';
+const UPDATES = 'updates.json'; // in ETC
 
 /** A SHA256 fingerprint as ssh-keygen prints it: SHA256: and 43 base64 characters. */
 const fingerprintShape = (s) => typeof s === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/.test(s);
@@ -62,6 +69,23 @@ function logLine(what, from, to, extra = {}) {
   }
 }
 
+/**
+ * A check name split at a comma by the old comma-splitting --checks ("test (macos-latest" and "22)"): its parentheses
+ * don't pair up. Such a name never matches a real check, so the updater would wait forever. updates.sh's warning about
+ * an existing file uses this too.
+ */
+const unbalanced = (n) => (n.match(/\(/g) || []).length !== (n.match(/\)/g) || []).length;
+
+/** Why a check name can't be added, or null when it can. The updater compares names exactly. */
+function checkNameProblem(n) {
+  if (typeof n !== 'string' || n.trim() === '') return 'is empty';
+  // C0 controls (a newline among them), DEL and C1 controls: never in a check's name, and a newline would split it.
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(n)) return 'has a newline or another control character';
+  if (n !== n.trim()) return 'starts or ends with a space (the updater compares names exactly)';
+  if (unbalanced(n)) return 'has unbalanced parentheses (a name split at a comma?); pass the whole name, quoted';
+  return null;
+}
+
 /** What an argument list asks for, or null when it is none of the exact forms. */
 function parse(args) {
   if (args.length === 2 && args[0] === 'channel' && (args[1] === 'release' || args[1] === 'main')) return { kind: 'channel', channel: args[1] };
@@ -72,6 +96,10 @@ function parse(args) {
   if (args.length === 2 && args[0] === 'confirm-signer' && fingerprintShape(args[1])) return { kind: 'confirm', fingerprint: args[1] };
   if (args.length === 1 && args[0] === 'acknowledge-signers') return { kind: 'acknowledge' };
   if (args.length === 1 && args[0] === 'release-hold') return { kind: 'release-hold' };
+  if (args.length >= 2 && args[0] === 'add-checks') {
+    const bad = args.slice(1).map((n) => [n, checkNameProblem(n)]).filter(([, why]) => why);
+    return bad.length ? { kind: 'bad-checks', bad } : { kind: 'add-checks', names: args.slice(1) };
+  }
   return null;
 }
 
@@ -203,6 +231,166 @@ function setChannel(channel) {
   return 0;
 }
 
+const WS = ' \t\n\r';
+/** Past any JSON whitespace from i. */
+const skipWs = (t, i) => {
+  while (i < t.length && WS.includes(t[i])) i++;
+  return i;
+};
+
+/** The end (exclusive) of the JSON value that starts at i. */
+function valueEnd(t, i) {
+  if (t[i] === '"') {
+    for (i++; i < t.length; i++) {
+      if (t[i] === '\\') i++;
+      else if (t[i] === '"') return i + 1;
+    }
+    throw new Error('an unterminated string');
+  }
+  if (t[i] === '{' || t[i] === '[') {
+    let depth = 0;
+    for (; i < t.length; i++) {
+      if (t[i] === '"') i = valueEnd(t, i) - 1;
+      else if (t[i] === '{' || t[i] === '[') depth++;
+      else if ((t[i] === '}' || t[i] === ']') && --depth === 0) return i + 1;
+    }
+    throw new Error('an unclosed object or list');
+  }
+  const m = /^[^\s,\]}]+/.exec(t.slice(i));
+  if (!m) throw new Error(`no value at offset ${i}`);
+  return i + m[0].length;
+}
+
+/** Where the top-level "required_checks" value is in the text (the last one, as JSON.parse takes it), or null. */
+function requiredChecksSpan(t) {
+  let i = skipWs(t, 0);
+  if (t[i] !== '{') return null;
+  let span = null;
+  i = skipWs(t, i + 1);
+  while (i < t.length && t[i] !== '}') {
+    const keyEnd = valueEnd(t, i);
+    const key = JSON.parse(t.slice(i, keyEnd));
+    i = skipWs(t, keyEnd);
+    if (t[i] !== ':') throw new Error(`no ':' after ${JSON.stringify(key)}`);
+    i = skipWs(t, i + 1);
+    const end = valueEnd(t, i);
+    if (key === 'required_checks') span = { start: i, end };
+    i = skipWs(t, end);
+    if (t[i] === ',') i = skipWs(t, i + 1);
+  }
+  return span;
+}
+
+/**
+ * The file's text with these names appended to its required_checks list, each set off from the one before as the
+ * list's last entry is (on a line of its own, indented the same, in a laid-out file; after ", " or "," in a one-line
+ * one), and every other byte as it was. Checked before it is returned: it parses to the same object with only these
+ * names appended, and taking the inserted text back out gives the original byte for byte.
+ */
+function withChecks(text, names) {
+  const span = requiredChecksSpan(text);
+  if (!span || text[span.start] !== '[') throw new Error('no required_checks list');
+  // Each entry's start and end in the text.
+  const entries = [];
+  let i = skipWs(text, span.start + 1);
+  while (text[i] !== ']') {
+    const end = valueEnd(text, i);
+    entries.push({ start: i, end });
+    i = skipWs(text, end);
+    if (text[i] === ',') i = skipWs(text, i + 1);
+  }
+  let at;
+  let insert;
+  if (entries.length === 0) {
+    at = span.start + 1;
+    insert = names.map((n) => JSON.stringify(n)).join(', ');
+  } else {
+    const last = entries[entries.length - 1];
+    // What comes between the token before the last entry ("[" or ",") and that entry: its layout.
+    let j = last.start;
+    while (j > span.start && WS.includes(text[j - 1])) j--;
+    const sep = text.slice(j, last.start);
+    at = last.end;
+    insert = names.map((n) => `,${sep}${JSON.stringify(n)}`).join('');
+  }
+  const next = text.slice(0, at) + insert + text.slice(at);
+  const was = JSON.parse(text);
+  if (JSON.stringify(JSON.parse(next)) !== JSON.stringify({ ...was, required_checks: [...was.required_checks, ...names] })) throw new Error('the edit would change more than the list');
+  if (next.slice(0, at) + next.slice(at + insert.length) !== text) throw new Error('the edit would change other bytes');
+  return next;
+}
+
+/** Append these check names to updates.json's required_checks; one already there is said and skipped. */
+function addChecks(names) {
+  const file = path.join(ETC, UPDATES);
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    process.stderr.write(`${file} doesn't exist: install the updater first (sudo bash scripts/setup/updates.sh, without --add-check), then run --add-check again. Nothing was changed.\n`);
+    return 1;
+  }
+  if (!st.isFile()) {
+    process.stderr.write(`${file} isn't a regular file; nothing was changed\n`);
+    return 1;
+  }
+  const text = fs.readFileSync(file, 'utf8');
+  let cfg;
+  try {
+    cfg = JSON.parse(text);
+  } catch (e) {
+    process.stderr.write(`${file} isn't valid JSON (${e.message}); nothing was changed\n`);
+    return 1;
+  }
+  const before = cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg.required_checks : undefined;
+  if (!Array.isArray(before) || !before.every((n) => typeof n === 'string')) {
+    process.stderr.write(`${file} has no required_checks list of names; nothing was changed (remove the file and run updates.sh to write a new one)\n`);
+    return 1;
+  }
+  const show = (l) => l.map((n) => `  ${JSON.stringify(n)}\n`).join('') || '  (none)\n';
+  process.stdout.write(`${file} required_checks before:\n${show(before)}`);
+  const add = [];
+  for (const n of names) {
+    if (before.includes(n) || add.includes(n)) process.stdout.write(`already listed, skipped: ${JSON.stringify(n)}\n`);
+    else add.push(n);
+  }
+  if (add.length === 0) {
+    process.stdout.write('nothing to add; the file is unchanged\n');
+    return 0;
+  }
+  let next;
+  try {
+    next = withChecks(text, add);
+  } catch (e) {
+    process.stderr.write(`${file}: can't add to its required_checks in place (${e.message}); nothing was changed\n`);
+    return 1;
+  }
+  // The new text in full in a dotted temp file beside it, with the file's own owner and mode, then renamed over it:
+  // the updater, reading at any moment, sees the old file or the new one, never part of one. A fresh name each time
+  // ('wx': never an existing file), since this script removes nothing: a failed write leaves it, and says where.
+  const tmp = path.join(ETC, `.${UPDATES}.tmp-${process.pid}-${require('node:crypto').randomBytes(4).toString('hex')}`);
+  try {
+    const fd = fs.openSync(tmp, 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, next);
+      fs.fchownSync(fd, st.uid, st.gid);
+      fs.fchmodSync(fd, st.mode & 0o7777);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    const left = fs.existsSync(tmp) ? ` (the unfinished new one is left at ${tmp}; delete it)` : '';
+    process.stderr.write(`${file}: writing it failed (${e.message}); it is as it was${left}\n`);
+    return 1;
+  }
+  logLine('updates.required_checks', null, `added ${add.map((n) => JSON.stringify(n)).join(', ')}`);
+  for (const n of add) process.stdout.write(`added: ${JSON.stringify(n)}\n`);
+  process.stdout.write(`${file} required_checks after:\n${show([...before, ...add])}`);
+  return 0;
+}
+
 /** An admin has looked at the signers file as it is: it becomes the updater's record, and release installs are no longer held. */
 function acknowledgeSigners() {
   const file = path.join(ETC, SIGNERS);
@@ -225,6 +413,10 @@ function main(args) {
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
+  if (p.kind === 'bad-checks') {
+    for (const [n, why] of p.bad) process.stderr.write(`--add-check ${JSON.stringify(n)}: the name ${why}. Nothing was changed.\n`);
+    return 2;
+  }
   if (check) {
     // A confirm is acceptable only while its signer is staged: said before updates.sh installs anything.
     if (p.kind !== 'confirm') return 0;
@@ -235,9 +427,10 @@ function main(args) {
   if (p.kind === 'acknowledge') return acknowledgeSigners();
   if (p.kind === 'release-hold') return releaseHold();
   if (p.kind === 'channel') return setChannel(p.channel);
+  if (p.kind === 'add-checks') return addChecks(p.names);
   if (p.kind === 'add') return addSigner(p, 'updates.sh --signer');
   return confirmSigner(p.fingerprint);
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, fingerprintShape };
+module.exports = { parse, fingerprintShape, unbalanced, checkNameProblem, withChecks, addChecks };
