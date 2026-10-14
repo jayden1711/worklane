@@ -84,6 +84,9 @@ test('the sudoers rule lists exactly the 32 commands, no patterns but add-projec
   assert.equal(want.length - 1, 32);
   // Tailscale's four are whole commands: sudo matches a listed command's arguments exactly, so nothing may follow one.
   for (const a of ['install', 'up', 'serve', 'public-url']) assert.match(r.stdout, new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} tailscale ${a}(, \\\\)?$`, 'm'), a);
+  // The rule names no funnel command, no flag and no target: sudo matches a listed command's arguments exactly, so `tailscale serve <anything>` is not `tailscale serve`.
+  assert.doesNotMatch(r.stdout, /funnel|--[a-z]|https?:|[0-9]{4}/i);
+  assert.deepEqual([...r.stdout.matchAll(/ tailscale ([^,\\\n]*)/g)].map((m) => m[1]!.trim()), ['install', 'up', 'serve', 'public-url']);
   assert.deepEqual(cmds, want);
   // add-project's arguments are one anchored pattern (test/add-project.test.ts); nothing else has any.
   assert.doesNotMatch(r.stdout.replace(addProject, ''), /[*?[\]^$]|ALL\s*$|\bsh\b|bash/m, 'no wildcards, patterns or shells');
@@ -174,6 +177,42 @@ test('the helper takes tailscale install|up|serve|public-url and nothing more: n
     ['tailscale', 'serve', '--https=443', 'http://127.0.0.1:4398'],
     ['tailscale', 'serve', 'reset'],
     ['tailscale', 'funnel'],
+    // Nothing that could turn on Funnel, choose what serve forwards or where, or change what `up` exposes.
+    ['tailscale', 'funnel', '443'],
+    ['tailscale', 'funnel', '--bg', '--https=443', 'http://127.0.0.1:4399'],
+    ['tailscale', 'funnel', 'on'],
+    ['tailscale', '--funnel'],
+    ['tailscale', 'serve', '--funnel'],
+    ['tailscale', 'serve', 'funnel'],
+    ['tailscale', 'serve', 'funnel', 'on'],
+    ['tailscale', 'serve', '--bg', '--https=443', 'http://127.0.0.1:4399'],
+    ['tailscale', 'serve', '--https=8443'],
+    ['tailscale', 'serve', '--http=80'],
+    ['tailscale', 'serve', '--tcp=22', 'tcp://127.0.0.1:22'],
+    ['tailscale', 'serve', '--tls-terminated-tcp=443', 'tcp://127.0.0.1:4399'],
+    ['tailscale', 'serve', '--set-path=/x', 'http://127.0.0.1:4398'],
+    ['tailscale', 'serve', '--set-path', '/', 'http://203.0.113.5:80'],
+    ['tailscale', 'serve', 'http://0.0.0.0:4399'],
+    ['tailscale', 'serve', 'http://203.0.113.10:4399'],
+    ['tailscale', 'serve', 'https+insecure://example.test'],
+    ['tailscale', 'serve', '/etc'],
+    ['tailscale', 'serve', '--yes'],
+    ['tailscale', 'up', '--advertise-exit-node'],
+    ['tailscale', 'up', '--advertise-routes=198.51.100.0/24'],
+    ['tailscale', 'up', '--advertise-routes', '0.0.0.0/0'],
+    ['tailscale', 'up', '--advertise-tags=tag:server'],
+    ['tailscale', 'up', '--accept-routes'],
+    ['tailscale', 'up', '--exit-node=203.0.113.1'],
+    ['tailscale', 'up', '--shields-up=false'],
+    ['tailscale', 'up', '--operator=wl-alpha'],
+    ['tailscale', 'up', '--reset'],
+    ['tailscale', 'up', '--force-reauth'],
+    ['tailscale', 'up', '--hostname=other'],
+    ['tailscale', 'up', '--timeout=600s'],
+    ['tailscale', 'set', '--advertise-exit-node'],
+    ['tailscale', 'cert', 'x'],
+    ['tailscale', 'public-url', 'https://box.example.test'],
+    ['tailscale', 'public-url', '--name', 'other'],
     ['tailscale', 'public-url', 'https://elsewhere.example.test'],
     ['tailscale', 'public-url', '--public-url', 'https://elsewhere.example.test'],
     ['tailscale', 'install', '1.0.0'],

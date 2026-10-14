@@ -26,10 +26,14 @@
 # serve       `tailscale serve --bg --https=443 http://127.0.0.1:4399`: https on this machine's tailnet name to the
 #             hub's sign-in port, and to nothing else. Refused when the tailnet doesn't issue HTTPS certificates yet
 #             (MagicDNS and HTTPS certificates, in Tailscale's admin console), when 443 already forwards somewhere
-#             else, and when anything forwards to the break-glass port 4398.
+#             else, when anything forwards to the break-glass port 4398, and when Tailscale Funnel is on.
+#             Never Funnel: this script has no funnel command and no flag that turns it on; serve is tailnet-only.
 # public-url  the hub's URL becomes https://<this machine's tailnet name>, through dashboards.sh with the hub's other
 #             settings as its unit has them (the sign-in App's client id, the instances, the owner terminal). Only once
-#             serve forwards to the hub. The same as running, yourself:
+#             serve forwards to the hub, and never while Funnel is on. The name is read here, from tailscale status,
+#             and must be a *.ts.net name: no caller gives it, and no other host can be set. It writes the hub's and
+#             the instance dashboards' units and restarts them; the hub still listens on 127.0.0.1 only, so this makes
+#             nothing reachable that tailscale serve didn't already forward. The same as running, yourself:
 #               sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...
 #             Then set the sign-in App's callback URL to exactly https://<name>/auth/callback.
 #
@@ -69,8 +73,9 @@ ts() { env -u TS_AUTHKEY -u TS_AUTH_KEY "$TAILSCALE_BIN" "$@"; }
 
 # f_state (tailscale's BackendState, or - without one), f_name (this machine's tailnet name, or -), and yes or no for:
 # f_https (the tailnet issues a certificate for that name), f_serve (https 443 on it forwards / to the hub's sign-in
-# port), f_other443 (443 forwards somewhere else) and f_break_glass (anything forwards to the break-glass port). Every
-# value is checked here before bash sees it: a name is a ts.net name or nothing.
+# port), f_other443 (443 forwards somewhere else), f_break_glass (anything forwards to the break-glass port) and
+# f_funnel (Tailscale Funnel, the public internet, is on for anything on this machine: read only, never changed
+# here). Every value is checked here before bash sees it: a name is a ts.net name or nothing.
 read_facts() {
   local status="" serve="" out
   if installed; then
@@ -104,9 +109,11 @@ const on443 = Object.keys(web).some((k) => k.endsWith(":443")) || !!(sv.TCP && s
 const yn = (b) => (b ? "yes" : "no");
 const all = JSON.stringify(sv);
 const breakGlass = new RegExp(`(127\\.0\\.0\\.1|localhost|\\[::1\\]):${breakGlassPort}(?![0-9])`).test(all);
-process.stdout.write([state, name || "-", yn(!!name && certs.includes(name)), yn(serves), yn(on443 && !serves), yn(breakGlass)].join("\n") + "\n");
+// Funnel: any AllowFunnel entry that is on, anywhere in the serve config (a background one, or a foreground session).
+const funnelOn = (v) => !!v && typeof v === "object" && Object.entries(v).some(([k, x]) => (k === "AllowFunnel" && !!x && typeof x === "object" ? Object.values(x).some((on) => on === true) : funnelOn(x)));
+process.stdout.write([state, name || "-", yn(!!name && certs.includes(name)), yn(serves), yn(on443 && !serves), yn(breakGlass), yn(funnelOn(sv))].join("\n") + "\n");
 ' "$status" "$serve" "$HUB_PORT" "$BREAK_GLASS_PORT")"
-  { read -r f_state; read -r f_name; read -r f_https; read -r f_serve; read -r f_other443; read -r f_break_glass; } <<< "$out"
+  { read -r f_state; read -r f_name; read -r f_https; read -r f_serve; read -r f_other443; read -r f_break_glass; read -r f_funnel; } <<< "$out"
 }
 
 # --- progress
@@ -136,9 +143,9 @@ do_status() {
   hub_url="$(hub_option --public-url)"
   local name="${f_name#-}" state="${f_state#-}"
   if [ -n "$json" ]; then
-    printf '{"installed":%s,"version":%s,"pinned_version":%s,"state":%s,"name":%s,"https":%s,"serve":%s,"other_443":%s,"break_glass_forwarded":%s,"hub_url":%s}\n' \
+    printf '{"installed":%s,"version":%s,"pinned_version":%s,"state":%s,"name":%s,"https":%s,"serve":%s,"other_443":%s,"break_glass_forwarded":%s,"funnel":%s,"hub_url":%s}\n' \
       "$(if installed; then echo true; else echo false; fi)" "$(json_str "$version")" "$(json_str "$TAILSCALE_VERSION")" "$(json_str "$state")" "$(json_str "$name")" \
-      "$([ "$f_https" = yes ] && echo true || echo false)" "$([ "$f_serve" = yes ] && echo true || echo false)" "$([ "$f_other443" = yes ] && echo true || echo false)" "$([ "$f_break_glass" = yes ] && echo true || echo false)" "$(json_str "$hub_url")"
+      "$([ "$f_https" = yes ] && echo true || echo false)" "$([ "$f_serve" = yes ] && echo true || echo false)" "$([ "$f_other443" = yes ] && echo true || echo false)" "$([ "$f_break_glass" = yes ] && echo true || echo false)" "$([ "$f_funnel" = yes ] && echo true || echo false)" "$(json_str "$hub_url")"
     return 0
   fi
   if ! installed; then
@@ -147,6 +154,7 @@ do_status() {
     echo "tailscale: ${version:-installed}, ${state:-no state}${name:+, this machine is $name}"
     echo "https certificate for this name: $f_https; tailscale serve forwards 443 to the hub ($HUB_PORT): $f_serve"
     [ "$f_break_glass" = no ] || echo "WARNING: tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT, which must never be forwarded: tailscale serve reset"
+    echo "Tailscale Funnel (the public internet): $([ "$f_funnel" = yes ] && echo "ON; nothing here changes it, and serve and public-url do nothing while it is on (tailscale funnel reset)" || echo off)"
   fi
   echo "the hub's URL: ${hub_url:-none (no hub on this machine yet)}"
 }
@@ -244,7 +252,8 @@ do_up() {
   emit done "on the tailnet as ${f_name#-}"
 }
 
-# --- serve: https 443 to the hub's sign-in port, nothing else
+# --- serve: https 443 to the hub's sign-in port, nothing else; tailnet only, never Funnel
+FUNNEL_ON="Tailscale Funnel is on for this machine, which publishes to the public internet. This step never turns Funnel on or off, and does nothing while it is on: an admin turns it off (tailscale funnel reset), then run this again"
 
 do_serve() {
   local out rc
@@ -252,6 +261,7 @@ do_serve() {
   read_facts
   [ "$f_state" = Running ] || fail "this machine isn't on a tailnet yet: run the up step first"
   [ "$f_break_glass" = no ] || fail "tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT, which must never be forwarded: remove it (tailscale serve reset), then run this again"
+  [ "$f_funnel" = no ] || fail "$FUNNEL_ON"
   if [ "$f_serve" = yes ]; then
     emit done "https 443 on $f_name already forwards to the hub's sign-in port ($HUB_PORT)"
     return 0
@@ -267,6 +277,7 @@ do_serve() {
   read_facts
   [ "$rc" = 0 ] && [ "$f_serve" = yes ] || fail "tailscale serve didn't start forwarding within $TAILSCALE_SERVE_SECONDS s (see: tailscale serve status)"
   [ "$f_break_glass" = no ] || fail "tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT: tailscale serve reset"
+  [ "$f_funnel" = no ] || fail "$FUNNEL_ON"
   emit done "https 443 on $f_name forwards to the hub's sign-in port ($HUB_PORT), and to nothing else"
 }
 
@@ -277,6 +288,7 @@ do_public_url() {
   need_installed
   read_facts
   [ "$f_state" = Running ] && [ "$f_name" != - ] || fail "this machine isn't on a tailnet yet: run the up step first; the hub keeps its URL"
+  [ "$f_funnel" = no ] || fail "$FUNNEL_ON; the hub keeps its URL"
   [ "$f_serve" = yes ] || fail "tailscale serve doesn't forward to the hub yet, so the new URL would reach nothing: run the serve step first; the hub keeps its URL"
   new="https://$f_name"
   [ -f "$HUB_UNIT" ] || fail "no dashboard hub on this machine yet: set it up first (credentials.sh dashboard-signin, then dashboards.sh --client-id <id> --public-url $new <instance>...)"

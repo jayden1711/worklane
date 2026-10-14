@@ -866,6 +866,29 @@ jobs:
           refused tailscale serve --https=443 http://127.0.0.1:4398
           refused tailscale serve reset
           refused tailscale funnel
+          # Nothing that could turn on Funnel, choose what serve forwards or where, or change what `up` exposes.
+          refused tailscale funnel 443
+          refused tailscale funnel --bg --https=443 http://127.0.0.1:4399
+          refused tailscale --funnel
+          refused tailscale serve --funnel
+          refused tailscale serve funnel on
+          refused tailscale serve --bg --https=443 http://127.0.0.1:4399
+          refused tailscale serve --https=8443
+          refused tailscale serve --set-path=/x http://127.0.0.1:4398
+          refused tailscale serve --set-path / http://203.0.113.5:80
+          refused tailscale serve http://0.0.0.0:4399
+          refused tailscale serve --tcp=22 tcp://127.0.0.1:22
+          refused tailscale up --advertise-exit-node
+          refused tailscale up --advertise-routes=198.51.100.0/24
+          refused tailscale up --ssh
+          refused tailscale up --accept-routes
+          refused tailscale up --exit-node=203.0.113.1
+          refused tailscale up --operator=wl-ci
+          refused tailscale up --timeout=600s
+          refused tailscale public-url --name other
+          # The rule itself names no funnel command, no flag and no target.
+          if sudo grep -Eiq 'funnel|tailscale [a-z-]+ [^,\]' /etc/sudoers.d/worklane-machine; then echo "the sudoers rule has more than the four bare commands" >&2; exit 1; fi
+          [ "$(sudo grep -o 'worklane-machine tailscale [a-z-]*' /etc/sudoers.d/worklane-machine | sort | tr '\n' ' ')" = "worklane-machine tailscale install worklane-machine tailscale public-url worklane-machine tailscale serve worklane-machine tailscale up " ]
           refused tailscale public-url https://elsewhere.example.test
           refused tailscale install 1.0.0
           refused tailscale install --allow-unauthenticated
@@ -971,10 +994,28 @@ jobs:
           d=/var/lib/worklane/tailscale; hub=/etc/systemd/system/worklane-dashboard-hub.service
           ended() { sudo grep -q "\"step\":\"$1\",\"state\":\"\(done\|failed\)\"" "$d/steps.jsonl" 2>/dev/null; }
           idle() { for _ in $(seq 1 60); do systemctl is-active -q worklane-tailscale.service || return 0; sleep 1; done; return 1; }
+          # Funnel already on from before (the stand-in's serve config says so): status shows it, serve and public-url do
+          # nothing, and the config is byte for byte as it was. Then it is off again, as an admin would turn it off.
+          printf '{"AllowFunnel":{"%s:443":true}}' "$TS_NAME" | sudo tee /var/lib/ci-tailscale/serve.json >/dev/null
+          sudo cp /var/lib/ci-tailscale/serve.json "$F/ts-funnel.json"
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.funnel and (.serve|not)'
+          for a in serve public-url; do
+            sudo -u wl-ci sudo -n "$HELPER" tailscale "$a" < /dev/null
+            for _ in $(seq 1 60); do ended "$a" && break; sleep 1; done
+            sudo tail -n 1 "$d/steps.jsonl" | jq -e --arg a "$a" '.step==$a and .state=="failed" and (.detail|test("Tailscale Funnel is on for this machine.*never turns Funnel on or off"))'
+            idle
+          done
+          sudo cmp /var/lib/ci-tailscale/serve.json "$F/ts-funnel.json"
+          sudo cmp "$hub" "$F/hub-before.service"
+          if sudo jq -e 'select(.args[0]=="serve" and .args[1]=="--bg")' /var/lib/ci-tailscale/calls >/dev/null; then echo "serve ran with Funnel on" >&2; exit 1; fi
+          if sudo grep -q funnel /var/lib/ci-tailscale/calls; then echo "tailscale was given a funnel command" >&2; exit 1; fi
+          sudo rm -f /var/lib/ci-tailscale/serve.json
           sudo -u wl-ci sudo -n "$HELPER" tailscale serve < /dev/null
           for _ in $(seq 1 60); do ended serve && break; sleep 1; done
           sudo cat "$d/steps.jsonl"
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.step=="serve" and .state=="done"'
+          if sudo grep -q AllowFunnel /var/lib/ci-tailscale/serve.json; then echo "serve turned Funnel on" >&2; exit 1; fi
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.serve and (.funnel|not)'
           [ "$(sudo jq -sc 'map(.args) | map(select(.[0]=="serve" and .[1]=="--bg"))' /var/lib/ci-tailscale/calls)" = '[["serve","--bg","--https=443","http://127.0.0.1:4399"]]' ]
           if sudo grep -q '4398' /var/lib/ci-tailscale/serve.json; then echo "the break-glass port is forwarded" >&2; exit 1; fi
           idle
@@ -999,7 +1040,7 @@ jobs:
           for _ in $(seq 1 60); do ended public-url && break; sleep 1; done
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.state=="done" and (.detail|test("is already https://"))'
           [ "$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)" = "$since" ]
-          [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 7 ]
+          [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 9 ]
       - name: the units and the fake's log, on failure
         if: failure()
         run: |

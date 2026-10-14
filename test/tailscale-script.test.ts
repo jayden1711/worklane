@@ -100,7 +100,7 @@ test('a machine without tailscale: status says so and changes nothing; up, serve
   writeFileSync(join(m.T, 'hub.service'), hubUnit('https://hub.example.test'));
   const st = m.run(['status', '--json']);
   assert.equal(st.status, 0, st.stderr);
-  assert.deepEqual(JSON.parse(st.stdout), { installed: false, version: '', pinned_version: VERSION, state: '', name: '', https: false, serve: false, other_443: false, break_glass_forwarded: false, hub_url: 'https://hub.example.test' });
+  assert.deepEqual(JSON.parse(st.stdout), { installed: false, version: '', pinned_version: VERSION, state: '', name: '', https: false, serve: false, other_443: false, break_glass_forwarded: false, funnel: false, hub_url: 'https://hub.example.test' });
   assert.match(m.run(['status']).stdout, /^tailscale: not installed \(optional/);
   assert.ok(!existsSync(join(m.T, 'var')), 'status writes nothing');
   for (const step of ['up', 'serve', 'public-url']) {
@@ -181,6 +181,14 @@ test('the script fetches no install script and pipes nothing to a shell', () => 
   assert.doesNotMatch(code, /install\.sh|tailscale\.com\/install/);
   assert.deepEqual([...code.matchAll(/curl [^\n]*/g)].length, 1, 'one download: the key');
   assert.doesNotMatch(code, /--auth-?key/i, 'no auth key option anywhere');
+  // tailscale itself is run in exactly these ways: two reads, `up` with a timeout, and the one fixed serve. No funnel
+  // command, no flag that turns Funnel on, no other serve target, no other `up` flag.
+  const runs = [...code.matchAll(/(?:\bts|"\$TAILSCALE_BIN") ([a-z][^|)\n]*)/g)].map((m) => m[1]!.replace(/ 2>.*$/, '').trim());
+  assert.deepEqual([...new Set(runs)].sort(), ['serve --bg --https=443 "http://127.0.0.1:$HUB_PORT"', 'serve status --json', 'status --json', 'up --timeout="${TAILSCALE_UP_SECONDS}s"', 'version']);
+  assert.ok(!/(\bts|TAILSCALE_BIN"?) +funnel|--funnel/.test(code), 'tailscale is never given a funnel command or flag');
+  assert.deepEqual([...new Set([...code.matchAll(/tailscale funnel [a-z]+/g)].map((m) => m[0]))], ['tailscale funnel reset'], 'the only funnel command named is the one an admin is told to run to turn it off');
+  assert.doesNotMatch(code, /--(advertise|ssh|accept-routes|exit-node|login-server|operator|set-path|tcp|tls-terminated|http=)/);
+  assert.match(libText, /^HUB_PORT=4399$/m);
   // The pins: a full fingerprint and an exact version, in lib.sh only.
   assert.match(FPR, /^[0-9A-F]{40}$/);
   assert.match(VERSION, /^[0-9]+\.[0-9]+\.[0-9]+$/);
@@ -279,6 +287,27 @@ test('every other argument list is refused before anything runs: no auth key, fl
     ['logout'],
     ['down'],
     ['funnel'],
+    // Funnel, a target or port of the caller's, and anything that changes what `up` exposes.
+    ['funnel', '443'],
+    ['funnel', '--bg', '--https=443', 'http://127.0.0.1:4399'],
+    ['serve', '--funnel'],
+    ['serve', 'funnel'],
+    ['serve', '--bg', '--https=443', 'http://127.0.0.1:4399'],
+    ['serve', '--https=8443'],
+    ['serve', '--set-path=/x', 'http://127.0.0.1:4398'],
+    ['serve', '--set-path', '/', 'http://203.0.113.5:80'],
+    ['serve', 'http://0.0.0.0:4399'],
+    ['serve', '--tcp=22', 'tcp://127.0.0.1:22'],
+    ['up', '--advertise-exit-node'],
+    ['up', '--advertise-routes=198.51.100.0/24'],
+    ['up', '--ssh'],
+    ['up', '--accept-routes'],
+    ['up', '--exit-node=203.0.113.1'],
+    ['up', '--reset'],
+    ['up', '--timeout=1s'],
+    ['up', '--for', 'alpha', '--ssh'],
+    ['public-url', '--name', 'other'],
+    ['public-url', 'box.example.test'],
   ];
   for (const a of bad) {
     const r = m.run(a);
@@ -367,4 +396,42 @@ test('public-url: the hub\'s URL becomes this machine\'s tailnet name through da
   assert.equal(n.run(['public-url']).status, 1);
   assert.match(n.steps().at(-1)!.detail, /no dashboard hub on this machine yet: set it up first \(credentials\.sh dashboard-signin, then dashboards\.sh/);
   assert.equal(n.text('dashboards-calls'), '');
+});
+
+test('Funnel is read and never changed: with it on, status says so, and serve and public-url do nothing', { skip: !posix }, () => {
+  const funnel = { AllowFunnel: { [`${NAME}:443`]: true } };
+  const shapes = [
+    { ...serving(HUB), ...funnel },
+    { ...funnel },
+    { TCP: { 8443: { HTTPS: true } }, Web: { [`${NAME}:8443`]: { Handlers: { '/': { Proxy: 'http://127.0.0.1:3000' } } } }, AllowFunnel: { [`${NAME}:8443`]: true } },
+    { Foreground: { abc123: { ...serving('http://127.0.0.1:3000'), AllowFunnel: { [`${NAME}:443`]: true } } } },
+  ];
+  for (const cfg of shapes) {
+    const m = machine();
+    const unit = hubUnit('https://hub.example.test');
+    writeFileSync(join(m.T, 'hub.service'), unit);
+    m.set('state.json', RUNNING);
+    m.set('serve.json', cfg);
+    const st = JSON.parse(m.run(['status', '--json']).stdout) as { funnel: boolean };
+    assert.equal(st.funnel, true, JSON.stringify(cfg));
+    assert.match(m.run(['status']).stdout, /Tailscale Funnel \(the public internet\): ON; nothing here changes it/);
+    for (const step of ['serve', 'public-url']) {
+      assert.equal(m.run([step]).status, 1, `${step}: ${JSON.stringify(cfg)}`);
+      assert.match(m.steps().at(-1)!.detail, /Tailscale Funnel is on for this machine, which publishes to the public internet\. This step never turns Funnel on or off, and does nothing while it is on/);
+    }
+    // Nothing was run but the reads: serve was never started or reset, Funnel never touched, the hub's URL kept.
+    assert.deepEqual([...new Set(m.tsCalls().map((c) => c.args.join(' ')))].sort(), ['serve status --json', 'status --json', 'version']);
+    assert.deepEqual(JSON.parse(m.text('ts/serve.json')), cfg, 'the serve config is as it was');
+    assert.equal(m.text('hub.service'), unit);
+    assert.equal(m.text('dashboards-calls'), '');
+  }
+  // Funnel off (an entry that is false, or none): not flagged, and serve goes ahead.
+  const m = machine();
+  m.set('state.json', RUNNING);
+  m.set('serve.json', { AllowFunnel: { [`${NAME}:443`]: false } });
+  assert.equal((JSON.parse(m.run(['status', '--json']).stdout) as { funnel: boolean }).funnel, false);
+  assert.match(m.run(['status']).stdout, /Tailscale Funnel \(the public internet\): off/);
+  assert.equal(m.run(['serve']).status, 0);
+  // What serve wrote has no Funnel in it.
+  assert.doesNotMatch(m.text('ts/serve.json'), /AllowFunnel/);
 });
