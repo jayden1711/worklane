@@ -101,6 +101,7 @@ console.log(`the hub took GitHub's redirect from @${owner} once; a replay was re
 // 4. The install link: GitHub's install page for that App, with the repo picked for the project preselected.
 const install = await ask(2);
 assert.equal(install.kind, 'approve_link');
-assert.equal(install.url, `${gh}/apps/${manifest.name}/installations/new/permissions?suggested_target_id=501&repository_ids[]=777`);
+// On GitHub itself: the runner (add-project's `app-manifest`) has no setting that names another host for it.
+assert.equal(install.url, `https://github.com/apps/${manifest.name}/installations/new/permissions?suggested_target_id=501&repository_ids[]=777`);
 assert.match(install.detail, /Only select repositories/);
 console.log(`the install link preselects the repo: ${install.url}`);

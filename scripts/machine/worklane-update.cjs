@@ -19,7 +19,9 @@
 //     Installing an older commit than the tip logs a "chose" line: the commit, and why each newer one was skipped.
 //     On the engine repo the slow checks run in batches (.github/workflows/ci-batch.yml: main's newest commit, at
 //     most every 30 minutes), so only a batched commit can have every required check: one the batch skipped reads
-//     as pending ("hasn't run"), is waited for until pending_wait_minutes, then passed over, and never installed.
+//     as "hasn't run" and is never installed. Such a commit isn't waited for when nothing is in flight on it (a
+//     required check hasn't run, and no check on it is queued or running, 10 minutes or more after it landed): an
+//     older fully green commit goes in at once. Otherwise a busy main, whose tip is rarely the batched commit, would keep every batched one waiting.
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
@@ -32,6 +34,22 @@
 // backups, starts the services again on the old engine and holds the commit. Otherwise it switches
 // /opt/worklane/current and restarts the instance and dashboard services, and if any of them isn't active and
 // steady within 2 minutes, it restores the migration backups, switches back and restarts again.
+// The test sandbox, after the restart: an engine can come up "active and steady" and still have lost its test runs (a
+// helper change once made every coordinator's startup sandbox check fail from inside its unit, while it passed from
+// a shell). So before switching, the updater asks each instance for its last startup verdict (`sandbox-status
+// --instance <name> --json`, the new engine's, run as the instance's user like migrate: root never opens an
+// instance's event log), and after the restart it waits, updates.json "sandbox_wait_minutes" at most (default 10),
+// for a verdict newer than the restart. An instance that passed before and fails after rolls the update back as an
+// unhealthy service does (backups, helpers, the old engine, restart) and holds the commit; the rollback's reason
+// names the instance and the check's own words, redacted. That rollback's order: stop the services, put the
+// migrations' backups back, put the old engine's root helpers back (each one the new engine replaced, byte for byte,
+// owner and mode kept), switch /opt/worklane/current back, and only then restart, so the old engine never starts
+// beside a helper of another protocol. A helper that can't be put back is the first thing the reason says.
+// An instance with no test runs, with no verdict before, or
+// already failing before, is never waited for and never rolls anything back. No verdict in time from one that
+// passed before: rolled back and held too (updates.json "sandbox_on_timeout": "hold", the default: an engine whose
+// test runs can't be shown to work isn't kept). "sandbox_on_timeout": "stand" keeps the install instead and raises
+// an incident that says the check couldn't be confirmed.
 // The canary (updates.json "canary": { "instance", "repo", "time_limit_minutes" }, docs/canary.md): a scratch-repo
 // instance that gets a tiny issue each day and after every install, filed and read with the engine's `canary` command
 // as that instance's user. It must go issue -> plan -> PR -> green checks -> merged within the time limit (default
@@ -44,7 +62,14 @@
 // renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the machine doesn't
 // have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
 // the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
-// Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl.
+// Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl (a wait
+// or refusal once per commit and reason). Every run also prints one line to stdout, the journal: the result, and for
+// a wait, refusal, hold or failed build the commit and the reason (`waiting b9634df: required check "x" hasn't run
+// on this commit`), secrets redacted.
+// Stuck: when the machine has stayed on one engine commit for updates.json "stuck_alert_minutes" (default 120) while
+// what it follows has moved on, it raises one watchdog incident (update_stuck: the installed commit, the newest one,
+// how long, and the reason it gives now), once per episode, and resolves it when an install succeeds or there is
+// nothing newer. Never while updates are off; a machine that is only busy ("not quiet") must have been busy that long.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -55,6 +80,7 @@ const CONFIG = '/etc/worklane/updates.json';
 const LOG = '/var/lib/worklane/updates.jsonl';
 const STATE = '/var/lib/worklane/update-state.json';
 const HELD = '/var/lib/worklane/update-held.json'; // the last rolled-back commit: { sha, at, failed }
+const STUCK = '/var/lib/worklane/update-stuck.json'; // since when the engine has been behind: { installed, since, tip, notQuietSince, raised }
 const CANARY = '/var/lib/worklane/canary.json'; // the canary running now, and when the last one was filed (root, 0600)
 const OPT = '/opt/worklane';
 const SLOTS = '/var/lib/worklane/agent-slots';
@@ -79,8 +105,15 @@ const CANARY_LIMIT_MIN = 120;
 const LOOKBACK = 20; // updates.json max_lookback: first-parent commits looked at, from main's tip back
 const LOOKBACK_MAX = 100;
 const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
+const STUCK_ALERT_MIN = 120; // updates.json stuck_alert_minutes
+const STUCK_INCIDENT = 'update_stuck'; // the watchdog incident's kind (src/watchdog/incidents.ts KINDS); its key is 'engine'
+const SANDBOX_WAIT_MIN = 10; // updates.json sandbox_wait_minutes: how long a restarted instance has to say its sandbox check's result
+const SANDBOX_POLL_MS = 10_000;
+const SANDBOX_INCIDENT = 'update_sandbox_unconfirmed'; // the watchdog incident for a verdict that never came (key: the instance)
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
 const CHECK_PAGES_MAX = 10; // pages of 100 check runs read for one commit
+const IDLE_AFTER_MS = 10 * 60_000; // WHY: a commit's checks take a moment to appear; before this, "nothing running" isn't idle
+const JOURNAL_MAX = 1000; // characters of one stdout line (journalLine)
 const VERDICT_TTL_MS = 60 * 60_000; // how long an older commit's red verdict is reused before GitHub is asked again
 
 // ---------- decisions (pure) ----------
@@ -101,6 +134,58 @@ function fastForward(cmp) {
 function lookbackOf(cfg) {
   const n = cfg && cfg.max_lookback;
   return Number.isInteger(n) && n >= 1 ? Math.min(n, LOOKBACK_MAX) : LOOKBACK;
+}
+
+/** updates.json stuck_alert_minutes, in ms: a number above 0, else 120 minutes. */
+function stuckAlertMs(cfg) {
+  const n = cfg && cfg.stuck_alert_minutes;
+  return (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : STUCK_ALERT_MIN) * 60_000;
+}
+
+/** `2 h 10 min` */
+const span = (ms) => {
+  const m = Math.floor(ms / 60_000);
+  return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
+};
+
+/**
+ * The stuck alert's next step, from what this run saw (pure). `state` is what the last run left (or null), `seen`
+ * this run's: { current, head, result, reason }, or null when updates are off. Behind: the run ended any way but
+ * installed or current, on an engine that isn't the newest commit (head unknown, a run that failed before asking:
+ * still behind if it was). Returns { state, raise?: { detail, fix }, resolve?: true }:
+ *   - not behind, or off: the state cleared, and the incident resolved if this episode raised one;
+ *   - behind: the clock runs from the first run that saw this engine behind; one raise per episode, once it has
+ *     been afterMs, and, when the reason is only a busy machine ("not quiet"), once that has lasted afterMs too.
+ */
+function stuckStep(state, seen, afterMs, now, what = 'main') {
+  const mine = state && seen && state.installed === seen.current ? state : null;
+  const behind = !!seen && !!seen.current && seen.result !== 'installed' && seen.result !== 'current' && (seen.head ? seen.head !== seen.current : !!mine);
+  if (!behind) return { state: null, ...(state && state.raised ? { resolve: true } : {}) };
+  const at = new Date(now).toISOString();
+  const busy = /^not quiet\b/.test(String(seen.reason || ''));
+  const next = { installed: seen.current, since: mine ? mine.since : at, tip: seen.head || (mine && mine.tip) || null, notQuietSince: busy ? (mine && mine.notQuietSince) || at : null, raised: !!(mine && mine.raised) };
+  // WHY: an engine that changed under an open alert (a rollback to an older one, say) ends that episode.
+  const out = { state: next, ...(state && state.raised && !mine ? { resolve: true } : {}) };
+  const stuckMs = now - Date.parse(next.since);
+  if (next.raised || !(stuckMs >= afterMs) || (busy && !(now - Date.parse(next.notQuietSince) >= afterMs))) return out;
+  next.raised = true;
+  const why = redact(String(seen.reason || '')).replace(/\s+/g, ' ').trim();
+  const detail = `the engine has been on ${short(next.installed)} for ${span(stuckMs)} while ${what} moved on${next.tip ? ` to ${short(next.tip)}` : ''}; the updater says: ${seen.result}${why ? `: ${why}` : ''}`;
+  return { ...out, raise: { detail: detail.slice(0, 600), fix: 'read the reason; the Updates panel on the Machine page and /var/lib/worklane/updates.jsonl have the history' } };
+}
+
+/** Apply stuckStep: save the state, raise or resolve the incident. Never throws: an alert must not stop an update. */
+function stuckCheck(deps, cfg, seen) {
+  if (typeof deps.stuckState !== 'function' || typeof deps.saveStuck !== 'function') return;
+  try {
+    const before = deps.stuckState();
+    const step = stuckStep(before, seen, stuckAlertMs(cfg), deps.now(), cfg && channelOf(cfg) === 'release' ? 'the newest release' : (cfg && cfg.branch) || 'main');
+    if (JSON.stringify(step.state) !== JSON.stringify(before || null)) deps.saveStuck(step.state);
+    if (step.resolve && typeof deps.resolveIncident === 'function') deps.resolveIncident(STUCK_INCIDENT, 'engine');
+    if (step.raise && typeof deps.raiseIncident === 'function') deps.raiseIncident(STUCK_INCIDENT, 'engine', step.raise.detail, step.raise.fix);
+  } catch {
+    // the update log has the reason either way
+  }
 }
 
 /** updates.json pending_wait_minutes, in ms: a number >= 0, else 60 minutes. */
@@ -165,7 +250,10 @@ const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.fai
  * one; an older commit's final red verdict is reused for VERDICT_TTL_MS (deps.verdicts/saveVerdicts, optional), so a
  * long red streak doesn't spend the API's hourly limit (the tip is always asked). A pending commit, or one GitHub
  * gave no answer for, stops the scan to wait for it, until it has been on main pendingWaitMs; after that it is
- * passed over for an older one. Returns { chosen, skipped } | { wait, reason, skipped } | { none: true, skipped },
+ * passed over for an older one. An idle commit (evaluateChecks: a required check hasn't run and nothing on it is
+ * queued or running, IDLE_AFTER_MS or more after it landed) is passed over at once: nothing in flight will make it green, and waiting on it would only
+ * keep an older green commit out. Below the tip its verdict is remembered like a red one (only main's newest commit
+ * gets a batch). What may be installed is unchanged: only a commit whose checks are all green. Returns { chosen, skipped } | { wait, reason, skipped } | { none: true, skipped },
  * skipped being the newer commits passed over: [{ sha, reason, held?, pending? }].
  */
 async function chooseCommit(deps, cfg, api, cands, held) {
@@ -187,7 +275,9 @@ async function chooseCommit(deps, cfg, api, cands, held) {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
       const data = await checkRunsOf(deps, api, c.sha);
       v = data ? evaluateChecks(data.check_runs, cfg.required_checks) : { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
-      if (!v.ok && v.final && i > 0) {
+      // WHY: idle only once the commit has been on main a while: just landed, its checks may not have appeared yet.
+      if (v.idle && !(now - Date.parse(c.date || '') >= IDLE_AFTER_MS)) v = { ...v, idle: false };
+      if (!v.ok && (v.final || v.idle) && i > 0) {
         kept[c.sha] = { reason: v.reason, at: new Date(now).toISOString() };
         changed = true;
       }
@@ -199,12 +289,12 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     let pending = false;
     if (!v.final) {
       const landed = Date.parse(c.date || '');
-      if (v.noAnswer || !(now - landed >= waitMs)) {
+      if (v.noAnswer || !(v.idle || now - landed >= waitMs)) {
         out = { wait: c, reason: v.reason, skipped };
         break;
       }
       pending = true;
-      v = { ...v, reason: `${v.reason}, still ${Math.round(waitMs / 60_000)}+ minutes after it landed (pending_wait_minutes)` };
+      v = { ...v, reason: now - landed >= waitMs ? `${v.reason}, still ${Math.round(waitMs / 60_000)}+ minutes after it landed (pending_wait_minutes)` : `${v.reason}, and none of its checks is queued or running` };
     }
     skipped.push({ sha: c.sha, reason: v.reason, ...(v.held ? { held: true } : {}), ...(pending ? { pending: true } : {}) });
   }
@@ -222,6 +312,8 @@ const GREEN = new Set(['success', 'neutral', 'skipped']);
 /**
  * Every check on the commit complete and green, and every required check present and successful.
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
+ * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
+ * will bring it (a slow check that only runs in batches, on a commit with no batch).
  */
 function evaluateChecks(runs, required) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
@@ -232,7 +324,7 @@ function evaluateChecks(runs, required) {
   }
   for (const name of required) {
     const r = latest.get(name);
-    if (!r) return { ok: false, final: false, reason: `required check "${name}" hasn't run on this commit` };
+    if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit` };
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
     if (r.conclusion === 'skipped') return { ok: false, final: true, reason: `required check "${name}" was skipped` };
     if (r.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" ended ${r.conclusion}` };
@@ -303,7 +395,35 @@ function redact(text) {
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted key]')
     .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, '[redacted]')
     .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [redacted]')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@') // WHY: a clone URL can carry user:token@
     .replace(/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1$2[redacted]');
+}
+
+/**
+ * One journal line for a run's result: the event, the commit's short sha and the reason, on one line, secrets
+ * redacted (a reason can quote updates.json's repo_url or a build's output), capped.
+ * `waiting b9634df: required check "x" hasn't run on this commit`
+ */
+function journalLine(event, sha, reason) {
+  const why = redact(String(reason == null ? '' : reason)).replace(/\s+/g, ' ').trim();
+  const line = `${event}${sha ? ` ${short(sha)}` : ''}${why ? `: ${why}` : ''}`;
+  return line.length > JOURNAL_MAX ? `${line.slice(0, JOURNAL_MAX)}…` : line;
+}
+
+/**
+ * deps.note: a refusal or wait goes to updates.jsonl once per commit and reason (state remembers the last one), not
+ * every 10 minutes, and to the journal (print) on every run, so `journalctl -u` always says why it isn't updating.
+ */
+function makeNote({ readState, writeState, log, print }) {
+  return (event, sha, reason) => {
+    const last = readState() || {};
+    if (last.event !== event || last.sha !== sha || last.reason !== reason) {
+      log({ event, to: sha, reason });
+      writeState({ event, sha, reason });
+    }
+    print(journalLine(event, sha, reason));
+    return event;
+  };
 }
 
 /** The last lines of a text, capped. */
@@ -485,6 +605,78 @@ function migrateCommand(inst, sha, opt = OPT) {
   return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'migrate', '--instance', inst.name, '--json']);
 }
 
+/** The new engine's `sandbox-status` for one instance, run as its coordinator user (read-only: its own event log). */
+function sandboxCommand(inst, sha, opt = OPT) {
+  return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'sandbox-status', '--instance', inst.name, '--json']);
+}
+
+/**
+ * `sandbox-status --json`'s answer as { configured, last: { ok, detail, at } | null }, or null when it gave none
+ * (an unknown state is never a verdict).
+ */
+function parseSandbox(out) {
+  const line = String(out || '').trim().split('\n').filter(Boolean).pop() || '';
+  let j;
+  try {
+    j = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!j || j.ok !== true) return null;
+  const l = j.last;
+  const last = l && typeof l.ok === 'boolean' && typeof l.at === 'string' && Number.isFinite(Date.parse(l.at)) ? { ok: l.ok, detail: String(l.detail || ''), at: l.at } : null;
+  return { configured: j.configured === true, last };
+}
+
+/** updates.json sandbox_on_timeout: "stand" only when it says so; anything else, and unset, is "hold". */
+const sandboxOnTimeout = (cfg) => (cfg && cfg.sandbox_on_timeout === 'stand' ? 'stand' : 'hold');
+
+/** updates.json sandbox_wait_minutes, in ms: a number above 0, else 10 minutes. */
+function sandboxWaitMs(cfg) {
+  const n = cfg && cfg.sandbox_wait_minutes;
+  return (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : SANDBOX_WAIT_MIN) * 60_000;
+}
+
+/**
+ * One instance's sandbox verdict across an update, from its status before the switch and now (parseSandbox's, or
+ * null), and when the restart began:
+ *   skip  nothing to compare: no test runs configured, no verdict before, or it was already failing before;
+ *   wait  it passed before, and the restarted process hasn't said yet (the last verdict is from before the restart);
+ *   pass / fail  it passed before, and the restarted process's own check passed / failed.
+ */
+function sandboxVerdict(before, after, restartedAt) {
+  if (!before || !before.configured || !before.last || before.last.ok !== true) return 'skip';
+  if (!after || !after.last || !(Date.parse(after.last.at) >= restartedAt)) return 'wait';
+  return after.last.ok ? 'pass' : 'fail';
+}
+
+/**
+ * After the restart: each instance that passed before, asked until its restarted process has said (sandboxVerdict),
+ * every SANDBOX_POLL_MS, sandboxWaitMs at most; it stops at the first failure (the update rolls back either way).
+ * Returns { passed, failed: [{ instance, detail }], unconfirmed } (instance names; detail redacted, one line).
+ */
+async function verifySandbox(deps, cfg, instances, before, sha, restartedAt) {
+  const out = { passed: [], failed: [], unconfirmed: [] };
+  if (typeof deps.sandboxStatus !== 'function') return out;
+  let left = instances.filter((i) => sandboxVerdict(before[i.name], null, restartedAt) === 'wait');
+  const deadline = deps.now() + sandboxWaitMs(cfg);
+  while (left.length) {
+    const still = [];
+    for (const inst of left) {
+      const after = deps.sandboxStatus(inst, sha);
+      const v = sandboxVerdict(before[inst.name], after, restartedAt);
+      if (v === 'fail') out.failed.push({ instance: inst.name, detail: redact(after.last.detail).replace(/\s+/g, ' ').trim().slice(0, 500) });
+      else if (v === 'pass') out.passed.push(inst.name);
+      else still.push(inst);
+    }
+    left = still;
+    if (!left.length || out.failed.length || deps.now() >= deadline) break;
+    await deps.sleep(SANDBOX_POLL_MS);
+  }
+  out.unconfirmed = left.map((i) => i.name);
+  return out;
+}
+
 /** Put one backup back, as the instance's user (the files are its own): a log loses the migrated one's WAL files. */
 function restoreCommand(inst, b) {
   return asInstance(inst, ['/bin/sh', '-c', 'cp -p -- "$1" "$2" && rm -f -- "$2-wal" "$2-shm"', '_', b.backup, b.path]);
@@ -573,13 +765,26 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
 
 async function run(deps) {
   const cfg = deps.config();
-  if (!cfg || cfg.enabled !== true) return 'disabled';
+  if (!cfg || cfg.enabled !== true) {
+    stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
+    return 'disabled';
+  }
   // A canary running now goes first: no other update starts until it has passed, failed or run out of time.
   if (cfg.canary) {
     const st = deps.canaryState() || {};
     if (st.pending) return checkCanaryNow(deps, cfg, st);
   }
-  const r = await update(deps, cfg);
+  // What this run saw, for the stuck alert: the installed engine, the newest commit, and the reason it noted.
+  const seen = { current: null, head: null, reason: '' };
+  const noting = { ...deps, note: (event, sha, reason, ...rest) => ((seen.reason = reason), deps.note(event, sha, reason, ...rest)) };
+  let r;
+  try {
+    r = await update(noting, cfg, seen);
+  } catch (e) {
+    stuckCheck(deps, cfg, { ...seen, result: 'error', reason: String(e && e.message ? e.message : e).slice(0, 300) });
+    throw e;
+  }
+  stuckCheck(deps, cfg, { ...seen, result: r });
   // Once a day, when no install just filed one: a canary on the engine as it is.
   if (cfg.canary && r !== 'installed' && r !== 'rolled_back' && dailyDue(deps.canaryState(), deps.now())) {
     const filed = startCanary(deps, cfg, 'daily', null);
@@ -588,10 +793,11 @@ async function run(deps) {
   return r;
 }
 
-async function update(deps, cfg) {
+async function update(deps, cfg, seen = {}) {
   const gh = repoFromUrl(cfg.repo_url);
   if (!gh) return deps.note('refused', null, `updates.json repo_url isn't a GitHub repository: ${cfg.repo_url}`, true);
   const current = deps.installed();
+  seen.current = current;
   const release = channelOf(cfg) === 'release';
   let head;
   let tag = null;
@@ -599,6 +805,7 @@ async function update(deps, cfg) {
     tag = newestRelease(parseTags(deps.exec('git', ['ls-remote', '--tags', cfg.repo_url, 'refs/tags/v*'])));
     if (!tag) return deps.note('waiting', null, `no release tag vX.Y.Z on ${cfg.repo_url} yet`, false);
     head = tag.commit;
+    seen.head = head;
     if (head === current) return 'current';
     // Never back: a tag no newer than the installed engine's version is not an update.
     const installedVersion = deps.installedVersion();
@@ -606,6 +813,7 @@ async function update(deps, cfg) {
   } else {
     head = deps.exec('git', ['ls-remote', cfg.repo_url, `refs/heads/${cfg.branch || 'main'}`]).split(/\s/)[0];
     if (!/^[0-9a-f]{40}$/.test(head)) return deps.note('refused', null, `no ${cfg.branch || 'main'} on ${cfg.repo_url}`, true);
+    seen.head = head;
     if (head === current) return 'current';
   }
   // A commit that was rolled back is never retried by itself: only a newer commit, or an admin at a root shell
@@ -686,6 +894,9 @@ async function update(deps, cfg) {
       migrated.push({ inst, made: r.made, applied: r.applied });
     }
   }
+  // Each instance's sandbox verdict as the old engine left it, read while nothing runs (verifySandbox compares).
+  const sandboxBefore = {};
+  if (typeof deps.sandboxStatus === 'function') for (const inst of instances) sandboxBefore[inst.name] = deps.sandboxStatus(inst, head);
   // The root helpers from the new engine, before it starts: it never runs with a helper of another protocol.
   let helpers;
   try {
@@ -700,10 +911,41 @@ async function update(deps, cfg) {
     deps.log({ event: 'rolled_back', from: head, to: current, units, reason, ...back, back: settled.h, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
     return 'rolled_back';
   }
+  const restartedAt = deps.now();
   deps.switchTo(head);
   const after = await settle();
   if (after.h === 'healthy') {
-    deps.log({ event: 'installed', from: current, to: head, units, ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
+    // Up and steady isn't working: an instance whose test sandbox check passed before must pass it again.
+    const sandbox = await verifySandbox(deps, cfg, instances, sandboxBefore, head, restartedAt);
+    const onTimeout = sandboxOnTimeout(cfg);
+    if (sandbox.failed.length || (sandbox.unconfirmed.length && onTimeout === 'hold')) {
+      const failed = [
+        ...sandbox.failed.map((f) => `rollback: the test sandbox check passed before the update and fails after it: ${f.instance}: ${f.detail}`),
+        ...(sandbox.failed.length ? [] : sandbox.unconfirmed.map((i) => `rollback: no test sandbox result from ${i} within ${Math.round(sandboxWaitMs(cfg) / 60_000)} minutes of the restart (sandbox_on_timeout: hold)`)),
+      ];
+      // As for a service that didn't come up: the migrations' backups, the old engine's helpers, the old engine.
+      if (instances.length) deps.exec('systemctl', ['stop', ...units]);
+      const unrestored = restoreAll();
+      const hb = current ? helpersBack(deps, current) : {};
+      if (current) deps.switchTo(current);
+      const back = current ? await settle() : { h: 'failed' };
+      // WHY: an old engine left with the new one's helpers has no test runs either (another protocol): that is not a
+      // clean rollback, and it goes first in the reason so the incident says it before anything else.
+      if (hb.helpers_error) failed.unshift(`rollback: the old engine's root helpers could NOT be put back (${hb.helpers_error}); its test runs are off until they are: sudo bash /opt/worklane/current/scripts/setup/test-user.sh update-helper`);
+      deps.hold({ sha: head, at: new Date(deps.now()).toISOString(), failed });
+      // INVARIANT: the reason names the instance and what its check said: the watchdog's update_rollback incident quotes it.
+      deps.log({ event: 'rolled_back', from: head, to: current, units, reason: failed.join('; '), sandbox, back: back.h, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+      return 'rolled_back';
+    }
+    try {
+      for (const i of sandbox.passed) if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SANDBOX_INCIDENT, i);
+      for (const i of sandbox.unconfirmed) {
+        if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SANDBOX_INCIDENT, i, `after the update to ${short(head)}, ${i} gave no test sandbox result within ${Math.round(sandboxWaitMs(cfg) / 60_000)} minutes of its restart; its test runs passed that check before the update`, `look at ${i}'s log for testrun.sandbox and its coordinator's journal; the update was kept (sandbox_on_timeout in updates.json)`);
+      }
+    } catch {
+      // the installed line below is the record
+    }
+    deps.log({ event: 'installed', from: current, to: head, units, ...(sandbox.passed.length || sandbox.unconfirmed.length ? { sandbox: { passed: sandbox.passed, unconfirmed: sandbox.unconfirmed } } : {}), ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
     if (!cfg.canary) return 'installed';
     // The install stands only once the canary passes: until then the backups and the old engine are kept to go back to.
     const filed = startCanary(deps, cfg, 'update', { from: current, to: head, migrated: migrated.map((m) => ({ inst: m.inst, made: m.made })) });
@@ -932,7 +1174,7 @@ function saveJson(file, value, mode) {
   fs.renameSync(tmp, file);
 }
 
-function realDeps() {
+function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
   const readJson = (f) => {
     try {
       return JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -976,9 +1218,18 @@ function realDeps() {
     syncHelpers: (sha) => syncHelpers(path.join(OPT, sha)),
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
+    sandboxStatus: (inst, sha) => {
+      try {
+        return parseSandbox(execFileSync(...splitCmd(sandboxCommand(inst, sha)), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
+      } catch (e) {
+        return parseSandbox(e && e.stdout); // WHY: a failing command still prints its answer; none is "unknown", never a verdict
+      }
+    },
     held: () => readJson(HELD),
     verdicts: () => readJson(VERDICTS),
     saveVerdicts: (map) => saveJson(VERDICTS, map, 0o644),
+    stuckState: () => readJson(STUCK),
+    saveStuck: (state) => (state ? saveJson(STUCK, state, 0o644) : fs.rmSync(STUCK, { force: true })),
     canaryState: () => readJson(CANARY),
     saveCanary: (state) => {
       const tmp = `${CANARY}.tmp`;
@@ -1004,21 +1255,19 @@ function realDeps() {
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log,
-    /** A refusal or wait is logged once per commit and reason, not every 10 minutes. */
-    note: (event, sha, reason) => {
-      const last = readJson(STATE) || {};
-      if (last.event !== event || last.sha !== sha || last.reason !== reason) {
-        log({ event, to: sha, reason });
-        fs.writeFileSync(STATE, JSON.stringify({ event, sha, reason }), { mode: 0o644 });
-      }
-      return event;
-    },
+    note: makeNote({ readState: () => readJson(STATE), writeState: (st) => fs.writeFileSync(STATE, JSON.stringify(st), { mode: 0o644 }), log, print }),
   };
 }
 
 if (require.main === module) {
-  run(realDeps()).then(
-    (r) => process.stdout.write(`${r}\n`),
+  // WHY: one line per run in the journal. A noted result (waiting, refused, held, ...) printed its own, with the reason.
+  let said = false;
+  const print = (line) => {
+    said = true;
+    process.stdout.write(`${line}\n`);
+  };
+  run(realDeps(print)).then(
+    (r) => said || print(r),
     (e) => {
       try {
         fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), event: 'error', reason: String(e && e.message ? e.message : e).slice(0, 500) })}\n`);
@@ -1030,4 +1279,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };

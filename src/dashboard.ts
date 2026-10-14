@@ -15,6 +15,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { BRAND } from './brand.js';
+import { GITHUB_API } from './github-hosts.js';
 import { loadConfigAt, type Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
@@ -77,7 +78,7 @@ import type { InitIo } from './init.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionId, type ActionPlan } from './setup-actions.js';
 import { ClaudeSignin, claudeServerView, systemSigninDeps, type SigninDeps } from './claude-signin.js';
 import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
-import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, systemRunCli, tokenAsk, tokenState, type BotView, type RunCli } from './intake/discord-setup.js';
+import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState, type BotView, type DiscordListingStandIn } from './intake/discord-setup.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
@@ -202,8 +203,12 @@ export interface DashboardOptions {
   setupMode?: { run?: SetupRun; io?: InitIo };
   /** WHY: tests stand in for gh in Connect GitHub's device login (src/gh-login.ts). */
   ghLogin?: Partial<GhLoginDeps>;
-  /** WHY: tests stand in for the child process that lists the bot's channels (src/intake/discord-setup.ts); this engine's CLI when unset. */
-  discordCli?: RunCli;
+  /**
+   * WHY: tests and CI answer the bot's channel listing in-process instead of its child process (src/intake/discord-setup.ts),
+   * only through a stand-in made in code by discordListingStandIn; anything else here is refused. Unset: this engine's own
+   * cli.js, by absolute path.
+   */
+  discordListing?: DiscordListingStandIn;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -343,7 +348,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   // The backlog the coordinator files to, made when first needed: an instance's with its App's tokens.
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
-  const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com' })) : undefined;
+  const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: GITHUB_API })) : undefined;
   return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
 }
 
@@ -886,7 +891,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // (its application and channels) comes from a child process that reads the token itself: this process never does.
   // Kept a minute, and one listing at a time, so the page's polls don't spend Discord's rate limit.
   const instanceHome = opts.instance && opts.policyFile ? dirname(opts.policyFile) : null;
-  const discordCli = opts.discordCli ?? systemRunCli();
+  // INVARIANT: the engine's own cli.js by absolute path, or a stand-in set in code (tests, CI); anything else throws.
+  const discordCli = listingRunner(opts.discordListing);
   let bot: { at: number; view: BotView } | null = null;
   let botLoading: Promise<BotView> | null = null;
   const botNow = (fresh: boolean): Promise<BotView> => {

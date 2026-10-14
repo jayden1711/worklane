@@ -36,6 +36,8 @@ export const KINDS = {
   unit_down: { title: 'A service is down', severity: 'red' },
   crash_loop: { title: 'A service is crash-looping', severity: 'red' },
   update_rollback: { title: 'An engine update was rolled back', severity: 'red' },
+  // Raised by the engine updater (scripts/machine/<cli>-update.cjs): one engine commit for hours while main moved on.
+  update_stuck: { title: 'The engine is not updating', severity: 'amber' },
   claude_auth: { title: 'Claude sign-in is failing', severity: 'red' },
   claude_login_expiring: { title: 'A Claude login is about to expire', severity: 'amber' },
   github_auth: { title: 'GitHub access is failing', severity: 'red' },
@@ -49,6 +51,8 @@ export const KINDS = {
   update_signer_staged: { title: 'A release signer was staged for engine updates', severity: 'amber' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
+  // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.
+  update_sandbox_unconfirmed: { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.

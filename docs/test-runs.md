@@ -104,13 +104,21 @@ Posting needs the App's **Checks: read & write** permission, which only the owne
 
 ## On every PR
 
-With `test_run` in tests.yaml and the sandbox's check passing at start (`testrun.sandbox`), the coordinator's tick (src/coordinator/test-runs.ts) works like this:
+With `test_run` in tests.yaml and the sandbox's check passing (`testrun.sandbox`), the coordinator's tick (src/coordinator/test-runs.ts) works like this:
 
 - At most every 90 s, one API call lists the open PRs. That covers the harness's, the owner's and bots' alike.
 - It fetches each new head (`refs/pull/<n>/head`) and runs the fast tiers on it, with the files the PR changes against its base. Then it posts the checks on that head.
 - **New head:** the run on the old head is cancelled, and a run starts on the new one. A closed PR's run is cancelled too. A cancelled run posts no check.
 - **Restarts:** a head already run isn't run again. A run a restart cut short is wiped at start, recorded as `interrupted`, and run again.
 - **Bots:** a bot's PR gets the fast tier. Its full tiers (a batch, in PR mode) wait until the owner approves it (`fullRunAllowed`).
+
+**When the sandbox's check fails** (src/testrun/sandbox-watch.ts). The coordinator runs the helper's `check` at start. A failure never switches test runs off for the life of the process:
+
+- **Journal:** the failure, with its FAIL lines, is on the coordinator's stderr (`journalctl -u worklane-<name>.service`), and so is the recovery.
+- **Alert:** `testrun.sandbox` records each change. Health and the dashboard say "Test runs are off", and the watchdog raises one `test_sandbox` incident (the Health page, and the ops channel), resolved when the check passes.
+- **Retry:** the check runs again 30 s, 1 min and 2 min after a failure, then every 5 min, never two at once. When it passes, test runs go on in the running coordinator: no restart.
+- **PRs:** while it fails no run starts. Each open PR head gets one failing check, "Not run: test runs are off (the test sandbox check is failing)", with the FAIL lines. When the check passes, each of those heads runs, and its real check replaces that one.
+- **Batches and the deploy gate** wait while it fails, as they do without test runs: no batch runs, nothing merges untested, the deploy branch doesn't move.
 
 ## Test selection
 
@@ -157,6 +165,25 @@ The default is 2 slots. For a machine with 24 cores and 30 GB running three inst
 - **Memory.** 30 GB, less the instances' caps (20 GB), less 2 GB for the system, leaves 8 GB. A run with its Postgres takes about 2.5 GB, so memory allows 3 runs.
 
 The smaller of the two is 2 (`recommendTestSlots`). Give `worklane-test.slice` the cores and memory to match, below the smallest instance's cap: `--cpus 16-23 --memory-max 5G`. Each tier's measured CPU time and peak memory are on the dashboard's machine page: change the count once real runs show what they take.
+
+## Measuring a setting
+
+`worklane testrun measure` shows how one `test_run.env` value changes a tier's wall time. It runs the tier the way a PR's run does: the same helper, test user, slot, full-run lock (shared), workspace, caches, database, per-run limits and wipe. It runs once per value, one value at a time. Run it as the instance's coordinator user, when the machine is idle:
+
+```
+sudo -H -u wl-<name> worklane testrun measure --instance <name> --tier <tier>[,<tier>...] --set <KEY>=<v1>,<v2>,... [--sha <commit>] [--json]
+```
+
+- **`--sha`** defaults to the default branch's tip in the instance's checkout. The command does not fetch first.
+- **`--tier`** takes tests.yaml's tier names, of either kind, and runs them unsharded. A tier that needs `{changed_files}` is refused, because a measure has no change.
+- **`--set`** names exactly one key. It must be a key `test_run.env` already has, spelled exactly the same. It can never be `DATABASE_URL`, a key the engine or host sets (`CI`, `PATH`, `HOME`, `TMPDIR`, `LANG`, a cache's or shared directory's variable), or a reserved name. Each value is a plain token: no empty value, space, quote, comma or `=`. There are at most 12 values.
+- **It is refused while the machine is busy:** a test run of the instance is queued or running, any test slot is held, or the full-run lock is held or missing. Before each later value it checks again and stops if the machine became busy.
+- **It is refused when the helper is outdated or the sandbox fails its check.** A refusal starts nothing: no workspace, and no helper call for a bad request.
+- **It posts no check and touches no PR.** The instance's log gets only `testrun.measure` events. The PR runs, the batcher and the test-run view never read that event type. Each run's own events stay in memory.
+- **Output is one line per value:** the run's wall time, then for each tier its status (passed, failed, timed out, not run), duration, the sandbox unit's CPU time, average cores and peak memory (systemd-run's summary), and its slowest suites.
+- **Suite durations come from the tier's own output.** The command reads lines like `⏱ <suite>: 12.3s` from the tier's log in the instance's state, or else the per-test durations the metrics read. A suite log directory inside the workspace can't be used: the coordinator can't read the test user's files, and the wipe removes them.
+- **Each tier still has its own cap** (its `timeout_s` and the helper's limits), the same as a PR's run.
+- **A measure killed mid-run leaves its workspace behind.** The next measure wipes it first.
 
 ## Install
 

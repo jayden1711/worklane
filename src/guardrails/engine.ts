@@ -7,6 +7,7 @@ import type { GuardrailsConfig, Rule } from '../config/schema.js';
 import { basename, splitCommands, type SimpleCommand } from './shell.js';
 import { connectionsIn, fingerprint } from './fingerprint.js';
 import { globToRegExp } from './glob.js';
+import { pushHookFileRefusal, pushHookShellRefusal } from './push-hook.js';
 import { BRAND } from '../brand.js';
 
 /**
@@ -230,6 +231,14 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
       return { decision: 'deny', rule: 'agents-md', reason: `${hit}: agents never write AGENTS.md; a line reaches it only when an owner promotes a learning on the dashboard` };
     }
     if (hit) return { decision: 'deny', rule: 'protected-path', reason: `${hit} is harness config; change it through a reviewed proposal` };
+  }
+
+  // WHY: the push gate's first-time-setup hatch and git's pre-push hook are a person's, never an agent's (push-hook.ts).
+  {
+    const abs = (t: string) => (isAbsolute(t) ? t : resolve(call.cwd, t));
+    const p = EDIT_TOOLS.has(call.tool) ? filePathOf(call) : null;
+    const refusal = (p ? pushHookFileRefusal(p, abs(p), call.input) : null) ?? (call.tool === 'Bash' && typeof call.input.command === 'string' ? pushHookShellRefusal(call.input.command, commands, abs) : null);
+    if (refusal) return { decision: 'deny', rule: refusal.rule, reason: refusal.reason };
   }
 
   // Commit identity: the harness sets it; an agent never commits as anyone it chooses.

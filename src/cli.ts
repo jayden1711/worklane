@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
@@ -44,6 +45,7 @@ import { desktopBinary, runDesktop } from './desktop.js';
 import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
+import { sandboxVerdict } from './testrun/status.js';
 import { applyMigrations, instanceTargets, MigrationFailed, planMigrations, projectConfigFiles } from './migrations.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
@@ -55,6 +57,7 @@ import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
 import { discordChannelsCommand } from './intake/discord-channels.js';
+import { intakeCheckCommand } from './intake/check.js';
 import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
@@ -155,9 +158,18 @@ usage: ${BRAND.cli} <command> [options]
   canary file|check --instance name --repo owner/repo [--reason update|daily] [--issue n] --json
                                    (the engine updater runs these as the canary instance's user) file the
                                    canary issue on the scratch repo, or say how far it got (docs/canary.md)
+  sandbox-status --instance name --json
+                                   (the engine updater runs this as the instance's user) whether test runs are
+                                   configured, and the test sandbox check's last result at a coordinator start
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
                                    (doctor lists them; the coordinator won't start while any is pending)
   status                           what's running, waiting and spent, from the event log
+  testrun measure --instance name --tier t[,t...] --set KEY=V1,V2,... [--sha commit] [--json]
+                                   (as the instance's coordinator user) one sandboxed test run per value of a
+                                   key tests.yaml test_run env already has, in sequence, through the same
+                                   helper, slots, lock and limits as a PR's run; prints each value's wall time,
+                                   the tiers' status, CPU and memory, and their suites' durations. Posts no
+                                   check; refused while the machine has a test run or full run going
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
@@ -166,6 +178,8 @@ usage: ${BRAND.cli} <command> [options]
                                    read-only: the text and announcement channels the instance's bot can see,
                                    one "<server> / #<channel> <id>" line each (run as the instance's user);
                                    --json: one JSON line, with each server's id and the bot's application
+  intake check [--instance name]   read-only: validate the instance's intake.yaml as the coordinator reads it:
+                                   what is on, or each error with its path (exit 1); no file: intake is off
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
@@ -413,6 +427,26 @@ async function main(argv: string[]): Promise<number> {
         const log = new EventLog(join(i.stateDir, 'events.db'));
         try {
           return out({ ok: true, ...(await checkCanary(backlog, repo, issue, log.read(0, ['issue.seen', 'issue.claimed', 'plan.posted', 'pr.opened', 'pr.closed']))) });
+        } finally {
+          log.close();
+        }
+      } catch (e) {
+        return (out({ ok: false, error: String((e as Error).message ?? e).split('\n')[0]!.slice(0, 500) }), 1);
+      }
+    }
+
+    case 'sandbox-status': {
+      // Read-only, for the engine updater: it compares the answer before and after an update (never root on the log).
+      const out = (j: unknown) => (console.log(JSON.stringify(j)), 0);
+      if (!instanceOpt) {
+        console.error(`usage: ${BRAND.cli} sandbox-status --instance <name> --json`);
+        return 2;
+      }
+      try {
+        const i = loadInstance(instanceOpt);
+        const log = new EventLog(join(i.stateDir, 'events.db'));
+        try {
+          return out({ ok: true, configured: !!i.config.tests.test_run, last: sandboxVerdict(log.read(0, ['testrun.sandbox', 'testrun.helper'])) });
         } finally {
           log.close();
         }
@@ -858,6 +892,11 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'testrun': {
+      const m = await import('./testrun/measure-cli.js');
+      return m.measureCommand(instanceOpt, sub, rest);
+    }
+
     case 'stuck-scan': {
       const s = scanStuck(instanceOpt ? loadInstance(instanceOpt).stateDir : projectStateDir(root));
       console.log(`runs scanned: ${s.scanned} (${s.noFeed} older record(s) without a feed not scanned)\nwould flag: ${s.flagged}\nwould stop: ${s.stopped}`);
@@ -902,8 +941,7 @@ async function main(argv: string[]): Promise<number> {
       if (args.at(-1) !== 'get') return 0;
       const input = await readStdin();
       const host = /^host=(.*)$/m.exec(input)?.[1] ?? '';
-      const api = new URL(process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com');
-      if (host !== 'github.com' && host !== api.host) return 0; // not ours: let git try other helpers
+      if (host !== new URL(GITHUB_WEB).host) return 0; // not ours: let git try other helpers
       // A GitHub request this helper can't answer stops git (quit): it must never fall back to a terminal prompt.
       // The instance comes from the helper's own command line, then the environment, and then, because
       // `sudo -u` clears the environment, the coordinator user's only instance.
@@ -926,7 +964,7 @@ async function main(argv: string[]): Promise<number> {
           if (existsSync(g.path)) return 0;
           return refuse(`instance ${name}: credentials.yaml has no GitHub App, and no gh login at ${g.path}; ${setUp}`);
         }
-        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, api.origin);
+        const tokens = installationTokens({ appId: g.app_id, installationId: g.installation_id, keyPath: g.key_path }, i.repos, i.stateDir, fetch, GITHUB_API);
         process.stdout.write(`username=x-access-token\npassword=${await tokens()}\n`);
         return 0;
       } catch (e) {
@@ -1006,7 +1044,7 @@ async function main(argv: string[]): Promise<number> {
         } catch (e) {
           failure = (e as Error).message.split('\n')[0]!;
         }
-        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com') : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
+        const scope = token ? await checkRepoScope(token, [i.repo.repo], fetch, GITHUB_API) : { ok: false as const, why: `no GitHub token for the instance (${failure || 'empty'})` };
         if (!scope.ok) console.log(`  github token REFUSED: ${scope.why}`);
         else if (gh.kind === 'app') {
           // Installation tokens last about an hour and are minted again before they run out; the key is what ages.
@@ -1141,6 +1179,14 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return discordChannelsCommand({ instance: instanceOpt, json });
+    }
+
+    case 'intake': {
+      if (sub !== 'check' || rest.length) {
+        console.error(commandUsage('intake'));
+        return 2;
+      }
+      return intakeCheckCommand({ instance: instanceOpt });
     }
 
     case 'prod-read': {

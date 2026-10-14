@@ -54,7 +54,7 @@ The schema refuses:
 - a tier named twice;
 - a branch name git wouldn't take.
 
-The coordinator also refuses a gate on the default branch. The gate needs the test runs to be set up: a sandbox whose check passes (docs/test-runs.md). Without them, it records why (`coordinator.error`, where `deploy gate`) and moves nothing.
+The coordinator also refuses a gate on the default branch. The gate needs the test runs to be set up (docs/test-runs.md). Without them, it records why (`coordinator.error`, where `deploy gate`) and moves nothing. While the sandbox's check is failing the gate does nothing, and goes on when the check passes.
 
 ## Where to see it
 

@@ -11,6 +11,7 @@ import { appKeyAge, appKeyWarning, tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
+import { GITHUB_API } from './github-hosts.js';
 import { switchedOnto } from './claude-account.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
@@ -80,7 +81,7 @@ export function backlogFor(cfg: Config, root: string, state = projectStateDir(ro
   return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo, token) : new FileBacklog(join(state, 'backlog.json'));
 }
 
-const githubApi = () => process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com';
+const githubApi = () => GITHUB_API;
 
 /** Where an instance's GitHub tokens come from: its App (minted, short-lived) or, as a fallback, its own gh login. */
 export function instanceTokens(i: Instance, env: NodeJS.ProcessEnv): () => Promise<string> {
@@ -317,9 +318,10 @@ export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: n
   if (intake) await intake.start();
   // The same instance root keeps its dependency cache, in the group its agents share.
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
-  // The coordinator's own test runs of every PR (tests.yaml test_run), once the sandbox's check passed.
+  // The coordinator's own test runs of every PR (tests.yaml test_run). While the sandbox's check fails they are set up
+  // but refuse every run, and the check is run again until it passes (src/testrun/sandbox-watch.ts).
   const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
-  // The pre-deploy gate (tests.yaml deploy_gate): only through the test runs just set up.
+  // The pre-deploy gate (tests.yaml deploy_gate): only through the test runs just set up, and only while their sandbox's check passes.
   const deployGate = opts.testRun ? setupDeployGate(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state, testRunsReady: !!testRuns, ...(opts.incidents ? { incidents: opts.incidents } : {}) }) : undefined;
   const previews = opts.testRun ? setupPreviews(cfg, opts.testRun, { log, actor: instanceId(), stateDir: state }) : undefined;
   const coordinator = new Coordinator({ cfg, log, backlog: backlogFor(cfg, root, state, tokens), runner: runner ?? new CliRunner(cfg.project.agent_runtime.kind), repo: root, instance: instanceId(), stateDir: state, ...(agentTasks ? { agentTasks } : {}), ...(depCacheRoot ? { depCacheRoot } : {}), ...(tokenExpiresAt !== undefined ? { tokenExpiresAt } : {}), ...(commandsAs ? { commandsAs } : {}), ...(appKeyPath ? { appKeyPath } : {}), ...(commitIdentity ? { commitIdentity } : {}), ...(autoMerge ? { autoMerge } : {}), ...(settings ? { settings } : {}), ...(opts.providerKeys ? { providerKeys: opts.providerKeys } : {}), ...(testRuns ? { prTestRuns: testRuns, testRuns: batchTestRuns(cfg.tests.test_run!, testRuns.stopped.signal) } : {}), ...(deployGate ? { deployGate } : {}), ...(previews ? { previews } : {}), ...(intake ? { intake: { config: intake.config, sources: intake.sources, name: intake.name, ...(intake.roleOf ? { roleOf: intake.roleOf } : {}) } } : {}), ...(opts.roleOf ? { roleOf: opts.roleOf } : {}), ...(opts.mainWatch ? { mainWatch: opts.mainWatch } : {}), ...(opts.mergePosts ? { mergePosts: opts.mergePosts } : {}), ...(opts.ciMetrics ? { ciMetrics: opts.ciMetrics } : {}),...(opts.protection ? { protection: opts.protection } : {}), ...(opts.incidents ? { incidents: opts.incidents } : {}), ...(opts.accountSwitched ? { accountSwitched: opts.accountSwitched } : {}), ...(opts.liveConfig ? { liveConfig: opts.liveConfig } : {}), ...(opts.superfan ? { superfan: opts.superfan } : {}) });
