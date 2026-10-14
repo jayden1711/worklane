@@ -11,6 +11,7 @@ import { appKeyAge, appKeyWarning, tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
+import { GITHUB_API } from './github-hosts.js';
 import { switchedOnto } from './claude-account.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
@@ -80,7 +81,7 @@ export function backlogFor(cfg: Config, root: string, state = projectStateDir(ro
   return cfg.project.backlog === 'github' ? new GitHubBacklog(cfg.project.project.repo, token) : new FileBacklog(join(state, 'backlog.json'));
 }
 
-const githubApi = () => process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com';
+const githubApi = () => GITHUB_API;
 
 /** Where an instance's GitHub tokens come from: its App (minted, short-lived) or, as a fallback, its own gh login. */
 export function instanceTokens(i: Instance, env: NodeJS.ProcessEnv): () => Promise<string> {

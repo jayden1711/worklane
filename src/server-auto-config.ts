@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { autoConfigure, emptyAutoConfig, type AutoConfigResult, type AutoConfigState, type RunResult } from './auto-config.js';
 import { BRAND } from './brand.js';
+import { GITHUB_API } from './github-hosts.js';
 import { installationTokens } from './github-app.js';
 import { instanceConfigProblems, loadInstanceSetup, type PolicyFile } from './instance.js';
 import { machineOwners } from './machine-owners.js';
@@ -22,7 +23,7 @@ import { coordinatorUser } from './setup/app-manifest.js';
 
 type Fetch = typeof fetch;
 
-export const githubApiBase = () => process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com';
+export const githubApiBase = () => GITHUB_API;
 
 const arg = (args: string[], name: string) => {
   const i = args.indexOf(name);

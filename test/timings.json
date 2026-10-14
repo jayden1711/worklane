@@ -94,6 +94,7 @@
   "test/gardener-coordinator.test.ts": 718,
   "test/gardener.test.ts": 13,
   "test/github-app.test.ts": 4355,
+  "test/github-hosts.test.ts": 2900,
   "test/github-scope.test.ts": 34,
   "test/guardrails.test.ts": 15,
   "test/health.test.ts": 188,

@@ -11,7 +11,7 @@ import { appBotIdentity, appJwt, installationTokens, mintInstallationToken } fro
 import { appOriginText, CredentialsFile, initInstance, readAppOrigin, setGithubApp } from '../src/instance.js';
 import { parse } from 'yaml';
 import { childEnv } from '../src/os/index.js';
-import { agentIsSelf, exampleProject, repoRoot } from './helpers.js';
+import { agentIsSelf, exampleProject, repoRoot, loopbackGitHub } from './helpers.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const pem = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
@@ -111,7 +111,7 @@ function appInstance() {
 test('acceptance: an App instance starts with a minted installation token that reaches only its repo, and refuses one that reaches more', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
   const { dir, home } = appInstance();
   const ok = await fakeGitHub(['example-org/example-shop']);
-  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: ok.api, GH_TOKEN: 'inherited-must-not-be-used' };
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(ok.api), GH_TOKEN: 'inherited-must-not-be-used' };
   try {
     const r = await run(['coordinator', 'run', '--instance', 'site', '--once'], env);
     assert.equal(r.status, 0, r.stderr);
@@ -124,7 +124,7 @@ test('acceptance: an App instance starts with a minted installation token that r
   const wide = await fakeGitHub(['example-org/example-shop', 'example-org/other']);
   try {
     rmCache(home);
-    const r = await run(['coordinator', 'run', '--instance', 'site', '--once'], { ...env, [`${BRAND.envPrefix}_GITHUB_API`]: wide.api });
+    const r = await run(['coordinator', 'run', '--instance', 'site', '--once'], { ...env, ...loopbackGitHub(wide.api) });
     assert.equal(r.status, 1);
     assert.match(r.stderr, /can reach 1 repo\(s\) outside this instance/);
   } finally {
@@ -143,7 +143,7 @@ function rmCache(home: string) {
 test('git credential helper: hands git an installation token for GitHub, and nothing for other hosts', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
   const { dir } = appInstance();
   const gh = await fakeGitHub(['example-org/example-shop']);
-  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api, [`${BRAND.envPrefix}_INSTANCE`]: 'site' };
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api), [`${BRAND.envPrefix}_INSTANCE`]: 'site' };
   try {
     const r = await run(['git-credential', 'get'], env, 'protocol=https\nhost=github.com\n\n');
     assert.equal(r.status, 0, r.stderr);
@@ -166,7 +166,7 @@ test('regression: under sudo -u (no instance in the environment) the helper stil
   // asked for a username and password on the terminal.
   const { dir } = appInstance();
   const gh = await fakeGitHub(['example-org/example-shop']);
-  const bare = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  const bare = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api) };
   delete (bare as Record<string, string | undefined>)[`${BRAND.envPrefix}_INSTANCE`];
   const ask = 'protocol=https\nhost=github.com\n\n';
   try {
@@ -234,7 +234,7 @@ test('regression (audit B3): instance set-github-app writes the App into credent
 test('instance show: an App instance reports a short-lived token and its key age, never "expires never"', { skip: process.platform === 'win32' && 'POSIX' }, async () => {
   const { dir, home } = appInstance();
   const gh = await fakeGitHub(['example-org/example-shop']);
-  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, [`${BRAND.envPrefix}_GITHUB_API`]: gh.api };
+  const env = { ...childEnv(), [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir, ...loopbackGitHub(gh.api) };
   try {
     let r = await run(['instance', 'show', 'site'], env);
     assert.equal(r.status, 0, r.stderr);
