@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -18,6 +18,7 @@ import { TrustView } from './components/TrustPanel';
 import { ConstraintsPanel, ConstraintsView } from './components/ConstraintsPanel';
 import { MetricsPanel, MetricsView } from './components/MetricsPanel';
 import { FlakyView } from './components/FlakyPanel';
+import { HarnessEvalsView } from './components/HarnessEvalsPanel';
 import { LearningsView } from './components/LearningsPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
@@ -106,6 +107,7 @@ export const renderConstraintsPanel = (state: State) => renderToStaticMarkup(<Co
 export const renderMetrics = (m: Metrics) => renderToStaticMarkup(<MetricsView m={m} />);
 export const renderMetricsPanel = (state: State) => renderToStaticMarkup(<MetricsPanel state={state} />);
 export const renderFlaky = (f: Flaky) => renderToStaticMarkup(<FlakyView f={f} />);
+export const renderHarnessEvals = (h: HarnessEvals) => renderToStaticMarkup(<HarnessEvalsView h={h} />);
 export const renderLearnings = (l: Learnings) => renderToStaticMarkup(<LearningsView l={l} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';

@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
+import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
 import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
 import type { RunAs } from './runner.js';
@@ -80,6 +81,8 @@ export const InstanceSettings = z.strictObject({
     .strictObject({
       local: z.boolean().optional(),
       hosted: z.array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,40}$/)).optional(),
+      /** WHY: item 38. Opt-in per CLI (src/cli-agents.ts); none listed, none runs. */
+      cli: z.array(z.enum(CLI_AGENTS)).optional(),
     })
     .optional(),
   /** Tiered evaluation for this instance (agents.yaml eval_routing): the cheap model, its levels, escalation. */
