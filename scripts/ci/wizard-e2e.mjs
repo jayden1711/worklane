@@ -587,7 +587,11 @@ async function serverMachine() {
     assert.ok(m, `the root command: ${cmd}`);
     assert.ok(sh('sudo', ['test', '-e', '/etc/worklane/allowed_signers']).status !== 0 || !sudoOk('cat', '/etc/worklane/allowed_signers').includes(pub), 'staging trusts nothing');
     // The admin's root step, as the page shows it.
-    sudoOk('bash', m[1], '--confirm-signer', m[2]);
+    // It shows who staged it, the principal and the key, then asks the admin to type the principal (the page says so):
+    // typed here on its stdin. Run 38539290696 gave it none, and it rightly added nothing.
+    const confirmed = sh('sudo', ['bash', m[1], '--confirm-signer', m[2]], { input: 'release@example.com\n' });
+    assert.equal(confirmed.status, 0, `the root confirm: ${confirmed.err}`);
+    assert.match(confirmed.err + confirmed.out, /release@example\.com/);
     assert.ok(sudoOk('cat', '/etc/worklane/allowed_signers').includes(`release@example.com ${pub}`));
     assert.equal(stat('/etc/worklane/allowed_signers'), 'root 644');
     // The root step has returned: a fresh load of the page reads the signers file, once.
