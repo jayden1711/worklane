@@ -2,7 +2,7 @@ name: ci slow
 # The slow checks: the bootstrap on each OS, the test-run sandbox and add-project on real systemd, and the Claude
 # sign-in probe with real users. Not on every push to main (ci.yml runs the fast checks there):
 #   - on main, in batches: ci-batch.yml starts this workflow (workflow_dispatch on main, job=all) on main's newest
-#     commit at most every 30 minutes, when that commit hasn't had a batch. A workflow_dispatch run's check runs
+#     commit, one batch at a time, when that commit hasn't had a batch. A workflow_dispatch run's check runs
 #     land on the commit it ran on, under the job names below, which the engine updater requires
 #     (UPDATE_DEFAULT_CHECKS in scripts/setup/lib.sh; test/update-checks.test.ts keeps them in step). So the
 #     updater installs only a batched commit: a main commit the batch skipped never gets these checks.
