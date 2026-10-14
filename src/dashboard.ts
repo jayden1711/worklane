@@ -74,6 +74,7 @@ import { gitRemoteRepo } from './install.js';
 import type { InitIo } from './init.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionId, type ActionPlan } from './setup-actions.js';
 import { ClaudeSignin, claudeServerView, systemSigninDeps, type SigninDeps } from './claude-signin.js';
+import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
@@ -191,6 +192,8 @@ export interface DashboardOptions {
   claudeSignin?: Partial<SigninDeps>;
   /** WHY: a checkout with no config yet (src/setup-mode.ts): the first-run page alone; tests stand in for its commands. */
   setupMode?: { run?: SetupRun; io?: InitIo };
+  /** WHY: tests stand in for gh in Connect GitHub's device login (src/gh-login.ts). */
+  ghLogin?: Partial<GhLoginDeps>;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -857,6 +860,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     setupCache.delete('claude-login');
     if (signinBy) audit(signinBy, 'first_run.claude_signin_ended', { state, detail: detail.slice(0, 300) });
   });
+  /** Connect GitHub's device login (local mode): made on first use, one at a time. */
+  let ghLogin: GhLogin | null = null;
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -1502,6 +1507,39 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           signin.start();
           audit(who, 'first_run.claude_signin', { state: signin.view(false).state });
           return json(res, 200, { ok: true, ...signin.view(true) });
+        }
+        // Connect GitHub (local mode, src/gh-login.ts): `gh auth login --web` run for the person, its one-time code shown,
+        // done once `gh auth status` says so. The instance's owners only; starting and cancelling are audited. The token
+        // stays in gh's own store: nothing here reads it. A server instance works as its GitHub App, never a gh login.
+        if (url.pathname === '/api/first-run/gh-login') {
+          const refused = (status: number, error: string) => {
+            if (req.method !== 'GET') audit(who, 'first_run.gh_login_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may connect GitHub here; @${who.login} is a ${who.role}`);
+          if (opts.instance) return refused(409, "a server instance works as its GitHub App, not a gh login: the agents' App is Add project's step");
+          ghLogin ??= new GhLogin(opts.ghLogin);
+          try {
+            if (req.method === 'GET') {
+              const v = ghLogin.poll();
+              if (v.state === 'done') setupCache.delete('gh-login');
+              return json(res, 200, v);
+            }
+            if (req.method === 'POST') {
+              const v = ghLogin.start();
+              audit(who, 'first_run.gh_login', { state: v.state === 'done' ? 'signed-in-already' : 'started' });
+              return json(res, 200, v);
+            }
+            if (req.method === 'DELETE') {
+              const v = ghLogin.cancel();
+              audit(who, 'first_run.gh_login', { state: 'cancelled' });
+              return json(res, 200, v);
+            }
+            return json(res, 405, { error: 'GET, POST or DELETE' });
+          } catch (e) {
+            if (e instanceof GhLoginError) return refused(e.status, e.message);
+            throw e;
+          }
         }
         // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
         // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.

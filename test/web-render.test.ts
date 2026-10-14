@@ -50,7 +50,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetupScreens(steps: unknown[]): string;
@@ -1224,8 +1224,21 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   // ... and it runs again once done (another account, an expired login).
   const signedIn = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((x) => (x.id === 'claude-login' ? { ...x, done: true } : x)) })) } };
   assert.match(r.renderFirstRun(signedIn), /data-step="claude-login" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="signin"[^>]*>Again</);
-  // Fix, a provider's login: a direct link, and that the page notices when it's done (GitHub's device login).
-  assert.match(r.renderFirstRun(f, { open: 'gh-login' }), /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="first-run-outside-link"[^>]*>Open GitHub(&#x27;|')s device login/);
+  // Connect GitHub (src/gh-login.ts): the command it runs for you; owners get the button, writers are told why not.
+  const ghFix = (canAct: boolean, ghLogin?: unknown) => r.renderFirstRun({ ...f, canAct }, { open: 'gh-login', ...(ghLogin ? { ghLogin } : {}) });
+  const gh0 = { state: 'idle', code: null, url: null, startedAt: null, expiresAt: null, detail: null, installed: true };
+  assert.match(ghFix(true, gh0), /data-fix="gh-login"[^>]*>Connect GitHub<[\s\S]*?data-testid="gh-login" data-state="idle"[\s\S]*?<code[^>]*>gh auth login --web<\/code>[\s\S]*?never sees the token[\s\S]*?data-testid="gh-login-start"[^>]*>Connect GitHub</);
+  assert.match(ghFix(false), /data-testid="gh-login-refused"/);
+  assert.doesNotMatch(ghFix(false), /gh-login-start/);
+  // Waiting: the one-time code, GitHub's device page, Cancel.
+  const waiting = ghFix(true, { ...gh0, state: 'waiting', code: 'E286-95A6', url: 'https://github.com/login/device', startedAt: '2026-10-13T00:00:00Z', expiresAt: '2026-10-13T00:15:00Z' });
+  assert.match(waiting, /data-testid="gh-login-code"[^>]*>E286-95A6</);
+  assert.match(waiting, /href="https:\/\/github\.com\/login\/device"[^>]*data-testid="gh-login-link"/);
+  assert.match(waiting, /data-testid="gh-login-cancel"/);
+  // Failed: why, and Try again; no gh: the Tools step.
+  assert.match(ghFix(true, { ...gh0, state: 'failed', detail: 'gh stopped (exit 1)' }), /data-testid="gh-login-detail"[^>]*>gh stopped \(exit 1\)<[\s\S]*?data-testid="gh-login-start"[^>]*>Try again</);
+  assert.match(ghFix(true, { ...gh0, installed: false }), /data-testid="gh-login-no-gh"/);
+  assert.match(ghFix(true, { ...gh0, state: 'done', detail: 'signed in' }), /data-testid="gh-login-done"/);
   // Fix with no screen yet: what a person does today, and that a screen is coming.
   const coming = f.setup!.groups.flatMap((g) => g.steps).find((s) => !s.done && s.fix.kind === 'coming')!;
   const comingHtml = r.renderFirstRun(f, { open: coming.id });
@@ -1391,7 +1404,7 @@ test('the first-run page: Skip on a step not done (owners), skipped shown and Un
   assert.match(settings, /data-testid="setup-screens"[\s\S]*?Setup screens/);
   assert.match(settings, /data-step="pre-commit"[\s\S]*?>done<[\s\S]*?worklane install --git-hooks[\s\S]*?href="\/first-run\?step=pre-commit"[^>]*>Run again/);
   assert.match(settings, /data-step="service"[\s\S]*?worklane up[\s\S]*?href="\/first-run\?step=service"[^>]*>Open/);
-  assert.doesNotMatch(settings, /data-step="gh-login"/, 'a step done on the provider\'s own page has no screen here');
+  assert.doesNotMatch(settings, /data-step="docker"/, 'a step done on the vendor\'s own page has no screen here');
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

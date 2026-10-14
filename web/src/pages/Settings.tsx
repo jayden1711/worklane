@@ -111,7 +111,7 @@ export function SettingsPage() {
         <a href="/machine" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/machine'))} data-testid="settings-machine-link">
           Machine page
         </a>
-        . Setup steps, such as Sign in to Claude, run again from the{' '}
+        . Each setup step (Connect GitHub, the tools, the hooks, ...) is checked again, and can be run again, on the{' '}
         <a href="/first-run" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/first-run'))} data-testid="settings-first-run-link">
           First run page
         </a>

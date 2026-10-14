@@ -850,7 +850,8 @@ export type SetupFix =
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
   | { kind: 'signin'; label: string }
-  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string };
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'gh-login'; label: string; command: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -954,6 +955,19 @@ export const startClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/clau
 export const cancelClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin/cancel', { method: 'POST', body: '{}' });
 /** Skip a setup step on the first-run page, or undo the skip. */
 export const skipStep = (step: string, skip: boolean) => api<{ ok: boolean; skipped: string[] }>('/api/first-run/skip', { method: 'POST', body: JSON.stringify({ step, skip }) });
+/** Connect GitHub (src/gh-login.ts): gh's device login, run by the server; only its one-time code reaches the page. */
+export interface GhLoginView {
+  state: 'idle' | 'waiting' | 'done' | 'failed' | 'expired' | 'cancelled';
+  code: string | null;
+  url: string | null;
+  startedAt: string | null;
+  expiresAt: string | null;
+  detail: string | null;
+  installed: boolean;
+}
+export const getGhLogin = () => api<GhLoginView>('/api/first-run/gh-login');
+export const startGhLogin = () => api<GhLoginView>('/api/first-run/gh-login', { method: 'POST', body: '{}' });
+export const cancelGhLogin = () => api<GhLoginView>('/api/first-run/gh-login', { method: 'DELETE' });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
