@@ -48,6 +48,7 @@ import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
+import { discordChannelsCommand } from './intake/discord-channels.js';
 import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
@@ -96,6 +97,15 @@ usage: ${BRAND.cli} <command> [options]
   skill status                     each project skill: evaluated, failing, stale or draft
   skill lint                       every SKILL.md has When to use, Inputs and access, Steps, Validate,
                                    Return and Approval, none empty; exits 1 otherwise (for CI)
+  harness-eval run [--task id]... [--samples k] [--budget usd] [--work dir] [--keep] [--record]
+                                   replay the harness eval suite's past tasks (templates/evals/tasks and the
+                                   held-out store) through the real coordinator in scratch instances, with
+                                   real agents, within the budget (default harness_evals.budget_usd); prints
+                                   success, cost, wall-clock and human interventions. --record: into the log
+  harness-eval add-task <owner/repo> <pr> [--id id] [--public]
+                                   a merged PR as a past task (read-only gh calls); kept in the held-out
+                                   store, or with --public in templates/evals/tasks (the engine's own
+                                   public repository only)
   queue full-run [--max-load n] [-- <command>]
                                    queue the full test run; starts by itself when the machine-wide
                                    full-run slot is free and tests.yaml idle_probe passes
@@ -137,6 +147,9 @@ usage: ${BRAND.cli} <command> [options]
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
+  discord channels [--instance name]
+                                   read-only: the text and announcement channels the instance's bot can see,
+                                   one "<server> / #<channel> <id>" line each (run as the instance's user)
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
@@ -521,6 +534,11 @@ async function main(argv: string[]): Promise<number> {
       for (const c of r.cases) console.log(`${c.pass ? 'pass' : 'FAIL'}  ${c.id}. ${c.title}  (${c.samples} samples passed${c.pass ? '' : `; e.g. correct ${c.correct}${c.wrongDone.length ? `, WRONG: ${c.wrongDone.join(' | ')}` : ''}`})`);
       console.log(`${r.passed}/${r.total} passed (model ${model}, judge ${judge})`);
       return r.passed === r.total ? 0 : 1;
+    }
+
+    case 'harness-eval': {
+      const he = await import('./harness-evals/cli.js');
+      return he.harnessEvalCommand(root, sub, rest, { instance: instanceOpt, option, flag, usage: commandUsage('harness-eval') });
     }
 
     case 'baseline': {
@@ -1007,6 +1025,14 @@ async function main(argv: string[]): Promise<number> {
       const created = await backlogFor(loadConfig(root), root).ensureLabels([...LABELS, INTAKE_LABEL]);
       console.log(created.length ? `created: ${created.join(', ')}` : 'all labels exist');
       return 0;
+    }
+
+    case 'discord': {
+      if (sub !== 'channels' || rest.length) {
+        console.error(commandUsage('discord'));
+        return 2;
+      }
+      return discordChannelsCommand({ instance: instanceOpt });
     }
 
     case 'prod-read': {

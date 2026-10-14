@@ -27,3 +27,16 @@ test/instance.test.ts /home/wl-no-such-agent-user
 test/setup-scripts.test.ts /home/site-agent
 # Placeholder homes in the separate-users guide.
 docs/separate-users.md /home/wl-
+# The CI runner's firewall: the private and shared ranges it refuses, and the addresses its checks probe.
+scripts/setup/ci-runner.sh 10.0.0.0
+scripts/setup/ci-runner.sh 100.64.0.0
+scripts/setup/ci-runner.sh 172.16.0.0
+scripts/setup/ci-runner.sh 192.168.0.0
+scripts/setup/ci-runner.sh 10.255.255.1
+scripts/setup/ci-runner.sh 100.100.100.100
+docs/ci-runners.md 100.64.0.0
+scripts/ci/runner-stand-in/job.sh 10.255.255.1
+scripts/ci/runner-stand-in/job.sh 100.100.100.100
+scripts/ci/runner-stand-in/job.sh 10.0.2.2
+.github/workflows/ci-runner-setup.yml 10.255.255.1
+.github/workflows/ci-runner-setup.yml 100.100.100.100
