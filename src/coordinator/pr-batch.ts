@@ -9,6 +9,7 @@
 // batch that held exactly that head (mayMerge, called right before the merge). A PR whose head changes leaves its
 // batch. Every step is an event, so a restart resumes a green batch's checks and abandons anything else (its PRs go
 // back in the queue), and nothing is merged twice.
+import { TestRunHeld } from '../testrun/gate.js';
 import { spawnSync } from 'node:child_process';
 import { BRAND } from '../brand.js';
 import type { CommitCheck, PullRequest } from '../backlog/types.js';
@@ -662,7 +663,14 @@ export class PrBatcher {
     const base = { repo: this.d.repo, sha, kind: 'full' as const, prs: prs.map((p) => p.number) };
     const reqs: TestRunRequest[] = shards === 1 ? [base] : Array.from({ length: shards }, (_, i) => ({ ...base, shard: { index: i + 1, total: shards } }));
     const signal = this.current?.controller.signal;
-    const results = await Promise.all(reqs.map((r) => this.d.testRuns!.startTestRun(r, signal ? { signal } : {})));
+    let results: TestRunResult[];
+    try {
+      results = await Promise.all(reqs.map((r) => this.d.testRuns!.startTestRun(r, signal ? { signal } : {})));
+    } catch (e) {
+      // WHY: held at the gate (src/testrun/gate.ts) is no verdict: the batch is abandoned, nobody blamed, batched again.
+      if (e instanceof TestRunHeld) throw new NoVerdict(`its run was held: ${e.reason}`);
+      throw e;
+    }
     // No verdict (cancelled, interrupted, errored, a tier that never ran): never red, never bisected.
     if (signal?.aborted) throw new NoVerdict(`its run was cancelled: ${this.current?.why ?? 'cancelled'}`);
     for (const r of results) {

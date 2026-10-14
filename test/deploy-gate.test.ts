@@ -2,6 +2,8 @@
 // commits green on every gate tier, never forced; refused (with an incident) when it moved off the default branch's
 // line; off by default; and an owner's `deploy <sha>` override from Discord, confirmed first, fast-forward only,
 // audited. Real git (a bare remote and a clone); GitHub and Discord are fakes.
+import { passGate } from '../src/testrun/gate.js';
+import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -88,7 +90,7 @@ const result = (req: TestRunRequest, red: string[] = []): TestRunResult => ({
   tiers: (req.tiers ?? []).map((t) => ({ tier: t, ok: !red.includes(t), durationMs: 10, summary: '', logRef: '' })),
 });
 
-function gate(o: { red?: string[]; config?: DeployGateConfig } = {}) {
+function gate(o: { red?: string[]; config?: DeployGateConfig; gated?: boolean } = {}) {
   const r = repos();
   const log = new EventLog(join(r.base, 'events.db'));
   const stateDir = join(r.base, 'state');
@@ -106,7 +108,8 @@ function gate(o: { red?: string[]; config?: DeployGateConfig } = {}) {
     actor: 'coordinator',
     stateDir,
     repo: r.clone,
-    start: async (req) => (runs.push(req), result(req, o.red)),
+    // WHY: gated, the run goes through the start gate first, as runTestRun (the only start of a run) does.
+    start: async (req) => (o.gated ? passGate() : undefined, runs.push(req), result(req, o.red)),
     post: async (sha, res) => void posted.push({ sha, ok: res.ok }),
     incidents: { raiseIncident: (kind, key, detail) => void incidents.push({ op: 'raise', kind, key, detail }), resolveIncident: (kind, key) => void incidents.push({ op: 'resolve', kind, key }) },
     pollMs: 0,
@@ -477,3 +480,28 @@ test('deploy override: refused while the gate is off, saying so; nothing moves',
   assert.deepEqual(u.refs.calls, []);
   assert.match(u.src.posts.filter((p) => p.where === CHANNEL).at(-1)!.text, /Not deployed: the deploy gate is off/);
 });
+
+for (const mode of GATE_MODES) {
+  test(`deploy gate: a run held at the start gate (${mode}) is no verdict: deploy stays, nothing is red, and the same commit runs once there is room`, async () => {
+    const g = guardGate();
+    try {
+      const t = gate({ gated: true });
+      g.close(mode);
+      await t.g.step();
+      await t.g.idle();
+      await t.g.step();
+      await t.g.idle();
+      assert.equal(t.runs.length, 0, 'nothing ran');
+      assert.deepEqual(t.of('deploy_gate.verdict'), [], 'no verdict');
+      assert.deepEqual(t.of('deploy_gate.held'), [], 'not held as red');
+      assert.equal(t.deployAt(), t.c1);
+      g.open();
+      await t.g.step();
+      await t.g.idle();
+      assert.deepEqual(t.runs.map((r) => r.sha), [t.c2], 'the same commit runs');
+      assert.equal(t.deployAt(), t.c2, 'and deploy moves on it');
+    } finally {
+      g.done();
+    }
+  });
+}

@@ -1,5 +1,6 @@
 // One test run, start to end: queue for a test slot, take the full-run lock shared (waiting for an exclusive holder,
 // never failing on one), make the workspace, run the tiers, wipe, record. docs/test-runs.md.
+import { passGate } from './gate.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EventLog } from '../events/log.js';
@@ -173,10 +174,13 @@ export function validateRequest(req: TestRunRequest): void {
 /**
  * Run one test run. Waits for a slot and then the lock as long as either takes (until `signal` aborts: a
  * superseded run), wipes the run whatever happens, and records every step. Never throws for a test failure, a
- * setup failure or a cancellation: those are the result (ok false). Throws only for a bad request.
+ * setup failure or a cancellation: those are the result (ok false). Throws for a bad request, and TestRunHeld while
+ * the start gate (./gate.ts: the disk full or below its floor) refuses: nothing is queued, recorded or started then.
  */
 export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signal?: AbortSignal; id?: string } = {}): Promise<TestRunResult> {
   validateRequest(req);
+  // INVARIANT: every test run passes the one start gate here, before anything is recorded or started.
+  passGate();
   const now = d.now ?? Date.now;
   const id = o.id ?? newRunId(req.kind, req.sha);
   const emit = <T extends EventType>(type: T, payload: EventPayload<T>) => d.log.append(type, payload, d.actor);

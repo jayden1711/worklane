@@ -41,6 +41,7 @@ import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount, flockHolders, installService, serviceChange, type ServiceSpec } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
+import { goalGraph } from './goal-graph.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
@@ -1923,6 +1924,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
           return json(res, 200, checkResults(readEvents(opts.eventsDb), issue));
+        }
+        // A goal's task graph (src/goal-graph.ts), read-only, for everyone with a role, like the goal's own page. Built
+        // from the events this person may see (a viewer's are the allowlisted ones), so it shows no goal or task a
+        // viewer couldn't see before; run links only for those the runs gate lets through.
+        if (url.pathname === '/api/goal-graph' && req.method === 'GET') {
+          const issue = Number(url.searchParams.get('issue'));
+          if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
+          const all = readEvents(opts.eventsDb);
+          const runs = mayReadRuns(who.role);
+          const live = runs ? liveRuns(opts.stateDir) : [];
+          const runOf = (n: number) => live.find((r) => r.issue === n)?.run ?? runsForIssue(opts.stateDir, n).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0]?.id ?? null;
+          return json(res, 200, goalGraph({ events: isWriter(who.role) ? all : forViewers(all), goal: issue, ...(runs ? { runOf } : {}) }));
         }
         if (url.pathname === '/api/stream' && req.method === 'GET') {
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });

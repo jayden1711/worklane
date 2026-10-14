@@ -314,7 +314,9 @@ export class Coordinator extends HarnessEvals {
         cwd: this.d.repo,
         doneWhenOf: async (n) => {
           const c = parseContract((await this.d.backlog.get(n)).body);
-          return c.ok ? doneWhenCommands(localDoneWhen(c.done_when, this.d.cfg.tests), this.d.cfg.tests.runner) : [];
+          if (!c.ok) return { commands: [], tests: [] };
+          const list = localDoneWhen(c.done_when, this.d.cfg.tests);
+          return { commands: doneWhenCommands(list, this.d.cfg.tests.runner), tests: list.flatMap((x) => ('test' in x ? [x.test] : [])) };
         },
         spentToday: () => this.spentToday(),
         dailyBudgetUsd: this.d.cfg.agents.daily_budget_usd,

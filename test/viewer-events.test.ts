@@ -15,6 +15,11 @@ import { forViewer, stateForViewer, VIEWER_EVENTS } from '../src/viewer-events.j
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const seen = { issue: 1, title: 'Fix rounding', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' };
+/**
+ * The run's cost: a number no timestamp, id or count can spell by chance (an ISO time has at most four digits in a
+ * row), so finding it means it leaked. 1.25 was not: a time like 08:33:41.250Z holds "1.25".
+ */
+const RUN_USD = 98765.4321;
 const asked = { id: 'd-1', kind: 'question' as const, issue: 1, owner: 'example-owner', question: 'Which rounding?', options: ['up', 'down'], recommendation: 'up', receipts: ['run 2026-x: secret-ish receipt'] };
 
 async function serve() {
@@ -23,7 +28,7 @@ async function serve() {
   const log = new EventLog(db);
   log.append('issue.seen', seen, 'c');
   log.append('research.searched', { issue: 1, run: 'r-1', query: 'what the agent searched for' }, 'c');
-  log.append('run.cost', { issue: 1, role: 'worker', model: 'sonnet', usd: 1.25, turns: 3 }, 'c');
+  log.append('run.cost', { issue: 1, role: 'worker', model: 'sonnet', usd: RUN_USD, turns: 3 }, 'c');
   log.append('decision.asked', asked, 'c');
   log.append('coordinator.error', { instance: 'demo', where: 'tick', kind: 'error', message: 'agent output: /home/example/secret path' }, 'c');
   const { dir: root } = exampleProject();
@@ -35,6 +40,20 @@ async function serve() {
 }
 
 type Ev = { type: string; payload: Record<string, unknown> };
+
+/** A key that names money. costBasis is the one allowed: the word for how costs are counted ("estimate"), not an amount. */
+const MONEY_KEY = /cost|usd|price|spen[dt]|budget|dollar|amount|billing|charge/i;
+/** The path of every money-shaped key anywhere in `x`, at any depth. */
+function moneyKeys(x: unknown, path = '$'): string[] {
+  if (Array.isArray(x)) return x.flatMap((y, i) => moneyKeys(y, `${path}[${i}]`));
+  if (!x || typeof x !== 'object') return [];
+  return Object.entries(x).flatMap(([k, y]) => {
+    const allowed = k === 'costBasis' && typeof y === 'string' && !/\d/.test(y);
+    return [...(MONEY_KEY.test(k) && !allowed ? [`${path}.${k}`] : []), ...moneyKeys(y, `${path}.${k}`)];
+  });
+}
+/** The run's cost in any form: as is, rounded to cents, in cents, or written with a thousands comma. */
+const leaksRunCost = (json: string) => /98,?765/.test(json);
 
 test('a viewer gets only the allowlisted events and fields on /api/events and in Activity; a writer and the owner get everything', async () => {
   const s = await serve();
@@ -138,7 +157,9 @@ test('the service log and the machine settings are the writers\' and the owner\'
   }
 });
 
-test('a viewer\'s state has no costs, spend, budget or agent runs; a writer\'s and the owner\'s have them', async () => {
+test('a viewer\'s state has no costs, spend, budget or agent runs; a writer\'s and the owner\'s have them', async (t) => {
+  // Every timestamp at an instant that holds "1.25" (the old check's flake), so a check that a timestamp can match fails every time.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-14T08:33:41.250Z') });
   const s = await serve();
   try {
     type St = Record<string, unknown> & { tasks: Record<string, unknown>[] };
@@ -146,17 +167,22 @@ test('a viewer\'s state has no costs, spend, budget or agent runs; a writer\'s a
     for (const k of ['budget', 'spendToday', 'spendByRole', 'runs']) assert.ok(!(k in v), `no ${k} for a viewer`);
     assert.ok(v.tasks.length && v.tasks.every((t) => !('costUsd' in t)), "no task's cost");
     assert.equal(v.tasks[0]!.title, 'Fix rounding', 'the task itself is still there');
-    assert.ok(!JSON.stringify(v).includes('1.25'), 'the run cost appears nowhere');
+    assert.deepEqual(moneyKeys(v), [], 'no cost-, usd-, price- or spend-shaped field anywhere');
+    assert.ok(!leaksRunCost(JSON.stringify(v)), 'the run cost appears nowhere');
     for (const who of ['example-collaborator', 'example-owner']) {
       const full = await s.get<St>('/api/state', who);
       for (const k of ['budget', 'spendToday', 'spendByRole', 'runs']) assert.ok(k in full, `${who} has ${k}`);
-      assert.equal(full.tasks[0]!.costUsd, 1.25);
+      assert.equal(full.tasks[0]!.costUsd, RUN_USD);
+      assert.ok(leaksRunCost(JSON.stringify(full)), `the check finds the cost in ${who}'s state`);
+      assert.ok(moneyKeys(full).includes('$.tasks[0].costUsd'), `and its field`);
     }
     // The health view's usage per day: the runs, never their estimated cost, for a viewer.
     type H = { usage: { days: Record<string, unknown>[] } };
     const vh = await s.get<H>('/api/health', 'someone-else');
     assert.ok(vh.usage.days.length && vh.usage.days.every((d) => !('estimatedUsd' in d) && typeof d.runs === 'number'));
-    for (const who of ['example-collaborator', 'example-owner']) assert.equal((await s.get<H>('/api/health', who)).usage.days[0]!.estimatedUsd, 1.25);
+    assert.deepEqual(moneyKeys(vh), [], "no cost-shaped field in a viewer's health");
+    assert.ok(!leaksRunCost(JSON.stringify(vh)), "the run cost appears nowhere in a viewer's health");
+    for (const who of ['example-collaborator', 'example-owner']) assert.equal((await s.get<H>('/api/health', who)).usage.days[0]!.estimatedUsd, Math.round(RUN_USD * 100) / 100);
     // The machine's outbound proxy (root's network.json) is its network layout: writers only.
     const f = join(mkdtempSync(join(tmpdir(), 'net-')), 'network.json');
     writeFileSync(f, JSON.stringify({ proxy: 'http://proxy.internal:3128' }));

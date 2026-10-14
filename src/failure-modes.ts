@@ -349,7 +349,10 @@ export function mergeCostMarkdown(m: MergeMetrics): string[] {
   return lines;
 }
 
-/** The weekly section for the earliest failed stage: per stage, how many failed runs each instance had there, and example reasons. */
+/**
+ * The weekly section for the earliest failed stage: per stage, how many failed runs each instance had there, and
+ * example reasons. plan and review are code's, from the run's trace: every one of them shows its evidence line.
+ */
 export function stageLabelsMarkdown(labels: (StageLabel & { instance: string })[], opts: { examples?: number } = {}): string[] {
   const lines: string[] = [`**Where failed runs first went wrong, last 7 days** (${labels.length} labelled)`];
   if (!labels.length) return [...lines, '- no failed runs labelled'];
@@ -361,7 +364,7 @@ export function stageLabelsMarkdown(labels: (StageLabel & { instance: string })[
     for (const l of at) byInstance.set(l.instance, (byInstance.get(l.instance) ?? 0) + 1);
     const counts = [...byInstance].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([i, n]) => `${i} ${n}`).join(', ');
     lines.push(`- ${stage}: ${at.length} (${counts})`);
-    for (const l of at.slice(0, per)) lines.push(`  - /runs/${l.run}: ${l.reason.split('\n')[0]!.slice(0, 200)}`);
+    for (const l of stage === 'plan' || stage === 'review' ? at : at.slice(0, per)) lines.push(`  - /runs/${l.run}: ${l.reason.split('\n')[0]!.slice(0, 200)}`);
   }
   return lines;
 }

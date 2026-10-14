@@ -186,6 +186,17 @@ export interface CheckRun {
   checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped' | string; exitCode: number | null; tail: string | null }[];
 }
 
+/** A goal's task graph (GET /api/goal-graph?issue=n, src/goal-graph.ts): `from` finishes before `to` starts. */
+export interface GoalGraph {
+  goal: number;
+  split: boolean;
+  nodes: { issue: number; key: string | null; title: string; status: TaskStatus | null; pr: { number: number; url: string } | null; run: string | null; cycle: boolean; layer: number }[];
+  edges: { from: number; to: number; cycle: boolean }[];
+  cycles: number[][];
+  total: number;
+  capped: boolean;
+}
+
 export interface Activity { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }
 
 export interface State {
