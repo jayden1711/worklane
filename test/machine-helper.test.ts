@@ -75,12 +75,15 @@ test('a refused argument list writes and logs nothing', () => {
 const setup = join(repoRoot, 'scripts', 'setup');
 const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), ...users], { encoding: 'utf8' });
 
-test('the sudoers rule lists exactly the 28 commands, no patterns but add-project\'s one, for the named coordinators only', { skip: !posix && 'bash' }, () => {
+test('the sudoers rule lists exactly the 32 commands, no patterns but add-project\'s one, for the named coordinators only', { skip: !posix && 'bash' }, () => {
   const r = sudoers('wl-alpha', 'wl-beta');
   assert.equal(r.status, 0, r.stderr);
   const cmds = [...r.stdout.matchAll(new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
   const addProject = `${MACHINE_HELPER} ^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`;
-  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${MACHINE_HELPER} set-test-slots ${i + 1}`), `${MACHINE_HELPER} claude-account status`, `${MACHINE_HELPER} claude-account switch`, addProject];
+  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${MACHINE_HELPER} set-test-slots ${i + 1}`), `${MACHINE_HELPER} claude-account status`, `${MACHINE_HELPER} claude-account switch`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${MACHINE_HELPER} tailscale ${a}`), addProject];
+  assert.equal(want.length - 1, 32);
+  // Tailscale's four are whole commands: sudo matches a listed command's arguments exactly, so nothing may follow one.
+  for (const a of ['install', 'up', 'serve', 'public-url']) assert.match(r.stdout, new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} tailscale ${a}(, \\\\)?$`, 'm'), a);
   assert.deepEqual(cmds, want);
   // add-project's arguments are one anchored pattern (test/add-project.test.ts); nothing else has any.
   assert.doesNotMatch(r.stdout.replace(addProject, ''), /[*?[\]^$]|ALL\s*$|\bsh\b|bash/m, 'no wildcards, patterns or shells');
@@ -142,4 +145,69 @@ test('the helper takes claude-account status|switch and nothing more; a switch o
   for (const u of [undefined, '', 'root', 'admin', 'wl-dash', 'wl-alpha-agent', 'wl-Alpha', 'wl-', 'wl-a;b']) assert.equal(coordinatorInstance(u), null, String(u));
   // The script it runs is a fixed path in the helper's own source, like add-project's.
   assert.match(readFileSync(helperSrc, 'utf8'), /^const CLAUDE_ACCOUNT = '\/opt\/worklane\/current\/scripts\/setup\/claude-account\.sh';$/m);
+});
+
+test('the helper takes tailscale install|up|serve|public-url and nothing more: no auth key, flag, URL or port', () => {
+  const { parseTailscale, tailscaleCommand, parse, parseAddProject, parseClaudeAccount } = createRequire(import.meta.url)(helperSrc) as {
+    parseTailscale: (a: unknown[]) => string | null;
+    tailscaleCommand: (real: string, action: string, instance: string) => string[];
+    parse: (a: string[]) => unknown;
+    parseAddProject: (a: string[]) => unknown;
+    parseClaudeAccount: (a: string[]) => unknown;
+  };
+  for (const a of ['install', 'up', 'serve', 'public-url']) assert.equal(parseTailscale(['tailscale', a]), a);
+  const bad: unknown[][] = [
+    ['tailscale'],
+    ['tailscale', 'up', '--auth-key=tskey-auth-kExample-abcdef'],
+    ['tailscale', 'up', '--authkey', 'tskey-auth-kExample-abcdef'],
+    ['tailscale', 'up', '--auth-key', 'file:/etc/key'],
+    ['tailscale', 'up', '--login-server=https://example.test'],
+    ['tailscale', 'up', '--ssh'],
+    ['tailscale', 'up', '--for', 'alpha'],
+    ['tailscale', 'up', ''],
+    ['tailscale', 'up --auth-key=tskey-auth-x'],
+    ['tailscale', 'up\n'],
+    ['tailscale', ' up'],
+    ['tailscale', 'UP'],
+    ['tailscale', '--auth-key=tskey-auth-x', 'up'],
+    ['tailscale', 'serve', '4398'],
+    ['tailscale', 'serve', '--https=443', 'http://127.0.0.1:4398'],
+    ['tailscale', 'serve', 'reset'],
+    ['tailscale', 'funnel'],
+    ['tailscale', 'public-url', 'https://elsewhere.example.test'],
+    ['tailscale', 'public-url', '--public-url', 'https://elsewhere.example.test'],
+    ['tailscale', 'install', '1.0.0'],
+    ['tailscale', 'install', '--allow-unauthenticated'],
+    ['tailscale', 'status'],
+    ['tailscale', 'logout'],
+    ['tailscale', 'down'],
+    ['tailscale', 'set', '--operator=wl-alpha'],
+    ['tailscale', ['up']],
+    ['tailscale', null],
+    ['Tailscale', 'up'],
+    ['tailscale-up'],
+    ['up'],
+    [],
+  ];
+  for (const a of bad) assert.equal(parseTailscale(a), null, JSON.stringify(a));
+  // And none of them is some other command's: the helper refuses each outright.
+  for (const a of bad.filter((x): x is string[] => x.every((s) => typeof s === 'string'))) assert.ok(!parse(a) && !parseAddProject(a) && !parseClaudeAccount(a), JSON.stringify(a));
+  // What the unit runs is the script and that one word; only `up` is told whose dashboard gets the login link.
+  assert.deepEqual(tailscaleCommand('/opt/x/tailscale.sh', 'install', 'alpha'), ['/bin/bash', '/opt/x/tailscale.sh', 'install']);
+  assert.deepEqual(tailscaleCommand('/opt/x/tailscale.sh', 'up', 'alpha'), ['/bin/bash', '/opt/x/tailscale.sh', 'up', '--for', 'alpha']);
+  assert.deepEqual(tailscaleCommand('/opt/x/tailscale.sh', 'serve', 'alpha'), ['/bin/bash', '/opt/x/tailscale.sh', 'serve']);
+  assert.deepEqual(tailscaleCommand('/opt/x/tailscale.sh', 'public-url', 'alpha'), ['/bin/bash', '/opt/x/tailscale.sh', 'public-url']);
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.match(src, /^const TAILSCALE = '\/opt\/worklane\/current\/scripts\/setup\/tailscale\.sh';$/m);
+  assert.doesNotMatch(src, /auth-?key|tskey/i, 'the helper has no way to name a key, bar the comment saying so');
+});
+
+test('a refused tailscale argument list runs nothing and logs nothing; a caller who is no coordinator is refused too', () => {
+  const h = helperIn(mkdtempSync(join(tmpdir(), 'machine-')));
+  for (const a of [['tailscale'], ['tailscale', 'up', '--auth-key=tskey-auth-x'], ['tailscale', 'serve', '4398'], ['tailscale', 'public-url', 'https://x.example.test'], ['tailscale', 'status']]) {
+    const r = h.run(...a);
+    assert.equal(r.status, 2, JSON.stringify(a));
+    assert.match(r.stderr, /usage: worklane-machine .*\| tailscale install\|up\|serve\|public-url\n$/);
+  }
+  assert.ok(!existsSync(h.log), 'nothing logged');
 });

@@ -28,6 +28,20 @@
 // cgroup, because the switch stops every coordinator, that one included; it takes the token from the asking
 // instance's dashboard (--token-from <the instance whose coordinator asked>: from SUDO_USER, never an argument). An
 // admin switches from a terminal with claude-account.sh itself.
+//
+//   worklane-machine tailscale install
+//   worklane-machine tailscale up
+//   worklane-machine tailscale serve
+//   worklane-machine tailscale public-url
+//
+// start the installed engine's scripts/setup/tailscale.sh with that one word, under the same root-owned check, as a
+// transient unit of its own (worklane-tailscale.service: one at a time; an install or a login outlasts the asking
+// coordinator's 30 seconds). Exactly these four lists and nothing after them: no auth key, no flag, no URL, no port.
+// What each does is fixed in that script: install is Tailscale's signed apt repository, with its signing key and the
+// version pinned there; up is `tailscale up` with no auth key, its login link going only to a file the asking
+// coordinator's user alone reads (--for <the instance whose coordinator asked>: from SUDO_USER, never an argument);
+// serve forwards https 443 to the hub's sign-in port and nothing else; public-url sets the hub's URL to this
+// machine's own tailnet name through dashboards.sh. An admin runs tailscale.sh from a terminal instead.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -39,9 +53,12 @@ const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const ADD_PROJECT = '/opt/worklane/current/scripts/setup/add-project.sh';
 const CLAUDE_ACCOUNT = '/opt/worklane/current/scripts/setup/claude-account.sh';
 const CLAUDE_ACCOUNT_UNIT = 'worklane-claude-account';
+const TAILSCALE = '/opt/worklane/current/scripts/setup/tailscale.sh';
+const TAILSCALE_UNIT = 'worklane-tailscale';
+const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | tailscale install|up|serve|public-url';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -141,6 +158,36 @@ function claudeAccount(action) {
   return 0;
 }
 
+/** The tailscale step a list asks for (install, up, serve or public-url), or null when it is anything else: exactly two words. */
+function parseTailscale(args) {
+  return args.length === 2 && args[0] === 'tailscale' && typeof args[1] === 'string' && TAILSCALE_ACTIONS.includes(args[1]) ? args[1] : null;
+}
+
+/** What the unit runs for a tailscale step: the script, the one word and, for up, whose dashboard gets the login link. Nothing of the caller's but that word. */
+function tailscaleCommand(real, action, instance) {
+  return ['/bin/bash', real, action, ...(action === 'up' ? ['--for', instance] : [])];
+}
+
+function tailscale(action) {
+  const real = rootScript(TAILSCALE);
+  if (!real) return 1;
+  const instance = coordinatorInstance(process.env.SUDO_USER);
+  if (!instance) {
+    process.stderr.write('tailscale here is for a coordinator, through sudo; an admin runs scripts/setup/tailscale.sh\n');
+    return 2;
+  }
+  logLine('tailscale', null, action);
+  const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
+  const r = spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT, '--collect', '--no-block', '--quiet', '--description', `worklane tailscale ${action}`, '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8 HOME=/root`, ...tailscaleCommand(real, action, instance)], { cwd: '/', env, encoding: 'utf8' });
+  if (r.error || r.status !== 0) {
+    const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
+    process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a tailscale step is already running (worklane-tailscale.service); wait for it to finish\n' : `couldn't start tailscale ${action}: ${text.split('\n')[0]}\n`);
+    return 1;
+  }
+  process.stdout.write(`started tailscale ${action} as ${TAILSCALE_UNIT}.service\n`);
+  return 0;
+}
+
 function addProject(p) {
   const real = rootScript(ADD_PROJECT);
   if (!real) return 1;
@@ -177,6 +224,8 @@ function main(args) {
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
   if (account) return claudeAccount(account);
+  const ts = parseTailscale(args);
+  if (ts) return tailscale(ts);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
@@ -204,4 +253,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseAddProject, parseClaudeAccount, coordinatorInstance };
+module.exports = { parse, parseAddProject, parseClaudeAccount, parseTailscale, tailscaleCommand, coordinatorInstance };
