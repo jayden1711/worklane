@@ -6,7 +6,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 
 ### Highlights
 
-One command, one URL: `bash scripts/bootstrap.sh <repo>` (or `--hardened` on a server) installs pinned, checksum-checked tools and the engine, then prints a single first-run wizard URL with no key in it, where every remaining setup step happens on its own screen (#357, #380). Owners can now dictate into the Ask panel and hear answers read back, on-device and off by default (#404, #405), and with voice intake turned on, speak an idea or "approve <issue>" and confirm it within 10 seconds (#411). A goal issue is split into child tasks with "Depends on" edges, and the goal's page draws that task graph (#347, #351, #410). The engine updater drains a machine that is never quiet: new runs pause, in-flight work finishes, the update installs and the machine reopens (#407). A full disk no longer kills the coordinator: events wait in memory, new work pauses under a `disk_full` incident, and everything resumes on its own (#398). One start gate now sits in front of every test run, so the disk floor and `disk_full` hold all six paths that start one (#406).
+One command, one URL: `bash scripts/bootstrap.sh <repo>` (or `--hardened` on a server) installs pinned, checksum-checked tools and the engine, then prints a single first-run wizard URL with no key in it, where every remaining setup step happens on its own screen (#357, #380). Owners can now dictate into the Ask panel and hear answers read back, on-device and off by default (#404, #405), and with voice intake turned on, speak an idea or "approve <issue>" and confirm it within 10 seconds (#411). A goal issue is split into child tasks with "Depends on" edges, and the goal's page draws that task graph (#347, #351, #410). The engine updater drains a machine that is never quiet: new runs pause, in-flight work finishes, the update installs and the machine reopens (#407). A full disk no longer kills the coordinator: events wait in memory, new work pauses under a `disk_full` incident, and everything resumes on its own (#398). One start gate now sits in front of every test run, so the disk floor and `disk_full` hold all six paths that start one (#406). The dashboard is much faster: each dashboard reads its event log once and then only what is new, built files are compressed and cached, and pages switch from what the page already holds; at 120 ms latency and 10 Mbit/s a cold load shows real data in about 1 s and switches take under 100 ms, gated by a real-Chrome test (#442, #445). The test suite runs clean beside a live install, on its own temporary home, state and slots (#436).
 
 ### Upgrade notes (from v0.4.1)
 
@@ -261,6 +261,19 @@ One command, one URL: `bash scripts/bootstrap.sh <repo>` (or `--hardened` on a s
 - docs: getting started around the one install command and the first-run wizard (#423)
 - docs: a short, current README; voice intake and approvals in getting started (#427)
 - cli: drop the npx hint from --help until the package is on npm (#428)
+- updates.sh --add-check: add required checks to an existing updates.json (#424)
+- live config: resolve a stale config_invalid when the coordinator starts on a valid config (#432)
+- Hub: keep a down instance listed (as down) while the person's role copy is fresh (#434)
+- Dashboard truth: current coordinator errors with time, local-day today, grey dot for an unread status, hub list refreshed (#433)
+- Dashboard reads wait out an event-log lock (no 500); phone test waits for the status dot it checks (#437)
+- Coordinator start: wait out an event-log lock, never exit 2 (wizard Start read 'activating'); stacked on #437 (#438)
+- Updater: a slot pid below 2 is no holder, so a corrupt slot file can't hold updates off for good (#439)
+- ci-runner: deny /var/lib/worklane-test to the runner user by ACL, as the other worklane paths (#440)
+- github_auth resolves once GitHub works again; not reaching GitHub is amber; App token mint gets a timeout (#430)
+- Tests run clean beside a live install: temporary home/state/slots, held ports, no pid <= 0 (#436)
+- Dashboard speed (server): incremental event reads, one-pass Board/trust, compression, year-cached hashed assets (#442)
+- Package (0.5.0): installed-tarball run test, size budget; doctor/dashboard --help print usage (#443)
+- Dashboard speed (client): switches from cache, prefetch, code split; a real-Chrome speed test gates cold load < 3 s and switches < 300 ms (#445)
 
 ### Fixes
 
@@ -287,6 +300,7 @@ One command, one URL: `bash scripts/bootstrap.sh <repo>` (or `--hardened` on a s
 - Fix forward with culprit finding (items 2 and 8) (#337)
 - Fix red main: ownership tests under #334's default plan gate (item 34) (#358)
 - Harness evals: fixed past tasks replayed through the real coordinator, weekly and on src/ changes (item 36) (#335)
+- Release notes for v0.5.0: every PR since v0.4.1, highlights and upgrade notes (changelog tool fixed) (#429)
 
 ### Security and guardrails
 
