@@ -234,6 +234,8 @@ A viewer's board leaves out everything about runs and agents (the run, its resou
 
 Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
+The Settings page's **Model routing** panel (part of `GET /api/settings`, owners and writers) lists every task type in agents.yaml `routing` (src/routing.ts): the model or value in effect and where it came from: the default in code, a role's model that stands in for it, the agents.yaml key (an older `model_routing` or `eval_routing` key is flagged with its new name), or the instance's policy.yaml. It is read-only: its "Change it" snippet is the `routing:` block to edit in agents.yaml through a pull request.
+
 Above the machine settings, the **Updates** panel (`GET /api/updates`, owners and writers) says where the engine stands: the version and commit installed now, the last update, any rollback or held commit with its reason (a canary that failed says so), and the canary's last result: passed or failed (or timed out), after an update or the daily one, how long it took, and a link to its PR. See [canary.md](canary.md) for setting the canary up.
 
 ## Trust
@@ -249,6 +251,12 @@ it has been seen flaky since, its issue, and its passes in a row toward release;
 flake rate, flaky re-runs over red runs, over 7 and 30 days. An owner's **Clear** puts a check back to blocking at
 once (`POST /api/flaky/clear`, audited). Quarantine changes only the harness's own red/green decisions after a merge;
 the updater still installs only a commit with every check green.
+
+Under it, **Learnings** (owners and writers; `GET /api/learnings`, src/learnings.ts): the notes finished tasks left for
+their failed runs (earliest failed stage, normalized cause), grouped by cause, with sightings, stages, issues and when
+last seen. For a cause seen 3 times or more, an owner may edit the suggested line and **Promote** it
+(`POST /api/learnings/promote`, owners only, audited): the coordinator opens a PR adding the line to `AGENTS.md`,
+labelled `review:L3`, which waits for the owner. Agents never write `AGENTS.md` themselves.
 
 - **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
   on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
@@ -287,8 +295,8 @@ value under each. A figure whose source has recorded nothing yet says **not meas
 - **Main red** and **time to green**: from the check of the default branch after each auto-merge
   (`merge.main_result`): the times it went red, and the median minutes from red to its next green.
 - **Fix-forward versus revert**: revert PRs opened (on a red default branch, or for a commit the main watch couldn't
-  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward isn't built
-  yet; its slot fills from its `fix_forward.finished` events once it is.
+  account for) and merged, and the revert rate (reverts on red over the times it went red). Fix-forward success:
+  fixed over every red default branch fix-forward took on, from its `fix_forward.finished` events.
 - **PR CI wall-clock**: on each merged PR's head, from the first check run starting to the last required check
   (config.yaml `required_checks`; every check when none) completing. Read from GitHub's check runs once per PR
   (`ci.pr_timing`, src/ci-metrics.ts), at most one read-only call a minute.

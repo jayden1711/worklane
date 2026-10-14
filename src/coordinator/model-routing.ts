@@ -1,4 +1,4 @@
-// Model routing, wired: the model each coordinator run uses, from the repo's agents.yaml model_routing over the
+// Model routing, wired: the model each coordinator run uses, from the repo's agents.yaml routing over the
 // defaults (src/model-routing.ts), and the instance's model_cap applied to every run the coordinator starts.
 import type { Config } from '../config/load.js';
 import type { InstanceSettings } from '../instance.js';
@@ -23,8 +23,8 @@ export function cappedModel(model: string, settings: InstanceSettings | undefine
 
 /** The routing with every open-model setting dropped: what each kind of run uses when no provider takes it. */
 function anthropicRouting(cfg: Config) {
-  const r = Object.fromEntries(Object.entries(cfg.agents.model_routing ?? {}).filter(([, v]) => typeof v !== 'string' || !providerOf(v)));
-  return modelRouting({ roles: cfg.agents.roles, model_routing: r });
+  const r = Object.fromEntries(Object.entries(cfg.agents.routing).filter(([, v]) => typeof v !== 'string' || !providerOf(v)));
+  return modelRouting({ roles: cfg.agents.roles, routing: r });
 }
 
 /**
@@ -39,5 +39,6 @@ export function buildRoute(cfg: Config, labels: string[], attempt = 1, noOpenMod
 
 /** A routed kind's model and its route, with the Anthropic model it falls back to. */
 export function runRoute(cfg: Config, kind: RoutedRun): { model: string; route: NonNullable<RunRequest['route']> } {
-  return { model: routeRun(cfg, kind), route: { kind, fallback: routedModel(anthropicRouting(cfg), kind) } };
+  // The runner knows the reflection as an 'other' run: no open-model provider takes it (src/providers.ts).
+  return { model: routeRun(cfg, kind), route: { kind: kind === 'reflection' ? 'other' : kind, fallback: routedModel(anthropicRouting(cfg), kind) } };
 }

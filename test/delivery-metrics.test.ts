@@ -122,7 +122,7 @@ test('every delivery metric from fixture events, over 7 and 30 days', () => {
 test('fix-forward: not measured until its events exist, then its success rate from them', () => {
   const m = metrics(fixture());
   assert.equal(w(m, 7).fixForward.measured, false);
-  assert.match((w(m, 7).fixForward as { why: string }).why, /fix-forward isn't built yet; this fills from its fix_forward\.finished events/);
+  assert.match((w(m, 7).fixForward as { why: string }).why, /fix-forward hasn't taken on a red default branch yet; this fills from its fix_forward\.finished events/);
   const withFf = metrics([...fixture(), ev(at(1), FIX_FORWARD_EVENT, { outcome: 'fixed' }), ev(at(2), FIX_FORWARD_EVENT, { outcome: 'reverted' }), ev(at(3), FIX_FORWARD_EVENT, { outcome: 'fixed' })]);
   assert.deepEqual(w(withFf, 7).fixForward, { measured: true, attempts: 3, fixed: 2, reverted: 1, successRate: 0.667 });
 });
@@ -164,7 +164,7 @@ test('the weekly metrics digest: the delivery figures, then the 20 slowest tests
   assert.match(parts[0]!, /- Main red: 2 \/ 3 \(red now\)/);
   assert.match(parts[0]!, /- Time to green \(median\): 180 min \/ 105 min/);
   assert.match(parts[0]!, /- Reverts opened, merged: 1, 0 \/ 2, 1; revert rate 0% \/ 33\.3%/);
-  assert.match(parts[0]!, /- Fix-forward success: not measured yet \(fix-forward isn't built yet/);
+  assert.match(parts[0]!, /- Fix-forward success: not measured yet \(fix-forward hasn't taken on a red default branch yet/);
   assert.match(parts[0]!, /- PR CI wall-clock \(median, p90\): 21 min, 30 min \/ 12 min, 30 min/);
   assert.match(parts[0]!, /- Agent startup \(median, p90\): 30 s, 40 s \/ 40 s, 5 min/);
   assert.match(parts[0]!, /- Flake rate: 50% of 2 \/ 50% of 2/);

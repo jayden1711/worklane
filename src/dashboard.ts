@@ -43,18 +43,20 @@ import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, 
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
-import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
+import { applySettings, changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
+import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
+import { learningsView, promoteRefusal } from './learnings.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
@@ -67,6 +69,7 @@ import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeA
 import { readSecretBody } from './console/secrets.js';
 import { AskError } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
+import { effectiveRouting, ROUTING } from './routing.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -79,7 +82,18 @@ export function settingsForViewer(cfg: Config) {
   return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
 }
 
-export function settingsView(cfg: Config) {
+/** WHY: the dashboard's cfg is the repo's; the panel shows what runs, so the instance's settings go over it (item 32). */
+export function routingInEffect(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>) {
+  let cfg = o.cfg;
+  try {
+    if (o.policyFile) cfg = applySettings(o.cfg, PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings);
+  } catch {
+    // WHY: the Instance settings panel reports an unreadable policy; this panel still shows the repo's routing.
+  }
+  return effectiveRouting(cfg.agents).map((r) => ({ ...r, task: ROUTING[r.key].task }));
+}
+
+export function settingsView(cfg: Config, routing = routingInEffect({ cfg, policyFile: null })) {
   return {
     configDir: BRAND.configDir,
     project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
@@ -90,6 +104,7 @@ export function settingsView(cfg: Config) {
       budget: cfg.agents.daily_budget_usd,
       roles: Object.entries(cfg.agents.roles).map(([name, r]) => ({ name, enabled: r!.enabled, model: r!.model, count: r!.count ?? null })),
     },
+    routing,
     tests: { gates: cfg.tests.gates, batchMax: cfg.tests.land.batch_max, nightlyAt: cfg.tests.nightly_at ?? null, tiers: Object.keys(cfg.tests.tiers ?? {}), baselineParser: !!cfg.tests.failures },
     review: cfg.review ? { levels: Object.fromEntries(Object.entries(cfg.review.levels).map(([k, v]) => [k, (v as { when: string[] }).when]))} : null,
     guardrails: { rules: cfg.guardrails.rules.length, protectedPaths: cfg.guardrails.protected_paths, secretPaths: cfg.guardrails.secret_paths.length, network: cfg.guardrails.network ? 'restricted' : 'open', preApproved: cfg.guardrails.pre_approved },
@@ -961,7 +976,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
         // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg) : settingsForViewer(opts.cfg));
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg, routingInEffect(opts)) : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
           const all = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
@@ -1138,6 +1153,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
         }
+        // Repeated feedback (src/checks-from-feedback.ts): the constraints people's "no"s cluster into, each with its
+        // count, its evidence links and its proposal. People's words, so the owner's and the writers', like the runs.
+        if (url.pathname === '/api/constraints' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('repeated feedback is', who) });
+          const c = opts.cfg.project.checks_from_feedback;
+          return json(res, 200, constraintsView(readEvents(opts.eventsDb), { writers: opts.cfg.project.owners.writers, enabled: c.enabled, minSightings: c.min_sightings, maxPerWeek: c.max_proposals_per_week, now: new Date() }));
+        }
         // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
         // A viewer gets only the figures the viewer-events allowlist permits, and never cost.
         if (url.pathname === '/api/trust') {
@@ -1167,6 +1189,26 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const r = releaseByOwner(log, body.test, who.login);
             if (!r.ok) return json(res, r.status, { error: r.error });
             audit(who, 'flaky.cleared', { test: body.test });
+            return json(res, 200, { ok: true });
+          } finally {
+            log.close();
+          }
+        }
+        // WHY: item 33 (src/learnings.ts). Read like the flaky tests; a promote is the owner's alone, by the same
+        // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
+        if (url.pathname === '/api/learnings' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the learnings are', who) });
+          return json(res, 200, { ...learningsView(readEvents(opts.eventsDb)), canPromote: isOwnerHere });
+        }
+        if (url.pathname === '/api/learnings/promote' && req.method === 'POST') {
+          const body = (await readBody(req)) as { fingerprint?: unknown; line?: unknown };
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may promote a learning to AGENTS.md; @${who.login} is a ${who.role}` });
+          const log = new EventLog(opts.eventsDb);
+          try {
+            const refused = promoteRefusal(learningsView(log.read()), body.fingerprint, body.line);
+            if (refused) return json(res, refused.status, { error: refused.error });
+            log.append('learning.promote_requested', { fingerprint: body.fingerprint as string, line: (body.line as string).trim(), by: who.login }, who.login, 'human');
+            audit(who, 'learning.promoted', { fingerprint: body.fingerprint });
             return json(res, 200, { ok: true });
           } finally {
             log.close();

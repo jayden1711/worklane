@@ -18,6 +18,8 @@ import type { MainWatchApi } from '../main-watch.js';
 import type { MergePostsApi } from '../merge-posts.js';
 import type { CiMetricsApi } from '../ci-metrics.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
+import type { JournalRead } from '../superfan/digest.js';
+import type { Previews } from '../preview/previews.js';
 import { DEFAULT_GENERATED } from '../config/schema.js';
 
 export interface CoordinatorDeps {
@@ -65,6 +67,11 @@ export interface CoordinatorDeps {
    * usage-limit pause raises and resolves its incident there. Absent: the pause reports only through its events.
    */
   incidents?: IncidentSink;
+  /**
+   * The superfan's view of this instance (src/coordinator/superfan.ts): its name (the incidents' `instance`) and its
+   * own service log, read as the coordinator's user (never sudo). Absent (a checkout's coordinator): no superfan.
+   */
+  superfan?: { name: string; journal?: () => Promise<JournalRead | null> };
   /**
    * The config follows the default branch (src/config/live.ts): `tree`, the config tree `cfg` was loaded from
    * (absent: the checkout's HEAD); `check`, checks beyond the schema a new config must pass (an instance's policy).
@@ -124,6 +131,8 @@ export interface CoordinatorDeps {
   roleOf?: RoleOf;
   /** The pre-deploy gate (src/deploy-gate/, tests.yaml deploy_gate); absent: off. */
   deployGate?: DeployGate;
+  /** docs/previews.md: PR previews; absent, off. */
+  previews?: Previews;
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */
