@@ -60,7 +60,7 @@ test_run:
 - no other run's workspace: `runs/` is an empty read-only tmpfs with only this run's directory bound in;
 - a private `/tmp`, `HOME` inside the run's directory, no devices, no new privileges;
 - `TMPDIR` (and `TMP`, `TEMP`) the run's own short directory, `/var/lib/wlt/<8 hex>`, the only one in the sandbox's `/var/lib/wlt`: a Unix socket's path has at most 107 bytes, and Chrome's `$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket` didn't fit under the run's directory. The helper makes it (the test user's, 0700) and refuses one that is already there. `/var/lib/wlt` is root's, 0711, made by the helper itself. It is not under `/tmp` or `/var/tmp`: the coordinator's unit has a private `/tmp`, so a directory the helper made there would not be in the host's `/tmp`, where systemd looks for it to bind it into the run;
-- an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment.
+- an environment of exactly `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI`, `USER`, `LOGNAME` and the variables the run names. The helper refuses any variable that looks like a secret or that the sandbox sets. The coordinator passes only the project's own variables, the caches' directories and `DATABASE_URL`, never its own environment. No value of these is ever in an argv, the journal or the unit: the coordinator passes them to the helper on stdin (each `NAME=value` ended by a NUL), the helper hands them to systemd in a root-only file (`EnvironmentFile=` under `/run/worklane-testrun-env`, removed when the command ends and by the wipe), and gives the database password to docker in an `--env-file`, never `-e`.
 - the command exactly as written, for bash alone. Otherwise systemd-run expands `${...}` in it itself (as `ExecStart=` does), which blanks a shell-only `${x}`. On systemd 254 and later the helper passes `--expand-environment=no`. On an older one it writes each `$` as `$$`, systemd's escape for a literal `$`.
 
 **The wipe.** After every run, pass or fail: the run's units are killed and stopped, its containers and volumes removed, and its directory and its `TMPDIR` deleted. The wipe then looks again and fails if anything is left.
@@ -165,6 +165,25 @@ The default is 2 slots. For a machine with 24 cores and 30 GB running three inst
 - **Memory.** 30 GB, less the instances' caps (20 GB), less 2 GB for the system, leaves 8 GB. A run with its Postgres takes about 2.5 GB, so memory allows 3 runs.
 
 The smaller of the two is 2 (`recommendTestSlots`). Give `worklane-test.slice` the cores and memory to match, below the smallest instance's cap: `--cpus 16-23 --memory-max 5G`. Each tier's measured CPU time and peak memory are on the dashboard's machine page: change the count once real runs show what they take.
+
+## Measuring a setting
+
+`worklane testrun measure` shows how one `test_run.env` value changes a tier's wall time. It runs the tier the way a PR's run does: the same helper, test user, slot, full-run lock (shared), workspace, caches, database, per-run limits and wipe. It runs once per value, one value at a time. Run it as the instance's coordinator user, when the machine is idle:
+
+```
+sudo -H -u wl-<name> worklane testrun measure --instance <name> --tier <tier>[,<tier>...] --set <KEY>=<v1>,<v2>,... [--sha <commit>] [--json]
+```
+
+- **`--sha`** defaults to the default branch's tip in the instance's checkout. The command does not fetch first.
+- **`--tier`** takes tests.yaml's tier names, of either kind, and runs them unsharded. A tier that needs `{changed_files}` is refused, because a measure has no change.
+- **`--set`** names exactly one key. It must be a key `test_run.env` already has, spelled exactly the same. It can never be `DATABASE_URL`, a key the engine or host sets (`CI`, `PATH`, `HOME`, `TMPDIR`, `LANG`, a cache's or shared directory's variable), or a reserved name. Each value is a plain token: no empty value, space, quote, comma or `=`. There are at most 12 values.
+- **It is refused while the machine is busy:** a test run of the instance is queued or running, any test slot is held, or the full-run lock is held or missing. Before each later value it checks again and stops if the machine became busy.
+- **It is refused when the helper is outdated or the sandbox fails its check.** A refusal starts nothing: no workspace, and no helper call for a bad request.
+- **It posts no check and touches no PR.** The instance's log gets only `testrun.measure` events. The PR runs, the batcher and the test-run view never read that event type. Each run's own events stay in memory.
+- **Output is one line per value:** the run's wall time, then for each tier its status (passed, failed, timed out, not run), duration, the sandbox unit's CPU time, average cores and peak memory (systemd-run's summary), and its slowest suites.
+- **Suite durations come from the tier's own output.** The command reads lines like `⏱ <suite>: 12.3s` from the tier's log in the instance's state, or else the per-test durations the metrics read. A suite log directory inside the workspace can't be used: the coordinator can't read the test user's files, and the wipe removes them.
+- **Each tier still has its own cap** (its `timeout_s` and the helper's limits), the same as a PR's run.
+- **A measure killed mid-run leaves its workspace behind.** The next measure wipes it first.
 
 ## Install
 

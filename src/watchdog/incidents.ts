@@ -46,9 +46,16 @@ export const KINDS = {
   disk_full: { title: 'Disk almost full', severity: 'red' },
   // Not a fault: a notice. A key was added to the ones engine releases are verified against (the updater's root of
   // trust), which every owner should know happened; it resolves by itself a day later.
+  // Raised by the updater itself (scripts/machine/, "the signers file, watched"), with or without a coordinator: the
+  // signers file changed and no updates.sh command made the change. Open until an admin acknowledges it at a root shell.
+  update_signers_changed: { title: 'The release signers file changed outside updates.sh', severity: 'red' },
   update_signer_added: { title: 'A release signer was added for engine updates', severity: 'amber' },
+  // A notice too: someone staged a signer from a dashboard (trusted for nothing until confirmed at a root shell).
+  update_signer_staged: { title: 'A release signer was staged for engine updates', severity: 'amber' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
+  // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.
+  update_sandbox_unconfirmed: { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.

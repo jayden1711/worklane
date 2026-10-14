@@ -94,7 +94,7 @@ export function UpdatesPanelView({ data }: { data: UpdatesPanelData }) {
                 </span>
               </div>
               <div data-testid="updates-rollback-reason">{data.rollback.reason}</div>
-              {data.rollback.held ? <div className="text-[12px] text-ink-3">Every instance runs the previous engine. This commit is held until a newer one, or until updates are turned off and on.</div> : null}
+              {data.rollback.held ? <div className="text-[12px] text-ink-3">Every instance runs the previous engine. This commit is held until a newer one, or until an admin releases it at a root shell: <span className="font-mono">sudo bash scripts/setup/updates.sh --release-hold</span>. Turning updates off and on doesn't.</div> : null}
             </div>
           ) : (
             'none'

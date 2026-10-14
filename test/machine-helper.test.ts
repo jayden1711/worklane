@@ -259,8 +259,8 @@ test('staging a signer writes the pending list and nothing else: the signers fil
   assert.deepEqual(readdirSync(h.etc), ['allowed_signers']);
   const list = (JSON.parse(readFileSync(h.pending, 'utf8')) as { pending: Record<string, string>[] }).pending;
   assert.deepEqual(list.map(({ at: _at, ...rest }) => rest), [
-    { principal: 'owner@example.com', key: a, fingerprint: fingerprint(a), by: 'wl-alpha' },
-    { principal: 'second@example.com', key: b, fingerprint: fingerprint(b), by: 'wl-alpha' },
+    { principal: 'owner@example.com', key: a, fingerprint: fingerprint(a), by: 'wl-alpha', instance: 'alpha' },
+    { principal: 'second@example.com', key: b, fingerprint: fingerprint(b), by: 'wl-alpha', instance: 'alpha' },
   ]);
   if (posix) assert.equal(statSync(h.pending).mode & 0o777, 0o644);
   // Staged again: nothing changes (its 24 hours don't start over).
@@ -439,4 +439,106 @@ test('a refused tailscale argument list runs nothing and logs nothing; a caller 
     assert.match(r.stderr, /usage: worklane-machine .*\| tailscale install\|up\|serve\|public-url\n$/);
   }
   assert.ok(!existsSync(h.log), 'nothing logged');
+});
+
+/** machine_sudoers with a stand-in sudo on PATH whose -V reports `version` (or nothing, for a sudo that won't say). */
+function sudoersWithSudo(version: string | null) {
+  const bin = mkdtempSync(join(tmpdir(), 'fake-sudo-'));
+  writeFileSync(join(bin, 'sudo'), `#!/bin/sh\n[ "$1" = -V ] && ${version ? `echo "Sudo version ${version}" && echo "Sudoers policy plugin version ${version}" &&` : ''} exit 0\nexit 1\n`, { mode: 0o755 });
+  return spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), 'wl-alpha'], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+}
+
+test('the pattern rules (add-project, stage-update-signer, discard-update-signer) are installed only for sudo 1.9.10 or later; below, they are left out, said so, and every other rule stays', { skip: !posix && 'bash' }, () => {
+  const k = /\^(stage-update-signer|discard-update-signer|add-project) /g;
+  // The command lines alone, each without its list punctuation: what differs is which commands, not where the list ends.
+  const commands = (rule: string) => rule.split('\n').filter((l) => !l.startsWith('#')).map((l) => l.replace(/,? \\$/, '').replace(/^Cmnd_Alias WORKLANE_MACHINE = /, '    ').trim()).filter(Boolean);
+  for (const v of ['1.9.10', '1.9.10p1', '1.9.15p5', '1.9.17', '1.10.0', '2.0.0']) {
+    const r = sudoersWithSudo(v);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual((r.stdout.match(k) ?? []).map((x) => x.trim()), ['^stage-update-signer', '^discard-update-signer', '^add-project'], `sudo ${v}: all three pattern rules`);
+    assert.doesNotMatch(r.stdout, /^# Not here/m);
+  }
+  const newer = commands(sudoersWithSudo('1.9.10').stdout).filter((l) => !/\^(stage-update-signer|discard-update-signer|add-project) /.test(l));
+  for (const v of ['1.9.9', '1.9.9p2', '1.9.5p2', '1.8.31', '1.9.0', null]) {
+    const r = sudoersWithSudo(v);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal((r.stdout.match(k) ?? []).length, 0, `sudo ${v}: no pattern rule`);
+    assert.match(r.stdout, new RegExp(`^# Not here: add-project, stage-update-signer and discard-update-signer\\. This sudo \\(${(v ?? '').replace(/p\d+$/, '')}\\) is older than 1\\.9\\.10 and would read their patterns as literal text\\.$`, 'm'));
+    // Every other rule is there as on a newer sudo.
+    assert.deepEqual(commands(r.stdout), newer, `sudo ${v}: the rest unchanged`);
+    if (spawnSync('visudo', ['--version']).status === 0) {
+      const f = join(mkdtempSync(join(tmpdir(), 'sudoers-')), 'rule');
+      writeFileSync(f, r.stdout);
+      assert.equal(spawnSync('visudo', ['-cf', f]).status, 0, `sudo ${v}: visudo accepts the rule without them`);
+    }
+  }
+  // machine-helper.sh says which it did, refuses (to stderr) to install them on an older sudo, and records it for the dashboard.
+  const sh = readFileSync(join(setup, 'machine-helper.sh'), 'utf8');
+  assert.match(sh, /^if sudo_regex_ok; then\n  echo "sudo \$\(sudo_version\): \$SUDO_REGEX_MIN or later, so the add-project, stage-update-signer and discard-update-signer rules are installed"\n  left_out='\[\]'\nelse\n  echo "REFUSED: the add-project, stage-update-signer and discard-update-signer rules are NOT installed\./m);
+  assert.match(sh, /left_out='\["add-project","stage-update-signer","discard-update-signer"\]'/);
+  assert.match(sh, /^mv -f "\$\(dirname "\$HELPER_RULES"\)\/\.helper-rules\.json\.tmp" "\$HELPER_RULES"$/m);
+  assert.match(readFileSync(join(setup, 'lib.sh'), 'utf8'), /^HELPER_RULES=\/etc\/worklane\/helper-rules\.json$/m);
+});
+
+test('every step that writes system paths runs in a transient unit of its own, started with the same arguments; nothing else does, and --in-unit is root\'s alone', () => {
+  const h = createRequire(import.meta.url)(helperSrc) as { needsUnit: (a: string[]) => boolean; unitCommand: (a: string[], user?: string, self?: string, node?: string, pid?: number) => string[]; IN_UNIT: string };
+  const k = ed25519();
+  // The coordinator's own unit runs with ProtectSystem=full: /usr, /boot and /etc read-only for sudo and this helper.
+  const writes = [['set-slots', '3'], ['set-test-slots', '2'], ['set-updates', 'on'], ['set-updates', 'off'], ['set-update-channel', 'release'], ['install-updater'], ['add-project', 'alpha', 'example/alpha'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['discard-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['claude-account', 'status']];
+  for (const a of writes) assert.equal(h.needsUnit(a), true, JSON.stringify(a));
+  // Already units of their own (systemd-run --no-block), and anything the helper refuses: never wrapped.
+  for (const a of [['tailscale', 'up'], ['claude-account', 'switch'], ['set-slots', '17'], ['install-updater', 'x'], ['rm', '-rf', '/'], []]) assert.equal(h.needsUnit(a), false, JSON.stringify(a));
+  assert.deepEqual(h.unitCommand(['install-updater'], 'wl-alpha', '/usr/local/libexec/worklane-machine', '/usr/bin/node', 42), [
+    '--unit', 'worklane-machine-install-updater-42', '--wait', '--pipe', '--collect', '--quiet', '--service-type=exec', '--description', 'worklane-machine install-updater',
+    '--property', 'Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 HOME=/root SUDO_USER=wl-alpha',
+    '/usr/bin/node', '/usr/local/libexec/worklane-machine', '--in-unit', 'install-updater',
+  ]);
+  // Who asked passes to the unit only when it is a user name: nothing of the caller's otherwise.
+  assert.doesNotMatch(h.unitCommand(['set-slots', '3'], 'x y;id').join(' '), /SUDO_USER/);
+  // --in-unit is never on sudo's list, and the helper refuses it from anyone but root.
+  assert.doesNotMatch(sudoers('wl-alpha').stdout, /in-unit/);
+  if (posix && process.getuid?.() !== 0) {
+    const r = helperIn(mkdtempSync(join(tmpdir(), 'machine-'))).run('--in-unit', 'set-slots', '3');
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /--in-unit is the helper's own, as root/);
+  }
+  // As root it goes to systemd-run before anything is written: main checks root and needsUnit first.
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.match(src, /if \(!inner && process\.getuid && process\.getuid\(\) === 0 && needsUnit\(args\)\) return inUnit\(args\);\n  const add = parseAddProject\(args\);/);
+});
+
+test('a step is recorded only once it has run: as done when it exited 0, as failed when it failed or never started; never as a change before it happened', () => {
+  const h = helperIn(mkdtempSync(join(tmpdir(), 'machine-')));
+  const { runLogged } = createRequire(import.meta.url)(h.copy) as { runLogged: (what: string, to: string, run: () => number) => number };
+  const records = () => (existsSync(h.log) ? readFileSync(h.log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { what: string; to: string }) : []);
+  let seen: number | null = null;
+  assert.equal(
+    runLogged('install-updater', 'updates.sh', () => {
+      seen = records().length;
+      return 1;
+    }),
+    1,
+  );
+  assert.equal(seen, 0, 'nothing is recorded while the step runs');
+  assert.equal(
+    runLogged('install-updater', 'updates.sh', () => {
+      throw new Error('spawn bash ENOENT');
+    }),
+    1,
+  );
+  assert.deepEqual(records().map((c) => [c.what, c.to]), [['install-updater', 'failed: updates.sh: exit 1'], ['install-updater', 'failed: updates.sh: exit 1']], 'a failed step writes no success record');
+  assert.equal(runLogged('install-updater', 'updates.sh', () => 0), 0);
+  assert.deepEqual(records().at(-1)?.to, 'updates.sh');
+  // Every step the helper runs inline goes through it; a unit started with --no-block is recorded only after systemd-run, by outcome.
+  const src = readFileSync(helperSrc, 'utf8');
+  for (const s of ["runLogged('install-updater', 'updates.sh',", "runLogged('add-project', `${p.name} ${p.repo}`,", "runLogged('claude-account', 'status',"]) assert.ok(src.includes(s), s);
+  const units: [string, string, string][] = [
+    ["spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT", "logLine('claude-account', null, `switch (token", "logLine('claude-account', null, `failed: switch"],
+    ["spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT", "logLine('tailscale', null, action);", "logLine('tailscale', null, `failed: ${action}: not started`);"],
+  ];
+  for (const [start, ok, failed] of units) {
+    const at = src.indexOf(start);
+    assert.ok(at > 0 && src.indexOf(ok) > at && src.indexOf(failed) > at, `${ok}: recorded after systemd-run, by outcome`);
+    assert.equal(src.split(ok).length, 2, `${ok}: one success record`);
+  }
 });

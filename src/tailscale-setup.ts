@@ -16,7 +16,7 @@
 // Nothing here runs unless an owner asks: a machine without tailscale, or an owner who skips the screen, changes
 // nothing, and the hub keeps its URL.
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { EventLog } from './events/log.js';
@@ -112,6 +112,16 @@ export interface StepLine {
 
 /** Take a link or a key out of a line before it is shown: the script never writes one, and this is the check on that. */
 const scrub = (s: string) => s.replace(/https?:\/\/login\.tailscale\.com\S*/g, '[the login link]').replace(/tskey-[A-Za-z0-9_-]+/g, '[a key]');
+
+/** Which version of the progress file this is (its size and change time; '' when there is none): it changes with every line. */
+export function stepsStamp(dir = TAILSCALE_DIR): string {
+  try {
+    const st = statSync(join(dir, 'steps.jsonl'));
+    return `${st.size}:${st.mtimeMs}:${st.ino}`;
+  } catch {
+    return '';
+  }
+}
 
 /** The progress lines of the last step (steps.jsonl); torn or foreign lines are skipped. */
 export function readStepLines(dir = TAILSCALE_DIR): StepLine[] {

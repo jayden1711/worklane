@@ -142,6 +142,8 @@ export interface HealthView {
   } | null;
   /** An engine update this machine rolled back and holds (src/updates.ts heldUpdate); null when none. */
   updateHold?: { at: string; sha: string | null; reason: string; migration: boolean } | null;
+  /** The machine's outbound proxy and custom CA from root's network.json (src/network.ts), or why the file was refused; null when neither (or for a viewer). */
+  network?: { proxy: string | null; file: string; ca: { path: string; count: number; fingerprints: string[] } | null; error: string | null } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */
@@ -732,6 +734,8 @@ export interface AddProjectData {
   machineOwners: string[];
   /** Newest first. */
   runs: AddProjectRun[];
+  /** When the machine helper can't run add-project here (an older sudo): why, and the root script to run instead; absent from older servers. */
+  manual?: { sudo: string | null; why: string; script: string } | null;
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
 /** Add project's repo picker (GET /api/add-project/repos, src/setup/repo-picker.ts): an account's repos to pick from. */
@@ -828,6 +832,9 @@ export interface ConfigChange {
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
+/** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
+export const mergeRepoConfig = (number: number, confirm: boolean) =>
+  api<{ ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string }>('/api/first-run/repo-config/merge', { method: 'POST', body: JSON.stringify({ number, confirm }) });
 export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
   key: string;
@@ -1105,7 +1112,7 @@ export interface ClaudeAccountData {
   canPasteToken: boolean;
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
 }
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
@@ -1156,10 +1163,10 @@ export interface TailscaleData {
   run: { step: TailscaleAction; startedAt: string; status: 'running' | 'waiting' | 'done' | 'failed' | 'stalled'; detail: string; lines: TailscaleStepLine[] } | null;
   /** Tailscale's login page for the waiting `up`: sent to machine owners only, never stored by the page. */
   loginUrl: string | null;
-  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string }[];
+  requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
   script: { status: string; steps: string[] };
 }
-export const getTailscale = () => api<TailscaleData>('/api/tailscale');
+export const getTailscale = (fresh = false) => api<TailscaleData>(`/api/tailscale${fresh ? '?fresh=1' : ''}`);
 export const tailscaleAction = (action: TailscaleAction) => api<{ ok: boolean }>('/api/machine/tailscale', { method: 'POST', body: JSON.stringify({ action, confirm: true }) });
 
 export interface SavedView { name: string; filters: Filters }

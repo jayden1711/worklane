@@ -34,6 +34,22 @@
 // backups, starts the services again on the old engine and holds the commit. Otherwise it switches
 // /opt/worklane/current and restarts the instance and dashboard services, and if any of them isn't active and
 // steady within 2 minutes, it restores the migration backups, switches back and restarts again.
+// The test sandbox, after the restart: an engine can come up "active and steady" and still have lost its test runs (a
+// helper change once made every coordinator's startup sandbox check fail from inside its unit, while it passed from
+// a shell). So before switching, the updater asks each instance for its last startup verdict (`sandbox-status
+// --instance <name> --json`, the new engine's, run as the instance's user like migrate: root never opens an
+// instance's event log), and after the restart it waits, updates.json "sandbox_wait_minutes" at most (default 10),
+// for a verdict newer than the restart. An instance that passed before and fails after rolls the update back as an
+// unhealthy service does (backups, helpers, the old engine, restart) and holds the commit; the rollback's reason
+// names the instance and the check's own words, redacted. That rollback's order: stop the services, put the
+// migrations' backups back, put the old engine's root helpers back (each one the new engine replaced, byte for byte,
+// owner and mode kept), switch /opt/worklane/current back, and only then restart, so the old engine never starts
+// beside a helper of another protocol. A helper that can't be put back is the first thing the reason says.
+// An instance with no test runs, with no verdict before, or
+// already failing before, is never waited for and never rolls anything back. No verdict in time from one that
+// passed before: rolled back and held too (updates.json "sandbox_on_timeout": "hold", the default: an engine whose
+// test runs can't be shown to work isn't kept). "sandbox_on_timeout": "stand" keeps the install instead and raises
+// an incident that says the check couldn't be confirmed.
 // The canary (updates.json "canary": { "instance", "repo", "time_limit_minutes" }, docs/canary.md): a scratch-repo
 // instance that gets a tiny issue each day and after every install, filed and read with the engine's `canary` command
 // as that instance's user. It must go issue -> plan -> PR -> green checks -> merged within the time limit (default
@@ -91,6 +107,9 @@ const LOOKBACK_MAX = 100;
 const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
 const STUCK_ALERT_MIN = 120; // updates.json stuck_alert_minutes
 const STUCK_INCIDENT = 'update_stuck'; // the watchdog incident's kind (src/watchdog/incidents.ts KINDS); its key is 'engine'
+const SANDBOX_WAIT_MIN = 10; // updates.json sandbox_wait_minutes: how long a restarted instance has to say its sandbox check's result
+const SANDBOX_POLL_MS = 10_000;
+const SANDBOX_INCIDENT = 'update_sandbox_unconfirmed'; // the watchdog incident for a verdict that never came (key: the instance)
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
 const CHECK_PAGES_MAX = 10; // pages of 100 check runs read for one commit
 const IDLE_AFTER_MS = 10 * 60_000; // WHY: a commit's checks take a moment to appear; before this, "nothing running" isn't idle
@@ -220,7 +239,10 @@ async function checkRunsOf(deps, api, sha) {
 
 /** `a0685ce: required check "push-gate" ended failure; …` */
 const skippedText = (skipped) => skipped.map((s) => `${short(s.sha)}: ${s.reason}`).join('; ');
-const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until updates are turned off and on again`;
+// A hold is released only at a root shell (updates.sh --release-hold) or by a newer commit: never by updates.json
+// changing, which any coordinator can make happen through the machine helper (the on/off switch, the channel).
+const RELEASE_HOLD = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold';
+const heldReason = (held) => `rolled back at ${held.at}${held.failed && held.failed.length ? ` (${held.failed.join('; ')})` : ''}; held until a newer commit, or until an admin releases it at a root shell: ${RELEASE_HOLD}`;
 
 /**
  * Which candidate (firstParentLine, newest first) to install: the newest one that isn't held and whose checks are
@@ -247,7 +269,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
   for (let i = 0; i < cands.length && !out; i++) {
     const c = cands[i];
     let v;
-    if (held && held.sha === c.sha && !(deps.configChangedAt() > Date.parse(held.at))) v = { ok: false, final: true, held: true, reason: heldReason(held) };
+    if (held && held.sha === c.sha) v = { ok: false, final: true, held: true, reason: heldReason(held) };
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
@@ -394,14 +416,36 @@ function journalLine(event, sha, reason) {
  */
 function makeNote({ readState, writeState, log, print }) {
   return (event, sha, reason) => {
+    // INVARIANT: the state file holds the redacted reason, so the dedupe compares redacted with redacted: a reason
+    // with a secret in it is still logged once, not every run.
+    const why = redactDeep(reason);
     const last = readState() || {};
-    if (last.event !== event || last.sha !== sha || last.reason !== reason) {
-      log({ event, to: sha, reason });
-      writeState({ event, sha, reason });
+    if (last.event !== event || last.sha !== sha || last.reason !== why) {
+      log({ event, to: sha, reason: why });
+      writeState({ event, sha, reason: why });
     }
     print(journalLine(event, sha, reason));
     return event;
   };
+}
+
+/** A value with redact() applied to every string in it, however deep (keys are the updater's own, never data). */
+function redactDeep(v) {
+  if (typeof v === 'string') return redact(v);
+  if (Array.isArray(v)) return v.map(redactDeep);
+  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactDeep(x)]));
+  return v;
+}
+
+/**
+ * INVARIANT: every write to the update log, the state file and the hold file goes through these two, redacted: all
+ * three are world-readable (0644), and their fields carry reasons, URLs, build output and journal lines.
+ */
+function appendLog(file, entry) {
+  fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), ...redactDeep(entry) })}\n`, { mode: 0o644 });
+}
+function writeRedacted(file, value) {
+  saveJson(file, redactDeep(value), 0o644);
 }
 
 /** The last lines of a text, capped. */
@@ -583,6 +627,78 @@ function migrateCommand(inst, sha, opt = OPT) {
   return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'migrate', '--instance', inst.name, '--json']);
 }
 
+/** The new engine's `sandbox-status` for one instance, run as its coordinator user (read-only: its own event log). */
+function sandboxCommand(inst, sha, opt = OPT) {
+  return asInstance(inst, ['/usr/bin/env', 'node', path.posix.join(opt, sha, 'dist', 'src', 'cli.js'), 'sandbox-status', '--instance', inst.name, '--json']);
+}
+
+/**
+ * `sandbox-status --json`'s answer as { configured, last: { ok, detail, at } | null }, or null when it gave none
+ * (an unknown state is never a verdict).
+ */
+function parseSandbox(out) {
+  const line = String(out || '').trim().split('\n').filter(Boolean).pop() || '';
+  let j;
+  try {
+    j = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!j || j.ok !== true) return null;
+  const l = j.last;
+  const last = l && typeof l.ok === 'boolean' && typeof l.at === 'string' && Number.isFinite(Date.parse(l.at)) ? { ok: l.ok, detail: String(l.detail || ''), at: l.at } : null;
+  return { configured: j.configured === true, last };
+}
+
+/** updates.json sandbox_on_timeout: "stand" only when it says so; anything else, and unset, is "hold". */
+const sandboxOnTimeout = (cfg) => (cfg && cfg.sandbox_on_timeout === 'stand' ? 'stand' : 'hold');
+
+/** updates.json sandbox_wait_minutes, in ms: a number above 0, else 10 minutes. */
+function sandboxWaitMs(cfg) {
+  const n = cfg && cfg.sandbox_wait_minutes;
+  return (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : SANDBOX_WAIT_MIN) * 60_000;
+}
+
+/**
+ * One instance's sandbox verdict across an update, from its status before the switch and now (parseSandbox's, or
+ * null), and when the restart began:
+ *   skip  nothing to compare: no test runs configured, no verdict before, or it was already failing before;
+ *   wait  it passed before, and the restarted process hasn't said yet (the last verdict is from before the restart);
+ *   pass / fail  it passed before, and the restarted process's own check passed / failed.
+ */
+function sandboxVerdict(before, after, restartedAt) {
+  if (!before || !before.configured || !before.last || before.last.ok !== true) return 'skip';
+  if (!after || !after.last || !(Date.parse(after.last.at) >= restartedAt)) return 'wait';
+  return after.last.ok ? 'pass' : 'fail';
+}
+
+/**
+ * After the restart: each instance that passed before, asked until its restarted process has said (sandboxVerdict),
+ * every SANDBOX_POLL_MS, sandboxWaitMs at most; it stops at the first failure (the update rolls back either way).
+ * Returns { passed, failed: [{ instance, detail }], unconfirmed } (instance names; detail redacted, one line).
+ */
+async function verifySandbox(deps, cfg, instances, before, sha, restartedAt) {
+  const out = { passed: [], failed: [], unconfirmed: [] };
+  if (typeof deps.sandboxStatus !== 'function') return out;
+  let left = instances.filter((i) => sandboxVerdict(before[i.name], null, restartedAt) === 'wait');
+  const deadline = deps.now() + sandboxWaitMs(cfg);
+  while (left.length) {
+    const still = [];
+    for (const inst of left) {
+      const after = deps.sandboxStatus(inst, sha);
+      const v = sandboxVerdict(before[inst.name], after, restartedAt);
+      if (v === 'fail') out.failed.push({ instance: inst.name, detail: redact(after.last.detail).replace(/\s+/g, ' ').trim().slice(0, 500) });
+      else if (v === 'pass') out.passed.push(inst.name);
+      else still.push(inst);
+    }
+    left = still;
+    if (!left.length || out.failed.length || deps.now() >= deadline) break;
+    await deps.sleep(SANDBOX_POLL_MS);
+  }
+  out.unconfirmed = left.map((i) => i.name);
+  return out;
+}
+
 /** Put one backup back, as the instance's user (the files are its own): a log loses the migrated one's WAL files. */
 function restoreCommand(inst, b) {
   return asInstance(inst, ['/bin/sh', '-c', 'cp -p -- "$1" "$2" && rm -f -- "$2-wal" "$2-shm"', '_', b.backup, b.path]);
@@ -671,6 +787,7 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
 
 async function run(deps) {
   const cfg = deps.config();
+  watchSigners(deps, cfg);
   if (!cfg || cfg.enabled !== true) {
     stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
     return 'disabled';
@@ -722,16 +839,20 @@ async function update(deps, cfg, seen = {}) {
     seen.head = head;
     if (head === current) return 'current';
   }
-  // A commit that was rolled back is never retried by itself: only a newer commit, or the owner turning
-  // updates off and on again after the rollback (updates.json written later), releases it.
+  // A commit that was rolled back is never retried by itself: only a newer commit, or an admin at a root shell
+  // (updates.sh --release-hold, which moves the hold file aside), releases it. Nothing a coordinator can do through
+  // the machine helper does: updates.json changing (on/off, the channel) is not read here.
   // (On main, a held commit is passed over for an older one; see chooseCommit.)
   const held = deps.held();
   const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
   // On main: the newer commits passed over for the one installed, and why.
   let skipped = [];
   if (release) {
-    if (held && held.sha === head && !(deps.configChangedAt() > Date.parse(held.at))) return deps.note('held', head, heldReason(held), true);
+    if (held && held.sha === head) return deps.note('held', head, heldReason(held), true);
     // The commit whose checks count: the main commit the release was cut from.
+    // The signers file changed outside updates.sh and nobody has acknowledged it: no release is installed on its say-so.
+    const signersHeld = typeof deps.signersHold === 'function' ? deps.signersHold() : null;
+    if (signersHeld) return deps.note('held', head, `the signers file changed outside updates.sh at ${signersHeld.at} and hasn't been acknowledged (${signersChangeText(signersHeld)}); no release is installed until an admin runs: ${SIGNERS_ACK}`, true);
     const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
     if (!v.ok) return deps.note('refused', head, v.reason, true);
     const checks = evaluateChecks(((await checkRunsOf(deps, api, v.base)) || {}).check_runs, cfg.required_checks);
@@ -799,6 +920,9 @@ async function update(deps, cfg, seen = {}) {
       migrated.push({ inst, made: r.made, applied: r.applied });
     }
   }
+  // Each instance's sandbox verdict as the old engine left it, read while nothing runs (verifySandbox compares).
+  const sandboxBefore = {};
+  if (typeof deps.sandboxStatus === 'function') for (const inst of instances) sandboxBefore[inst.name] = deps.sandboxStatus(inst, head);
   // The root helpers from the new engine, before it starts: it never runs with a helper of another protocol.
   let helpers;
   try {
@@ -813,10 +937,41 @@ async function update(deps, cfg, seen = {}) {
     deps.log({ event: 'rolled_back', from: head, to: current, units, reason, ...back, back: settled.h, held: true, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
     return 'rolled_back';
   }
+  const restartedAt = deps.now();
   deps.switchTo(head);
   const after = await settle();
   if (after.h === 'healthy') {
-    deps.log({ event: 'installed', from: current, to: head, units, ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
+    // Up and steady isn't working: an instance whose test sandbox check passed before must pass it again.
+    const sandbox = await verifySandbox(deps, cfg, instances, sandboxBefore, head, restartedAt);
+    const onTimeout = sandboxOnTimeout(cfg);
+    if (sandbox.failed.length || (sandbox.unconfirmed.length && onTimeout === 'hold')) {
+      const failed = [
+        ...sandbox.failed.map((f) => `rollback: the test sandbox check passed before the update and fails after it: ${f.instance}: ${f.detail}`),
+        ...(sandbox.failed.length ? [] : sandbox.unconfirmed.map((i) => `rollback: no test sandbox result from ${i} within ${Math.round(sandboxWaitMs(cfg) / 60_000)} minutes of the restart (sandbox_on_timeout: hold)`)),
+      ];
+      // As for a service that didn't come up: the migrations' backups, the old engine's helpers, the old engine.
+      if (instances.length) deps.exec('systemctl', ['stop', ...units]);
+      const unrestored = restoreAll();
+      const hb = current ? helpersBack(deps, current) : {};
+      if (current) deps.switchTo(current);
+      const back = current ? await settle() : { h: 'failed' };
+      // WHY: an old engine left with the new one's helpers has no test runs either (another protocol): that is not a
+      // clean rollback, and it goes first in the reason so the incident says it before anything else.
+      if (hb.helpers_error) failed.unshift(`rollback: the old engine's root helpers could NOT be put back (${hb.helpers_error}); its test runs are off until they are: sudo bash /opt/worklane/current/scripts/setup/test-user.sh update-helper`);
+      deps.hold({ sha: head, at: new Date(deps.now()).toISOString(), failed });
+      // INVARIANT: the reason names the instance and what its check said: the watchdog's update_rollback incident quotes it.
+      deps.log({ event: 'rolled_back', from: head, to: current, units, reason: failed.join('; '), sandbox, back: back.h, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
+      return 'rolled_back';
+    }
+    try {
+      for (const i of sandbox.passed) if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SANDBOX_INCIDENT, i);
+      for (const i of sandbox.unconfirmed) {
+        if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SANDBOX_INCIDENT, i, `after the update to ${short(head)}, ${i} gave no test sandbox result within ${Math.round(sandboxWaitMs(cfg) / 60_000)} minutes of its restart; its test runs passed that check before the update`, `look at ${i}'s log for testrun.sandbox and its coordinator's journal; the update was kept (sandbox_on_timeout in updates.json)`);
+      }
+    } catch {
+      // the installed line below is the record
+    }
+    deps.log({ event: 'installed', from: current, to: head, units, ...(sandbox.passed.length || sandbox.unconfirmed.length ? { sandbox: { passed: sandbox.passed, unconfirmed: sandbox.unconfirmed } } : {}), ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
     if (!cfg.canary) return 'installed';
     // The install stands only once the canary passes: until then the backups and the old engine are kept to go back to.
     const filed = startCanary(deps, cfg, 'update', { from: current, to: head, migrated: migrated.map((m) => ({ inst: m.inst, made: m.made })) });
@@ -963,7 +1118,7 @@ function logCanary(deps, pending, v, extra = {}) {
 function raise(deps, pending, v) {
   if (typeof deps.raiseIncident !== 'function') return;
   const what = pending.update ? `the canary after installing ${String(pending.update.to).slice(0, 12)} failed: ${v.reason}; rolled back and held` : `the daily canary failed: ${v.reason}`;
-  const fix = pending.update ? 'look at the canary issue and its PR; turning updates off and on again retries the held commit' : 'look at the canary issue and its PR';
+  const fix = pending.update ? `look at the canary issue and its PR; an admin retries the held commit with: ${RELEASE_HOLD}` : 'look at the canary issue and its PR';
   try {
     deps.raiseIncident('canary_failed', 'canary', what, fix);
   } catch {
@@ -1028,6 +1183,169 @@ async function rollbackAfterCanary(deps, pending, v) {
 /** [file, args] of an argv. */
 const splitCmd = (argv) => [argv[0], argv.slice(1)];
 
+// ---------- the signers file, watched ----------
+//
+// /etc/worklane/allowed_signers is the root of trust for the release channel, and the only expected way it changes is
+// scripts/setup/updates.sh --signer or --confirm-signer (scripts/setup/updates-root.cjs), at a root shell. So every
+// run, on or off, the updater hashes the file it verifies releases against and compares it with the hash recorded in
+// SIGNERS_STATE (root-owned, 0644, written atomically). updates-root.cjs records the new hash in the same step it
+// appends, so its own change is expected. Any other change (a hand edit, another tool, a tampered or missing file)
+// is reported once: a `signers_changed` line in the update log, a line on stderr (the journal), and a red incident,
+// each with the old and new hash, the line counts and the key fingerprints added and removed (public data). The new
+// hash is then adopted, so the next change is caught too. It needs no coordinator: the incident store is written here.
+//
+// An unexplained change also HOLDS the release channel: nothing is installed from a release tag until an admin has
+// looked and acknowledged it at a root shell (updates.sh --acknowledge-signers). The signature check itself is as
+// strict as ever; the hold is one more refusal in front of it, never a way around it.
+const SIGNERS_STATE = '/var/lib/worklane/signers-state.json';
+const SIGNERS_INCIDENT = 'update_signers_changed';
+
+/** A signers file as it is now: its sha256 ("absent" when there is none), its signer lines, and each key's fingerprint. */
+function signersDigest(file) {
+  let bytes;
+  try {
+    bytes = fs.readFileSync(file);
+  } catch {
+    return { file, hash: 'absent', lines: 0, fingerprints: [] };
+  }
+  const crypto = require('node:crypto');
+  const fingerprints = new Set();
+  let lines = 0;
+  for (const raw of bytes.toString('utf8').split('\n')) {
+    const w = raw.trim().split(/\s+/);
+    if (!w[0] || w[0].startsWith('#')) continue;
+    lines++;
+    const t = w.findIndex((x, i) => i > 0 && /^(ssh-|ecdsa-|sk-)[A-Za-z0-9@.-]+$/.test(x));
+    if (t > 0 && /^[A-Za-z0-9+/]+=*$/.test(w[t + 1] || '')) fingerprints.add(`SHA256:${crypto.createHash('sha256').update(Buffer.from(w[t + 1], 'base64')).digest('base64').replace(/=+$/, '')}`);
+  }
+  return { file, hash: `sha256:${crypto.createHash('sha256').update(bytes).digest('hex')}`, lines, fingerprints: [...fingerprints].sort() };
+}
+
+/** The recorded state, or null when nothing is recorded yet (or it can't be read). */
+function readSignersState(stateFile = SIGNERS_STATE) {
+  try {
+    const j = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    return j && typeof j.hash === 'string' && typeof j.file === 'string' ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+const saveSignersState = (stateFile, cur, at, hold, extra = {}) => saveJson(stateFile, { file: cur.file, hash: cur.hash, lines: cur.lines, fingerprints: cur.fingerprints, at, hold: hold || null, ...extra }, 0o644);
+
+/**
+ * Compare the signers file with what is recorded. Returns null when it is as recorded, when nothing was recorded
+ * yet (recorded now, silently), or when it is the change updates-root.cjs said it was about to make. Otherwise the
+ * change { from, to, linesBefore, linesAfter, added, removed, at }: recorded as adopted, and held until acknowledged.
+ */
+function checkSigners(file, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const cur = signersDigest(file);
+  const st = readSignersState(stateFile);
+  const at = new Date(now).toISOString();
+  if (!st) {
+    saveSignersState(stateFile, cur, at, null);
+    return null;
+  }
+  if (st.file === cur.file && st.hash === cur.hash) return null;
+  if (st.file === cur.file && st.expected && st.expected === cur.hash) {
+    saveSignersState(stateFile, cur, at, st.hold);
+    return null;
+  }
+  const before = Array.isArray(st.fingerprints) ? st.fingerprints : [];
+  const change = {
+    at,
+    file: cur.file,
+    ...(st.file !== cur.file ? { fileBefore: st.file } : {}),
+    from: st.hash,
+    to: cur.hash,
+    linesBefore: Number(st.lines) || 0,
+    linesAfter: cur.lines,
+    added: cur.fingerprints.filter((f) => !before.includes(f)),
+    removed: before.filter((f) => !cur.fingerprints.includes(f)),
+  };
+  // An earlier change nobody acknowledged stays the hold's start: the newest one is what it now describes.
+  saveSignersState(stateFile, cur, at, { ...change, since: st.hold && st.hold.since ? st.hold.since : at });
+  return change;
+}
+
+/**
+ * For updates-root.cjs, around its own append. Before: `expectSigners(file, hashItWillHave)` when the file is as
+ * recorded (or nothing is recorded), so the append is expected; false when the file already differs from the record,
+ * in which case nothing is recorded and the updater's next run reports the whole change. After: recordSigners(file).
+ */
+function expectSigners(file, nextHash, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const cur = signersDigest(file);
+  const st = readSignersState(stateFile);
+  if (st && !(st.file === cur.file && st.hash === cur.hash)) return false;
+  saveSignersState(stateFile, cur, st ? st.at : new Date(now).toISOString(), st ? st.hold : null, { expected: nextHash });
+  return true;
+}
+function recordSigners(file, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const st = readSignersState(stateFile);
+  saveSignersState(stateFile, signersDigest(file), new Date(now).toISOString(), st ? st.hold : null);
+}
+
+/** The unexplained change the release channel is held for, or null. */
+const signersHold = (stateFile = SIGNERS_STATE) => (readSignersState(stateFile) || {}).hold || null;
+
+/** An admin has looked at the file as it is now: it is the record, and nothing is held. Returns what was held (or null). */
+function acknowledgeSigners(file, stateFile = SIGNERS_STATE, now = Date.now()) {
+  const held = signersHold(stateFile);
+  // acknowledged: for the updater's next run to close the incident, once.
+  saveSignersState(stateFile, signersDigest(file), new Date(now).toISOString(), null, held ? { acknowledged: new Date(now).toISOString() } : {});
+  return held;
+}
+
+/** Whether an acknowledgement is waiting to be told to the incident store; true once, then forgotten. */
+function takeAcknowledged(stateFile = SIGNERS_STATE) {
+  const st = readSignersState(stateFile);
+  if (!st || !st.acknowledged || st.hold) return false;
+  saveSignersState(stateFile, st, st.at, null);
+  return true;
+}
+
+const shortHash = (h) => (String(h).startsWith('sha256:') ? `sha256:${String(h).slice(7, 19)}` : String(h));
+/** One line saying what changed, for the log, the journal and the incident. */
+function signersChangeText(c) {
+  const what = c.to === 'absent' ? `${c.file} is gone` : c.from === 'absent' ? `${c.file} appeared` : `${c.file} changed`;
+  const keys = [c.added.length ? `added ${c.added.join(', ')}` : '', c.removed.length ? `removed ${c.removed.join(', ')}` : ''].filter(Boolean).join('; ') || 'no key added or removed';
+  return `${what} outside updates.sh --signer or --confirm-signer${c.fileBefore ? ` (the updater read ${c.fileBefore} before)` : ''}: ${shortHash(c.from)} -> ${shortHash(c.to)}, ${c.linesBefore} signer line${c.linesBefore === 1 ? '' : 's'} before, ${c.linesAfter} after; key fingerprints: ${keys}`;
+}
+const SIGNERS_ACK = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers';
+
+/** Every run, before anything else: the signers file against its record. A change is logged, said on stderr, and raised. */
+function watchSigners(deps, cfg) {
+  if (typeof deps.signersCheck !== 'function') return;
+  let change;
+  try {
+    change = deps.signersCheck((cfg && typeof cfg.allowed_signers === 'string' && cfg.allowed_signers) || ALLOWED_SIGNERS);
+  } catch (e) {
+    deps.log({ event: 'error', reason: `couldn't check the signers file: ${String((e && e.message) || e).slice(0, 300)}` });
+    return;
+  }
+  if (!change) {
+    // Acknowledged at a root shell since the last run: the incident is closed, once.
+    if (typeof deps.signersAcknowledged === 'function' && deps.signersAcknowledged() && typeof deps.resolveIncident === 'function') {
+      try {
+        deps.resolveIncident(SIGNERS_INCIDENT, 'allowed_signers');
+      } catch {
+        // nothing to resolve
+      }
+    }
+    return;
+  }
+  const reason = signersChangeText(change);
+  deps.log({ event: 'signers_changed', reason, signers: change, held: true });
+  if (typeof deps.warn === 'function') deps.warn(`signers_changed: ${reason}; release installs are held until: ${SIGNERS_ACK}`);
+  if (typeof deps.raiseIncident === 'function') {
+    try {
+      deps.raiseIncident(SIGNERS_INCIDENT, 'allowed_signers', `${reason}. Release-channel installs are held`, `Look at the file. If the change is yours, acknowledge it at a root shell: ${SIGNERS_ACK}. If not, put the file right first, then acknowledge`);
+    } catch {
+      // the log line and the journal are the record
+    }
+  }
+}
+
 // ---------- the machine (real effects) ----------
 
 /** The installed engine's watchdog module, or null while it has none. */
@@ -1045,7 +1363,7 @@ function saveJson(file, value, mode) {
   fs.renameSync(tmp, file);
 }
 
-function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
+function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = { log: LOG, state: STATE, held: HELD }) {
   const readJson = (f) => {
     try {
       return JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -1053,7 +1371,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
       return null;
     }
   };
-  const log = (entry) => fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { mode: 0o644 });
+  const log = (entry) => appendLog(files.log, entry);
   return {
     config: () => readJson(CONFIG),
     installed: () => {
@@ -1089,7 +1407,14 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     syncHelpers: (sha) => syncHelpers(path.join(OPT, sha)),
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
-    held: () => readJson(HELD),
+    sandboxStatus: (inst, sha) => {
+      try {
+        return parseSandbox(execFileSync(...splitCmd(sandboxCommand(inst, sha)), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
+      } catch (e) {
+        return parseSandbox(e && e.stdout); // WHY: a failing command still prints its answer; none is "unknown", never a verdict
+      }
+    },
+    held: () => readJson(files.held),
     verdicts: () => readJson(VERDICTS),
     saveVerdicts: (map) => saveJson(VERDICTS, map, 0o644),
     stuckState: () => readJson(STUCK),
@@ -1104,19 +1429,13 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     // The watchdog's incidents (src/watchdog) once the installed engine has them; until then the log line is the record.
     raiseIncident: (kind, key, detail, fix) => void watchdog().then((w) => w && typeof w.raiseIncident === 'function' && w.raiseIncident(kind, key, detail, fix)).catch(() => {}),
     resolveIncident: (kind, key) => void watchdog().then((w) => w && typeof w.resolveIncident === 'function' && w.resolveIncident(kind, key)).catch(() => {}),
-    hold: (entry) => {
-      const tmp = `${HELD}.tmp`;
-      fs.writeFileSync(tmp, `${JSON.stringify(entry)}\n`, { mode: 0o644 });
-      fs.chmodSync(tmp, 0o644);
-      fs.renameSync(tmp, HELD);
-    },
-    configChangedAt: () => {
-      try {
-        return fs.statSync(CONFIG).mtimeMs;
-      } catch {
-        return 0;
-      }
-    },
+    // The hold is read back by sha and time only; its reasons are for people, so redacting them changes no decision.
+    hold: (entry) => writeRedacted(files.held, entry),
+    signersCheck: (file) => checkSigners(file),
+    signersHold: () => signersHold(),
+    signersAcknowledged: () => takeAcknowledged(),
+    // stderr is the unit's journal: a line there needs neither the dashboard nor a coordinator.
+    warn: (line) => process.stderr.write(`${line}\n`),
     switchTo: (sha) => {
       const link = path.join(OPT, '.current.new');
       fs.rmSync(link, { force: true });
@@ -1126,7 +1445,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log,
-    note: makeNote({ readState: () => readJson(STATE), writeState: (st) => fs.writeFileSync(STATE, JSON.stringify(st), { mode: 0o644 }), log, print }),
+    note: makeNote({ readState: () => readJson(files.state), writeState: (st) => writeRedacted(files.state, st), log, print }),
   };
 }
 
@@ -1141,7 +1460,7 @@ if (require.main === module) {
     (r) => said || print(r),
     (e) => {
       try {
-        fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), event: 'error', reason: String(e && e.message ? e.message : e).slice(0, 500) })}\n`);
+        appendLog(LOG, { event: 'error', reason: String(e && e.message ? e.message : e).slice(0, 500) });
       } catch {
         // nowhere to write: the journal has stderr
       }
@@ -1150,4 +1469,5 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });

@@ -12,7 +12,7 @@ import type { UnitState } from '../os/stats.js';
 import type { UpdateEntry } from '../updates.js';
 import { incidentsDir } from './incidents.js';
 import { postPending, type Poster } from './post.js';
-import { diskFindings, INSTANCE_KINDS, instanceFindings, reconcile, signerFindings, unitFindings, updateFindings, watchedUnits, type InstanceFacts, type RestartHistory } from './probes.js';
+import { diskFindings, INSTANCE_KINDS, instanceFindings, reconcile, signerFindings, stagedSignerFindings, unitFindings, updateFindings, watchedUnits, type InstanceFacts, type RestartHistory } from './probes.js';
 import type { MachineChange } from '../machine.js';
 import type { WatchdogConfig } from './config.js';
 
@@ -143,6 +143,8 @@ export class Watchdog {
     reconcile(updateFindings(this.d.updates()), { kinds: ['update_rollback'], instance: null }, opts);
     // A release signer added (updates.sh --signer or --confirm-signer): an alert each, open for a day.
     if (this.d.machineChanges) reconcile(signerFindings(this.d.machineChanges(), now.getTime()), { kinds: ['update_signer_added'], instance: null }, opts);
+    // A signer staged from a dashboard: an alert each too, open for a day.
+    if (this.d.machineChanges) reconcile(stagedSignerFindings(this.d.machineChanges(), now.getTime()), { kinds: ['update_signer_staged'], instance: 'any' }, opts);
     const disks = this.d.disks();
     reconcile(diskFindings(disks, cfg.diskPct), { kinds: ['disk_full'], instance: null, keys: new Set(disks.map((x) => x.path)) }, opts);
   }

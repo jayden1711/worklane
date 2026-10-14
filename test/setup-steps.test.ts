@@ -93,6 +93,7 @@ function fixture() {
     allowedSigners: join(m, 'allowed_signers'),
     hubUnitFile: join(m, 'hub.service'),
     fullRunLock: join(m, 'full-run.lock'),
+    claudeAccountDir: join(m, 'claude-account'),
   };
   const home = mkdtempSync(join(tmpdir(), 'setup-instance-'));
   const facts: InstanceFacts = { home, credentials: { github: { kind: 'app', key_path: join(home, 'app.pem') } } };
@@ -202,6 +203,30 @@ test("server: what the coordinator's user can't see is read from init's record; 
   const unrecorded = checkSetup(f.ctx('server', { instanceFacts: () => facts, handoff: {} }), probeFor(world()));
   assert.equal(stepIn(unrecorded, 'claude-token')!.done, false);
   assert.match(stepIn(unrecorded, 'claude-token')!.detail, /names no Claude login/);
+});
+
+test("regression (bug B): server, after add-project installed the agents' token, the step reads the agent user's login as claude-account status found it (no credentials.yaml entry, no init record); never the cached email", () => {
+  const f = fixture();
+  const facts = { home: f.home, credentials: { github: { kind: 'app' as const, key_path: join(f.home, 'app.pem') } } };
+  const status = (users: object[]) => {
+    mkdirSync(f.machine.claudeAccountDir, { recursive: true });
+    writeFileSync(join(f.machine.claudeAccountDir, 'status.json'), JSON.stringify({ at: '2026-10-14T10:00:00Z', users }));
+  };
+  const step = () => stepIn(checkSetup(f.ctx('server', { instanceFacts: () => facts, handoff: {} }), probeFor(world())), 'claude-token')!;
+  // What add-project's `claude-account.sh status shop` writes once the token is in (as root, from the agent's own home).
+  const agent = { instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'previous-account@example.com', token_id: '0123abcd', installed_at: '2026-10-14T09:59:00Z' };
+  status([{ ...agent, instance: 'other', user: 'wl-other-agent' }, { ...agent, kind: 'eval', user: 'wl-shop-eval' }]);
+  assert.equal(step().done, false, "another instance's login, or the eval user's, is not this one's agents'");
+  status([agent]);
+  const done = step();
+  assert.equal(done.done, true, done.detail);
+  assert.match(done.detail, /^wl-shop-agent is signed in \(claude\.ai\), per claude auth status as that user at 2026-10-14T10:00:00Z; token 0123abcd$/);
+  assert.doesNotMatch(done.detail, /example\.com/, 'never the cached account email (#341)');
+  // After a switch the record is rewritten: a login that failed there reads not done, whatever init recorded.
+  status([{ ...agent, logged_in: false, error: 'claude auth status says it is not logged in' }]);
+  const failed = stepIn(checkSetup(f.ctx('server', { instanceFacts: () => facts, handoff: { 'claude-token': 'done' } }), probeFor(world())), 'claude-token')!;
+  assert.equal(failed.done, false);
+  assert.match(failed.detail, /wl-shop-agent: claude auth status says it is not logged in, per claude auth status as that user/);
 });
 
 test('a step for the other mode is not shown; linger only where loginctl answers', () => {

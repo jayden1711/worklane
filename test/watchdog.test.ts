@@ -65,7 +65,7 @@ function world(o: { instance?: string; dir?: string; poster?: boolean } = {}) {
     units: () => w.units,
     updates: () => w.updates,
     disks: () => w.disks,
-    config: () => ({ stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null }),
+    config: () => ({ stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null, minFreeGb: 10, minFreePct: 5 }),
     poster: () =>
       o.poster === false
         ? null
@@ -393,9 +393,11 @@ test('unit states from the real systemctl (Linux CI): a running unit is active, 
 test('watchdog.json: valid fields over the defaults, out-of-range ones ignored; intake.yaml ops_channel needs dashboard_url', () => {
   const dir = mkdtempSync(join(tmpdir(), 'watchdog-config-'));
   const f = join(dir, 'watchdog.json');
-  assert.deepEqual(watchdogConfig(f), { stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null });
-  writeFileSync(f, JSON.stringify({ stall_hours: 2, disk_pct: 5, ops_channel: '123456789012345678', dashboard_url: 'http://insecure.example' }));
-  assert.deepEqual(watchdogConfig(f), { stallHours: 2, diskPct: 85, opsChannel: '123456789012345678', dashboardUrl: null });
+  assert.deepEqual(watchdogConfig(f), { stallHours: 6, diskPct: 85, opsChannel: null, dashboardUrl: null, minFreeGb: 10, minFreePct: 5 });
+  writeFileSync(f, JSON.stringify({ stall_hours: 2, disk_pct: 5, ops_channel: '123456789012345678', dashboard_url: 'http://insecure.example', min_free_gb: 0, min_free_pct: 60 }));
+  assert.deepEqual(watchdogConfig(f), { stallHours: 2, diskPct: 85, opsChannel: '123456789012345678', dashboardUrl: null, minFreeGb: 10, minFreePct: 5 });
+  writeFileSync(f, JSON.stringify({ min_free_gb: 40, min_free_pct: 0 }));
+  assert.deepEqual([watchdogConfig(f).minFreeGb, watchdogConfig(f).minFreePct], [40, 0]);
   const base = { version: 1, discord: { enabled: true, guild: '100000000000000001', ops_channel: '100000000000000005' } };
   assert.equal(IntakeConfig.safeParse(base).success, false, 'no dashboard_url: refused');
   assert.equal(IntakeConfig.safeParse({ ...base, discord: { ...base.discord, dashboard_url: DASH } }).success, true);

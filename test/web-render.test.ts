@@ -3,7 +3,7 @@
 // data; decisions are still answerable only where the server says so.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +16,7 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
@@ -51,6 +51,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string } }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -61,6 +62,9 @@ interface Render {
   renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
   renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
+  tailscaleBusy(d: unknown, now?: number): boolean;
+  tailscaleStepEnded(prev: unknown, next: unknown): boolean;
+  accountBusy(d: unknown, now?: number): boolean;
   addProjectInvalid(name: string, repo: string): string | null;
   keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
@@ -112,6 +116,29 @@ interface Render {
   navRows: { to: string; label: string; testId: string }[];
   renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
+  renderComposerMic(role: string | undefined, prefs: VoicePrefs, support: unknown, listening?: boolean): string;
+  renderMicInterim(listening: boolean, interim: string, error?: string | null): string;
+  renderVoiceSettings(owner: boolean): string;
+  renderVoiceSettingsView(prefs: VoicePrefs, status: unknown): string;
+  checkSupport(ctor: unknown, o: { lang: string; allowCloud: boolean }): Promise<{ kind: string; why?: string; local?: boolean }>;
+  Dictation: new (ctor: unknown, o: { lang: string; local: boolean }, hooks: { onFinal: (t: string) => void; onInterim: (t: string) => void; onListening: (l: boolean) => void; onError: (w: string) => void }) => { start(): void; stop(): void; abort(): void; listening: boolean };
+  insertAt(text: string, start: number, end: number, chunk: string): { text: string; caret: number };
+  intoBox(box: () => unknown, setText: (t: string) => void): (words: string) => void;
+  NO_ON_DEVICE: string;
+  speechCtor(w: unknown): unknown;
+  mayDictate(role: string | undefined, prefs: VoicePrefs): boolean;
+  readVoicePrefs(): VoicePrefs;
+  renderTalkStatus(role: string | undefined, prefs: VoicePrefs, speaking: boolean, note?: string | null): string;
+  renderVoiceSettingsVoices(prefs: VoicePrefs, voices: { local: number; network: number } | null): string;
+  mayTalk(role: string | undefined, prefs: VoicePrefs): boolean;
+  countVoices(voices: FakeVoice[], lang: string): { local: number; network: number };
+  pickVoice(voices: FakeVoice[], lang: string, allowNetwork: boolean): FakeVoice | null;
+  spokenText(answer: string): string;
+  stopSpeaking(): void;
+  TalkBack: new (o: { lang: string; allowNetwork: boolean; synth?: unknown; voicesWaitMs?: number }) => TalkBackLike;
+  CODE_OMITTED: string;
+  SECRET_OMITTED: string;
+  NO_LOCAL_VOICE: string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
   actionHref(a: unknown): string | null;
   citationHref(c: unknown): string;
@@ -124,6 +151,9 @@ const LONG_PROSE =
   'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
   'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
 
+type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean };
+type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
+type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
 let asOwner: State;
 let asOther: State;
@@ -530,6 +560,18 @@ test('the off-machine backup on the health panel: not set up with the docs link;
   const updateHold = { at: '2026-10-12T03:00:00.000Z', sha: 'b'.repeat(40), reason: 'rollback: migration failed: bob: disk full', migration: true };
   assert.match(r.renderHealth({ ...base, offsiteBackup: null, updateHold }), /role="alert"[^>]*data-testid="health-update-held"[\s\S]*?Engine update rolled back: a migration failed[\s\S]*?2026-10-12 03:00 UTC, bbbbbbbbbbbb[\s\S]*?rollback: migration failed: bob: disk full/);
   assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, updateHold: null }), /health-update-held/);
+  // The machine's outbound proxy (root's network.json), read-only: the host and its file, or the refusal in red.
+  const proxied = r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: 'proxy.internal:3128', file: '/etc/x/network.json', ca: null, error: null } });
+  assert.match(proxied, /data-testid="health-network"[^>]*>Outbound proxy: <code[^>]*>proxy\.internal:3128<\/code> \(from <code[^>]*>\/etc\/x\/network\.json<\/code>\)/);
+  assert.doesNotMatch(proxied, /<(?:input|button|form)[^>]*network/i, 'nothing on the page changes it');
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', ca: null, error: '/etc/x/network.json: proxy must not carry a user or password; no outbound proxy or custom CA is set' } }), /role="alert"[^>]*data-testid="health-network-refused"[\s\S]*?Outbound proxy and custom CA refused:[\s\S]*?must not carry a user or password/);
+  assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, network: null }), /health-network/);
+  assert.doesNotMatch(proxied, /health-network-ca/, 'no CA line without a CA');
+  // The custom CA (root's ca_file): its path, how many certificates, each one's short SHA-256 fingerprint.
+  const ca = r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', ca: { path: '/etc/x/ca/corp.pem', count: 2, fingerprints: ['0123456789abcdef', 'fedcba9876543210'] }, error: null } });
+  assert.match(ca, /data-testid="health-network-ca"[^>]*>Custom CA: <code[^>]*>\/etc\/x\/ca\/corp\.pem<\/code>, 2 certificates, fingerprints <code[^>]*>sha256:0123456789abcdef, sha256:fedcba9876543210<\/code> \(from <code[^>]*>\/etc\/x\/network\.json<\/code>\)/);
+  assert.doesNotMatch(ca, /data-testid="health-network"[^-]/, 'no proxy line without a proxy');
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', ca: { path: '/etc/x/ca.pem', count: 1, fingerprints: ['0123456789abcdef'] }, error: null } }), /1 certificate, fingerprint <code/);
   const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
   const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
   const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });
@@ -1665,6 +1707,23 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
   assert.match(view(ownerRequester('ada'), 'writer'), /data-enabled="no"[\s\S]*only an owner of this instance/, 'a writer here sees it, disabled');
 });
 
+test('Add project on an older sudo: no submit, why, and the root command to run instead; the name and repo fields still there to fill it', () => {
+  const ownersFile = machineOwnersFile('ada');
+  const f = join(mkdtempSync(join(tmpdir(), 'helper-rules-')), 'helper-rules.json');
+  writeFileSync(f, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer'] }));
+  const html = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile, helperRulesFile: f }));
+  assert.match(html, /data-testid="add-project" data-enabled="no"/);
+  assert.doesNotMatch(html, /data-testid="add-project-submit"|data-testid="add-project-disabled"/, 'no button that could only fail, and no bare refusal');
+  assert.match(html, /data-testid="add-project-manual"[\s\S]*?this machine(&#x27;|')s sudo \(1\.9\.9\) is older than 1\.9\.10[\s\S]*?data-testid="add-project-manual-command"[^>]*>sudo bash \/opt\/worklane\/current\/scripts\/setup\/add-project\.sh &lt;name&gt; &lt;owner\/repo&gt;</);
+  for (const id of ['add-project-name', 'add-project-repo']) assert.doesNotMatch(html.match(new RegExp(`<input[^>]*data-testid="${id}"[^>]*>`))![0], /disabled=""/, `${id} can be filled in`);
+  // On 1.9.10 or later, as before.
+  const g = join(mkdtempSync(join(tmpdir(), 'helper-rules-')), 'helper-rules.json');
+  writeFileSync(g, JSON.stringify({ sudo: '1.9.15', patterns_min: '1.9.10', left_out: [] }));
+  const ok = r.renderAddProject(addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile, helperRulesFile: g }), null);
+  assert.match(ok, /data-testid="add-project-submit"/);
+  assert.doesNotMatch(ok, /data-testid="add-project-manual"/);
+});
+
 test("Add project's repo picker: the account's repos to pick from, the ones the App can't work on shown disabled with why; the script it stands for; hidden when adding isn't allowed", () => {
   const ownersFile = machineOwnersFile('ada');
   const data = addProjectView([], { role: 'owner', requester: ownerRequester('ada') }, { ownersFile });
@@ -2250,4 +2309,522 @@ test("the first-run page's Discord step: the token's place and a paste box, the 
   assert.match(r.renderFirstRun(f, { open: 'discord', discord: stored }), /data-step="discord"[\s\S]*?data-testid="first-run-fix-panel"[\s\S]*?data-testid="discord-setup"/);
   const done = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'discord' ? { ...s, done: true } : s)) })) } };
   assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
+});
+
+test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  assert.doesNotMatch(r.renderRepoConfigForm(c), /repo-config-merge/, 'nothing to merge before a PR is proposed');
+  const proposed = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7' });
+  assert.match(proposed, /data-testid="repo-config-result"[^>]*>proposed: merge the PR to apply it/);
+  assert.match(proposed, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"/);
+  assert.match(proposed, /data-testid="repo-config-merge-review"[^>]*>Merge PR #(<!-- -->)?7(<!-- -->)? here…/);
+  const confirming = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7', mergePlan: { command: 'gh pr merge 7 --repo example-org/example-shop --squash', then: "then this checkout's main is fast-forwarded to origin's" } });
+  assert.match(confirming, /data-testid="repo-config-merge-confirming"[\s\S]*?gh pr merge 7 --repo example-org\/example-shop --squash[\s\S]*?fast-forwarded to origin(&#x27;|')s\.[\s\S]*?data-testid="repo-config-merge-confirm"[^>]*>Confirm merge[\s\S]*?data-testid="repo-config-merge-cancel"/);
+});
+
+test('Tailscale: the read that shows a step ended offers the next step at once, from the status after it, with no wait for the idle poll', { skip: process.platform === 'win32' }, async () => {
+  // Put together here so the repo holds no tailnet name, even a made-up one (the denylist's rule).
+  const name = ['box', 'tail0example', 'ts', 'net'].join('.');
+  const st = (over: Partial<TailscaleStatus>): TailscaleStatus => ({ installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'Running', name, https: true, serve: false, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test', ...over });
+  let tailscale = st({ state: 'NeedsLogin', name: null, https: false });
+  const tsDir = mkdtempSync(join(tmpdir(), 'tailscale-ended-'));
+  const at = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  const line = (state: string, detail: string) => `${JSON.stringify({ at: at(), step: 'up', state, detail })}\n`;
+  writeFileSync(join(tsDir, 'steps.jsonl'), line('started', '') + line('running', 'tailscale up (no auth key)') + line('waiting', 'the login link is in alpha\'s dashboard'));
+  const dir = mkdtempSync(join(tmpdir(), 'tailscale-ended-dash-'));
+  const { dir: root } = exampleProject();
+  const eventsDb = join(dir, 'events.db');
+  new EventLog(eventsDb).close();
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'alpha', machineOwnersFile: machineOwnersFile('example-owner'), tailscaleDir: tsDir, tailscaleStatus: async () => tailscale, slotsDir: join(dir, 'slots') });
+  const read = async () => {
+    const res = await fetch(`${d.url.split('/?')[0]!}/api/tailscale`, { headers: { authorization: `Bearer ${d.token}`, ...asDevicePerson('example-owner') } });
+    assert.equal(res.status, 200);
+    return (await res.json()) as { next: string | null; run: { status: string }; busy: string | null; steps: { id: string; blocked: string | null }[] };
+  };
+  const serveButton = (html: string) => /data-step="serve"[^]*?<button([^>]*)data-testid="tailscale-step-run"/.exec(html)![1]!;
+  try {
+    // up is waiting on the owner: the card polls at its busy pace, and serve can't be asked for yet.
+    const waiting = await read();
+    assert.deepEqual([waiting.run.status, waiting.next], ['waiting', 'up']);
+    assert.ok(r.tailscaleBusy(waiting));
+    assert.match(serveButton(r.renderTailscaleSetup(waiting)), /disabled=""/);
+    // The owner logs in: tailscale is up, and the step's last line is written, all within the status cache's 3 s.
+    tailscale = st({});
+    appendFileSync(join(tsDir, 'steps.jsonl'), line('done', `on the tailnet as ${name}`));
+    // The very next read, with no wait: the step is done, Tailscale's status is the one after it, and serve is offered.
+    const ended = await read();
+    assert.deepEqual([ended.run.status, ended.next, ended.busy], ['done', 'serve', null]);
+    assert.equal(ended.steps.find((s) => s.id === 'serve')!.blocked, null);
+    assert.doesNotMatch(serveButton(r.renderTailscaleSetup(ended)), /disabled/, 'the Serve button is enabled on the render after that read');
+    // And the card sees the step end, so it reads again at once (fresh) rather than at its idle pace.
+    assert.ok(r.tailscaleStepEnded(waiting, ended));
+    assert.ok(!r.tailscaleStepEnded(ended, ended), 'only once');
+    assert.ok(!r.tailscaleBusy(ended), 'then idle: nothing left running');
+  } finally {
+    await d.close();
+  }
+});
+
+test('Tailscale and Claude account: a request handed to its own unit keeps the card at its busy pace until the unit writes its first line', () => {
+  const now = Date.parse('2026-10-14T12:00:30Z');
+  const req = (over: Record<string, unknown> = {}) => ({ id: 'mr-1', args: ['tailscale', 'serve'], by: 'ada', at: '2026-10-14T12:00:20.500Z', status: 'done', detail: 'started', finishedAt: '2026-10-14T12:00:22Z', ...over });
+  const run = (startedAt: string, status = 'done') => ({ step: 'up', startedAt, status, detail: '', lines: [] });
+  // The request is done (the unit was started), but the progress file still shows the step before: keep looking.
+  assert.ok(r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now));
+  assert.ok(r.tailscaleBusy({ run: null, requests: [req()] }, now));
+  // The unit's first line is there: from now on its own status decides.
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:21Z'), requests: [req()] }, now));
+  assert.ok(r.tailscaleBusy({ run: run('2026-10-14T12:00:21Z', 'running'), requests: [req()] }, now));
+  // A refused or failed request starts no unit; and after a minute the unit is taken not to have started.
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req({ status: 'refused' })] }, now));
+  assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now + 120_000));
+  // The Claude account switch is started the same way (its own unit): the panel used to stop looking entirely.
+  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', tokenFrom: 'alpha', waitingForToken: false, token: null, instances: [] });
+  const account = req({ args: ['claude-account', 'switch'] });
+  assert.ok(r.accountBusy({ switch: sw('2026-10-13T09:00:00Z'), requests: [account] }, now));
+  assert.ok(r.accountBusy({ switch: null, requests: [account] }, now));
+  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [account] }, now));
+  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [account] }, now));
+  assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
+});
+
+// Voice dictation in the Ask panel (web/src/voice/): owners only, off until turned on, on-device only by default,
+// and nothing it hears is ever sent.
+
+/** A stand-in for the browser's SpeechRecognition: the test says what it hears. */
+function fakeRecognizer(o: { availability?: string | null; processLocally?: boolean } = {}) {
+  const made: FakeRec[] = [];
+  class FakeRec {
+    lang = '';
+    continuous = false;
+    interimResults = false;
+    onresult: ((e: unknown) => void) | null = null;
+    onerror: ((e: { error: string }) => void) | null = null;
+    onend: (() => void) | null = null;
+    calls: string[] = [];
+    constructor() {
+      made.push(this);
+    }
+    start() {
+      this.calls.push('start');
+    }
+    stop() {
+      this.calls.push('stop');
+    }
+    abort() {
+      this.calls.push('abort');
+    }
+    hear(results: [string, boolean][], resultIndex = 0) {
+      this.onresult?.({ resultIndex, results: results.map(([transcript, isFinal]) => ({ isFinal, 0: { transcript } })) });
+    }
+  }
+  if (o.processLocally !== false) Object.defineProperty(FakeRec.prototype, 'processLocally', { value: false, writable: true });
+  if (o.availability !== null) (FakeRec as unknown as { available: unknown }).available = async () => o.availability ?? 'available';
+  return { ctor: FakeRec, made };
+}
+
+const READY_LOCAL = { kind: 'ready', local: true, title: 'Dictate (on-device)' };
+const roleOf = (s: State) => (s as unknown as { role?: string }).role;
+
+test("the mic is the owners' only, from the role the server serves: not a writer's, not a viewer's", () => {
+  const on = { dictation: true, allowCloud: false };
+  assert.deepEqual([roleOf(asOwner), roleOf(asWriter), roleOf(asOther)], ['owner', 'writer', 'viewer'], 'the roles a real dashboard serves');
+  assert.match(r.renderComposerMic(roleOf(asOwner), on, READY_LOCAL), /data-testid="chat-mic"[^>]*data-state="idle"[^>]*data-local="true"/);
+  for (const s of [asWriter, asOther]) assert.equal(r.renderComposerMic(roleOf(s), on, READY_LOCAL), '', `no mic for a ${roleOf(s)}`);
+  assert.equal(r.renderComposerMic(undefined, on, READY_LOCAL), '', 'no role (an older server): no mic');
+  // The Settings section that turns it on: an owner's only too.
+  assert.match(r.renderVoiceSettings(true), /data-testid="settings-voice"/);
+  assert.equal(r.renderVoiceSettings(false), '');
+});
+
+test('the mic is off until an owner turns it on in Settings, and on-device only until they allow the cloud', () => {
+  localStorage.setItem('dash-voice', '{}');
+  const prefs = r.readVoicePrefs();
+  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false }, 'all off by default');
+  assert.equal(r.renderComposerMic(roleOf(asOwner), prefs, READY_LOCAL), '', 'not rendered for the owner until enabled');
+  const settings = r.renderVoiceSettings(true);
+  assert.match(settings, /data-testid="voice-dictation"/);
+  assert.doesNotMatch(settings, /checked=""/, 'both switches start off');
+  localStorage.setItem('dash-voice', JSON.stringify({ dictation: 'yes', allowCloud: 1 }));
+  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false }, 'only a stored true turns either on');
+  localStorage.setItem('dash-voice', JSON.stringify({ dictation: true }));
+  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false });
+  assert.match(r.renderVoiceSettings(true), /data-testid="voice-dictation" checked=""/);
+  assert.match(r.renderComposerMic(roleOf(asOwner), r.readVoicePrefs(), READY_LOCAL), /data-testid="chat-mic"/, 'there once turned on');
+  localStorage.setItem('dash-voice', '{}');
+});
+
+test("without speech recognition there is no button; on-device only, a browser that can't keep the audio local gets a disabled one saying why", async () => {
+  const on = { dictation: true, allowCloud: false };
+  const owner = roleOf(asOwner);
+  assert.equal(r.speechCtor({}), null);
+  const none = await r.checkSupport(null, { lang: 'en-US', allowCloud: false });
+  assert.deepEqual(none, { kind: 'none' });
+  assert.equal(r.renderComposerMic(owner, on, none), '', 'no recognizer: no button at all');
+  // A recognizer with no on-device API (an older Chrome's webkitSpeechRecognition): it would stream to the cloud.
+  const old = await r.checkSupport(fakeRecognizer({ availability: null, processLocally: false }).ctor, { lang: 'en-US', allowCloud: false });
+  assert.deepEqual([old.kind, old.why], ['disabled', r.NO_ON_DEVICE]);
+  assert.match(r.renderComposerMic(owner, on, old), /<button[^>]*disabled=""[^>]*title="on-device speech recognition isn(&#x27;|')t available in this browser"[^>]*data-state="disabled"/);
+  // The on-device API, but no model for the language: still disabled.
+  for (const availability of ['unavailable', 'downloadable']) {
+    const s = await r.checkSupport(fakeRecognizer({ availability }).ctor, { lang: 'en-US', allowCloud: false });
+    assert.equal(s.kind, 'disabled', availability);
+  }
+  const throws = fakeRecognizer();
+  (throws.ctor as unknown as { available: unknown }).available = async () => {
+    throw new Error('boom');
+  };
+  assert.deepEqual(await r.checkSupport(throws.ctor, { lang: 'en-US', allowCloud: false }).then((s) => [s.kind, s.why]), ['disabled', r.NO_ON_DEVICE], 'a check that throws is no error, just disabled');
+  // On the device: ready, and local.
+  assert.deepEqual(await r.checkSupport(fakeRecognizer().ctor, { lang: 'en-US', allowCloud: false }).then((s) => [s.kind, s.local]), ['ready', true]);
+  // Only when the owner allowed the cloud does a browser without on-device get a working mic, marked not local.
+  const cloud = await r.checkSupport(fakeRecognizer({ availability: null, processLocally: false }).ctor, { lang: 'en-US', allowCloud: true });
+  assert.deepEqual([cloud.kind, cloud.local], ['ready', false]);
+  assert.match(r.renderComposerMic(owner, { dictation: true, allowCloud: true }, cloud), /data-local="false"/);
+  assert.match(r.renderVoiceSettingsView(on, { recognizer: true, availability: 'downloadable' }), /data-testid="voice-install"/);
+  assert.doesNotMatch(r.renderVoiceSettingsView(on, { recognizer: true, availability: 'available' }), /data-testid="voice-install"/);
+});
+
+test('dictation puts what it hears in the box at the caret, interim apart, and sends nothing: no fetch, no WebSocket', () => {
+  const g = globalThis as Record<string, unknown>;
+  const network: string[] = [];
+  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
+  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network in dictation')));
+  g.WebSocket = class {
+    constructor(url: string) {
+      network.push(`ws ${url}`);
+    }
+  };
+  g.XMLHttpRequest = class {
+    open(_m: string, url: string) {
+      network.push(`xhr ${url}`);
+    }
+  };
+  g.EventSource = class {
+    constructor(url: string) {
+      network.push(`sse ${url}`);
+    }
+  };
+  try {
+    const { ctor, made } = fakeRecognizer();
+    // The text box: a question already typed, the caret after "Why is".
+    const box = {
+      value: 'Why is stuck?',
+      selectionStart: 6,
+      selectionEnd: 6,
+      setSelectionRange(a: number, b: number) {
+        this.selectionStart = a;
+        this.selectionEnd = b;
+      },
+    };
+    let state = box.value;
+    const interims: string[] = [];
+    const listening: boolean[] = [];
+    const errors: string[] = [];
+    const d = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, (t) => (state = t)), onInterim: (t) => interims.push(t), onListening: (l) => listening.push(l), onError: (w) => errors.push(w) });
+    d.start();
+    const rec = made[0]!;
+    assert.equal((rec as unknown as { processLocally: boolean }).processLocally, true, 'on-device asked of this recognizer');
+    assert.deepEqual([rec.continuous, rec.interimResults, rec.lang], [true, true, 'en-US']);
+    rec.hear([['issue', false]]);
+    assert.equal(interims.at(-1), 'issue', 'interim, not in the box');
+    assert.equal(box.value, 'Why is stuck?');
+    rec.hear([['issue twelve', true], [' and', false]]);
+    assert.equal(box.value, 'Why is issue twelve stuck?', 'the final lands at the caret');
+    assert.equal(state, box.value, "the box's own state has it too");
+    assert.equal(box.selectionStart, 'Why is issue twelve'.length, 'the caret sits after it');
+    assert.equal(interims.at(-1), 'and');
+    // Two finals in one event: both land, in order; "send" is only a word.
+    rec.hear([['issue twelve', true], ['and thirteen', true], ['send', true]], 1);
+    assert.equal(box.value, 'Why is issue twelve and thirteen send stuck?', 'no voice command');
+    // The second click stops; the browser ends.
+    d.stop();
+    assert.deepEqual(rec.calls, ['start', 'stop']);
+    rec.onend?.();
+    assert.deepEqual(listening, [true, false]);
+    assert.equal(interims.at(-1), '', 'the interim line clears');
+    assert.equal(box.value, 'Why is issue twelve and thirteen send stuck?', 'still in the box, for review: the end sends nothing');
+    assert.deepEqual(errors, []);
+    // Aborted (the panel closed or lost focus): nothing more lands, even if the browser still says something.
+    const d2 = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, (t) => (state = t)), onInterim: () => {}, onListening: () => {}, onError: () => {} });
+    d2.start();
+    const rec2 = made[1]!;
+    const handler = rec2.onresult;
+    d2.abort();
+    assert.deepEqual(rec2.calls, ['start', 'abort']);
+    assert.equal(d2.listening, false);
+    handler?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: 'late words' } }] });
+    assert.doesNotMatch(box.value, /late words/, 'nothing lands after an abort');
+    assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource during dictation');
+  } finally {
+    Object.assign(g, saved);
+  }
+});
+
+test('on-device only: a recognizer without the processLocally option is never started', () => {
+  const { ctor, made } = fakeRecognizer({ processLocally: false });
+  const errors: string[] = [];
+  const d = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: () => {}, onInterim: () => {}, onListening: () => {}, onError: (w) => errors.push(w) });
+  d.start();
+  assert.deepEqual(made[0]!.calls, [], 'not started');
+  assert.deepEqual(errors, [r.NO_ON_DEVICE]);
+});
+
+test('dictated words go in at the caret with a space where words meet, replacing a selection', () => {
+  assert.deepEqual(r.insertAt('', 0, 0, ' hello '), { text: 'hello', caret: 5 });
+  assert.deepEqual(r.insertAt('Why', 3, 3, 'stuck'), { text: 'Why stuck', caret: 9 });
+  assert.deepEqual(r.insertAt('a c', 1, 2, 'b'), { text: 'a b c', caret: 4 }, 'a space each side where words meet; the caret after them');
+  assert.deepEqual(r.insertAt('Why old stuck', 4, 7, 'new'), { text: 'Why new stuck', caret: 7 });
+  assert.deepEqual(r.insertAt('x', 1, 1, '  '), { text: 'x', caret: 1 }, 'nothing heard: nothing changes');
+});
+
+test('the interim line is marked as interim and says how to stop; an error says dictation stopped', () => {
+  assert.equal(r.renderMicInterim(false, ''), '');
+  assert.match(r.renderMicInterim(true, 'why is'), /data-testid="chat-mic-interim"[\s\S]*Listening[\s\S]*class="truncate italic" data-testid="chat-mic-interim-text">why is…/);
+  assert.match(r.renderMicInterim(true, ''), /Esc stops/);
+  assert.match(r.renderMicInterim(false, '', 'no microphone found'), /data-testid="chat-mic-error"[^>]*>Dictation stopped: no microphone found/);
+});
+
+// Talk-back in the Ask panel (web/src/voice/talk.ts): owners only, off until turned on, on-device voices only by
+// default, the answer without code or secrets, and stopped the moment the owner talks.
+
+const LOCAL_EN: FakeVoice = { name: 'Samantha', lang: 'en-US', localService: true };
+const NETWORK_EN: FakeVoice = { name: 'Google US English', lang: 'en-US', localService: false, default: true };
+
+/** A stand-in for window.speechSynthesis and SpeechSynthesisUtterance: it records what it is asked to do. */
+function fakeSynth(voices: FakeVoice[] = [LOCAL_EN, NETWORK_EN]) {
+  const calls: string[] = [];
+  const spoken: { text: string; voice: FakeVoice | null; lang: string; onend: (() => void) | null }[] = [];
+  class Utterance {
+    lang = '';
+    voice: FakeVoice | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((e: { error?: string }) => void) | null = null;
+    constructor(public text: string) {}
+  }
+  const synth = {
+    speak(u: Utterance) {
+      calls.push('speak');
+      spoken.push(u);
+    },
+    cancel() {
+      calls.push('cancel');
+    },
+    getVoices: () => voices,
+  };
+  return { s: { synth, Utterance }, calls, spoken };
+}
+
+const TALK_ON = { dictation: false, allowCloud: false, talkBack: true, allowNetworkVoices: false };
+
+test("talk-back is off by default and the owners' only: a writer, a viewer or an owner who didn't turn it on hear nothing", async () => {
+  localStorage.setItem('dash-voice', '{}');
+  const prefs = r.readVoicePrefs();
+  assert.equal(prefs.talkBack, false, 'off by default');
+  assert.equal(prefs.allowNetworkVoices, false, 'network voices off by default');
+  localStorage.setItem('dash-voice', JSON.stringify({ talkBack: 'yes', allowNetworkVoices: 1 }));
+  assert.deepEqual([r.readVoicePrefs().talkBack, r.readVoicePrefs().allowNetworkVoices], [false, false], 'only a stored true turns it on');
+  localStorage.setItem('dash-voice', '{}');
+  assert.doesNotMatch(r.renderVoiceSettings(true), /data-testid="voice-talk-back" checked=""/, 'the switch starts off');
+  assert.match(r.renderVoiceSettings(true), /data-testid="voice-allow-network-voices"/);
+
+  const owner = roleOf(asOwner);
+  assert.equal(r.mayTalk(owner, prefs), false, 'an owner who did not turn it on');
+  assert.equal(r.mayTalk(owner, TALK_ON), true);
+  for (const s of [asWriter, asOther]) {
+    assert.equal(r.mayTalk(roleOf(s), TALK_ON), false, `not a ${roleOf(s)}`);
+    assert.equal(r.renderTalkStatus(roleOf(s), TALK_ON, true), '', `no reading line for a ${roleOf(s)}`);
+  }
+  assert.equal(r.mayTalk(undefined, TALK_ON), false, 'no role (an older server)');
+  assert.equal(r.renderTalkStatus(owner, prefs, true), '', 'nothing for an owner with it off');
+  assert.match(r.renderTalkStatus(owner, TALK_ON, true), /data-testid="chat-speaking"[\s\S]*data-testid="chat-speaking-stop"/);
+
+  // The reader itself does nothing until it is made active (the panel open, for an owner who turned it on).
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  try {
+    assert.deepEqual(await t.speak('Issue 12 is waiting on a review.'), { spoken: false, why: null });
+    assert.deepEqual(f.calls, [], 'speechSynthesis.speak is never called while inactive');
+  } finally {
+    t.dispose();
+  }
+});
+
+test('reading an answer hands speechSynthesis.speak the answer with code blocks and secrets left out', async () => {
+  const token = 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8';
+  const key = 'sk-ant-' + 'api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2';
+  const jwtish = 'eyJhbGciOiJIUzI1NiJ9.' + 'eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456';
+  const answer = [
+    '**Issue 12** is stuck: the `review` lane has no free slot.',
+    '```bash',
+    'export GH_TOKEN=' + token,
+    'git push --force-with-lease',
+    '```',
+    `The key ${key} was pasted in the log, and so was ${jwtish}.`,
+    'Run it with postgres://app:hunter2pass@db.internal/main.',
+  ].join('\n');
+  const said = r.spokenText(answer);
+  for (const secret of [token, key, jwtish, 'hunter2pass', 'force-with-lease', 'GH_TOKEN']) assert.ok(!said.includes(secret), `"${secret}" is not read out: ${said}`);
+  assert.match(said, new RegExp(`${r.CODE_OMITTED}`), 'the code block is named, not read');
+  assert.match(said, new RegExp(`The key ${r.SECRET_OMITTED} was pasted`), 'a secret is named, not read');
+  assert.match(said, /^Issue 12 is stuck: the review lane has no free slot\./, 'markdown marks are not read out');
+  assert.match(r.spokenText('Before\n```\nan unclosed block\nstill code'), new RegExp(`^Before\\n${r.CODE_OMITTED}\\.$`), 'an unclosed block is left out to the end');
+  assert.equal(r.spokenText('Commit 3f2a9c1 is fine.'), 'Commit 3f2a9c1 is fine.', 'a short id is ordinary text');
+
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  try {
+    t.setActive(true);
+    assert.deepEqual(await t.speak(answer), { spoken: true });
+    assert.deepEqual(f.calls, ['speak']);
+    assert.equal(f.spoken[0]!.text, said, 'speak gets the redacted text, nothing else');
+    assert.equal(t.speaking, true);
+    f.spoken[0]!.onend?.();
+    assert.equal(t.speaking, false, 'done when the browser says it ended');
+  } finally {
+    t.dispose();
+  }
+});
+
+test("the owner starting to dictate stops the answer being read, at once", async () => {
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  try {
+    t.setActive(true);
+    await t.speak('A long answer about issue 12.');
+    assert.equal(t.speaking, true);
+    const { ctor } = fakeRecognizer();
+    new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: () => {}, onInterim: () => {}, onListening: () => {}, onError: () => {} }).start();
+    assert.deepEqual(f.calls, ['speak', 'cancel'], 'starting dictation cancels speech');
+    assert.equal(t.speaking, false);
+    // And the hook other voice input (the wake word) calls does the same.
+    await t.speak('Another answer.');
+    r.stopSpeaking();
+    assert.deepEqual(f.calls, ['speak', 'cancel', 'speak', 'cancel']);
+  } finally {
+    t.dispose();
+  }
+});
+
+test('Esc, the panel closing and the tab being hidden each stop the reading; nothing starts after a stop', async () => {
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+  const unhide = t.stopWhenHidden(doc);
+  try {
+    t.setActive(true);
+    // Esc.
+    await t.speak('One.');
+    assert.equal(t.escape(), true, 'Esc while reading is taken by the reading');
+    assert.deepEqual([f.calls.at(-1), t.speaking], ['cancel', false], 'Esc cancels');
+    assert.equal(t.escape(), false, 'the next Esc is the panel’s (it closes)');
+    // The tab hidden.
+    await t.speak('Two.');
+    doc.dispatchEvent(new Event('visibilitychange'));
+    assert.equal(t.speaking, true, 'still visible: still reading');
+    doc.visibilityState = 'hidden';
+    const before = f.calls.length;
+    doc.dispatchEvent(new Event('visibilitychange'));
+    assert.deepEqual([f.calls.slice(before), t.speaking], [['cancel'], false], 'hidden cancels');
+    doc.visibilityState = 'visible';
+    // The panel closing (useTalkBack makes it inactive).
+    await t.speak('Three.');
+    t.setActive(false);
+    assert.deepEqual([f.calls.at(-1), t.speaking], ['cancel', false], 'closing the panel cancels');
+    assert.deepEqual(await t.speak('Four.'), { spoken: false, why: null }, 'closed: nothing is read');
+    // A stop while the browser's voices are still loading: nothing starts once they arrive.
+    const late = fakeSynth([]);
+    let fire = () => {};
+    const slow = { ...late.s, synth: { ...late.s.synth, addEventListener: (_: string, fn: () => void) => (fire = fn), removeEventListener: () => {} } };
+    const t2 = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: slow, voicesWaitMs: 5000 });
+    t2.setActive(true);
+    const pending = t2.speak('Five.');
+    t2.stop();
+    late.s.synth.getVoices = () => [LOCAL_EN];
+    fire();
+    assert.deepEqual(await pending, { spoken: false, why: null });
+    assert.ok(!late.calls.includes('speak'), 'nothing is read after a stop');
+    t2.dispose();
+  } finally {
+    unhide();
+    t.dispose();
+  }
+});
+
+test('only on-device voices unless the owner allowed network voices; never the browser default by omission', async () => {
+  assert.equal(r.pickVoice([NETWORK_EN, LOCAL_EN], 'en-US', false), LOCAL_EN);
+  assert.equal(r.pickVoice([NETWORK_EN], 'en-US', false), null, 'a network voice is not used unless allowed');
+  assert.equal(r.pickVoice([NETWORK_EN], 'en-US', true), NETWORK_EN, 'allowed: a network voice when there is no local one');
+  assert.equal(r.pickVoice([NETWORK_EN, LOCAL_EN], 'en-US', true), LOCAL_EN, 'allowed, a local voice still comes first');
+  assert.equal(r.pickVoice([{ name: 'Thomas', lang: 'fr-FR', localService: true }], 'en-US', false), null, 'not another language');
+
+  const only = fakeSynth([NETWORK_EN]);
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: only.s });
+  try {
+    t.setActive(true);
+    assert.deepEqual(await t.speak('Hello.'), { spoken: false, why: r.NO_LOCAL_VOICE });
+    assert.deepEqual(only.calls, [], 'nothing is spoken with only a network voice');
+  } finally {
+    t.dispose();
+  }
+  const both = fakeSynth();
+  const t2 = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: both.s });
+  try {
+    t2.setActive(true);
+    await t2.speak('Hello.');
+    assert.equal(both.spoken[0]!.voice, LOCAL_EN, 'the voice is set to the local one, never left to the browser default');
+  } finally {
+    t2.dispose();
+  }
+  assert.match(r.renderTalkStatus(roleOf(asOwner), TALK_ON, false, r.NO_LOCAL_VOICE), /data-testid="chat-talk-note"[^>]*>Not read aloud: no on-device voice/);
+  assert.deepEqual(r.countVoices([LOCAL_EN, NETWORK_EN, { name: 'Thomas', lang: 'fr-FR', localService: true }], 'en-US'), { local: 1, network: 1 });
+  assert.match(r.renderVoiceSettingsVoices(TALK_ON, { local: 0, network: 2 }), /data-testid="voice-voices"[^>]*>Voices for reading aloud \(en-US\): 0 on-device \(2 network, not used\): answers aren(&#x27;|')t read aloud here/);
+});
+
+test('reading aloud sends nothing: no fetch, WebSocket, XHR or EventSource while it speaks or stops', async () => {
+  const g = globalThis as Record<string, unknown>;
+  const network: string[] = [];
+  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
+  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network in talk-back')));
+  g.WebSocket = class {
+    constructor(url: string) {
+      network.push(`ws ${url}`);
+    }
+  };
+  g.XMLHttpRequest = class {
+    open(_m: string, url: string) {
+      network.push(`xhr ${url}`);
+    }
+  };
+  g.EventSource = class {
+    constructor(url: string) {
+      network.push(`sse ${url}`);
+    }
+  };
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: true, synth: f.s });
+  try {
+    t.setActive(true);
+    await t.speak('Issue 12 is waiting.\n```\ncode\n```');
+    f.spoken[0]!.onend?.();
+    await t.speak('Again.');
+    t.escape();
+    t.setActive(false);
+    assert.deepEqual(f.calls, ['speak', 'speak', 'cancel', 'cancel']);
+    assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource during talk-back');
+  } finally {
+    t.dispose();
+    Object.assign(g, saved);
+  }
+});
+
+test("no effect in the web app returns a member call's value: React calls it as the cleanup (scrollIntoView returns a Promise in Chrome)", () => {
+  const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : /\.tsx?$/.test(e.name) ? [join(dir, e.name)] : []));
+  const bad: string[] = [];
+  for (const f of files(join(repoRoot, 'web', 'src'))) {
+    // An expression-bodied effect may be `void x`, a cleanup `() => ...`, or a call of a plain local function;
+    // a member call (`a.b()`, `a?.b()`) returns whatever that API returns.
+    for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
+  }
+  assert.deepEqual(bad, []);
 });

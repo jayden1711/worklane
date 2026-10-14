@@ -28,6 +28,8 @@ export interface UpdaterPending {
   key: string;
   fingerprint: string;
   by: string;
+  /** The instance whose dashboard staged it; absent from older servers. */
+  instance?: string | null;
   at: string;
   expiresAt: string;
   /** The root command that confirms it. */
@@ -44,7 +46,7 @@ export interface UpdaterData {
   signers: UpdaterSigner[] | null;
   pending: UpdaterPending[];
   pendingMax: number;
-  script: { install: string; signer: string; confirm: string; release: string; main: string };
+  script: { install: string; signer: string; confirm: string; release: string; main: string; releaseHold?: string };
 }
 
 export interface UpdaterPlan {
@@ -203,6 +205,11 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
               </Button>
             )}
             {open('install')}
+            {u.script.releaseHold && (
+              <p className="text-[12px] text-ink-3" data-testid="updater-release-hold">
+                A commit the updater rolled back stays held until a newer one, or until an admin releases it at a root shell: <span className="font-mono">{u.script.releaseHold}</span>. Nothing on this page releases a hold, the channel and the on/off switch included.
+              </p>
+            )}
           </Step>
           <Step n={2} title="Release signers" state={`${signers.length ? `${signers.length} listed` : 'none listed'}${pending.length ? `, ${pending.length} staged` : ''}`} tone={signers.length ? 'ok' : u.channel === 'main' ? 'neutral' : 'warn'}>
             <p className="text-[12.5px] text-ink-2">
@@ -248,7 +255,7 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
                   <Badge tone="warn">staged, not a signer</Badge>
                   <span className="break-all text-[12.5px] font-medium text-ink">{p.principal}</span>
                   <span className="text-[11.5px] text-ink-3" title={p.at}>
-                    staged {ago(p.at)} by {p.by}; dropped in {waitsFor(p.expiresAt)}
+                    staged {ago(p.at)} by {p.by}{p.instance ? ` (instance ${p.instance})` : ''}; dropped in {waitsFor(p.expiresAt)}
                   </span>
                 </div>
                 <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-[12.5px] sm:grid-cols-[92px_1fr]">
@@ -260,7 +267,7 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
                   </dd>
                 </dl>
                 <p className="text-[12.5px] text-ink-2">
-                  To make it a signer, check the fingerprint against your own key (<span className="font-mono text-[12px]">ssh-keygen -lf &lt;your key&gt;.pub</span>), then run this as root on the machine. It prints the principal and key before it adds them:
+                  To make it a signer, check the fingerprint against your own key (<span className="font-mono text-[12px]">ssh-keygen -lf &lt;your key&gt;.pub</span>), then run this as root on the machine. It prints who staged it, the principal and the key, and asks you to type the principal before it adds anything:
                 </p>
                 <code className={code} data-testid="updater-pending-command">
                   {p.confirm}

@@ -455,7 +455,7 @@ jobs:
               socket.socket(socket.AF_UNIX).bind(os.path.join(old, "SingletonSocket")); print("old place bound")
           except OSError as e:
               print("old place:", len(os.path.join(old, "SingletonSocket").encode()), "bytes:", e)'
-          out="$(as2 exec "$id" 120 -- "python3 -c '$probe' && google-chrome --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir=\"\$TMPDIR/profile\" --dump-dom about:blank | head -c 200")"
+          out="$(as2 exec "$id" 120 -- "python3 -c '$probe' && google-chrome --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir=\"\$TMPDIR/profile\" --dump-dom about:blank | head -c 200" < /dev/null)"
           echo "$out"
           grep -qx "TMPDIR $t TMP $t TEMP $t" <<<"$out"
           grep -q "^bound $t/org.chromium.Chromium.[A-Za-z0-9_]*/SingletonSocket " <<<"$out"
@@ -524,10 +524,103 @@ jobs:
           rm -rf "$r"
       - name: a red main tip doesn't block the updater, as root (the newest green first-parent commit; its verdict memo root-owned)
         run: sudo "$(command -v node)" scripts/ci/updater-lookback-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
+      - name: a sandbox check that fails after an update rolls it back, as root, with every root helper put back (bytes, owner, group, mode)
+        run: sudo "$(command -v node)" scripts/ci/updater-sandbox-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
       - name: the database image, pinned to the digest it has today
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "regression: no value of a run's variables, nor its database password, in any argv, the journal or the unit (a canary, watched as nobody)"
+        run: |
+          # sudo logs its whole command line to the journal; any user reads a process's argv (ps, /proc/<pid>/cmdline)
+          # and a unit's systemctl show / cat. A run's DATABASE_URL carries its database's password. Each phase: a run
+          # made as wl-ci, its exec given a canary variable and its database started, while nobody watches
+          # (scripts/ci/argv-watch.sh); then the canary and the password are looked for in that output and the journal.
+          H=/usr/local/libexec/worklane-testrun
+          w="$(mktemp -d /tmp/wl-watch-XXXXXX)"; cp scripts/ci/argv-watch.sh "$w/"; chmod -R a+rX "$w"
+          # Every docker call the helper makes, recorded (scripts/ci/docker-argv-shim.sh in place of the test user's
+          # docker CLI for this step, the real one put back after): sampling can miss a call that lasts a moment.
+          D="$(readlink -f /opt/worklane-test/docker/docker)"
+          argvlog=/var/log/wl-docker-argv.log
+          sudo install -o wl-test-ci -g wl-test-ci -m 0600 /dev/null "$argvlog"
+          sudo mv "$D" "$D.real"
+          trap 'sudo mv -f "$D.real" "$D"' EXIT
+          sed -e "s#@LOG@#$argvlog#" -e "s#@REAL@#$D.real#" scripts/ci/docker-argv-shim.sh | sudo tee "$D" > /dev/null
+          sudo chmod 0755 "$D"
+          mkrun() {
+            local r id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+            r="$(mktemp -d)"
+            git init -q "$r" && date > "$r/f" && git -C "$r" add f && git -C "$r" "${id_[@]}" commit -q -m probe
+            for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$1/$x" HEAD; done
+            git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$1/head" "refs/worklane/test-run/$1/base"
+            sudo -u wl-ci sudo -n "$H" ci create "$1" main "refs/worklane/test-run/$1/head" "refs/worklane/test-run/$1/base" "$(git -C "$r" rev-parse HEAD)" "$(git -C "$r" rev-parse HEAD)" < "$r/b" >/dev/null
+            rm -rf "$r"
+          }
+          # One phase: $1 old|new. Prints how often the canary and the password were seen, and where.
+          phase() {
+            local which="$1" id="argv-$1-$$" canary value since out pw seen cmd watcher
+            canary="wl-canary-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+            value="$canary x \"q\" \$HOME \`id\` #h 'a'"
+            mkrun "$id"
+            since="$(date '+%Y-%m-%d %H:%M:%S')"
+            rm -f "$w/stop"
+            sudo -u nobody bash "$w/argv-watch.sh" ci "$w/stop" > "$RUNNER_TEMP/watch-$which.log" 2>&1 &
+            watcher=$!
+            sleep 1
+            cmd='printf %s "$CANARY_VAR" | sha256sum; sleep 3'
+            if [ "$which" = old ]; then
+              out="$(sudo -u wl-ci sudo -n "$H" ci exec "$id" 60 --env "CANARY_VAR=$value" -- "$cmd" 2>/dev/null < /dev/null)"
+            else
+              # As the engine passes them (src/testrun/host.ts runVars): NAME=value, a NUL, on stdin. printf is bash's own.
+              out="$(printf 'CANARY_VAR=%s\0' "$value" | sudo -u wl-ci sudo -n "$H" ci exec "$id" 60 -- "$cmd" 2>/dev/null)"
+            fi
+            [ "$(cut -d' ' -f1 <<<"$out")" = "$(printf %s "$value" | sha256sum | cut -d' ' -f1)" ] || { echo "$which: the run didn't get the value exactly: $out" >&2; exit 1; }
+            echo "$which helper: the run got CANARY_VAR exactly (its sha256 matches)"
+            sudo truncate -s 0 "$argvlog"
+            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[0-9]* \([0-9a-f]\{32\}\)$/\1/p')"
+            [ -n "$pw" ] || { echo "$which: db-start printed no password" >&2; exit 1; }
+            # db-start's recorded docker calls, copied out with no value on any command line. WHY: a sudo grep for the
+            # password put it in sudo's own journal line; every search with the value runs only after the watch and
+            # the journal are taken, and never through sudo.
+            sudo cat "$argvlog" > "$RUNNER_TEMP/argv-$which.log"
+            touch "$w/stop"; wait "$watcher" || true
+            sudo journalctl --since "$since" -o verbose --no-pager > "$RUNNER_TEMP/journal-$which.txt"
+            # How many recorded docker calls carry the password, and how many were "docker run".
+            echo "$which shim $(grep -cF -- "$pw" "$RUNNER_TEMP/argv-$which.log" || true) $(grep -c '^run ' "$RUNNER_TEMP/argv-$which.log" || true)" >> "$RUNNER_TEMP/seen"
+            grep '^run ' "$RUNNER_TEMP/argv-$which.log" | cut -c1-240 | sed "s/^/  $which, docker argv recorded: /" || true
+            for secret in canary pw; do
+              seen="$(grep -cF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" || true) $(grep -cF -- "${!secret}" "$RUNNER_TEMP/journal-$which.txt" || true)"
+              echo "$which helper: the $secret in argv/units as nobody, in the journal: $seen (lines)"
+              grep -hF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" "$RUNNER_TEMP/journal-$which.txt" | sort -u | head -n 3 | cut -c1-240 | sed "s/^/  $which, $secret seen: /" || true  # WHY: none seen is the pass, and grep then exits 1
+              echo "$which $secret $seen" >> "$RUNNER_TEMP/seen"
+            done
+            echo "$which helper: who can ask the test user's Docker for the container's environment (docker inspect): $(sudo stat -c '%U:%G %a' /run/worklane-test-ci-docker)"
+            sudo -u wl-ci sudo -n "$H" ci wipe "$id" >/dev/null
+          }
+          : > "$RUNNER_TEMP/seen"
+          # Fail-without: the helper before this change (protocol 6, as on main at 593e0d2), as a machine had it.
+          old=593e0d248f0ba2f9d984522b8d2675f0ba51133a
+          git fetch -q --depth=1 origin "$old"
+          git show "$old:scripts/machine/worklane-testrun.sh" > "$RUNNER_TEMP/helper-6.sh"
+          grep -qx 'PROTOCOL=6' "$RUNNER_TEMP/helper-6.sh"
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/helper-6.sh" "$H"
+          phase old
+          sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+          phase new
+          cat "$RUNNER_TEMP/seen"
+          # The old helper showed both (else this proves nothing); the new one shows neither, anywhere.
+          grep -Eq '^old canary [1-9][0-9]* [1-9][0-9]*$' "$RUNNER_TEMP/seen"
+          # The password: sampled or in the journal (a short docker call can slip between samples), and always in the
+          # recorded docker argv.
+          grep -Eq '^old pw ([1-9][0-9]* [0-9]+|[0-9]+ [1-9][0-9]*)$' "$RUNNER_TEMP/seen"
+          grep -Eq '^old shim [1-9][0-9]* [1-9][0-9]*$' "$RUNNER_TEMP/seen"
+          grep -qx 'new canary 0 0' "$RUNNER_TEMP/seen"
+          grep -qx 'new pw 0 0' "$RUNNER_TEMP/seen"
+          # And in no recorded docker argv, with "docker run" recorded (the shim ran).
+          grep -Eq '^new shim 0 [1-9][0-9]*$' "$RUNNER_TEMP/seen"
+          [ -z "$(sudo ls -A /run/worklane-testrun-env)" ] || { echo "a variables file was left" >&2; sudo ls -la /run/worklane-testrun-env >&2; exit 1; }
+          echo "no value seen with this helper; its variables files are gone"
+          rm -rf "$w"
       - name: the coordinator's sandbox host, as wl-ci, against real systemd-run
         run: |
           # What wl-ci runs, world-readable: the build, its one dependency, node, the driver and the fixtures.
@@ -584,6 +677,52 @@ jobs:
             /opt/worklane-test/docker/docker ps -aq --filter label=worklane.test-run > "$RUNNER_TEMP/left"
           if [ -s "$RUNNER_TEMP/left" ]; then echo "containers left:" >&2; cat "$RUNNER_TEMP/left" >&2; exit 1; fi
           echo "nothing left"
+      - name: testrun measure, as wl-ci, through the real helper and sudoers rule (two values of a test_run env key, in sequence)
+        run: |
+          # The CLI whole (it needs every dependency, not only zod) and the example project, world-readable for wl-ci.
+          cp -r node_modules/. "$T/node_modules/"
+          cp -r examples "$T/"
+          # WHY: only what this step added: $T/ids and $T/ids.db belong to wl-ci, so a chmod of all of $T fails on them.
+          chmod -R a+rX "$T/node_modules" "$T/examples"
+          cat > "$T/measure.sh" <<'EOF'
+          set -euo pipefail
+          t="$1"
+          export WORKLANE_INSTANCES_DIR="$HOME/measure-instances"
+          r="$HOME/measure-repo"
+          cp -r "$t/examples/basic" "$r"
+          # A tier that prints one stopwatch line per lane, as a runner that times its suites does.
+          printf '%s\n' 'test_run: {"tiers": [{"name": "lanes", "kind": "fast", "command": "for i in $(seq $LANES); do echo \"⏱ suite-$i: 0.$i\"s; done; sleep 1"}], "env": {"LANES": "1"}}' >> "$r/.worklane/tests.yaml"
+          g=(git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+          "${g[@]}" init -q -b main && "${g[@]}" add -A && "${g[@]}" commit -q -m measure
+          "$t/node" "$t/dist/src/cli.js" instance init ci --repo "$r" --github example-org/example-shop > /dev/null
+          printf 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: pr\n' > "$WORKLANE_INSTANCES_DIR/ci/policy.yaml"
+          cli() { "$t/node" "$t/dist/src/cli.js" testrun measure --instance ci "$@"; }
+          # Refused, and nothing started: not a key of test_run env, and a key the engine sets.
+          for bad in NOPE=1 DATABASE_URL=postgres://x; do
+            rc=0; cli --tier lanes --set "$bad" 2> "$HOME/refused.log" || rc=$?
+            echo "--set $bad: exit $rc: $(cat "$HOME/refused.log")"
+            [ "$rc" = 2 ] && grep -q '^refused: .*nothing was started$' "$HOME/refused.log"
+          done
+          [ ! -e "$WORKLANE_INSTANCES_DIR/ci/state/test-runs-measure" ]
+          cli --tier lanes --set LANES=1,2 | tee "$HOME/measure.log"
+          grep -E '^LANES=1  wall [0-9.]+s  ok  lanes passed in [0-9.]+s \(cpu [0-9.]+s, [0-9.]+ cores avg, mem peak [0-9]+ MB\); suites: suite-1 0\.1s  \[run measure-' "$HOME/measure.log"
+          grep -E '^LANES=2  wall [0-9.]+s  ok  lanes passed in [0-9.]+s \(cpu [0-9.]+s, [0-9.]+ cores avg, mem peak [0-9]+ MB\); suites: suite-2 0\.2s, suite-1 0\.1s  \[run measure-' "$HOME/measure.log"
+          # The instance's log has its own event type only: no testrun.queued/started/finished a PR run would read.
+          types="$("$t/node" -e 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); console.log([...new Set(db.prepare("select type from events").all().map((r) => r.type))].join(","))' "$WORKLANE_INSTANCES_DIR/ci/state/events.db")"
+          echo "event types recorded: $types"
+          [ "$types" = testrun.measure ]
+          grep -o 'run measure-[0-9a-f-]*' "$HOME/measure.log" | cut -d' ' -f2 > "$t/measure-ids"
+          EOF
+          chmod a+r "$T/measure.sh"
+          sudo install -o wl-ci -g wl-ci -m 0644 /dev/null "$T/measure-ids"
+          sudo -u wl-ci env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-ci | cut -d: -f6)" LANG=C.UTF-8 \
+            bash -c 'cd "$HOME" && bash "$1/measure.sh" "$1"' _ "$T"
+          # Each value's run is wiped, seen as root.
+          [ "$(wc -l < "$T/measure-ids")" = 2 ]
+          while IFS= read -r id; do
+            if sudo test -e "/var/lib/worklane-test/ci/runs/$id"; then echo "run $id's directory is still there" >&2; exit 1; fi
+          done < "$T/measure-ids"
+          echo "both measure runs wiped"
       - name: the sandbox's units and Docker, on failure
         if: failure()
         run: |
@@ -607,7 +746,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 37
     defaults:
       run:
         shell: bash
@@ -685,6 +824,66 @@ jobs:
           if jq -e '(.detail + " " + .retry) | test("by hand|credentials.sh")' <<<"$last"; then echo "the App step still names the manual way" >&2; exit 1; fi
           id wl-ci && id wl-ci-agent
           if [ -e /etc/systemd/system/worklane-dashboard-hub.service ] || systemctl is-active -q worklane-dashboard-hub.service; then echo "a hub was started with no sign-in App" >&2; exit 1; fi
+      - name: "the one command on a machine with no hub (bootstrap --hardened): it starts the hub's setup mode and prints its URL only once it answers 200; before that, no URL, the reason and the fix (#393)"
+        run: |
+          pub=https://hub.example.test u=worklane-dashboard-hub-setup.service
+          # The install command from a root-owned copy of this checkout whose pinned engine is this commit, its origin
+          # itself (engine.sh clones the origin of the scripts it runs from, and finds this commit's build in /opt).
+          # Only ENGINE_TAG differs, in the copy.
+          b=/var/tmp/one-url-boot sha="$(git rev-parse HEAD)"
+          sudo rsync -a --exclude node_modules --exclude dist "$GITHUB_WORKSPACE/" "$b/"
+          sudo chown -R root:root "$b" && sudo git -C "$b" remote set-url origin "$b"
+          sudo sed -i "s/^ENGINE_TAG=.*/ENGINE_TAG=$sha/" "$b/scripts/bootstrap.sh"
+          [ "$(sudo git -C "$b" diff --name-only)" = scripts/bootstrap.sh ]
+          boot() { set +e; sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner "$@" ci example/alpha > "$F/$log" 2>&1; rc=$?; set -e; tail -n 12 "$F/$log"; echo "rc=$rc"; }
+          last_is_url() { tail -n 1 "$F/$1" | grep -qE '^https?://'; }
+          # No https origin (no Tailscale here, no --public-url): no URL at all, the reason and the fix; nothing started.
+          log=boot-a.log
+          boot
+          [ "$rc" = 4 ]
+          grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/$log"
+          if last_is_url "$log"; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
+          if systemctl is-active -q "$u"; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
+          [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
+          # The origin given, but nothing serves it yet (tailscale serve): setup mode starts, and still no URL: it doesn't answer.
+          log=boot-b.log
+          boot --public-url "$pub"
+          [ "$rc" = 4 ]
+          systemctl is-active "$u"
+          grep -qF "no URL to open yet: the hub's setup mode runs on this machine (port 4399), but $pub doesn't reach it" "$F/$log"
+          grep -qF "fix: sudo tailscale serve --bg --https=443 http://127.0.0.1:4399, then run this again" "$F/$log"
+          if last_is_url "$log"; then echo "a URL that answers nothing was printed" >&2; exit 1; fi
+          # tailscale serve's stand-in: the origin's name on this machine, real TLS from a CA the system trusts, to port 4399.
+          sudo apt-get install -y -q socat > /dev/null
+          t="$RUNNER_TEMP/tls" && mkdir -p "$t"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/ca.key" -out "$t/ca.pem" -subj /CN=ci-hub-ca -days 2 -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign 2>/dev/null
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/leaf.key" -out "$t/leaf.csr" -subj /CN=hub.example.test 2>/dev/null
+          printf 'subjectAltName=DNS:hub.example.test\nextendedKeyUsage=serverAuth\n' > "$t/ext"
+          openssl x509 -req -in "$t/leaf.csr" -CA "$t/ca.pem" -CAkey "$t/ca.key" -CAcreateserial -out "$t/leaf.pem" -days 2 -extfile "$t/ext" 2>/dev/null
+          sudo cp "$t/ca.pem" /usr/local/share/ca-certificates/ci-hub-ca.crt && sudo update-ca-certificates > /dev/null
+          echo '127.0.0.1 hub.example.test' | sudo tee -a /etc/hosts > /dev/null
+          sudo sh -c "nohup socat openssl-listen:443,reuseaddr,fork,cert=$t/leaf.pem,key=$t/leaf.key,verify=0 tcp:127.0.0.1:4399 > $t/socat.log 2>&1 &"
+          for _ in $(seq 1 20); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$pub/")" = 200 ] && break; sleep 1; done
+          tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
+          before="$(sudo sha256sum "$tf")"
+          # Served: the one URL, last, the only one in its block, no token in it; it answers 200 with setup mode's page.
+          for log in boot-c.log boot-d.log; do
+            boot --public-url "$pub"
+            [ "$rc" = 0 ]
+            [ "$(tail -n 1 "$F/$log")" = "$pub/" ]
+            closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/$log")"
+            [ "$(grep -c '://' <<< "$closing")" = 1 ]
+            if sudo grep -qFf "$tf" "$F/$log"; then echo "the setup token was printed" >&2; exit 1; fi
+            curl -s -o "$t/page.html" -w '%{http_code}\n' "$(tail -n 1 "$F/$log")" | grep -qx 200
+            grep -q 'This hub is in setup mode' "$t/page.html"
+            grep -qF "sudo cat $tf" "$F/$log"
+          done
+          # The rerun changed nothing: setup mode left running, its one-time token the same.
+          [ "$(sudo sha256sum "$tf")" = "$before" ]
+          [ "$(grep -c 'scripts/setup/dashboards.sh --setup' "$F/boot-d.log")" = 0 ]
+          # Back as the next steps expect it: no stand-in for tailscale serve.
+          sudo pkill -f 'socat openssl-listen:443' || true
+          sudo sed -i '/ hub\.example\.test$/d' /etc/hosts
       - name: "the sign-in App through the hub's setup mode (B8): wl-dash's one-time token from a 0600 file, never printed or in a URL; it turns itself off once the secret exists"
         run: |
           u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h=http://127.0.0.1:4399
@@ -766,6 +965,9 @@ jobs:
       # unit itself, before its App step. The drop-in goes afterwards, and the real hub runs with the instance.
       - name: "a machine's first project, no hub and no instance: add-project starts the hub before the App step, the App through the manifest flow, to the end; nothing by hand"
         run: |
+          # A stand-in claude from here on (scripts/ci/claude-stand-in.cjs): add-project's claude-token step asks claude
+          # auth status as the agent user, and records what it says for the first-run step (claude-account status.json).
+          sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
           sudo bash scripts/setup/machine-owners.sh --first ci-owner
           dd=/etc/systemd/system/worklane-dashboard-hub.service.d
           printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist %s https://hub.example.test\n' "$GH_FAKE" | sudo tee "$dd/stand-in.conf" >/dev/null
@@ -832,22 +1034,195 @@ jobs:
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
           if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
-      - name: through the machine helper, as the coordinator, every step is skipped as done
+      - name: "regression (bug B): after add-project installed the agents' token, the first-run step reads it done, from claude-account's status.json (never the token, never the cached email)"
         run: |
-          sudo -u wl-ci sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }
+          s=/var/lib/worklane/claude-account/status.json
+          [ "$(stat -c '%U %a' "$s")" = "root 644" ]
+          id="$(tr -d '[:space:]' < "$F/claude-token" | tr -d '\n' | sha256sum | cut -c1-8)"
+          jq -e --arg id "$id" '.users | map(select(.instance == "ci" and .kind == "agent")) | length == 1 and .[0].user == "wl-ci-agent" and .[0].logged_in == true and .[0].stored == true and .[0].token_id == $id' "$s"
+          if sudo grep -qFf "$F/claude-token" "$s"; then echo "status.json holds the token" >&2; exit 1; fi
+          # The step, through the real hub (wl-dash, break-glass) to the instance's dashboard (wl-ci), which can't sudo.
+          hub="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; printf 'authorization: Bearer %s\n' "$(sudo cat "$hub")" > "$F/hub-auth-b")
+          for _ in $(seq 1 20); do curl -sS -H @"$F/hub-auth-b" 'http://127.0.0.1:4398/api/i/ci/first-run?fresh=1' > "$F/first-run-b.json" && jq -e '.setup' "$F/first-run-b.json" > /dev/null && break; sleep 3; done
+          jq '.setup.groups[].steps[] | select(.id == "claude-token")' "$F/first-run-b.json"
+          jq -e --arg id "$id" '.setup.groups[].steps[] | select(.id == "claude-token") | .done == true and (.detail | test("^wl-ci-agent is signed in \\(claude\\.ai\\), per claude auth status as that user at .*; token " + $id + "$"))' "$F/first-run-b.json"
+          if grep -q '@example.test' "$F/first-run-b.json"; then echo "the first-run page shows the cached account email" >&2; exit 1; fi
+      - name: "outbound env on a real unit, as the coordinator (#381 follow-up): the unit's redirecting and TLS-trust variables reach no child; root's network.json proxy and CA do (a real Node, git and gh handshake); a writable, non-root, symlinked or non-PEM one is refused"
+        run: |
+          # As wl-ci in a transient unit whose own environment points every redirecting variable elsewhere: the env the
+          # instance's coordinator builds (instanceEnv, its implicit gh/git children) and a project command's (childEnv),
+          # each printed by a real child, and real Node, git and gh children's HTTPS requests to local servers whose
+          # certificate only the test CA signs. The files are really root's here, which the unit tests can't make.
+          # Nothing leaves the runner: every request goes to 127.0.0.1.
+          d=/var/tmp/outbound-ci && sudo install -d -m 0755 "$d"
+          cat > "$F/outbound.mjs" <<'EOF'
+          const engine = '/opt/worklane/current/dist/src';
+          const { spawnSync } = await import('node:child_process');
+          const { projectCommand } = await import(`${engine}/os/index.js`);
+          const { loadInstance } = await import(`${engine}/instance.js`);
+          const { instanceEnv } = await import(`${engine}/service.js`);
+          const envOf = (file, args, env) => Object.fromEntries(spawnSync(file, args, { env, encoding: 'utf8' }).stdout.split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+          const c = projectCommand('env');
+          const coord = instanceEnv(loadInstance('ci'));
+          // A real TLS handshake from a child with each env: trusted only through root's CA, never through the unit's own variables.
+          const get = "require('https').get('https://127.0.0.1:8443/', (r) => { console.log('status ' + r.statusCode); r.resume(); }).on('error', (e) => console.log('error ' + e.code))";
+          const tls = (env) => spawnSync(process.execPath, ['-e', get], { env, encoding: 'utf8', timeout: 20000 }).stdout.trim();
+          // git and gh with the same envs, against scripts/ci/test-ca-server.mjs on 127.0.0.1:443 (gh takes no port in --hostname).
+          const run = (file, args, env) => {
+            const r = spawnSync(file, args, { env, encoding: 'utf8', timeout: 30000 });
+            return { code: r.status, out: (r.stdout ?? '').trim().slice(0, 300), err: (r.stderr ?? '').trim().split('\n').slice(-2).join(' | ').slice(0, 300) };
+          };
+          const { mkdtempSync } = await import('node:fs');
+          const ghDir = mkdtempSync('/tmp/outbound-gh-');
+          // The probe's own additions for gh only, none of which changes what it trusts: an empty config dir, a dummy token
+          // for the loopback host (gh refuses an unauthenticated host before any request), no update check, no telemetry.
+          const gh = (env) => run('gh', ['api', '--hostname', '127.0.0.1', '/ci-probe'], { ...env, GH_CONFIG_DIR: ghDir, GH_ENTERPRISE_TOKEN: 'ci-dummy-token', GH_NO_UPDATE_NOTIFIER: '1', GH_TELEMETRY: 'false', DO_NOT_TRACK: '1', GH_PROMPT_DISABLED: '1' });
+          const git = (env) => run('git', ['ls-remote', 'https://127.0.0.1/x.git'], env);
+          console.log(JSON.stringify({
+            project: envOf(c.file, c.args, c.env),
+            coordinator: envOf('/usr/bin/env', [], coord),
+            tls: { project: tls(c.env), coordinator: tls(coord) },
+            tools: { project: { git: git(c.env), gh: gh(c.env) }, coordinator: { git: git(coord), gh: gh(coord) } },
+          }));
+          EOF
+          sudo install -m 0644 "$F/outbound.mjs" "$d/outbound.mjs"
+          bad=http://attacker.invalid:8080
+          probe() {
+            sudo systemd-run --uid=wl-ci --wait --pipe --quiet -p WorkingDirectory=/ \
+              -p "Environment=HTTPS_PROXY=$bad HTTP_PROXY=$bad ALL_PROXY=$bad NO_PROXY=* https_proxy=$bad http_proxy=$bad all_proxy=$bad no_proxy=*" \
+              -p "Environment=ANTHROPIC_BASE_URL=$bad ANTHROPIC_API_URL=$bad GH_HOST=attacker.invalid GH_REPO=attacker.invalid/o/r GITHUB_API_URL=$bad GIT_PROXY_COMMAND=/bin/false CLAUDE_CODE_USE_BEDROCK=1" \
+              -p "Environment=NODE_TLS_REJECT_UNAUTHORIZED=0 GIT_SSL_NO_VERIFY=1 NODE_EXTRA_CA_CERTS=/tmp/attacker-ca.pem SSL_CERT_FILE=/tmp/attacker-ca.pem SSL_CERT_DIR=/tmp/attacker-certs GIT_SSL_CAINFO=/tmp/attacker-ca.pem REQUESTS_CA_BUNDLE=/tmp/attacker-ca.pem CURL_CA_BUNDLE=/tmp/attacker-ca.pem SSLKEYLOGFILE=/tmp/attacker-keys GODEBUG=x509sha1=1 GIT_CONFIG_PARAMETERS=http.sslverify=false" \
+              /usr/local/bin/node "$d/outbound.mjs"
+          }
+          check() { # $1: the probe's JSON; $2: the proxy root set, or empty for none
+            for k in project coordinator; do
+              jq -e --arg k "$k" '.[$k] | (.PATH | length > 0) and (to_entries | map(select(.value | test("attacker|^\\*$"))) | length == 0)' <<<"$1" || return 1
+              jq -e --arg k "$k" '.[$k] | keys | map(select(test("^(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|GH_HOST|GH_REPO|GITHUB_API_URL|GIT_PROXY_COMMAND|CLAUDE_CODE_USE_BEDROCK|ALL_PROXY)$"; "i"))) | length == 0' <<<"$1" || return 1
+              if [ -n "$2" ]; then
+                jq -e --arg k "$k" --arg p "$2" '.[$k] | .HTTPS_PROXY == $p and .HTTP_PROXY == $p and .https_proxy == $p and .http_proxy == $p and .NO_PROXY == "localhost,127.0.0.1" and .no_proxy == "localhost,127.0.0.1"' <<<"$1" || return 1
+              else
+                jq -e --arg k "$k" '.[$k] | keys | map(select(test("_proxy$"; "i"))) | length == 0' <<<"$1" || return 1
+              fi
+            done
+          }
+          # Only root's CA, as NODE_EXTRA_CA_CERTS, SSL_CERT_FILE and GIT_SSL_CAINFO; no other trust variable; and a real handshake
+          # to the test server that succeeds only with it ($2: the CA path, or empty for none).
+          check_ca() {
+            check_tools "$1" "$2" "${3:-?}" || return 1
+            for k in project coordinator; do
+              jq -e --arg k "$k" '.[$k] | keys | map(select(test("^(NODE_TLS_REJECT_UNAUTHORIZED|GIT_SSL_NO_VERIFY|SSL_CERT_DIR|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|SSLKEYLOGFILE|GODEBUG|GIT_CONFIG_PARAMETERS)$"; "i"))) | length == 0' <<<"$1" || return 1
+              jq -e --arg k "$k" '.[$k] | to_entries | map(select(.value | test("attacker"))) | length == 0' <<<"$1" || return 1
+              if [ -n "$2" ]; then
+                jq -e --arg k "$k" --arg c "$2" '(.[$k] | .NODE_EXTRA_CA_CERTS == $c and .SSL_CERT_FILE == $c and .GIT_SSL_CAINFO == $c) and (.tls[$k] == "status 200")' <<<"$1" || return 1
+              else
+                jq -e --arg k "$k" '(.[$k] | has("NODE_EXTRA_CA_CERTS") or has("SSL_CERT_FILE") or has("GIT_SSL_CAINFO") | not) and (.tls[$k] | startswith("error "))' <<<"$1" || return 1
+              fi
+            done
+          }
+          # git and gh, as children of each env: with root's CA, past TLS (git lists the server's one ref, gh prints its JSON);
+          # without, refused at TLS with a certificate error, whatever the unit's GIT_SSL_NO_VERIFY, SSL_CERT_FILE and the
+          # rest say. Each result printed as an OK line quoting git's and gh's own text ($3: what this probe is).
+          check_tools() {
+            for k in project coordinator; do
+              for tool in git gh; do
+                r="$(jq -c --arg k "$k" --arg t "$tool" '.tools[$k][$t]' <<<"$1")"
+                if [ -n "$2" ]; then
+                  want='refs/heads/main'; [ "$tool" = gh ] && want='ci-probe-ok'
+                  jq -e --arg w "$want" '.code == 0 and (.out | contains($w))' <<<"$r" >/dev/null || { echo "FAIL: $3: $tool ($k) with the root CA: $r" >&2; return 1; }
+                  echo "OK: $3: $tool ($k) got past TLS with the root CA: $(jq -r '.out' <<<"$r")"
+                else
+                  jq -e '.code != 0 and (.err | test("certificate|x509|SSL"; "i"))' <<<"$r" >/dev/null || { echo "FAIL: $3: $tool ($k) without the root CA: $r" >&2; return 1; }
+                  echo "OK: $3: $tool ($k) refused at TLS: $(jq -r '.err' <<<"$r")"
+                fi
+              done
+            done
+          }
+          # The test CA and a server certificate for 127.0.0.1 that only it signs, served by openssl on 8443 (Node's probe)
+          # and by scripts/ci/test-ca-server.mjs on 443, as root (git's smart-HTTP refs and gh's API, both loopback only).
+          t="$F/tls" && mkdir -p "$t"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/ca.key" -out "$t/ca.pem" -subj /CN=ci-test-ca -days 2 -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign 2>/dev/null
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/leaf.key" -out "$t/leaf.csr" -subj /CN=localhost 2>/dev/null
+          printf 'subjectAltName=IP:127.0.0.1,DNS:localhost\nbasicConstraints=CA:FALSE\n' > "$t/leaf.ext"
+          openssl x509 -req -in "$t/leaf.csr" -CA "$t/ca.pem" -CAkey "$t/ca.key" -CAcreateserial -out "$t/leaf.pem" -days 2 -extfile "$t/leaf.ext" 2>/dev/null
+          nohup openssl s_server -quiet -accept 8443 -cert "$t/leaf.pem" -key "$t/leaf.key" -www > "$t/server.log" 2>&1 &
+          echo $! > "$t/server.pid"
+          sudo bash -c 'nohup /usr/local/bin/node "$1" "$2" "$3" 443 > "$4" 2>&1 & echo $! > "$5"' _ "$GITHUB_WORKSPACE/scripts/ci/test-ca-server.mjs" "$t/leaf.pem" "$t/leaf.key" "$t/git-gh-server.log" "$t/git-gh-server.pid"
+          for _ in $(seq 1 20); do (echo > /dev/tcp/127.0.0.1/8443) 2>/dev/null && (echo > /dev/tcp/127.0.0.1/443) 2>/dev/null && break; sleep 0.5; done
+          n=/etc/worklane/network.json
+          out="$(probe)"
+          check "$out" ""
+          check_ca "$out" "" "no network.json"
+          printf '{"proxy": "http://proxy.ci.invalid:3128", "no_proxy": "localhost,127.0.0.1"}\n' > "$F/network.json"
+          sudo install -o root -g root -m 0644 "$F/network.json" "$n"
+          check "$(probe)" "http://proxy.ci.invalid:3128"
+          # Writable by others, then not root's, then a proxy with a login: each refused, so no proxy at all.
+          sudo chmod 0666 "$n"
+          check "$(probe)" ""
+          sudo chmod 0644 "$n"
+          sudo chown wl-ci "$n"
+          check "$(probe)" ""
+          sudo chown root "$n"
+          printf '{"proxy": "http://user:pass@proxy.ci.invalid:3128"}\n' | sudo tee "$n" >/dev/null
+          check "$(probe)" ""
+          # The custom CA: root's file in root's directory, then each refusal (no CA at all, never the unit's own).
+          ca=/etc/worklane/ca/ci-test.pem
+          sudo install -d -o root -g root -m 0755 /etc/worklane/ca
+          sudo install -o root -g root -m 0644 "$t/ca.pem" "$ca"
+          printf '{"ca_file": "%s"}\n' "$ca" | sudo tee "$n" >/dev/null
+          out="$(probe)"
+          check_ca "$out" "$ca" "root's ca_file"
+          check "$out" ""
+          sudo chmod 0666 "$ca"
+          check_ca "$(probe)" "" "CA file 0666"
+          sudo chmod 0644 "$ca"
+          sudo chown wl-ci "$ca"
+          check_ca "$(probe)" "" "CA file owned by wl-ci"
+          sudo chown root "$ca"
+          sudo chmod 0777 /etc/worklane/ca
+          check_ca "$(probe)" "" "CA directory 0777"
+          sudo chmod 0755 /etc/worklane/ca
+          sudo ln -sfn "$ca" /etc/worklane/ca/link.pem
+          printf '{"ca_file": "/etc/worklane/ca/link.pem"}\n' | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" "" "CA through a symlink"
+          sudo install -o root -g root -m 0644 "$t/leaf.key" /etc/worklane/ca/key.pem
+          printf '{"ca_file": "/etc/worklane/ca/key.pem"}\n' | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" "" "a private key as ca_file"
+          head -c 300000 /dev/zero | tr '\0' ' ' | cat "$t/ca.pem" - | sudo tee /etc/worklane/ca/big.pem >/dev/null
+          printf '{"ca_file": "/etc/worklane/ca/big.pem"}\n' | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" "" "a 300 KB CA file"
+          printf '{"ca_file": "%s"}\n' "$ca" | sudo tee "$n" >/dev/null
+          check_ca "$(probe)" "$ca" "root's ca_file again"
+          kill "$(cat "$t/server.pid")" || true
+          sudo kill "$(cat "$t/git-gh-server.pid")" || true
+          # Every request the git/gh server saw (all on 127.0.0.1).
+          cat "$t/git-gh-server.log"
+          sudo rm -f "$n"
+          sudo rm -rf /etc/worklane/ca "$d"
+      - name: through the machine helper, as the coordinator from inside its own sandbox, every step is skipped as done
+        run: |
+          # As the coordinator really calls it: through sudo from inside its unit (ProtectSystem=full), the unit's settings
+          # read from the one service.sh generates. The helper runs add-project.sh in a unit of its own.
+          mapfile -t props < <(bash scripts/ci/coordinator-unit-props.sh ci)
+          args=(); for p in "${props[@]}"; do args+=(-p "$p"); done
+          sudo systemd-run --wait --pipe --collect --quiet "${args[@]}" sudo -n "$HELPER" add-project ci example/alpha < /dev/null > "$F/run3.jsonl" 2> "$F/run3.err" || { cat "$F/run3.jsonl" "$F/run3.err"; exit 1; }
+          # (The read-only failure of the old inline way is shown in the updater step, for install-updater and set-slots.
+          # A rerun of add-project that skips every step could pass inline too, so it would prove nothing here.)
           cat "$F/run3.jsonl"
           jq -se 'length == 18 and (map(select(.state=="done")) | length == 9) and (map(select(.state=="ask" or .state=="failed")) | length == 0)' "$F/run3.jsonl"
           sudo grep -q '"what":"add-project".*"to":"ci example/alpha"' /var/lib/worklane/machine-changes.jsonl
           if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
+          echo "OK: add-project, called by the coordinator from inside its sandbox, ran in a unit of its own: every step skipped as done"
       - name: "the updater through the machine helper, as the coordinator: installed off, the release channel only, a signer staged and the signers file untouched; adding a signer and any other arguments refused by sudo"
         run: sudo "$(command -v node)" scripts/ci/updater-setup-root.mjs wl-ci
       # Wizard screen 11's terminal half and its server path, on the instance add-project made (ci): credentials.sh
       # intake-discord installs the bot token for the coordinator only and writes credentials.yaml itself; the engine's
       # own listing code, run as the coordinator, reads that token and asks a fake Discord (scripts/ci/fake-discord.mjs,
       # through an injected fetch: the listing has no setting for its host); the real hub (wl-dash) forwards the Discord
-      # step to the instance's dashboard (wl-ci), which runs the listing as a child process: the CLI on its unit's PATH,
-      # here a stand-in that answers with canned JSON (scripts/ci/discord-cli-stand-in.cjs). Not a real token, and
-      # nothing in this step asks discord.com.
+      # step to the instance's dashboard (wl-ci). How that dashboard's listing is chosen is shown in units of its own
+      # (scripts/ci/discord-seam-dashboard.mjs, as wl-ci): the engine's own cli.js by absolute path, whatever PATH or
+      # the environment say; a stand-in only through the code-level seam; an option naming another program refused.
+      # Not a real token, and nothing in this step asks discord.com.
       - name: "credentials.sh intake-discord: the bot token on stdin, 0400 for the coordinator only, credentials.yaml written; the bot's channels as the coordinator; the Discord step through the hub"
         run: |
           h="$(getent passwd wl-ci | cut -d: -f6)"
@@ -902,33 +1277,55 @@ jobs:
           jq . "$F/discord-step.json"
           jq -e --arg tf "$tf" '.available and .canAct and .token == {"configured":true,"file":$tf,"present":true,"error":null} and .invite.integer == "309237648384" and .intake.exists == false' "$F/discord-step.json"
           jq -e '(.automation.token | test("^sudo bash /opt/worklane/[^ ]+/scripts/setup/credentials\\.sh ci intake-discord$")) and .automation.channels == "sudo -H -u wl-ci worklane discord channels --instance ci"' "$F/discord-step.json"
-          # Its listing is a child process of the instance's dashboard: the CLI on the unit's PATH, as claude and gh
-          # are found. A stand-in there (as claude's is) answers with canned JSON naming the user it ran as, so this
-          # shows the hub, the instance's dashboard and its child process wired together, as wl-ci, without the token
-          # being read and without any request to Discord.
-          n="$(wc -l < "$F/discord-requests.log")"
-          restart_dashboard() {
-            sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-ci.service
-            for _ in $(seq 1 30); do curl -sf -o /dev/null -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord && return 0; sleep 1; done
-            echo "the instance's dashboard didn't come back" >&2; return 1
-          }
+          # The listing's seam on this host, in units of their own as wl-ci, with this engine (the same code the dashboard
+          # unit runs). A copy of the instance whose token file wl-ci can't read, so the engine's own CLI fails on its own
+          # line before any request. Decoys that leave a mark if they ever run: a CLI and a node first on PATH, a file
+          # NODE_OPTIONS loads into the listing's process, and variables naming another binary.
+          seam=/var/tmp/ci-discord-seam; marks=/var/tmp/ci-discord-marks; ci_home="$h/.local/state/worklane/instances/ci"
+          sudo rm -rf "$seam" "$marks" /usr/local/lib/ci-discord
+          sudo install -d -o wl-ci -g wl-ci -m 0700 "$seam" "$seam/instances" "$seam/instances/ci"
+          sudo install -o wl-ci -g wl-ci -m 0600 "$ci_home/instance.yaml" "$ci_home/policy.yaml" "$seam/instances/ci/"
+          sudo sed -e "s|^\( *discord_token:\).*|\1 $seam/unreadable-token|" "$ci_home/credentials.yaml" | sudo -u wl-ci sh -c 'umask 077; cat > "$1"' _ "$seam/instances/ci/credentials.yaml"
+          sudo grep -q "discord_token: $seam/unreadable-token" "$seam/instances/ci/credentials.yaml"
+          sudo -u wl-ci sh -c 'umask 077; openssl rand -hex 35 > "$1"; chmod 000 "$1"' _ "$seam/unreadable-token"
+          sudo install -m 0666 /dev/null "$marks"
           sudo install -d -m 0755 /usr/local/lib/ci-discord
-          sudo install -m 0755 scripts/ci/discord-cli-stand-in.cjs /usr/local/lib/ci-discord/worklane
-          sudo install -d /etc/systemd/system/worklane-dashboard-ci.service.d
-          printf '[Service]\nEnvironment=PATH=/usr/local/lib/ci-discord:/usr/local/bin:/usr/bin:/bin\n' | sudo tee /etc/systemd/system/worklane-dashboard-ci.service.d/ci-discord.conf > /dev/null
-          restart_dashboard
-          code="$(curl -sS -o "$F/discord-list.json" -w '%{http_code}' -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord/channels)"
-          cat "$F/discord-list.json"; echo
+          for b in worklane node nodejs; do printf '#!/bin/sh\necho "%s $*" >> %s\necho "{}"\n' "$b" "$marks" | sudo tee "/usr/local/lib/ci-discord/$b" > /dev/null; sudo chmod 0755 "/usr/local/lib/ci-discord/$b"; done
+          printf 'if (process.argv.includes("channels")) require("node:fs").appendFileSync(%s, "NODE_OPTIONS preload\\n");\n' "\"$marks\"" | sudo tee /usr/local/lib/ci-discord/preload.cjs > /dev/null
+          seam_unit() {
+            sudo systemd-run --quiet --collect "$@" --uid=wl-ci --gid=wl-ci --working-directory=/ \
+              -p "Environment=PATH=/usr/local/lib/ci-discord:/usr/local/bin:/usr/bin:/bin" \
+              -p "Environment=NODE_OPTIONS=--require=/usr/local/lib/ci-discord/preload.cjs" \
+              -p "Environment=HOME=$h WORKLANE_INSTANCES_DIR=$seam/instances WORKLANE_CLI=/usr/local/lib/ci-discord/worklane WORKLANE_DISCORD_CLI=/usr/local/lib/ci-discord/worklane WORKLANE_ENGINE=/usr/local/lib/ci-discord" \
+              /usr/local/bin/node /opt/worklane/current/scripts/ci/discord-seam-dashboard.mjs /opt/worklane/current/dist "$mode" "$port" "$seam/instances" /srv/worklane/ci/alpha
+          }
+          seam_get() {
+            for _ in $(seq 1 60); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break; sleep 1; done
+            (umask 077; printf 'authorization: Bearer %s\n' "$(sudo cat "$seam/state-$mode/dashboard-token")" > "$F/seam-auth")
+            curl -sS -o "$F/seam-$mode.json" -w '%{http_code}' -H @"$F/seam-auth" "http://127.0.0.1:$port/api/first-run/discord/channels"
+          }
+          # 1. No stand-in: the engine's own CLI ran (its own line for a token it can't read), and no decoy did.
+          mode=engine port=4791; seam_unit --unit=ci-discord-seam-engine
+          code="$(seam_get)"; cat "$F/seam-engine.json"; echo
+          [ "$code" = 502 ]
+          jq -e '.error | test("^instance ci: can.t read its bot token file /var/tmp/ci-discord-seam/unreadable-token \\(EACCES\\)")' "$F/seam-engine.json"
+          # 2. The stand-in, set in code: it answered, in the dashboard's own process, as wl-ci; still no decoy ran.
+          mode=stand-in port=4792; seam_unit --unit=ci-discord-seam-stand-in
+          code="$(seam_get)"; cat "$F/seam-stand-in.json"; echo
           [ "$code" = 200 ]
-          jq -e '.application.name == "stand-in for ci, run as wl-ci" and .invite == "https://discord.com/oauth2/authorize?client_id=700000000000000001&scope=bot&permissions=309237648384" and ([.channels[].name] == ["general","superfan-shop"])' "$F/discord-list.json"
-          [ "$(wc -l < "$F/discord-requests.log")" = "$n" ]
-          # The stand-in is taken away again: the later steps run the dashboard as it is installed.
-          sudo rm -rf /etc/systemd/system/worklane-dashboard-ci.service.d/ci-discord.conf /usr/local/lib/ci-discord
-          restart_dashboard
+          jq -e '.application.name == "stand-in through the code seam for ci, run as wl-ci" and .invite == "https://discord.com/oauth2/authorize?client_id=700000000000000001&scope=bot&permissions=309237648384"' "$F/seam-stand-in.json"
+          # 3. An option naming another program: refused, nothing started.
+          mode=option port=4793; seam_unit --unit=ci-discord-seam-option --wait --pipe > "$F/seam-option.out" 2>&1 || { cat "$F/seam-option.out"; exit 1; }
+          cat "$F/seam-option.out"
+          grep -q '^refused: .*only a stand-in made in code by discordListingStandIn may replace it' "$F/seam-option.out"
+          sudo systemctl stop ci-discord-seam-engine.service ci-discord-seam-stand-in.service
+          echo "marks:"; cat "$marks"
+          [ ! -s "$marks" ] || { echo "a decoy ran" >&2; exit 1; }
+          sudo rm -rf "$seam" "$marks" /usr/local/lib/ci-discord
           # Nothing was written by looking: no intake.yaml, and the instance's log has no ask.
           sudo test ! -e "$h/.local/state/worklane/instances/ci/intake.yaml"
           # Never echoed: not in any output, the fake's log, a response, or any unit's journal.
-          if grep -qFf "$F/discord-token" "$F/discord.out" "$F/discord2.out" "$F/channels.json" "$F/channels-agent.err" "$F/discord-requests.log" "$F/fake-discord.log" "$F/discord-step.json" "$F/discord-list.json" || sudo journalctl --no-pager | grep -qFf "$F/discord-token"; then echo "the token was echoed" >&2; exit 1; fi
+          if grep -qFf "$F/discord-token" "$F/discord.out" "$F/discord2.out" "$F/channels.json" "$F/channels-agent.err" "$F/discord-requests.log" "$F/fake-discord.log" "$F/discord-step.json" "$F/seam-engine.json" "$F/seam-stand-in.json" "$F/seam-option.out" || sudo journalctl --no-pager | grep -qFf "$F/discord-token"; then echo "the token was echoed" >&2; exit 1; fi
       - name: "claude-account: a stand-in claude, and a second instance (beta, with an eval user) whose coordinator finishes its run on SIGTERM"
         run: |
           # claude auth status as each user: signed in when that user's own login holds a setup token (scripts/ci/).
@@ -1453,6 +1850,8 @@ jobs:
           path=/api/tailscale; api > "$F/ts-view5.json"
           jq -e '.status.serve and .next==null and (.steps|map(.done)|all)' "$F/ts-view5.json"
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
+      - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
+        run: sudo bash scripts/ci/disk-full-coordinator.sh ci
       - name: the units and the fake's log, on failure
         if: failure()
         run: |

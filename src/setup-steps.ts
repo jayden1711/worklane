@@ -18,6 +18,7 @@ import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
 import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
+import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
 import { lingerEnabled, serviceRunning, systemUnitActive } from './os/index.js';
@@ -71,6 +72,8 @@ export interface MachinePaths {
   allowedSigners: string;
   hubUnitFile: string;
   fullRunLock: string;
+  /** claude-account.sh's status.json: each agent user's stored login and `claude auth status`, never the token. */
+  claudeAccountDir: string;
 }
 export const MACHINE_PATHS: MachinePaths = {
   enginePackage: fileURLToPath(new URL('../../package.json', import.meta.url)),
@@ -81,6 +84,7 @@ export const MACHINE_PATHS: MachinePaths = {
   allowedSigners: `/etc/${BRAND.cli}/allowed_signers`,
   hubUnitFile: `/etc/systemd/system/${BRAND.cli}-dashboard-hub.service`,
   fullRunLock: FULL_RUN_LOCK,
+  claudeAccountDir: CLAUDE_ACCOUNT_DIR,
 };
 export const HUB_UNIT = `${BRAND.cli}-dashboard-hub.service`;
 /** The hub in setup mode (src/hub-setup.ts; dashboards.sh --setup): before the sign-in App exists. */
@@ -219,6 +223,16 @@ export interface Checking {
 }
 
 const ok = (detail: string): Detected => ({ done: true, detail });
+/** Server mode: the instance's agent user's login, as claude-account.sh status (or add-project, credentials.sh) last found it; null when it has no record. */
+function agentLogin(k: Checking): Detected | null {
+  if (!k.c.instance) return null;
+  const s = readAccountStatus(k.m.claudeAccountDir);
+  const u = s?.users.find((x) => x.instance === k.c.instance && x.kind === 'agent');
+  if (!s || !u) return null;
+  const when = s.at ? ` at ${s.at}` : '';
+  if (u.loggedIn) return ok(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ''}, per claude auth status as that user${when}${u.tokenId ? `; token ${u.tokenId}` : ''}`);
+  return no(`${u.user}: ${u.error ?? 'not signed in'}, per claude auth status as that user${when}`);
+}
 /** Server mode: a step this user can't check for itself, done as init recorded add-project's step; null when not recorded done. */
 const recorded = (k: Checking, step: string, what: string): Detected | null => (k.c.handoff?.[step] === 'done' ? ok(`${what}: done, as init recorded it (add-project: ${step}); not visible to this user to check again`) : null);
 const no = (detail: string): Detected => ({ done: false, detail });
@@ -433,6 +447,11 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step)',
     detect: (k) => {
       const i = k.inst();
+      // WHY: add-project and credentials.sh keep the login in the agent user's own home, out of this user's sight;
+      // what claude auth status said there, as root found it (claude-account status.json), is the real state. A switch
+      // rewrites it. Signed in or not only: never the cached account email (#341), never the token.
+      const login = agentLogin(k);
+      if (login) return login;
       if (isErr(i)) return recorded(k, 'claude-token', "the agents' Claude login") ?? no(i.error);
       if (i.credentials.claude) return existsSync(i.credentials.claude.config_dir) ? ok(`the agents' Claude login is stored (${i.credentials.claude.config_dir})`) : (recorded(k, 'claude-token', "the agents' Claude login") ?? no(`Claude config dir ${i.credentials.claude.config_dir} not found`));
       if (i.credentials.agent_api_key) return ok('the agents bill to an API key (credentials.yaml agent_api_key)');

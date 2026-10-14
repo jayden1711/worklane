@@ -7,6 +7,11 @@ import type { DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, Cla
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
+import { ComposerMic, MicInterim } from './voice/Mic';
+import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount } from './voice/VoiceSettings';
+import { TalkStatus } from './voice/TalkBack';
+import type { VoicePrefs } from './voice/prefs';
+import type { Support } from './voice/speech';
 import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
 import { Header } from './pages/Overview';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
@@ -31,6 +36,7 @@ import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { RepoConfigForm } from './components/RepoConfigForm';
 import { ClaudeSigninView } from './components/ClaudeSignin';
 import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { DiscordSetupView } from './components/DiscordSetup';
@@ -50,6 +56,8 @@ import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
 import { ClaudeAccountView } from './components/ClaudeAccount';
 import { TailscaleSetupView } from './components/TailscaleSetup';
+export { tailscaleBusy, tailscaleStepEnded } from './components/TailscaleSetup';
+export { accountBusy } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
@@ -103,6 +111,18 @@ export const renderMainWatchAlert = (protection: Protection) => renderToStaticMa
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';
+export const renderComposerMic = (role: string | undefined, prefs: VoicePrefs, support: Support | null, listening = false) => renderToStaticMarkup(<ComposerMic role={role} prefs={prefs} support={support} listening={listening} onToggle={() => {}} />);
+export const renderMicInterim = (listening: boolean, interim: string, error: string | null = null) => renderToStaticMarkup(<MicInterim listening={listening} interim={interim} error={error} />);
+export const renderVoiceSettings = (owner: boolean) => renderToStaticMarkup(<VoiceSettings owner={owner} />);
+export const renderVoiceSettingsView = (prefs: VoicePrefs, status: OnDeviceStatus | null) => renderToStaticMarkup(<VoiceSettingsView prefs={prefs} status={status} lang="en-US" onChange={() => {}} onInstall={() => {}} />);
+export { checkSupport, Dictation, insertAt, intoBox, NO_ON_DEVICE, speechCtor } from './voice/speech';
+export { mayDictate } from './voice/Mic';
+export { readVoicePrefs, VOICE_DEFAULTS } from './voice/prefs';
+export const renderTalkStatus = (role: string | undefined, prefs: VoicePrefs, speaking: boolean, note: string | null = null) => renderToStaticMarkup(<TalkStatus role={role} prefs={prefs} speaking={speaking} note={note} onStop={() => {}} />);
+export const renderVoiceSettingsVoices = (prefs: VoicePrefs, voices: VoiceCount) => renderToStaticMarkup(<VoiceSettingsView prefs={prefs} status={null} lang="en-US" onChange={() => {}} onInstall={() => {}} voices={voices} />);
+export { mayTalk } from './voice/TalkBack';
+export { countVoices } from './voice/VoiceSettings';
+export { pickVoice, spokenText, stopSpeaking, TalkBack, CODE_OMITTED, SECRET_OMITTED, NO_LOCAL_VOICE } from './voice/talk';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderIntake = (data: IntakeViewData, view?: string) => renderToStaticMarkup(<IntakeReports data={data} {...(view ? { view } : {})} />);
 export const renderIntakeHealth = (health: IntakeViewData['health']) => renderToStaticMarkup(<IntakeHealthSection health={health} />);
@@ -169,3 +189,6 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
 };
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
+
+export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; mergePlan?: { command: string; then: string } } = {}) =>
+  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialMergePlan={o.mergePlan ?? null} />);

@@ -146,13 +146,41 @@ export interface InstanceHealth {
   error: string | null;
 }
 
+/**
+ * The machine's outbound proxy and custom CA, read-only: set by root in network.json (docs/network.md), never from the
+ * page. A refused file is said in red: children then go direct and trust only their own stores.
+ */
+export function OutboundProxy({ network: n }: { network: NonNullable<HealthView['network']> }) {
+  if (n.error)
+    return (
+      <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-network-refused">
+        <span className="font-medium text-red">Outbound proxy and custom CA refused:</span> <span className="break-all">{n.error}</span>
+      </div>
+    );
+  return (
+    <div className="space-y-0.5 text-[12.5px] text-ink-2">
+      {n.proxy && (
+        <div data-testid="health-network">
+          Outbound proxy: <code className="font-mono text-[12px]">{n.proxy}</code> (from <code className="font-mono text-[12px]">{n.file}</code>)
+        </div>
+      )}
+      {n.ca && (
+        <div data-testid="health-network-ca">
+          Custom CA: <code className="font-mono text-[12px] break-all">{n.ca.path}</code>, {n.ca.count} {n.ca.count === 1 ? 'certificate' : 'certificates'}, {n.ca.fingerprints.length === 1 ? 'fingerprint' : 'fingerprints'}{' '}
+          <code className="font-mono text-[12px]">{n.ca.fingerprints.map((f) => `sha256:${f}`).join(', ')}</code> (from <code className="font-mono text-[12px]">{n.file}</code>)
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The panel from its data (also what the render checks render). `instances`: on a hub, every instance's view. */
 /** A held engine update, in red: rolled back (a failed migration, or services that didn't come up) and not retried. */
 export function UpdateHold({ hold }: { hold: NonNullable<HealthView['updateHold']> }) {
   return (
     <div role="alert" className="rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="health-update-held">
       <span className="font-medium text-red">{hold.migration ? 'Engine update rolled back: a migration failed' : 'Engine update rolled back'}</span>
-      {' '}({new Date(hold.at).toISOString().slice(0, 16).replace('T', ' ')} UTC{hold.sha ? `, ${hold.sha.slice(0, 12)}` : ''}): {hold.reason}. Every instance runs the previous engine; this commit is held until a newer one, or until you turn updates off and on.
+      {' '}({new Date(hold.at).toISOString().slice(0, 16).replace('T', ' ')} UTC{hold.sha ? `, ${hold.sha.slice(0, 12)}` : ''}): {hold.reason}. Every instance runs the previous engine; this commit is held until a newer one, or until an admin releases it at a root shell: sudo bash scripts/setup/updates.sh --release-hold.
     </div>
   );
 }
@@ -191,6 +219,12 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
         // The machine's, so any instance's view (on the hub) shows it.
         const hold = view.updateHold ?? instances?.map((i) => i.view?.updateHold).find(Boolean) ?? null;
         return hold ? <UpdateHold hold={hold} /> : null;
+      })()}
+
+      {(() => {
+        // The machine's, so any instance's view (on the hub) shows it.
+        const network = view.network ?? instances?.map((i) => i.view?.network).find(Boolean) ?? null;
+        return network ? <OutboundProxy network={network} /> : null;
       })()}
 
       <OffsiteBackup status={view.offsiteBackup ?? null} docs={view.docs?.backups ?? null} />

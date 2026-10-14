@@ -95,12 +95,28 @@ refuse_if_open() {
 # same way: one principal of an email's shape and one ed25519 public key in its fixed encoding (68 base64 characters
 # after the type), which the helper checks again (it decodes the key). Staging writes only the helper's pending list:
 # no rule here lets a coordinator write the updater's allowed signers file, or follow main instead of releases.
+# Those two, and add-project, are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
+# older sudo would take a pattern as literal text, so they are left out there, the rule says so in a comment, and
+# machine-helper.sh records it in HELPER_RULES for the dashboard (which then shows the root command instead).
+HELPER_RULES=/etc/worklane/helper-rules.json
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
 ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
 SIGNER_SUDOERS_ARGS='[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
+# Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
+# expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
+SUDO_REGEX_MIN=1.9.10
+sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
+sudo_regex_ok() {
+  local v a b c
+  v="$(sudo_version)"
+  [ -n "$v" ] || return 1
+  IFS=. read -r a b c <<< "$v"
+  (( a > 1 || (a == 1 && (b > 9 || (b == 9 && c >= 10))) ))
+}
+
 machine_sudoers() {
-  local u n cmds=()
+  local u n cmds=() signer_rules=1
   [ "$#" -ge 1 ] || { echo "machine_sudoers: no users" >&2; return 1; }
   for u in "$@"; do
     [[ "$u" =~ ^wl-[a-z][a-z0-9-]{0,20}$ && "$u" != wl-dash ]] || { echo "machine_sudoers: $u is not a coordinator user" >&2; return 1; }
@@ -113,8 +129,14 @@ machine_sudoers() {
   # Tailscale (tailscale.sh): four fixed commands. sudo matches a listed command's arguments exactly, so none takes an
   # auth key, a flag, a URL or a port.
   cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
-  cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+  if sudo_regex_ok; then
+    cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
+    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+  else
+    signer_rules=0
+  fi
   printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
+  [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
