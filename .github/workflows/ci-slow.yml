@@ -299,6 +299,9 @@ jobs:
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
+    env:
+      # The second instance's name is as long as the helper takes (21), so a run's paths are the longest a host has.
+      I2: ci2-sandbox-long-name
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -314,7 +317,7 @@ jobs:
       - name: a coordinator user and the full-run lock (what instance.sh and the machine script make)
         run: |
           # Two instances, so each test user's check also proves it can't reach the other's state.
-          for u in wl-ci wl-ci2; do
+          for u in wl-ci "wl-$I2"; do
             sudo useradd --create-home --shell /bin/bash "$u"
             sudo chmod 0750 "$(getent passwd "$u" | cut -d: -f6)"
           done
@@ -359,11 +362,11 @@ jobs:
           grep -q '^restarted worklane-test-ci-docker.service' "$RUNNER_TEMP/reinstall.log"
           tail -n 5 "$RUNNER_TEMP/reinstall.log" | grep -qx 'OK: all checks passed'
           # A second instance's test user, then both checks again: each must be shut out of the other's state.
-          sudo bash scripts/setup/test-user.sh install ci2 --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install2.log"
+          sudo bash scripts/setup/test-user.sh install "$I2" --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install2.log"
           tail -n 5 "$RUNNER_TEMP/install2.log" | grep -qx 'OK: all checks passed'
-          for i in ci ci2; do
+          for i in ci "$I2"; do
             sudo bash scripts/setup/test-user.sh check "$i" | tee "$RUNNER_TEMP/check-$i.log"
-            grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo ci2 || echo ci)" "$RUNNER_TEMP/check-$i.log"
+            grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo "$I2" || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
       - name: systemd-run leaves a command's ${...} to bash, on this systemd (the flag) and as an older one needs it ($$)
@@ -388,7 +391,7 @@ jobs:
         run: |
           H=/usr/local/libexec/worklane-testrun
           need="$(sed -n 's/^PROTOCOL=\([0-9][0-9]*\)$/\1/p' scripts/machine/worklane-testrun.sh)"
-          sudo sha256sum /etc/sudoers.d/worklane-test-ci /etc/sudoers.d/worklane-test-ci2 > "$RUNNER_TEMP/sudoers.before"
+          sudo sha256sum /etc/sudoers.d/worklane-test-ci "/etc/sudoers.d/worklane-test-$I2" > "$RUNNER_TEMP/sudoers.before"
           old() {
             # The helper as a machine had it before db-start took max_connections: no version command.
             sudo install -o root -g root -m 0755 test/fixtures/testrun-helper-protocol-1.sh "$H"
@@ -421,6 +424,47 @@ jobs:
           in_step
           sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed'
           sudo rm -rf "$E"
+      - name: a sandboxed run with the longest instance name and run id binds Chrome's SingletonSocket under its TMPDIR, and Chrome runs
+        run: |
+          # Regression: with TMPDIR under the run's directory, Chrome died with "Socket path too long". The run's TMPDIR is
+          # /tmp/wlt-<8 hex>, the test user's own, 0700; a socket where Chrome puts one binds, and headless Chrome runs.
+          H=/usr/local/libexec/worklane-testrun
+          id="fast-$(printf 'c%.0s' $(seq 43))"
+          [ "${#I2}" -eq 21 ] && [ "${#id}" -eq 48 ]
+          as2() { sudo -u "wl-$I2" sudo -n "$H" "$I2" "$@"; }
+          r="$(mktemp -d)"
+          id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+          git init -q "$r" && date > "$r/f" && git -C "$r" add f && git -C "$r" "${id_[@]}" commit -q -m probe
+          for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$id/$x" HEAD; done
+          git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base"
+          sha="$(git -C "$r" rev-parse HEAD)"
+          as2 create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$sha" "$sha" < "$r/b"
+          t="/tmp/wlt-$(printf '%s/%s' "$I2" "$id" | sha256sum | cut -c1-8)"
+          echo "the run's TMPDIR on the host: $t, $(sudo stat -c '%U %a' "$t")"
+          [ "$(sudo stat -c '%U %a' "$t")" = "wl-test-$I2 700" ]
+          # Where Chrome binds: mkdtemp under TMPDIR, then SingletonSocket in it. And, for contrast, the old place.
+          probe='import os, socket, tempfile
+          d = tempfile.mkdtemp(prefix="org.chromium.Chromium.")
+          p = os.path.join(d, "SingletonSocket")
+          s = socket.socket(socket.AF_UNIX); s.bind(p); s.close()
+          print("TMPDIR", os.environ["TMPDIR"], "TMP", os.environ["TMP"], "TEMP", os.environ["TEMP"])
+          print("bound", p, len(p.encode()), "bytes")
+          old = os.path.join(os.path.dirname(os.getcwd()), "tmp", "org.chromium.Chromium.abcdef")
+          os.makedirs(old)
+          try:
+              socket.socket(socket.AF_UNIX).bind(os.path.join(old, "SingletonSocket")); print("old place bound")
+          except OSError as e:
+              print("old place:", len(os.path.join(old, "SingletonSocket").encode()), "bytes:", e)'
+          out="$(as2 exec "$id" 120 -- "python3 -c '$probe' && google-chrome --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir=\"\$TMPDIR/profile\" --dump-dom about:blank | head -c 200")"
+          echo "$out"
+          grep -qx "TMPDIR $t TMP $t TEMP $t" <<<"$out"
+          grep -q "^bound $t/org.chromium.Chromium.[A-Za-z0-9_]*/SingletonSocket " <<<"$out"
+          grep -q '^old place: .*AF_UNIX path too long' <<<"$out"
+          grep -q '<html><head></head><body></body></html>' <<<"$out"
+          as2 wipe "$id"
+          if sudo test -e "$t"; then echo "$t is still there after the wipe" >&2; exit 1; fi
+          echo "wiped: $t is gone"
+          rm -rf "$r"
       - name: a red main tip doesn't block the updater, as root (the newest green first-parent commit; its verdict memo root-owned)
         run: sudo "$(command -v node)" scripts/ci/updater-lookback-root.mjs "$PWD/scripts/machine/worklane-update.cjs"
       - name: the database image, pinned to the digest it has today

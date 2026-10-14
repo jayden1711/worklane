@@ -1176,6 +1176,36 @@ export interface Flaky {
   rates: { days: number; redRuns: number; flakyReruns: number; rate: number | null }[];
   canClear: boolean;
 }
+/**
+ * Harness evals (GET /api/harness-evals, src/harness-evals/; owners and writers): past tasks replayed through the real
+ * coordinator, weekly and when the engine's src/ changes. Per run: success rate, cost, wall-clock and human
+ * interventions per replay, and the change from its baseline; the latest run's tasks.
+ */
+export interface HarnessEvalRun {
+  id: string;
+  at: string;
+  trigger: 'weekly' | 'change' | 'manual';
+  engine: string | null;
+  pr: number | null;
+  runs: number;
+  passed: number;
+  successRate: number | null;
+  costPerRun: number | null;
+  wallMsPerRun: number | null;
+  interventionsPerRun: number | null;
+  costUsd: number;
+  budgetUsd: number;
+  stopped: boolean;
+  error: string | null;
+  successDelta: number | null;
+  costDelta: number | null;
+}
+export interface HarnessEvals {
+  enabled: boolean;
+  runs: HarnessEvalRun[];
+  latest: { task: string; heldOut: boolean; passed: number; samples: number; costUsd: number; outcomes: string[] }[];
+}
+
 export const clearFlaky = (test: string) => api<{ ok: boolean }>('/api/flaky/clear', { method: 'POST', body: JSON.stringify({ test }) });
 
 /** WHY: item 33; mirrors LearningsView in src/learnings.ts (GET /api/learnings, owners and writers). */

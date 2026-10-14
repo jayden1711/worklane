@@ -1,0 +1,22 @@
+id: worklane-300
+base: a0685ce68fab7967743eb1e5ca041295c831290f
+title: "Push gate: a sign-off with the commit's own email is inherent to it,
+  name included"
+body: "Intent: stop every squash merge from turning main's push-gate red. A
+  GitHub squash commit's author is the repo owner's display name, but its body
+  concatenates the branch's DCO trailers, which carry the repo owner's handle
+  with the same email. The gate stripped only the commit's own name and email,
+  so the handle in those `Signed-off-by` lines was refused (seen on 804ef4b and
+  e82b6a7), and the auto-updater then refused those main commits. Now a
+  `Signed-off-by: <name> <email>` line whose email equals the commit's own
+  author or committer email is blanked whole before scanning. A sign-off with
+  any other email is still scanned, and the handle anywhere else in the message
+  is still refused. Nothing is hardcoded."
+done_when:
+  - test: test/push-gate.test.ts
+  - command: npm run typecheck
+labels:
+  - size:S
+outcome:
+  pr: 300
+  merge: 20110234929fb7f3ea158e0b6103454ec750ca8a
