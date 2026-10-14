@@ -13,7 +13,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { GITHUB_API } from './github-hosts.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
@@ -885,7 +885,7 @@ export function dashboardToken(stateDir: string): string {
 
 function readEvents(dbPath: string, after = 0): StoredEvent[] {
   if (!existsSync(dbPath)) return [];
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const db = openReadOnly(dbPath);
   try {
     const rows = db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id').all(after) as { id: number; ts: string; type: string; actor: string; source: string; payload: string }[];
     return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }) as StoredEvent);
