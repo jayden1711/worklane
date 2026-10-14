@@ -10,13 +10,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { asks } from '../src/console/asks.js';
-import { startHub } from '../src/dashboard-hub.js';
-import { SESSION_COOKIE, STATE_COOKIE } from '../src/dashboard-auth.js';
+import { signInFromFiles, startHub } from '../src/dashboard-hub.js';
+import { authorizeUrl, loginFromCode, SESSION_COOKIE, STATE_COOKIE } from '../src/dashboard-auth.js';
 import { EventLog } from '../src/events/log.js';
 import { currentUser } from '../src/os/index.js';
-import { APP_SECRET, FAKE_PEM, fakeGitHub as fake } from './fake-github.js';
+import { APP_SECRET, FAKE_PEM, fakeGitHub as fake, WEBHOOK_SECRET } from './fake-github.js';
+import { repoRoot } from './helpers.js';
 import {
   AGENT_APP_PERMISSIONS,
+  AGENT_SECRET_FILES,
   agentKeyDir,
   appManifest,
   availableAppName,
@@ -176,6 +178,15 @@ test('the agent App: manifest, machine-owner callback, key 0400 for the coordina
     assert.equal(statSync(dirname(key)).mode & 0o777, 0o700);
     assert.equal(statSync(key).uid, process.getuid!());
 
+    // The App's client secret and webhook secret, as GitHub returned them: beside the key, the same way.
+    for (const [file, value] of [[AGENT_SECRET_FILES.clientSecret, APP_SECRET], [AGENT_SECRET_FILES.webhookSecret, WEBHOOK_SECRET]] as const) {
+      const f = join(dirname(key), file);
+      assert.equal(readFileSync(f, 'utf8'), value, file);
+      assert.equal(statSync(f).mode & 0o777, 0o400, `${file} 0400`);
+      assert.equal(statSync(f).uid, process.getuid!(), `${file} the coordinator's`);
+    }
+    assert.deepEqual(readdirSync(dirname(key)).filter((f) => f.endsWith('.tmp')), [], 'no temp file left');
+
     // credentials.yaml: the App, with its other settings kept.
     const y = readFileSync(creds, 'utf8');
     assert.match(y, /github:\s*\n?\s*kind: app/);
@@ -185,9 +196,9 @@ test('the agent App: manifest, machine-owner callback, key 0400 for the coordina
     assert.match(y, /discord_token: \/somewhere\/discord-token/);
     assert.match(s.lines.join('\n'), /OK: the key works, the installation reaches only the instance repo/, 'the real app-permissions.mjs ran');
 
-    // Never logged, never in an ask.
-    const everything = [out, ...s.lines, ...s.asked.map((a) => `${a.title} ${a.detail} ${a.url}`)].join('\n');
-    for (const secret of [PEM.split('\n')[1]!, APP_SECRET]) assert.ok(!everything.includes(secret), 'no key material in any output');
+    // Never logged, never in an ask: no key material, no secret, and not the one-time conversion code either.
+    const everything = [out, ...s.lines, ...s.asked.map((a) => `${a.title} ${a.detail} ${a.url}`), JSON.stringify(r)].join('\n');
+    for (const secret of [PEM.split('\n')[1]!, APP_SECRET, WEBHOOK_SECRET, 'mcode1']) assert.ok(!everything.includes(secret), `no ${secret.slice(0, 6)}… in any output`);
   } finally {
     await s.close();
   }
@@ -203,8 +214,11 @@ test('an installation that reaches another repo is refused, and credentials.yaml
     const run = runAppManifest({ instance: 'alpha', repo: REPO, kind: 'agent' }, s.deps());
     const p = await s.startPage((await s.waitAsk(1)).url, ada);
     s.gh.codes.set('mcode2', { slug: `alpha-${BRAND.cli}`, id: 91 });
+    // An App without a webhook secret (GitHub may make none for an inactive webhook): nothing is stored for one.
+    s.gh.state.webhookSecret = null;
     assert.equal((await s.open(`${PUBLIC}${MANIFEST_CALLBACK_PATH}?code=mcode2&state=${p.state}`, ada)).status, 200);
     await s.waitAsk(2);
+    assert.deepEqual(readdirSync(agentKeyDir(s.home, 'alpha')).sort(), [AGENT_SECRET_FILES.clientSecret, AGENT_SECRET_FILES.key].sort(), 'the key and client secret, no webhook secret');
     s.gh.state.reaches = [REPO, 'example/other'];
     s.gh.state.installed = true;
     const r = await run;
@@ -347,4 +361,107 @@ test('a taken App name gets a short suffix', async () => {
   assert.equal(await availableAppName('alpha-y', { api: 'http://gh', fetch: f }), 'alpha-y');
   assert.equal(await availableAppName('alpha-x', { api: 'http://gh', fetch: f, suffix: () => String(++n).padStart(4, '0') }), 'alpha-x-0002');
   assert.ok(appManifest({ kind: 'signin', name: 'n', repo: REPO, publicUrl: PUBLIC }).name.length <= 34);
+});
+
+// INVARIANT (owner's rule): GitHub's hosts for the hub's sign-in are constants. Sign-in sends the sign-in App's client
+// secret and each person's sign-in code to them, so nothing may point them elsewhere: no environment variable, no
+// request, no cookie, no signed-in person. (SignInConfig's `web`, `api` and `fetch` are for in-process tests only;
+// signInFromFiles, the one way the hub's command makes its config, sets none of them.)
+const SIGNIN_HOSTS = ['https://github.com', 'https://api.github.com'];
+const HOST_VARIABLES = [`${BRAND.envPrefix}_GITHUB_API`, `${BRAND.envPrefix}_GITHUB_WEB`, 'GITHUB_API_URL', 'GITHUB_SERVER_URL', 'GH_HOST', 'GITHUB_HOST'];
+const ELSEWHERE = 'https://elsewhere.example.test';
+/** Run `f` with every variable that names a GitHub host anywhere in the engine or in gh pointing elsewhere. */
+async function withHostsElsewhere<T>(f: () => Promise<T>): Promise<T> {
+  const saved = HOST_VARIABLES.map((n) => process.env[n]);
+  for (const n of HOST_VARIABLES) process.env[n] = ELSEWHERE;
+  try {
+    return await f();
+  } finally {
+    HOST_VARIABLES.forEach((n, i) => {
+      if (saved[i] === undefined) delete process.env[n];
+      else process.env[n] = saved[i];
+    });
+  }
+}
+const signInFiles = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'amf-signin-'));
+  writeFileSync(join(dir, 'client-secret'), `${CLIENT_SECRET}\n`);
+  writeFileSync(join(dir, 'session-secret'), `${'s'.repeat(48)}\n`);
+  return dir;
+};
+
+test("sign-in's GitHub hosts are constants: no environment variable moves the redirect, the code exchange or the token's revocation", async () => {
+  await withHostsElsewhere(async () => {
+    const cfg = signInFromFiles({ clientId: CLIENT_ID, publicUrl: PUBLIC, dir: signInFiles() });
+    assert.deepEqual(Object.keys(cfg).sort(), ['clientId', 'clientSecret', 'publicUrl', 'sessionSecret'], 'the config from files names no host and no fetch');
+    assert.equal(new URL(authorizeUrl(cfg, 'state')).origin, 'https://github.com');
+    // The exchange, with only fetch stood in (an in-process GitHub): every request goes to GitHub's own two hosts.
+    const asked: { url: string; secret: boolean }[] = [];
+    const github = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      asked.push({ url, secret: `${String(init?.body ?? '')} ${JSON.stringify(init?.headers ?? {})}`.includes(CLIENT_SECRET) || /Basic /.test(JSON.stringify(init?.headers ?? {})) });
+      if (url.endsWith('/login/oauth/access_token')) return new Response(JSON.stringify({ access_token: 'ghu_ada' }), { status: 200 });
+      if (url.endsWith('/user')) return new Response(JSON.stringify({ login: 'ada' }), { status: 200 });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+    assert.equal(await loginFromCode({ ...cfg, fetch: github }, 'the-code'), 'ada');
+    assert.deepEqual(
+      asked.map((a) => a.url),
+      ['https://github.com/login/oauth/access_token', 'https://api.github.com/user', `https://api.github.com/applications/${CLIENT_ID}/token`],
+    );
+    for (const a of asked) assert.ok(SIGNIN_HOSTS.includes(new URL(a.url).origin), a.url);
+    assert.ok(asked.some((a) => a.secret), 'the client secret did travel, and only there');
+  });
+});
+
+test("the hub's sign-in goes to github.com whatever the environment, a request, a cookie or a signed-in person says", { skip: !posix }, async () => {
+  const web = mkdtempSync(join(tmpdir(), 'amf-web-'));
+  writeFileSync(join(web, 'index.html'), '<!doctype html><title>hub</title>');
+  await withHostsElsewhere(async () => {
+    // Started the way the hub's command starts it, with the environment pointing elsewhere before and after.
+    const h = await startHub({ instances: [], stateDir: mkdtempSync(join(tmpdir(), 'amf-hub-')), webDir: web, signIn: signInFromFiles({ clientId: CLIENT_ID, publicUrl: PUBLIC, dir: signInFiles() }) });
+    const base = h.url.replace(/\/$/, '');
+    const E = ELSEWHERE;
+    const [apiVar, webVar] = HOST_VARIABLES as [string, string, ...string[]];
+    /** Everything a request can carry that names another host. */
+    const tries: { q: string; headers: Record<string, string> }[] = [
+      { q: '', headers: {} },
+      { q: `?web=${E}&api=${E}&github_web=${E}&github_api=${E}&host=${E}`, headers: {} },
+      { q: `?${apiVar}=${E}&${webVar}=${E}&redirect_uri=${E}/auth/callback&client_id=Iv1.someoneelse1`, headers: {} },
+      { q: '', headers: { 'x-forwarded-host': 'elsewhere.example.test', 'x-forwarded-proto': 'https', origin: E, referer: `${E}/` } },
+      { q: '', headers: { [apiVar.toLowerCase()]: E, [webVar.toLowerCase()]: E, 'x-github-api': E, 'x-github-web': E } },
+      { q: '', headers: { cookie: `${apiVar}=${E}; ${webVar}=${E}; web=${E}; api=${E}` } },
+    ];
+    try {
+      for (const t of tries) {
+        const r = await fetch(`${base}/auth/login${t.q}`, { redirect: 'manual', headers: t.headers });
+        assert.equal(r.status, 302);
+        const to = new URL(r.headers.get('location')!);
+        assert.equal(to.origin, 'https://github.com', JSON.stringify(t));
+        assert.equal(to.pathname, '/login/oauth/authorize');
+        assert.equal(to.searchParams.get('redirect_uri'), `${PUBLIC}/auth/callback`);
+        assert.equal(to.searchParams.get('client_id'), CLIENT_ID);
+      }
+    } finally {
+      await h.close();
+    }
+  });
+  // A signed-in person is no different: on a hub whose GitHub is an in-process fake (a test's injection), a machine
+  // owner's session moves nothing either.
+  const s = await setup();
+  try {
+    const ada = await s.signIn('ada');
+    for (const q of ['', `?web=${ELSEWHERE}&api=${ELSEWHERE}`]) {
+      const r = await fetch(`${s.base}/auth/login${q}`, { redirect: 'manual', headers: { cookie: ada, 'x-github-web': ELSEWHERE } });
+      assert.equal(new URL(r.headers.get('location')!).origin, new URL(s.gh.url).origin, 'where the hub was started with, not where the request says');
+    }
+  } finally {
+    await s.close();
+  }
+});
+
+// WHY: a static check on top of the behaviour: the sign-in path reads no environment at all, so a later change that
+// adds a host override there has to delete this line to do it.
+test('the sign-in code reads no environment variable', () => {
+  for (const f of ['src/dashboard-auth.ts', 'src/dashboard-hub.ts']) assert.doesNotMatch(readFileSync(join(repoRoot, f), 'utf8'), /process\.env/, f);
 });

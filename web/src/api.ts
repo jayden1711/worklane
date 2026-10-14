@@ -730,6 +730,23 @@ export interface AddProjectData {
   runs: AddProjectRun[];
 }
 export const getAddProject = () => api<AddProjectData>('/api/add-project');
+/** Add project's repo picker (GET /api/add-project/repos, src/setup/repo-picker.ts): an account's repos to pick from. */
+export interface PickableRepo {
+  fullName: string;
+  private: boolean;
+  installable: boolean;
+  why: string | null;
+  pushedAt: string | null;
+}
+export interface RepoPickerData {
+  owner: string;
+  ownerType: 'User' | 'Organization' | null;
+  accounts: string[];
+  repos: PickableRepo[];
+  note: string;
+  error: string | null;
+}
+export const getAddProjectRepos = (owner?: string) => api<RepoPickerData>(`/api/add-project/repos${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`);
 
 /** The first-run checklist (GET /api/first-run, src/init.ts firstRunView): init's steps as it recorded them. */
 export type FirstRunStatus = 'pending' | 'done' | 'skipped' | 'failed';

@@ -4,10 +4,18 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { repoRoot } from './helpers.js';
+import { AGENT_APP_PERMISSIONS, appManifest } from '../src/setup/app-manifest.js';
 
 type Problems = { errors: string[]; warnings: string[] };
 const script = join(repoRoot, 'scripts', 'setup', 'app-permissions.mjs');
-const { permissionProblems } = (await import(pathToFileURL(script).href)) as { permissionProblems: (p: Record<string, string>) => Problems };
+type Rules = {
+  permissionProblems: (p: Record<string, string>) => Problems;
+  REQUIRED: Record<string, string>;
+  ALLOWED_UP_TO: Record<string, string>;
+  EXPECTED: Record<string, { level: string; why: string }>;
+  REFUSED: Record<string, (level: string) => string | null>;
+};
+const { permissionProblems, REQUIRED, ALLOWED_UP_TO, EXPECTED, REFUSED } = (await import(pathToFileURL(script).href)) as Rules;
 
 const base = { metadata: 'read', contents: 'write', issues: 'write', pull_requests: 'write', checks: 'read' };
 
@@ -62,4 +70,20 @@ test('credentials.sh checks permissions only through app-permissions.mjs, at ins
   assert.doesNotMatch(verify, /install |> "|shred|chmod/);
   // No second copy of the rules inline.
   assert.doesNotMatch(sh, /permissions\.(workflows|administration)/);
+});
+
+// WHY: the manifest the setup console posts to GitHub (AGENT_APP_PERMISSIONS) and the check every installation must
+// pass (app-permissions.mjs) are two lists in two files. If they drift, GitHub makes an App that the check then
+// refuses, or one with a permission the check never looks at. This holds them to exactly the same set.
+test("the manifest App's permissions are exactly what app-permissions.mjs asks for: every required and expected one, at the most it allows, nothing else", () => {
+  const exact: Record<string, string> = {};
+  for (const [name, level] of Object.entries(REQUIRED)) exact[name] = ALLOWED_UP_TO[name] ?? level;
+  for (const [name, { level }] of Object.entries(EXPECTED)) exact[name] = level;
+  assert.deepEqual({ ...AGENT_APP_PERMISSIONS }, exact);
+  // So the check passes it with nothing to say, and no refused permission is in it at a refused level.
+  assert.deepEqual(permissionProblems({ ...AGENT_APP_PERMISSIONS }), { errors: [], warnings: [] });
+  for (const [name, refuse] of Object.entries(REFUSED)) if (name in AGENT_APP_PERMISSIONS) assert.equal(refuse(AGENT_APP_PERMISSIONS[name]!), null, name);
+  // And the manifest posts that list, as it is.
+  const m = appManifest({ kind: 'agent', name: 'alpha-app', repo: 'example/alpha', publicUrl: 'https://hub.example.test' });
+  assert.deepEqual(m.default_permissions, exact);
 });
