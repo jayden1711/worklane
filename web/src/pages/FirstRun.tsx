@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { cancelGhLogin, getFirstRun, getGhLogin, runFirstRunAction, skipStep, startCoordinator, startGhLogin, type FirstRun, type GhLoginView, type FirstRunActionPlan, type PolicyChange, type ConfigChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State, type ClaudeSigninData } from '../api';
 import { navigate } from '../App';
 import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
+import { DiscordSetupPanel } from '../components/DiscordSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
 import { PolicyForm } from '../components/PolicyForm';
@@ -302,12 +303,12 @@ function FixPanel({ s }: { s: SetupStepView }) {
 }
 
 function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; onSkip?: (skip: boolean) => void }) {
-  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login';
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' ? s.fix.label : 'Fix';
+  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' ? s.fix.label : 'Fix';
   // WHY: a form's values can be reviewed and changed whether or not the step is done (the policy starts valid), and a
-  // sign-in is rerunnable (another account, an expired login); any step opened from Settings' Setup list can be run
+  // sign-in or the Discord step is rerunnable (another account, an expired login, another channel); any step opened from Settings' Setup list can be run
   // again; a skipped step stays closed until the skip is undone.
-  const offered = rerun || (!s.skipped && (!s.done || (s.fix.kind === 'form' && s.fix.form !== 'setup-origin' && s.fix.form !== 'setup-config') || s.fix.kind === 'signin'));
+  const offered = rerun || (!s.skipped && (!s.done || (s.fix.kind === 'form' && s.fix.form !== 'setup-origin' && s.fix.form !== 'setup-config') || s.fix.kind === 'signin' || s.fix.kind === 'discord'));
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : s.skipped ? 'skipped' : 'todo'}>
       <div className="flex gap-3">
@@ -329,8 +330,8 @@ function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupSt
             </Button>
           )}
           {offered && (
-            <Button size="sm" variant={open || (s.done && s.fix.kind === 'signin') ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
-              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : 'Run again') : label}
+            <Button size="sm" variant={open || (s.done && (s.fix.kind === 'signin' || s.fix.kind === 'discord')) ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' ? 'Change' : 'Run again') : label}
             </Button>
           )}
         </div>
@@ -426,7 +427,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; initialGhLogin?: GhLoginView | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; initialGhLogin?: GhLoginView | null }) {
   const [skipError, setSkipError] = useState<string | null>(null);
   const skip = (id: string, on: boolean) => {
     setSkipError(null);
@@ -517,6 +518,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       signin ? <ClaudeSigninView v={signin} onChanged={() => onRecheck?.()} /> : <ClaudeSigninPanel onDone={recheck} />
                     ) : s.fix.kind === 'gh-login' ? (
                       <GhLoginPanel canAct={!!f.canAct} command={s.fix.command} initial={initialGhLogin} onDone={recheck} />
+                    ) : s.fix.kind === 'discord' ? (
+                      (discord ?? <DiscordSetupPanel onChanged={() => onRecheck?.()} />)
                     ) : s.fix.kind === 'form' && s.fix.form === 'policy' && f.policy ? (
                       <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'repo-config' && f.repoConfig ? (
@@ -580,6 +583,9 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
 export const firstRunRefusal = (state: Pick<State, 'canReadDigest' | 'user' | 'role'>) =>
   state.canReadDigest === false ? `the first-run checklist is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
+/** The step a link asked to open (Settings links here to run a step again): /first-run?open=<step>. */
+const openFromUrl = () => (typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('open'));
+
 export function FirstRunPage({ state }: { state: State }) {
   const refused = firstRunRefusal(state);
   // WHY: Settings' Setup list opens one step here (?step=<id>), done or not, to run it again.
@@ -621,7 +627,7 @@ export function FirstRunPage({ state }: { state: State }) {
         ) : !f ? null : 'error' in f ? (
           <div className="text-[13px] text-red">Can't load the checklist: {f.error}</div>
         ) : (
-          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={rerun} rerun={rerun} />
+          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={rerun ?? openFromUrl()} rerun={rerun} />
         )}
       </div>
     </div>

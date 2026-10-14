@@ -6,7 +6,7 @@ import { navigate } from '../App';
 import { Badge, Card } from './ui';
 
 /** The steps with a screen of their own: an action, a form, Start, or another page. */
-export const withScreen = (steps: SetupStepView[]) => steps.filter((s) => ['action', 'form', 'start', 'screen', 'signin', 'gh-login'].includes(s.fix.kind));
+export const withScreen = (steps: SetupStepView[]) => steps.filter((s) => ['action', 'form', 'start', 'screen', 'signin', 'gh-login', 'discord'].includes(s.fix.kind));
 
 export function SetupScreensView({ steps }: { steps: SetupStepView[] }) {
   return (

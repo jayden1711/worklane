@@ -148,7 +148,9 @@ export type Fix =
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
   | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
   /** WHY: Connect GitHub (src/gh-login.ts): gh's device login run for the person, its one-time code relayed to the page. */
-  | { kind: 'gh-login'; label: string; command: string };
+  | { kind: 'gh-login'; label: string; command: string }
+  /** WHY: the Discord step (src/intake/discord-setup.ts): token, invite, channel picks, intake.yaml after a shown diff. */
+  | { kind: 'discord'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -738,8 +740,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'some',
-    today: "Create the app and bot in Discord's developer portal, turn on the message-content intent, invite it, `credentials.sh <name> intake-discord`, then write intake.yaml by hand (guild, channels, owners, people) and restart the instance.",
-    fix: { kind: 'outside', url: 'https://discord.com/developers/applications', label: "Discord's developer portal", why: "creating the bot and its intent toggle exist only there" },
+    today: `Create the app and bot in Discord's developer portal and turn on the message-content intent (only there). Then here, or in a terminal: the token (\`credentials.sh <name> intake-discord\`, as root), the invite link, the bot's channels (\`${BRAND.cli} discord channels\`, as the instance's user), and intake.yaml's discord and superfan channel keys; who may send, people and owners stay in intake.yaml by hand. Restart the instance.`,
+    fix: { kind: 'discord', label: 'Set up' },
+    automation: 'sudo bash scripts/setup/credentials.sh <name> intake-discord (the bot token), then intake.yaml in the instance home (guild, channels, owners, people; docs/intake.md) and a restart of the instance',
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return no(i.error);

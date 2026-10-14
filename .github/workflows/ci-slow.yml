@@ -601,6 +601,7 @@ jobs:
     # another instance gets its App through the manifest flow itself (wizard screen 5), with GitHub's conversion faked
     # and a stand-in hub for the owner's sign-in: no real App is made.
     # Last, Tailscale for the hub through the same helper (tailscale.sh): the real signed install, then a stand-in CLI.
+    # Then the chat bot's token (credentials.sh intake-discord) and the dashboard's Discord step, against a fake Discord.
     name: add-project (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
@@ -766,6 +767,94 @@ jobs:
           if sudo -u wl-ci sudo -n "$HELPER" add-project 'ci;id' example/alpha 2>/dev/null; then echo "a bad name ran" >&2; exit 1; fi
       - name: "the updater through the machine helper, as the coordinator: installed off, the release channel only, a signer staged and the signers file untouched; adding a signer and any other arguments refused by sudo"
         run: sudo "$(command -v node)" scripts/ci/updater-setup-root.mjs wl-ci
+      # Wizard screen 11's terminal half and its server path, on the instance add-project made (ci): credentials.sh
+      # intake-discord installs the bot token for the coordinator only and writes credentials.yaml itself; the engine's
+      # own listing code, run as the coordinator, reads that token and asks a fake Discord (scripts/ci/fake-discord.mjs,
+      # through an injected fetch: the listing has no setting for its host); the real hub (wl-dash) forwards the Discord
+      # step to the instance's dashboard (wl-ci), which runs the listing as a child process: the CLI on its unit's PATH,
+      # here a stand-in that answers with canned JSON (scripts/ci/discord-cli-stand-in.cjs). Not a real token, and
+      # nothing in this step asks discord.com.
+      - name: "credentials.sh intake-discord: the bot token on stdin, 0400 for the coordinator only, credentials.yaml written; the bot's channels as the coordinator; the Discord step through the hub"
+        run: |
+          h="$(getent passwd wl-ci | cut -d: -f6)"
+          creds="$h/.local/state/worklane/instances/ci/credentials.yaml"
+          tf="$h/.config/ci-intake/discord-token"
+          before="$(sudo sha256sum "$creds" | cut -d' ' -f1)"
+          # A bad token: refused, nothing installed, credentials.yaml untouched, never echoed.
+          bad="not-a-token-$(openssl rand -hex 8)"
+          if printf '%s\n' "$bad" | sudo bash scripts/setup/credentials.sh ci intake-discord > "$F/discord-bad.out" 2>&1; then echo "a bad token was accepted" >&2; exit 1; fi
+          cat "$F/discord-bad.out"
+          grep -q "that doesn't look like a bot token; nothing installed" "$F/discord-bad.out"
+          if grep -qF "$bad" "$F/discord-bad.out"; then echo "the bad token was echoed" >&2; exit 1; fi
+          if sudo test -e "$tf"; then echo "a bad token installed something" >&2; exit 1; fi
+          [ "$(sudo sha256sum "$creds" | cut -d' ' -f1)" = "$before" ]
+          # A good one: in a file of the runner's only, masked in case anything prints it; on stdin, never an argument.
+          t="$(openssl rand -hex 12).$(openssl rand -hex 3).$(openssl rand -hex 19)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/discord-token"); unset t
+          sudo bash scripts/setup/credentials.sh ci intake-discord < "$F/discord-token" > "$F/discord.out" 2>&1 || { cat "$F/discord.out"; exit 1; }
+          cat "$F/discord.out"
+          if grep -q 'In credentials.yaml set' "$F/discord.out"; then echo "credentials.sh still asks for a hand edit" >&2; exit 1; fi
+          grep -qxF "wrote $creds (intake.discord_token: $tf; the rest kept)" "$F/discord.out"
+          [ "$(sudo stat -c '%U %G %a' "$tf")" = "wl-ci wl-ci 400" ]
+          [ "$(sudo stat -c '%U %a' "$(dirname "$tf")")" = "wl-ci 700" ]
+          [ "$(sudo stat -c '%U %a' "$creds")" = "wl-ci 600" ]
+          [ "$(sudo cat "$tf" | sha256sum)" = "$(tr -d '\n' < "$F/discord-token" | sha256sum)" ]
+          # credentials.yaml names the file, and the App written earlier is still there.
+          sudo node -e 'const y=require("/opt/worklane/current/node_modules/yaml");const c=y.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(!(c.intake.discord_token===process.argv[2]&&c.github.kind==="app"&&c.github.app_id===91&&c.github.installation_id===4242))process.exit(1)' "$creds" "$tf"
+          # Only the coordinator reads it: not the agent user, not the hub's user.
+          sudo -u wl-ci test -r "$tf"
+          for u in wl-ci-agent wl-dash; do if sudo -u "$u" cat "$tf" > /dev/null 2>&1; then echo "$u can read the bot token" >&2; exit 1; fi; done
+          # A rerun (a new token after a reset) replaces the file and keeps credentials.yaml valid.
+          sudo bash scripts/setup/credentials.sh ci intake-discord < "$F/discord-token" > "$F/discord2.out" 2>&1 || { cat "$F/discord2.out"; exit 1; }
+          [ "$(sudo stat -c '%U %G %a' "$tf")" = "wl-ci wl-ci 400" ]
+          # The bot's channels, as the coordinator: the engine's own listing reads the instance's token and asks the fake.
+          nohup node scripts/ci/fake-discord.mjs 8997 "$F/discord-token" "$F/discord-requests.log" > "$F/fake-discord.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8997/ && break; sleep 1; done
+          : > "$F/discord-requests.log"
+          list() { (cd / && sudo -H -u "$1" /usr/local/bin/node /opt/worklane/current/scripts/ci/discord-listing-fake.mjs /opt/worklane/current/dist ci http://127.0.0.1:8997); }
+          list wl-ci > "$F/channels.json"
+          cat "$F/channels.json"
+          jq -e '.application == {"id":"700000000000000001","name":"Example Bot","message_content":true} and (.channels | length) == 7 and (.channels | all(has("guild_id") and has("id") and has("name")))' "$F/channels.json"
+          cat "$F/discord-requests.log"
+          [ "$(grep -c '^GET /guilds/[0-9]*/channels authorized$' "$F/discord-requests.log")" = 2 ]
+          if grep -v '^GET .* authorized$' "$F/discord-requests.log"; then echo "a request that isn't an authorized GET" >&2; exit 1; fi
+          # The agent user has no instance and no token: the same listing, as it, lists nothing.
+          if list wl-ci-agent > "$F/channels-agent.json" 2> "$F/channels-agent.err"; then echo "the agent user listed the bot's channels" >&2; exit 1; fi
+          [ ! -s "$F/channels-agent.json" ]
+          # The Discord step, through the real hub (wl-dash, break-glass) to the instance's dashboard (wl-ci): where the
+          # token is, never what it is.
+          hub="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; printf 'authorization: Bearer %s\n' "$(sudo cat "$hub")" > "$F/hub-auth")
+          curl -sS -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord > "$F/discord-step.json"
+          jq . "$F/discord-step.json"
+          jq -e --arg tf "$tf" '.available and .canAct and .token == {"configured":true,"file":$tf,"present":true,"error":null} and .invite.integer == "309237648384" and .intake.exists == false' "$F/discord-step.json"
+          jq -e '(.automation.token | test("^sudo bash /opt/worklane/[^ ]+/scripts/setup/credentials\\.sh ci intake-discord$")) and .automation.channels == "sudo -H -u wl-ci worklane discord channels --instance ci"' "$F/discord-step.json"
+          # Its listing is a child process of the instance's dashboard: the CLI on the unit's PATH, as claude and gh
+          # are found. A stand-in there (as claude's is) answers with canned JSON naming the user it ran as, so this
+          # shows the hub, the instance's dashboard and its child process wired together, as wl-ci, without the token
+          # being read and without any request to Discord.
+          n="$(wc -l < "$F/discord-requests.log")"
+          restart_dashboard() {
+            sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-ci.service
+            for _ in $(seq 1 30); do curl -sf -o /dev/null -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord && return 0; sleep 1; done
+            echo "the instance's dashboard didn't come back" >&2; return 1
+          }
+          sudo install -d -m 0755 /usr/local/lib/ci-discord
+          sudo install -m 0755 scripts/ci/discord-cli-stand-in.cjs /usr/local/lib/ci-discord/worklane
+          sudo install -d /etc/systemd/system/worklane-dashboard-ci.service.d
+          printf '[Service]\nEnvironment=PATH=/usr/local/lib/ci-discord:/usr/local/bin:/usr/bin:/bin\n' | sudo tee /etc/systemd/system/worklane-dashboard-ci.service.d/ci-discord.conf > /dev/null
+          restart_dashboard
+          code="$(curl -sS -o "$F/discord-list.json" -w '%{http_code}' -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run/discord/channels)"
+          cat "$F/discord-list.json"; echo
+          [ "$code" = 200 ]
+          jq -e '.application.name == "stand-in for ci, run as wl-ci" and .invite == "https://discord.com/oauth2/authorize?client_id=700000000000000001&scope=bot&permissions=309237648384" and ([.channels[].name] == ["general","superfan-shop"])' "$F/discord-list.json"
+          [ "$(wc -l < "$F/discord-requests.log")" = "$n" ]
+          # The stand-in is taken away again: the later steps run the dashboard as it is installed.
+          sudo rm -rf /etc/systemd/system/worklane-dashboard-ci.service.d/ci-discord.conf /usr/local/lib/ci-discord
+          restart_dashboard
+          # Nothing was written by looking: no intake.yaml, and the instance's log has no ask.
+          sudo test ! -e "$h/.local/state/worklane/instances/ci/intake.yaml"
+          # Never echoed: not in any output, the fake's log, a response, or any unit's journal.
+          if grep -qFf "$F/discord-token" "$F/discord.out" "$F/discord2.out" "$F/channels.json" "$F/channels-agent.err" "$F/discord-requests.log" "$F/fake-discord.log" "$F/discord-step.json" "$F/discord-list.json" || sudo journalctl --no-pager | grep -qFf "$F/discord-token"; then echo "the token was echoed" >&2; exit 1; fi
       - name: "claude-account: a stand-in claude, and a second instance (beta, with an eval user) whose coordinator finishes its run on SIGTERM"
         run: |
           # claude auth status as each user: signed in when that user's own login holds a setup token (scripts/ci/).

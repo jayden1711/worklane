@@ -18,7 +18,7 @@ import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'setup-automation-state-'));
 
-const SCREEN_KINDS = ['action', 'form', 'start', 'screen', 'signin', 'gh-login'];
+const SCREEN_KINDS = ['action', 'form', 'start', 'screen', 'signin', 'gh-login', 'discord'];
 
 test('every step with a screen names how to do it without the page, and docs/dashboard.md lists exactly those', () => {
   const screens = SETUP_STEPS.filter((s) => SCREEN_KINDS.includes(s.fix.kind));

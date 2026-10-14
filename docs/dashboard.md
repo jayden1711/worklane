@@ -250,6 +250,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Guardrail fingerprints fetched | local, server | `worklane guardrails refresh` |
 | Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
 | The instance's policy | server | `the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch` |
+| Discord intake and chat | server | `sudo bash scripts/setup/credentials.sh <name> intake-discord (the bot token), then intake.yaml in the instance home (guild, channels, owners, people; docs/intake.md) and a restart of the instance` |
 | Reachable over Tailscale (HTTPS) | server | `sudo bash scripts/setup/tailscale.sh install, then up, serve and public-url (one step each; status reads only)` |
 | Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
@@ -281,6 +282,19 @@ What it can never do:
 - Change what `tailscale up` exposes: it is run with no flags (no exit node, routes, SSH, login server or auth key).
 - Set the hub's URL to anything but this machine's own `*.ts.net` name, which the script reads from `tailscale status` on the machine; nobody types it.
 - Install a package that isn't signed by the pinned key.
+
+## Discord: the bot's token, invite link and channels
+
+On a server instance, the First run page's **Discord** step (`src/intake/discord-setup.ts`; Settings links to it, and it opens again on a finished step as Change) sets up the chat bot. It is optional. Opening it, loading the bot's channels and reviewing a change write nothing; each write is an owner's, confirmed first, and audited (refusals too). Writers read where it stands. docs/intake.md section 10.1 has the script for each part.
+
+What it can change, all as the instance's coordinator user (the user its dashboard runs as), and nothing as root:
+
+- **The token.** Paste the token opens a paste box: a `paste_secret` ask for the credential `intake-discord` (`POST /api/first-run/discord/token-ask`). The value goes through the setup console's secret route, from the browser straight to `~/.config/<name>-secrets/intake-discord` (0400, in a 0700 directory), is refused unless it is shaped like a bot token, and `credentials.yaml` `intake.discord_token` is then pointed at the file through the same code as `credentials.sh <name> intake-discord` (`setDiscordToken`, `src/instance.ts`).
+- **`intake.yaml`**, in the instance home (0600): only `discord.enabled`, `guild`, `channels`, `asks_channel`, `ops_channel`, `chat_channels`, `dashboard_url` and `superfan.enabled`, `channel`, `machine_channel`, picked from the bot's own list. Review (`POST /api/first-run/discord/intake`) returns the exact diff and writes nothing; Confirm sends back that review's hash, and the server writes only if the file and the bot's list still give that very change. The result must pass the intake schema; a superfan channel is never one the bot reads.
+
+What it can never do: read or show the token (the dashboard's process never opens the token file; the bot's application id, its invite link and its channels come from a child process, `<cli> discord channels --instance <name> --json`, which reads the token itself, asks only Discord's own API (its base URL is a constant: nothing can point it at another host) and prints names and ids only, `GET /api/first-run/discord/channels`, owners only; the child is the `<cli>` on the unit's PATH, which root sets); write any other file, or any other key of `intake.yaml` (who may send, people, owners and trusted stay by hand); post, read or change anything on Discord (the child process makes GET requests only); restart the instance (it shows the command); or run anything as root. A hub forwards these calls to the instance's own dashboard like every other, so the hub's user never holds the token either.
+
+The invite link asks for exactly four permissions (View Channels, Send Messages, Create Public Threads, Send Messages in Threads; integer `309237648384`) and the `bot` scope. Creating the bot and turning on its Message Content Intent stay in Discord's developer portal: the step links there, and says whether the intent is on once the bot's view is loaded.
 
 ## Switching the agents' Claude account
 
