@@ -320,7 +320,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
   const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com' })) : undefined;
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : 4317, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}) };
 }
 
 /**
@@ -721,6 +721,8 @@ export function readServiceLog(src: LogSource, lines = 200, read: JournalReader 
   return { source: 'none', unit: src.unit, entries: [], problem: problem ?? 'no service log found: the coordinator runs in the foreground or as a service without a log file' };
 }
 
+/** WHY: a checkout's dashboard and `dashboard --detach` (src/dashboard-detach.ts) must agree, or a rerun prints another URL. */
+export const LOCAL_DASHBOARD_PORT = 4317;
 /** An instance's dashboard port, the same every time (so a tunnel to it can be set up once): 4400-4899, from its name. */
 export const instancePort = (name: string) => 4400 + (createHash('sha256').update(name).digest().readUInt32BE(0) % 500);
 

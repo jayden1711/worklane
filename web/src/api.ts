@@ -465,6 +465,26 @@ export const me: Promise<Me | null> = probeMe(servedByHub);
 /** Whether this page needs a sign-in: a hub page, with no session and no break-glass token. */
 export const needsSignIn: Promise<boolean> = me.then((m) => servedByHub && !m);
 
+/** WHY: the install's URL carries no key (src/dashboard-detach.ts), so an instance's own page opened by it asks for one. */
+export const needsKey = (hubPage: boolean, key: string) => !hubPage && !key;
+export const keyMissing = inBrowser && needsKey(servedByHub, token);
+/** WHY: the hub's break-glass port takes the key too; its sign-in port never does, so the form shows on loopback only. */
+export const onLoopback = inBrowser && ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname);
+
+/**
+ * INVARIANT: a key is tried (in a header, never a URL) before it is kept, and kept in this tab only, as a ?t= link's
+ * is. On a hub only the break-glass answer counts: its sign-in port says 200 to anyone.
+ */
+export async function tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: RequestInit) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: Pick<Storage, 'setItem'> }): Promise<boolean> {
+  const key = given.trim();
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(key)) return false;
+  const r = await (o.get ?? fetch)(o.hub ? '/api/me' : '/api/role', { headers: { authorization: `Bearer ${key}` } }).catch(() => null);
+  if (!r?.ok) return false;
+  if (o.hub && !((await r.json()) as { breakGlass?: boolean }).breakGlass) return false;
+  (o.store ?? sessionStorage).setItem('dash-token', key);
+  return true;
+}
+
 let csrf = '';
 void me.then((m) => {
   csrf = m?.csrf ?? '';
