@@ -1,16 +1,19 @@
 // The Machine page's "Updater setup" (the first-run wizard's Engine updates step, server mode): install the engine
-// updater, list the release signers it verifies tags against and add one, and pick the channel it follows. The
+// updater, see the release signers it verifies tags against, stage one more, and put it on the release channel. The
 // on/off switch stays in the machine settings table below.
 //
-// Every step is two clicks. Review asks the server what would run and change, and shows it: for a signer, the exact
-// principal, the whole public key, its fingerprint and the line that will be written. Confirm sends the same values
-// back with that fingerprint. Nothing changes until then, and leaving the page changes nothing. A confirmed step is a
-// machine request: the coordinator runs the machine helper (the dashboard never runs sudo), and it shows under
-// "Requested here". The page can add a signer; it can't remove or replace one, or change how the updater verifies.
+// A dashboard session can't add a release signer: those keys are the root of trust for engine updates. The page can
+// only STAGE one. It then shows the exact command an admin runs at a root shell on the machine to confirm it, naming
+// the key by its fingerprint; until that is run the staged key is trusted for nothing, and it is dropped after 24
+// hours. Following main instead of releases is likewise a root shell's: the page offers only "release".
+//
+// Every step is two clicks. Review asks the server what would run and change, and shows it; the second click confirms.
+// Nothing changes until then, and leaving the page changes nothing. A confirmed step is a machine request: the
+// coordinator runs the machine helper (the dashboard never runs sudo), and it shows under "Requested here".
 import { useState } from 'react';
 import { api } from '../api';
 import type { MachineData } from './MachineSettings';
-import { Badge, Button, Card, cx } from './ui';
+import { ago, Badge, Button, Card, cx } from './ui';
 
 export interface UpdaterSigner {
   principal: string;
@@ -20,39 +23,52 @@ export interface UpdaterSigner {
   fingerprint: string | null;
 }
 
+export interface UpdaterPending {
+  principal: string;
+  key: string;
+  fingerprint: string;
+  by: string;
+  at: string;
+  expiresAt: string;
+  /** The root command that confirms it. */
+  confirm: string;
+}
+
 export interface UpdaterData {
   installed: boolean;
   enabled: boolean | null;
   channel: 'release' | 'main' | null;
-  channels: { id: 'release' | 'main'; what: string }[];
+  channelWhat: string | null;
   signersFile: string;
   updaterReads: string | null;
   signers: UpdaterSigner[] | null;
-  script: { install: string; channel: string; signer: string; signersByHand: string };
+  pending: UpdaterPending[];
+  pendingMax: number;
+  script: { install: string; signer: string; confirm: string; release: string; main: string };
 }
 
 export interface UpdaterPlan {
-  step: 'install' | 'channel' | 'signer';
+  step: 'install' | 'release' | 'stage' | 'discard';
   args: string[];
   command: string;
   changes: string[];
   script: string;
-  signer?: { principal: string; key: string; fingerprint: string; line: string; file: string };
+  signer?: { principal: string; key: string; fingerprint: string; line: string; confirm: string; file: string };
 }
 
-type Input = { step: 'install' } | { step: 'channel'; channel: string } | { step: 'signer'; principal: string; key: string };
+type Input = { step: 'install' } | { step: 'release' } | { step: 'stage'; principal: string; key: string } | { step: 'discard'; principal: string; key: string };
 
 const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
 const field = 'h-8 w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]';
-const CONFIRM: Record<UpdaterPlan['step'], string> = { install: 'Install the updater', channel: 'Change the channel', signer: 'Add this signer' };
+const CONFIRM: Record<UpdaterPlan['step'], string> = { install: 'Install the updater', release: 'Follow releases', stage: 'Stage this signer', discard: 'Discard it' };
 
-/** What a reviewed step will run and change; for a signer, exactly what will be written. Then the confirming click. */
+/** What a reviewed step will run and change; for a signer, exactly what is staged and what would then confirm it. Then the confirming click. */
 function Review({ plan, busy, onConfirm, onCancel }: { plan: UpdaterPlan; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
   return (
     <div className="space-y-2.5 rounded-lg bg-blue-tint p-3" data-testid="updater-review" data-step={plan.step}>
       {plan.signer && (
         <div className="space-y-1.5" data-testid="updater-review-signer">
-          <p className="text-[12.5px] font-medium text-ink">This key will be trusted to sign engine releases for this machine. Check all of it before you confirm.</p>
+          <p className="text-[12.5px] font-medium text-ink">Staging adds nothing to the keys this machine trusts. It records this key so an admin can confirm it at a root shell.</p>
           <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-[12.5px] sm:grid-cols-[92px_1fr]">
             <dt className="text-ink-3">Principal</dt>
             <dd className="break-all font-mono text-[12px] text-ink" data-testid="updater-review-principal">
@@ -68,20 +84,15 @@ function Review({ plan, busy, onConfirm, onCancel }: { plan: UpdaterPlan; busy: 
             <dd className="break-all font-mono text-[12px] text-ink" data-testid="updater-review-fingerprint">
               {plan.signer.fingerprint}
             </dd>
-            <dt className="text-ink-3">Added to</dt>
-            <dd className="break-all font-mono text-[12px] text-ink">{plan.signer.file}</dd>
           </dl>
-          <p className="text-[12.5px] text-ink-2">The line it adds, exactly:</p>
-          <code className={code} data-testid="updater-review-line">
-            {plan.signer.line}
+          <p className="text-[12.5px] text-ink-2">Once staged, it becomes a signer only when an admin runs this, as root on the machine, within 24 hours:</p>
+          <code className={code} data-testid="updater-review-root-command">
+            {plan.signer.confirm}
           </code>
-          <p className="text-[12px] text-ink-2">
-            Compare the fingerprint with your own key's: <span className="font-mono">ssh-keygen -lf &lt;your key&gt;.pub</span>
-          </p>
         </div>
       )}
       <div className="space-y-1.5 text-[12.5px] text-ink-2">
-        <p>As root, through the machine helper, it runs:</p>
+        <p>As root, through the machine helper, this step runs:</p>
         <code className={code} data-testid="updater-review-command">
           {plan.command}
         </code>
@@ -119,6 +130,12 @@ function Step({ n, title, state, tone, children }: { n: number; title: string; s
   );
 }
 
+/** How long a staged signer still waits, as people say it. */
+export function waitsFor(expiresAt: string, now = Date.now()): string {
+  const m = Math.max(0, Math.round((Date.parse(expiresAt) - now) / 60_000));
+  return m >= 60 ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min` : `${m} min`;
+}
+
 /** The section from its data (also what the render checks render). `initialReview` opens a step's review as the server answered it. */
 export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = null }: { data: MachineData; onChanged?: (d: MachineData) => void; initialReview?: { input: Input; plan: UpdaterPlan } | null }) {
   const u = data.updater;
@@ -127,7 +144,6 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [principal, setPrincipal] = useState('');
   const [key, setKey] = useState('');
-  const [channel, setChannel] = useState<string>(u?.channel ?? '');
   if (!u) return null;
   const post = <T,>(path: string, body: object) => api<T>(path, { method: 'POST', body: JSON.stringify(body) });
   const ask = async (input: Input) => {
@@ -147,11 +163,10 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
     setBusy(true);
     setMsg(null);
     try {
-      // The fingerprint that was on the screen goes back with the confirm: the server refuses any other key.
-      const r = await post<{ machine: MachineData }>('/api/machine/updater', { ...review.input, confirm: true, ...(review.plan.signer ? { fingerprint: review.plan.signer.fingerprint } : {}) });
+      const r = await post<{ machine: MachineData }>('/api/machine/updater', { ...review.input, confirm: true });
       setMsg({ ok: true, text: `requested: ${review.plan.command}. The coordinator runs it on its next tick; it shows under "Requested here" below.` });
       setReview(null);
-      if (review.input.step === 'signer') {
+      if (review.input.step === 'stage') {
         setPrincipal('');
         setKey('');
       }
@@ -162,9 +177,11 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
       setBusy(false);
     }
   };
-  const open = (step: UpdaterPlan['step']) => (review?.plan.step === step ? <Review plan={review.plan} busy={busy} onConfirm={() => void confirm()} onCancel={() => setReview(null)} /> : null);
+  const open = (step: UpdaterPlan['step'], at?: string) =>
+    review?.plan.step === step && (at === undefined || ('key' in review.input && review.input.key === at)) ? <Review plan={review.plan} busy={busy} onConfirm={() => void confirm()} onCancel={() => setReview(null)} /> : null;
   const can = data.canChange;
   const signers = u.signers ?? [];
+  const pending = u.pending ?? [];
   return (
     <section className="space-y-2" aria-label="Updater setup" data-testid="updater-setup" id="updater-setup">
       <div className="flex flex-wrap items-baseline gap-2">
@@ -187,10 +204,9 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
             )}
             {open('install')}
           </Step>
-          <Step n={2} title="Release signers" state={signers.length ? `${signers.length} listed` : 'none listed'} tone={signers.length ? 'ok' : u.channel === 'main' ? 'neutral' : 'warn'}>
+          <Step n={2} title="Release signers" state={`${signers.length ? `${signers.length} listed` : 'none listed'}${pending.length ? `, ${pending.length} staged` : ''}`} tone={signers.length ? 'ok' : u.channel === 'main' ? 'neutral' : 'warn'}>
             <p className="text-[12.5px] text-ink-2">
-              On the release channel the updater installs only a release tag whose signature verifies against one of these public keys ({u.signersFile}). With none listed, it installs no release. This page can add a key. It can't remove or replace
-              one, and it can't turn the check off: an admin edits the file at a root shell.
+              On the release channel the updater installs only a release tag whose signature verifies against one of these public keys ({u.signersFile}). With none listed, it installs no release.
             </p>
             {u.updaterReads && (
               <p className="text-[12.5px] text-orange" data-testid="updater-reads-elsewhere">
@@ -222,7 +238,42 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
                 </table>
               </div>
             )}
-            {can && review?.plan.step !== 'signer' && (
+            <p className="text-[12.5px] text-ink-2" data-testid="updater-stage-only">
+              This page can't add a signer, and it can't remove or replace one. It can stage a key; an admin then confirms it with one command at a root shell on the machine. Until then the staged key is trusted for nothing, and after 24 hours it is dropped.
+              Every signer added raises an alert on the ops channel and the Health page.
+            </p>
+            {pending.map((p) => (
+              <div key={`${p.principal} ${p.key}`} className="space-y-1.5 rounded-lg bg-inset p-3 shadow-hairline" data-testid="updater-pending" data-fingerprint={p.fingerprint}>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <Badge tone="warn">staged, not a signer</Badge>
+                  <span className="break-all text-[12.5px] font-medium text-ink">{p.principal}</span>
+                  <span className="text-[11.5px] text-ink-3" title={p.at}>
+                    staged {ago(p.at)} by {p.by}; dropped in {waitsFor(p.expiresAt)}
+                  </span>
+                </div>
+                <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-[12.5px] sm:grid-cols-[92px_1fr]">
+                  <dt className="text-ink-3">Public key</dt>
+                  <dd className="break-all font-mono text-[12px] text-ink">ssh-ed25519 {p.key}</dd>
+                  <dt className="text-ink-3">Fingerprint</dt>
+                  <dd className="break-all font-mono text-[12px] text-ink" data-testid="updater-pending-fingerprint">
+                    {p.fingerprint}
+                  </dd>
+                </dl>
+                <p className="text-[12.5px] text-ink-2">
+                  To make it a signer, check the fingerprint against your own key (<span className="font-mono text-[12px]">ssh-keygen -lf &lt;your key&gt;.pub</span>), then run this as root on the machine. It prints the principal and key before it adds them:
+                </p>
+                <code className={code} data-testid="updater-pending-command">
+                  {p.confirm}
+                </code>
+                {can && !(review?.plan.step === 'discard' && 'key' in review.input && review.input.key === p.key) && (
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void ask({ step: 'discard', principal: p.principal, key: p.key })} data-testid="updater-pending-discard">
+                    Discard…
+                  </Button>
+                )}
+                {open('discard', p.key)}
+              </div>
+            ))}
+            {can && review?.plan.step !== 'stage' && pending.length < (u.pendingMax ?? 4) && (
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] sm:items-end" data-testid="updater-signer-form">
                 <label className="space-y-1 text-[11.5px] text-ink-3">
                   Principal (the signer's email)
@@ -232,32 +283,30 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
                   Public key (the line of the .pub file)
                   <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5…" autoComplete="off" spellCheck={false} className={cx(field, 'font-mono')} data-testid="updater-signer-key" />
                 </label>
-                <Button size="sm" variant="outline" disabled={busy || !principal.trim() || !key.trim()} onClick={() => void ask({ step: 'signer', principal, key })} data-testid="updater-signer-review">
-                  Review signer…
+                <Button size="sm" variant="outline" disabled={busy || !principal.trim() || !key.trim()} onClick={() => void ask({ step: 'stage', principal, key })} data-testid="updater-signer-review">
+                  Review to stage…
                 </Button>
               </div>
             )}
-            {open('signer')}
+            {open('stage')}
           </Step>
-          <Step n={3} title="Channel" state={u.channel ?? 'not installed'} tone={u.channel ? 'ok' : 'neutral'}>
-            <div className="space-y-1.5" role="radiogroup" aria-label="update channel">
-              {u.channels.map((c) => (
-                <label key={c.id} className="flex min-w-0 items-start gap-2 text-[12.5px] text-ink-2" data-testid="updater-channel" data-channel={c.id} data-current={u.channel === c.id}>
-                  <input type="radio" name="updater-channel" className="mt-0.5" value={c.id} checked={channel === c.id} disabled={!can || !u.installed} onChange={() => setChannel(c.id)} />
-                  <span className="min-w-0 break-words">
-                    <span className="font-medium text-ink">{c.id}</span>
-                    {u.channel === c.id ? ' (now)' : ''}: {c.what}.
-                  </span>
-                </label>
-              ))}
-            </div>
-            {can && u.installed && review?.plan.step !== 'channel' && (
-              <Button size="sm" variant="outline" disabled={busy || channel === u.channel} onClick={() => void ask({ step: 'channel', channel })} data-testid="updater-channel-review">
-                Review change…
+          <Step n={3} title="Channel" state={u.channel ?? 'not installed'} tone={u.channel === 'release' ? 'ok' : u.channel === 'main' ? 'warn' : 'neutral'}>
+            {u.channel ? (
+              <p className="break-words text-[12.5px] text-ink-2" data-testid="updater-channel" data-channel={u.channel}>
+                It follows <span className="font-medium text-ink">{u.channel}</span>: {u.channelWhat}.
+              </p>
+            ) : (
+              <p className="text-[12px] text-ink-3">Install the updater first: it starts on release, signed release tags only.</p>
+            )}
+            {can && u.channel === 'main' && review?.plan.step !== 'release' && (
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => void ask({ step: 'release' })} data-testid="updater-release">
+                Follow releases…
               </Button>
             )}
-            {!u.installed && <p className="text-[12px] text-ink-3">Install the updater first.</p>}
-            {open('channel')}
+            {open('release')}
+            <p className="text-[12px] text-ink-3" data-testid="updater-main-root-only">
+              The page only ever moves a machine to release. Following main instead is set at a root shell: <span className="font-mono">{u.script.main}</span>
+            </p>
           </Step>
         </ol>
       </Card>
@@ -268,7 +317,7 @@ export function UpdaterSetupView({ data, onChanged = () => {}, initialReview = n
       )}
       <div className="space-y-1 text-[12.5px] text-ink-2" data-testid="updater-script">
         <p>The same without this page, as root from the engine's checkout (docs/dashboard.md, "Updater setup"):</p>
-        <code className={code}>{[u.script.install, u.script.signer, u.script.channel].join('\n')}</code>
+        <code className={code}>{[u.script.install, u.script.signer, u.script.confirm, u.script.release].join('\n')}</code>
       </div>
     </section>
   );

@@ -78,14 +78,16 @@ export function installUpdater(exec: Exec = defaultExec): MachineResult {
   return runHelper(['install-updater'], exec);
 }
 
-/** Set the channel an installed updater follows, through the helper; nothing else in its config changes. */
-export function setUpdateChannel(channel: string, exec: Exec = defaultExec): MachineResult {
-  if (!(UPDATE_CHANNELS as readonly string[]).includes(channel)) return { ok: false, error: `the update channel is one of ${UPDATE_CHANNELS.join(', ')}, not ${channel}` };
-  return runHelper(['set-update-channel', channel], exec);
+/**
+ * Put an installed updater on the release channel (signed release tags), through the helper; nothing else in its
+ * config changes. The helper takes no other channel: following main is an admin's, at a root shell.
+ */
+export function followReleases(exec: Exec = defaultExec): MachineResult {
+  return runHelper(['set-update-channel', 'release'], exec);
 }
 
 /**
- * add-update-signer's arguments, exactly as the machine helper takes them (scripts/machine/, the helper's source; a
+ * A staged signer's arguments, exactly as the machine helper takes them (scripts/machine/, the helper's source; a
  * test keeps the two equal): one principal of an email's shape (never a pattern, a list or an option) and one ed25519
  * public key in its fixed encoding (the key type's name and 32 bytes: 68 base64 characters).
  */
@@ -104,12 +106,12 @@ export function signerFingerprint(key: string): string {
 }
 
 /**
- * Add one release signer to the updater's allowed signers file through the helper. It only adds: the helper has no
- * way to remove or replace one.
+ * Stage one release signer through the helper, or take a staged one back out. Staging adds nothing to the keys the
+ * updater trusts: the helper only writes its pending list, and an admin confirms a staged signer at a root shell.
  */
-export function addUpdateSigner(principal: string, key: string, exec: Exec = defaultExec): MachineResult {
+export function stagedSigner(action: 'stage' | 'discard', principal: string, key: string, exec: Exec = defaultExec): MachineResult {
   if (!signerPrincipalOk(principal) || !signerKeyOk(key)) return { ok: false, error: 'a release signer is one principal of an email\'s shape and one ssh-ed25519 public key' };
-  return runHelper(['add-update-signer', principal, 'ssh-ed25519', key], exec);
+  return runHelper([`${action}-update-signer`, principal, 'ssh-ed25519', key], exec);
 }
 
 /**

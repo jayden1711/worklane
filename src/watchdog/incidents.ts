@@ -42,6 +42,9 @@ export const KINDS = {
   stalled: { title: 'Ready work is not moving', severity: 'amber' },
   auto_merge_stopped: { title: 'The main watch stopped auto-merge', severity: 'red' },
   disk_full: { title: 'Disk almost full', severity: 'red' },
+  // Not a fault: a notice. A key was added to the ones engine releases are verified against (the updater's root of
+  // trust), which every owner should know happened; it resolves by itself a day later.
+  update_signer_added: { title: 'A release signer was added for engine updates', severity: 'amber' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.

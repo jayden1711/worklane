@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, addUpdateSigner, claudeAccount, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdateChannel, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, UPDATE_CHANNELS, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -30,7 +30,7 @@ export function slotCeiling(): number {
   return typeof max === 'function' ? max() : max;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>, and the updater's setup: install-updater, set-update-channel release|main, add-update-signer <principal> ssh-ed25519 <public key>. Nothing else. */
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>, and the updater's setup: install-updater, set-update-channel release, stage-update-signer and discard-update-signer <principal> ssh-ed25519 <public key>. Nothing else: nothing here adds a release signer or follows main. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -72,18 +72,20 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
   },
   {
     command: 'set-update-channel',
-    what: 'set what the engine updater follows: signed release tags, or main',
-    usage: `set-update-channel ${UPDATE_CHANNELS.join('|')}`,
-    allows: (a) => a.length === 1 && (UPDATE_CHANNELS as readonly string[]).includes(a[0]!),
-    run: (a, exec) => setUpdateChannel(a[0]!, exec),
+    what: 'put the engine updater on the release channel: signed release tags only',
+    usage: 'set-update-channel release',
+    allows: (a) => a.length === 1 && a[0] === 'release',
+    run: (_a, exec) => followReleases(exec),
   },
-  {
-    command: 'add-update-signer',
-    what: 'add one release-signing public key to the keys the updater verifies release tags against (it only adds; none is removed or replaced)',
-    usage: 'add-update-signer <principal> ssh-ed25519 <public key>',
-    allows: (a) => a.length === 3 && signerPrincipalOk(a[0]) && a[1] === 'ssh-ed25519' && signerKeyOk(a[2]),
-    run: (a, exec) => addUpdateSigner(a[0]!, a[2]!, exec),
-  },
+  ...(['stage', 'discard'] as const).map(
+    (action): RootStepRule => ({
+      command: `${action}-update-signer`,
+      what: action === 'stage' ? 'stage one release-signing public key for an admin to confirm at a root shell (staging adds nothing to the keys the updater trusts)' : 'take a staged release signer back out of the pending list',
+      usage: `${action}-update-signer <principal> ssh-ed25519 <public key>`,
+      allows: (a) => a.length === 3 && signerPrincipalOk(a[0]) && a[1] === 'ssh-ed25519' && signerKeyOk(a[2]),
+      run: (a, exec) => stagedSigner(action, a[0]!, a[2]!, exec),
+    }),
+  ),
   {
     command: 'add-project',
     what: 'add a project to this machine (the installed engine\'s scripts/setup/add-project.sh, as root)',

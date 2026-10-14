@@ -161,7 +161,7 @@ export interface DashboardOptions {
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
-  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string; signersPath?: string };
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
   acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
@@ -370,7 +370,7 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     testSlots: { cap: testSlotCap(o.slotsDir), running: testSlotsHeld(o.slotsDir).length, min: TEST_SLOTS_MIN, max: TEST_SLOTS_MAX },
     updates: updates ? { configured: true as const, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false as const, enabled: null },
     /** The updater's setup (src/updater-setup.ts): installed or not, its channel, the release signers listed, and the same steps as a script. */
-    updater: updaterSetup({ ...(o.machine?.updatesConfigPath ? { updatesConfigPath: o.machine.updatesConfigPath } : {}), ...(o.machine?.signersPath ? { signersPath: o.machine.signersPath } : {}) }),
+    updater: updaterSetup({ ...(o.machine?.updatesConfigPath ? { updatesConfigPath: o.machine.updatesConfigPath } : {}), ...(o.machine?.signersPath ? { signersPath: o.machine.signersPath } : {}), ...(o.machine?.pendingSignersPath ? { pendingPath: o.machine.pendingSignersPath } : {}) }),
     changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
     history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
     /** Changes asked for here, for the coordinator to run: pending, running, then done, failed, refused or interrupted. Newest first. */
@@ -1366,18 +1366,17 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           audit(who, 'machine.changed', { what: body.what, value: body.value, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
         }
-        // The updater's setup (src/updater-setup.ts): install it, its channel, add a release signer. Two calls each:
-        // /review answers with exactly what would run and change (for a signer: the principal, the whole key and its
-        // fingerprint) and records nothing; the change itself needs confirm: true, and for a signer the fingerprint the
-        // review showed, so what is confirmed is what was seen. Then the same gate and path as any machine change.
+        // The updater's setup (src/updater-setup.ts): install it, put it on the release channel, stage a release signer
+        // for an admin to confirm at a root shell (or discard a staged one). Two calls each: /review answers with
+        // exactly what would run and change and records nothing; the change itself needs confirm: true. Then the same
+        // gate and path as any machine change. No step here adds a signer: the helper it reaches can't.
         if ((url.pathname === '/api/machine/updater' || url.pathname === '/api/machine/updater/review') && req.method === 'POST') {
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may set the updater up; @${who.login} is a ${who.role}` });
-          const body = (await readBody(req)) as { step?: unknown; channel?: unknown; principal?: unknown; key?: unknown; fingerprint?: unknown; confirm?: unknown };
+          const body = (await readBody(req)) as { step?: unknown; principal?: unknown; key?: unknown; confirm?: unknown };
           const plan = updaterPlan(body, machine().updater);
           if ('error' in plan) return json(res, plan.status ?? 400, { error: plan.error });
           if (url.pathname.endsWith('/review')) return json(res, 200, { ok: true, plan });
           if (body.confirm !== true) return json(res, 400, { error: 'this changes the machine: review what it shows (POST /api/machine/updater/review), then confirm it ({"confirm": true})' });
-          if (plan.signer && body.fingerprint !== plan.signer.fingerprint) return json(res, 400, { error: `confirm the key that was shown: this key's fingerprint is ${plan.signer.fingerprint}` });
           const log = new EventLog(opts.eventsDb);
           let r: MachineRequest;
           try {
@@ -1388,7 +1387,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } finally {
             log.close();
           }
-          // A public key and its principal are not secrets: the audit says exactly what was added, and by whom.
+          // A public key and its principal are not secrets: the audit says exactly what was staged, and by whom.
           audit(who, 'machine.updater', { step: plan.step, args: plan.args, ...(plan.signer ? { fingerprint: plan.signer.fingerprint } : {}), request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
         }

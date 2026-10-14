@@ -756,7 +756,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'most',
-    today: '`sudo bash scripts/setup/updates.sh` installs it (off); `--signer <principal> ssh-ed25519 <public key>` adds a release signer to /etc/<cli>/allowed_signers, and `--channel release|main` picks what it follows; then turn updates on from the Machine page.',
+    today: '`sudo bash scripts/setup/updates.sh` installs it (off); `--signer <principal> ssh-ed25519 <public key>` adds a release signer to /etc/<cli>/allowed_signers (or `--confirm-signer <fingerprint>` for one staged on the Machine page), and `--channel release|main` picks what it follows; then turn updates on from the Machine page.',
     fix: { kind: 'screen', path: '/machine', label: "the Machine page's Updater setup" },
     detect: (k) => {
       if (!existsSync(k.m.updatesConfig)) return no(`the updater isn't set up (no ${k.m.updatesConfig})`);
