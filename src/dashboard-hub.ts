@@ -309,10 +309,13 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (!session || !sid) return json(res, 401, { error: 'sign in first', signIn: '/auth/login' });
         if (url.pathname === '/api/me' && req.method === 'GET') return json(res, 200, { login: session.login, csrf: sessions!.csrf(sid), breakGlass: false });
         if (url.pathname === '/api/hub' && req.method === 'GET') {
-          // Only the instances where this person has a role: each instance reads it from its own repo.
+          // Only the instances where this person has a role: each instance reads it from its own repo. One that isn't
+          // answering can't say, so it is listed (as down, nothing more) only while the hub's own copy of the person's
+          // role there is still fresh: the same copy, and the same 5 minutes, that the hub forwards a request on.
           const all = await Promise.all(opts.instances.map(async (i) => ({ name: i.name, ...(await probe(i, session.login)) })));
           for (const i of all) if (i.up) learn(i.name, session.login, i.role);
-          return json(res, 200, { instances: all.filter((i) => i.role) });
+          const listed = all.map((i) => (i.up ? i : { ...i, role: knownRole(i.name, session.login)?.role ?? null }));
+          return json(res, 200, { instances: listed.filter((i) => i.role) });
         }
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
         if (m) {
