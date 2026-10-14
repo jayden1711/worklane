@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { webUiSkip } from './browser-helpers.js';
+import { oneChromeAtATime, webUiSkip } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 const dir = join(repoRoot, 'scripts', 'dev');
@@ -59,7 +59,8 @@ test('a baseline makes only new console errors count: ports are ignored, a new p
 
 // Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise, but never in CI (CI_REQUIRE_WEB).
 const chrome = ctl.findChrome(process.env.CHROME);
-test('end to end: opens a page in a real headless Chrome with PR history, and keeps all its state in its temporary directory', { skip: webUiSkip(chrome) }, () => {
+test('end to end: opens a page in a real headless Chrome with PR history, and keeps all its state in its temporary directory', { skip: webUiSkip(chrome) }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   // A state dir the script must not write to: before the fix, the run record for the run page landed here.
   const mine = mkdtempSync(join(tmpdir(), 'not-the-demo-'));
   const r = spawnSync(process.execPath, [join(dir, 'control-dashboard.mjs'), 'open', 'run-detail', '--with-prs', ...(process.env.CHROME ? ['--chrome', process.env.CHROME] : [])], {
@@ -67,7 +68,10 @@ test('end to end: opens a page in a real headless Chrome with PR history, and ke
     env: { ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: mine },
     timeout: 120_000,
   });
-  const first = JSON.parse(r.stdout.split('\n')[0] ?? '{}') as { page?: string; heading?: string };
+  // The tool's own words when it printed no JSON (it failed before opening the page), not a bare JSON.parse error.
+  const line = r.stdout.split('\n')[0] ?? '';
+  assert.ok(line.startsWith('{'), `control-dashboard printed no result (exit ${r.status}, signal ${r.signal}${r.error ? `, ${r.error.message}` : ''}):\n${r.stdout}\n${r.stderr}`);
+  const first = JSON.parse(line) as { page?: string; heading?: string };
   assert.equal(first.page, 'run-detail', `${r.stdout}\n${r.stderr}`);
   assert.match(first.heading ?? '', /run$/);
   assert.deepEqual(readdirSync(mine), [], 'nothing written to the caller\'s state dir');
