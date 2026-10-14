@@ -580,7 +580,7 @@ export interface PrsView {
   /** This instance's auto-merge stops and resumes, newest first. */
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
   /** Tasks held because another task is changing the same hotspot files, newest first: still held (until null), or released after waitedMs. */
-  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null }[];
+  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null; kind?: 'files' | 'dependency' }[];
   /** The latest stale-PR pass (src/pr-hygiene.ts): when, its counts and their line; null before the first. */
   hygiene: (HygieneCounts & { at: string; line: string }) | null;
 }
@@ -690,7 +690,20 @@ export function prsView(events: StoredEvent[]): PrsView {
         holds.push({ issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, by: Number(p.by), files: p.files as string[], reason: String(p.reason), since: e.ts, until: null, waitedMs: null });
         break;
       case 'hotspot.released': {
-        const h = [...holds].reverse().find((x) => x.issue === Number(p.issue) && x.until === null);
+        const h = [...holds].reverse().find((x) => x.issue === Number(p.issue) && x.until === null && x.kind !== 'dependency');
+        if (h) Object.assign(h, { until: e.ts, waitedMs: Number(p.waited_ms) });
+        break;
+      }
+      case 'dependency.held': {
+        // INVARIANT: one row per wait; a later hold for the same wait (a dependency closed, others still open) updates it.
+        const on = p.on as number[];
+        const h = [...holds].reverse().find((x) => x.issue === Number(p.issue) && x.until === null && x.kind === 'dependency');
+        if (h) Object.assign(h, { by: on[0] ?? h.by, reason: String(p.reason) });
+        else holds.push({ issue: Number(p.issue), title: titles.get(Number(p.issue)) ?? `#${p.issue}`, by: on[0] ?? Number(p.issue), files: [], reason: String(p.reason), since: e.ts, until: null, waitedMs: null, kind: 'dependency' });
+        break;
+      }
+      case 'dependency.unblocked': {
+        const h = [...holds].reverse().find((x) => x.issue === Number(p.issue) && x.until === null && x.kind === 'dependency');
         if (h) Object.assign(h, { until: e.ts, waitedMs: Number(p.waited_ms) });
         break;
       }

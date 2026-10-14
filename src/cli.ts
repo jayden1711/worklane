@@ -49,6 +49,7 @@ import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
+import { discordChannelsCommand } from './intake/discord-channels.js';
 import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
@@ -143,6 +144,9 @@ usage: ${BRAND.cli} <command> [options]
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
   labels                           create the backlog labels on the GitHub repo
+  discord channels [--instance name]
+                                   read-only: the text and announcement channels the instance's bot can see,
+                                   one "<server> / #<channel> <id>" line each (run as the instance's user)
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
@@ -1033,6 +1037,14 @@ async function main(argv: string[]): Promise<number> {
       const created = await backlogFor(loadConfig(root), root).ensureLabels([...LABELS, INTAKE_LABEL]);
       console.log(created.length ? `created: ${created.join(', ')}` : 'all labels exist');
       return 0;
+    }
+
+    case 'discord': {
+      if (sub !== 'channels' || rest.length) {
+        console.error(commandUsage('discord'));
+        return 2;
+      }
+      return discordChannelsCommand({ instance: instanceOpt });
     }
 
     case 'prod-read': {

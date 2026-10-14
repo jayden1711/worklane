@@ -44,7 +44,7 @@ export const WAIT_LABEL: Record<WaitKind, string> = {
   landing_failed: 'Landing failed',
   deploy_failed: 'Deploys that failed',
   check_held: 'PRs held back by a required check',
-  hotspot_held: 'Tasks held behind another on the same files',
+  hotspot_held: 'Tasks held behind another task (the same files, or a "Depends on")',
   update_held: 'Engine updates rolled back and held',
 };
 
@@ -247,6 +247,14 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
     if (e.type === 'hotspot.released') holds.delete(q.issue);
   }
   for (const [issue, h] of holds) add('hotspot_held', h.ts, issue, null, `behind #${h.by}, on ${h.files.slice(0, 3).join(', ')}${h.files.length > 3 ? ` and ${h.files.length - 3} more` : ''}`);
+  // WHY: a "Depends on" hold shows beside the file holds, with its reason (src/task-graph.ts), since the first hold of that wait.
+  const deps = new Map<number, { since: string; reason: string }>();
+  for (const e of evs) {
+    const q = e.payload as { issue: number; reason?: string };
+    if (e.type === 'dependency.held') deps.set(q.issue, { since: deps.get(q.issue)?.since ?? e.ts, reason: String(q.reason) });
+    if (e.type === 'dependency.unblocked') deps.delete(q.issue);
+  }
+  for (const [issue, h] of deps) add('hotspot_held', h.since, issue, null, h.reason);
 
   // An engine update the machine rolled back and holds (a failed migration, or services that didn't come up):
   // the owner's, until a later install succeeds. From the machine's update log, not this instance's events.
