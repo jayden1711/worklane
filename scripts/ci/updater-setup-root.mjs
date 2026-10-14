@@ -14,6 +14,9 @@
 //     staged signer whose fingerprint that is, after the ones there, and clears it; any other fingerprint, and one
 //     staged over 24 hours ago, add nothing. --signer adds one directly; --channel main is set here and nowhere else.
 //     Each signer added is in the machine change log, which the installed engine's watchdog probe reads as an alert.
+//   - The installed updater watches the signers file: a file written by hand is reported once (the update log, the
+//     unit's journal, a red incident in the machine's store) and held until --acknowledge-signers; the appends that
+//     --confirm-signer and --signer make are not reported; a later hand edit is.
 //
 //   sudo node updater-setup-root.mjs <coordinator user>
 import assert from 'node:assert/strict';
@@ -175,7 +178,44 @@ assert.match(verify('v1.0.2').reason ?? '', /no allowed signers file/, 'a staged
 
 // ---- with a signers file an admin wrote: staging leaves every byte of it, and the staged key still verifies nothing
 const first = `owner@example.com ssh-ed25519 ${mine.pub}\n`;
+// ---- the updater's watch on the signers file. Its runs above recorded "no file", silently (the first look).
+const STATE = '/var/lib/worklane/signers-state.json';
+const signersState = () => JSON.parse(readFileSync(STATE, 'utf8'));
+const reported = () => readFileSync('/var/lib/worklane/updates.jsonl', 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.event === 'signers_changed');
+const { readIncidents } = await import(pathToFileURL('/opt/worklane/current/dist/src/watchdog/incidents.js').href);
+const signersIncidents = () => readIncidents().incidents.filter((i) => i.kind === 'update_signers_changed' && !i.resolvedAt);
+assert.equal(owner(STATE), '0:0 644');
+assert.deepEqual([signersState().hash, signersState().hold, reported(), signersIncidents()], ['absent', null, [], []]);
+// A signers file written by hand (root, here), not by updates.sh: the next run of the unit reports it, once.
 writeFileSync(SIGNERS, first, { mode: 0o644 });
+sh('systemctl', ['start', 'worklane-update.service']);
+assert.equal(reported().length, 1);
+assert.deepEqual([reported()[0].signers.from, reported()[0].signers.linesBefore, reported()[0].signers.linesAfter, reported()[0].signers.added, reported()[0].signers.removed], ['absent', 0, 1, [mine.fingerprint], []]);
+assert.match(reported()[0].signers.to, /^sha256:[0-9a-f]{64}$/);
+// On the unit's journal, with no dashboard or coordinator needed to see it.
+let journal = '';
+for (let i = 0; i < 20 && !journal.includes('signers_changed: '); i++) {
+  journal = sh('journalctl', ['-u', 'worklane-update.service', '-n', '60', '--no-pager', '-o', 'cat']);
+  if (!journal.includes('signers_changed: ')) await new Promise((r) => setTimeout(r, 250));
+}
+assert.ok(journal.includes(`signers_changed: ${SIGNERS} appeared outside updates.sh --signer or --confirm-signer`) && journal.includes(mine.fingerprint), `the journal:\n${journal}`);
+// A red incident in the machine's store, written by the updater itself, which coordinators can still write.
+for (let i = 0; i < 20 && !signersIncidents().length; i++) await new Promise((r) => setTimeout(r, 250));
+assert.deepEqual(signersIncidents().map((i) => [i.severity, i.title, i.key]), [['red', 'The release signers file changed outside updates.sh', 'allowed_signers']]);
+assert.ok(signersIncidents()[0].detail.includes(mine.fingerprint));
+assert.equal(spawnSync('sudo', ['-u', coordinator, 'test', '-w', '/var/lib/worklane/agent-slots/incidents.json']).status, 0, 'the coordinator can still write the incident store');
+assert.equal(signersState().hold.to, reported()[0].signers.to, 'held');
+// Not again on the next runs.
+for (let i = 0; i < 2; i++) sh('systemctl', ['start', 'worklane-update.service']);
+assert.equal(reported().length, 1);
+// Acknowledged at a root shell: it prints what is trusted now, lifts the hold, and the next run closes the incident.
+const acked = sh('bash', ['/opt/worklane/current/scripts/setup/updates.sh', '--acknowledge-signers']);
+assert.ok(acked.includes(mine.fingerprint) && acked.includes('release installs are no longer held'), acked);
+assert.equal(signersState().hold, null);
+assert.equal(owner(STATE), '0:0 644');
+sh('systemctl', ['start', 'worklane-update.service']);
+for (let i = 0; i < 20 && signersIncidents().length; i++) await new Promise((r) => setTimeout(r, 250));
+assert.deepEqual(signersIncidents(), []);
 assert.deepEqual(verify('v1.0.1'), { ok: true, base: main });
 ok('discard-update-signer', 'other@example.com', 'ssh-ed25519', other.pub);
 assert.deepEqual(pending(), []);
@@ -257,6 +297,17 @@ assert.deepEqual(added.map((c) => c.to), [`added other@example.com ssh-ed25519 $
 assert.ok(added.every((c) => c.by !== coordinator));
 const { signerFindings } = await import(pathToFileURL(`${engine}/dist/src/watchdog/probes.js`).href);
 const { machineChanges } = await import(pathToFileURL(`${engine}/dist/src/machine.js`).href);
+// Neither append (--confirm-signer, --signer) was a change the updater reports: it was told of each as it was made.
+sh('systemctl', ['start', 'worklane-update.service']);
+assert.equal(reported().length, 1, 'no signers_changed for a signer added through updates.sh');
+assert.equal(signersState().hold, null);
+// A line appended by hand afterwards is.
+const intruder = key('intruder');
+writeFileSync(SIGNERS, `${readFileSync(SIGNERS, 'utf8')}intruder@example.com ssh-ed25519 ${intruder.pub}\n`);
+sh('systemctl', ['start', 'worklane-update.service']);
+assert.equal(reported().length, 2);
+assert.deepEqual([reported()[1].signers.linesBefore, reported()[1].signers.linesAfter, reported()[1].signers.added, reported()[1].signers.removed], [3, 4, [intruder.fingerprint], []]);
+assert.equal(signersState().hold.added[0], intruder.fingerprint, 'release installs are held again');
 const alerts = signerFindings(machineChanges(), Date.now());
 assert.deepEqual(alerts.map((f) => [f.kind, f.key]), [['update_signer_added', `other@example.com ${other.fingerprint}`], ['update_signer_added', `third@example.com ${third.fingerprint}`]]);
 console.log(alerts.map((f) => `alert: ${f.detail}`).join('\n'));
@@ -270,4 +321,4 @@ if (spawnSync('id', ['-u', 'wl-dash']).status === 0) {
   }
 }
 rmSync(work, { recursive: true, force: true });
-console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), the channel set to release and never to main, a signer staged in the root-owned pending list (at most 4) with the signers file untouched and its tag still refused; adding or confirming a signer, and every other argument list, refused. As root: updates.sh --confirm-signer added only the staged signer with the matching fingerprint, appended, and cleared it; an expired one and a wrong fingerprint added nothing; --signer and --channel main worked; each signer added reads as a watchdog alert`);
+console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), the channel set to release and never to main, a signer staged in the root-owned pending list (at most 4) with the signers file untouched and its tag still refused; adding or confirming a signer, and every other argument list, refused. As root: updates.sh --confirm-signer added only the staged signer with the matching fingerprint, appended, and cleared it; an expired one and a wrong fingerprint added nothing; --signer and --channel main worked; each signer added reads as a watchdog alert. The updater's watch: a signers file written by hand was reported once (update log, journal, a red incident) and held until --acknowledge-signers; the appends through updates.sh were not reported; a later hand-added line was`);
