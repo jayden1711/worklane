@@ -22,7 +22,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -193,7 +193,7 @@ const first = `owner@example.com ssh-ed25519 ${mine.pub}\n`;
 const STATE = '/var/lib/worklane/signers-state.json';
 const signersState = () => JSON.parse(readFileSync(STATE, 'utf8'));
 const reported = () => readFileSync('/var/lib/worklane/updates.jsonl', 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.event === 'signers_changed');
-const { readIncidents } = await import(pathToFileURL('/opt/worklane/current/dist/src/watchdog/incidents.js').href);
+const { readIncidents, raiseIncident } = await import(pathToFileURL('/opt/worklane/current/dist/src/watchdog/incidents.js').href);
 const signersIncidents = () => readIncidents().incidents.filter((i) => i.kind === 'update_signers_changed' && !i.resolvedAt);
 assert.equal(owner(STATE), '0:0 644');
 assert.deepEqual([signersState().hash, signersState().hold, reported(), signersIncidents()], ['absent', null, [], []]);
@@ -315,6 +315,7 @@ const { machineChanges } = await import(pathToFileURL(`${engine}/dist/src/machin
 // Neither append (--confirm-signer, --signer) was a change the updater reports: it was told of each as it was made.
 updaterRun();
 assert.equal(reported().length, 1, 'no signers_changed for a signer added through updates.sh');
+console.log('OK: the appends by --confirm-signer and --signer raised no signers_changed report');
 assert.equal(signersState().hold, null);
 // A line appended by hand afterwards is.
 const intruder = key('intruder');
@@ -323,6 +324,81 @@ updaterRun();
 assert.equal(reported().length, 2);
 assert.deepEqual([reported()[1].signers.linesBefore, reported()[1].signers.linesAfter, reported()[1].signers.added, reported()[1].signers.removed], [3, 4, [intruder.fingerprint], []]);
 assert.equal(signersState().hold.added[0], intruder.fingerprint, 'release installs are held again');
+
+// ---- the whole hand-edit path, in order, with a release in reach: held, acknowledged, then installed.
+// The installed updater's own run(), as root, on this machine's real signers file, record and incident store, and its
+// real release check (git verify-tag, real ssh signatures) against the local repo. GitHub's check runs and the build
+// are stand-ins, as in updater-lookback-root.mjs: no network here, and a real build would replace this job's engine.
+console.log(`OK 1/5: a hand edit of ${SIGNERS} (intruder@example.com, ${intruder.fingerprint}) was reported by the updater's unit as signers_changed`);
+const { resolveIncident } = await import(pathToFileURL('/opt/worklane/current/dist/src/watchdog/incidents.js').href);
+for (let i = 0; i < 20 && !signersIncidents().some((x) => x.detail.includes(intruder.fingerprint)); i++) await new Promise((r) => setTimeout(r, 250));
+const red = signersIncidents().filter((x) => x.detail.includes(intruder.fingerprint));
+assert.deepEqual(red.map((x) => [x.kind, x.severity, x.title]), [['update_signers_changed', 'red', 'The release signers file changed outside updates.sh']]);
+console.log(`OK 2/5: the incident store holds the open red incident "${red[0].title}" (${red[0].kind}, id ${red[0].id}), naming ${intruder.fingerprint}`);
+const newest = git('rev-parse', 'v1.0.3^{commit}');
+const opt = mkdtempSync('/var/lib/wl-updater-opt-');
+const runLogs = [];
+let clock = Date.now();
+let installedSha = 'a'.repeat(40);
+const deps = {
+  config: () => ({ enabled: true, channel: 'release', repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'], allowed_signers: SIGNERS }),
+  // The updater's own signers watch, on this machine's file and record.
+  signersCheck: (file) => updater.checkSigners(file),
+  signersHold: () => updater.signersHold(),
+  signersAcknowledged: () => updater.takeAcknowledged(),
+  warn: (line) => runLogs.push({ warn: line }),
+  // The machine's incident store, through the installed engine.
+  raiseIncident: (kind, key, detail, fix) => raiseIncident(kind, key, detail, fix),
+  resolveIncident: (kind, key) => resolveIncident(kind, key),
+  installed: () => installedSha,
+  installedVersion: () => '1.0.2',
+  // The release tags and their check: real, against the local repo, as root.
+  verifyRelease: (_url, tag, signers) => updater.verifyRelease(origin, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), join(work, `run-verify-${++n}.git`)),
+  exec: (file, args) => {
+    if (file === 'git' && args[0] === 'ls-remote') return execFileSync('git', ['ls-remote', '--tags', origin, 'refs/tags/v*'], { encoding: 'utf8' });
+    if (file === 'systemctl' && args[0] === 'list-units') return 'worklane-ci-standin.service loaded active running x\n';
+    if (file === 'systemctl' && args[0] === 'show') return 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n';
+    runLogs.push({ exec: [file, ...args].join(' ').slice(0, 80) });
+    return '';
+  },
+  fetchJson: async () => ({ check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
+  slots: () => [],
+  alive: () => false,
+  installTree: (sha) => mkdirSync(join(opt, sha), { recursive: true }),
+  syncHelpers: () => [],
+  switchTo: (sha) => {
+    rmSync(join(opt, 'current'), { force: true });
+    symlinkSync(join(opt, sha), join(opt, 'current'));
+    installedSha = sha;
+  },
+  now: () => clock,
+  sleep: async (ms) => void (clock += ms),
+  log: (e) => runLogs.push(e),
+  held: () => null,
+  hold: () => {},
+  configChangedAt: () => 0,
+  note: (event, sha, reason) => (runLogs.push({ event, to: sha, reason }), event),
+};
+const verified = verify('v1.0.3');
+assert.equal(verified.ok, true, 'the newest release is signed by a listed key and would install');
+const heldRun = await updater.run(deps);
+assert.equal(heldRun, 'held');
+const heldLine = runLogs.find((e) => e.event === 'held');
+assert.match(heldLine.reason, /the signers file changed outside updates\.sh at .* hasn't been acknowledged .*no release is installed until an admin runs: sudo bash \/opt\/worklane\/current\/scripts\/setup\/updates\.sh --acknowledge-signers/);
+assert.ok(!existsSync(join(opt, 'current')) && !existsSync(join(opt, newest)) && installedSha === 'a'.repeat(40), 'nothing built, installed or switched');
+console.log(`OK 3/5: release v1.0.3 (${newest.slice(0, 12)}, signed by a listed key, checks green) was not installed: run() returned held: ${heldLine.reason.slice(0, 160)}`);
+const ack = sh('bash', ['/opt/worklane/current/scripts/setup/updates.sh', '--acknowledge-signers']);
+assert.ok(ack.includes(intruder.fingerprint) && ack.includes('release installs are no longer held'), ack);
+assert.equal(signersState().hold, null);
+console.log(`OK 4/5: sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers printed the ${signersState().lines} keys now trusted and lifted the hold`);
+const installedRun = await updater.run(deps);
+assert.equal(installedRun, 'installed', JSON.stringify(runLogs.slice(-3)));
+assert.equal(readlinkSync(join(opt, 'current')), join(opt, newest), 'current points to the release');
+for (let i = 0; i < 20 && signersIncidents().length; i++) await new Promise((r) => setTimeout(r, 250));
+assert.deepEqual(signersIncidents(), [], 'the incident is closed');
+assert.ok(readIncidents().incidents.some((x) => x.id === red[0].id && x.resolvedAt), 'resolved, not deleted');
+console.log(`OK 5/5: the next run installed v1.0.3: current -> ${readlinkSync(join(opt, 'current'))}; incident ${red[0].id} resolved at ${readIncidents().incidents.find((x) => x.id === red[0].id).resolvedAt}`);
+rmSync(opt, { recursive: true, force: true });
 const alerts = signerFindings(machineChanges(), Date.now());
 assert.deepEqual(alerts.map((f) => [f.kind, f.key]), [['update_signer_added', `other@example.com ${other.fingerprint}`], ['update_signer_added', `third@example.com ${third.fingerprint}`]]);
 console.log(alerts.map((f) => `alert: ${f.detail}`).join('\n'));
