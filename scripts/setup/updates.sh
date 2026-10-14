@@ -6,6 +6,7 @@
 #
 #   bash scripts/setup/updates.sh [--check "name" ...] [--channel release|main]
 #                                 [--signer <principal> ssh-ed25519 <public key>] [--confirm-signer SHA256:<fingerprint>]
+#                                 [--acknowledge-signers]
 #       (repeat --check for each required check)
 #
 # The last three are an admin's, at a root shell, and go through scripts/setup/updates-root.cjs, the only code that
@@ -16,6 +17,9 @@
 #                      fingerprint the page shows. It applies only a staged signer with exactly that fingerprint,
 #                      staged less than 24 hours ago, prints its principal and key first, and clears it from the
 #                      pending list. The dashboard itself can never add a signer: this command, or --signer, does.
+#   --acknowledge-signers   the updater hashes allowed_signers on every run; a change that didn't come from --signer or
+#                      --confirm-signer raises an incident and holds release installs. This prints the file's hash
+#                      and key fingerprints as they are now, records them, and lifts the hold. Look first.
 #
 #   - /usr/local/libexec/worklane-update (root:root 0755): every 10 minutes, when on, installs the newest
 #     signed release tag (channel "release", new installs: verified with `git verify-tag` against
@@ -39,6 +43,7 @@ checks=()
 channel=""
 signer=()
 confirm=""
+acknowledge=""
 # An absolute path: node's require takes a relative one for a package name.
 root_steps="$(cd "$(dirname "$0")" && pwd)/updates-root.cjs"
 while [ "$#" -gt 0 ]; do
@@ -47,6 +52,7 @@ while [ "$#" -gt 0 ]; do
     --channel) [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--channel needs release or main" >&2; exit 2; }; channel="$2"; shift 2 ;;
     --signer) [ "$#" -ge 4 ] || { echo "--signer needs <principal> ssh-ed25519 <public key>" >&2; exit 2; }; signer=("$2" "$3" "$4"); shift 4 ;;
     --confirm-signer) [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "--confirm-signer needs the staged signer's fingerprint (SHA256:...)" >&2; exit 2; }; confirm="$2"; shift 2 ;;
+    --acknowledge-signers) acknowledge=1; shift ;;
     --checks) echo "--checks (a comma-separated list) is gone: check names contain commas. Pass each with --check \"name\"." >&2; exit 2 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
@@ -140,6 +146,10 @@ fi
 if [ -n "$confirm" ]; then
   say "the staged release signer $confirm, added to /etc/worklane/allowed_signers (the ones already listed stay as they are)"
   node "$root_steps" confirm-signer "$confirm"
+fi
+if [ -n "$acknowledge" ]; then
+  say "the signers file, acknowledged as it is now"
+  node "$root_steps" acknowledge-signers
 fi
 [ -f /etc/worklane/allowed_signers ] || echo "NOTE: no /etc/worklane/allowed_signers yet: the release channel installs nothing until it lists the key that signs releases (--signer <principal> ssh-ed25519 <public key>; or stage it on the Machine page's Updater setup, then --confirm-signer <its fingerprint>)"
 echo "updates are $(node -e 'process.stdout.write(require("/etc/worklane/updates.json").enabled ? "ON" : "OFF")'); turn them on from the hub's settings once machine-helper.sh is set up"
