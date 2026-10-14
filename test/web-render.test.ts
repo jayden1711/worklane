@@ -524,6 +524,12 @@ test('the off-machine backup on the health panel: not set up with the docs link;
   const updateHold = { at: '2026-10-12T03:00:00.000Z', sha: 'b'.repeat(40), reason: 'rollback: migration failed: bob: disk full', migration: true };
   assert.match(r.renderHealth({ ...base, offsiteBackup: null, updateHold }), /role="alert"[^>]*data-testid="health-update-held"[\s\S]*?Engine update rolled back: a migration failed[\s\S]*?2026-10-12 03:00 UTC, bbbbbbbbbbbb[\s\S]*?rollback: migration failed: bob: disk full/);
   assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, updateHold: null }), /health-update-held/);
+  // The machine's outbound proxy (root's network.json), read-only: the host and its file, or the refusal in red.
+  const proxied = r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: 'proxy.internal:3128', file: '/etc/x/network.json', error: null } });
+  assert.match(proxied, /data-testid="health-network"[^>]*>Outbound proxy: <code[^>]*>proxy\.internal:3128<\/code> \(from <code[^>]*>\/etc\/x\/network\.json<\/code>\)/);
+  assert.doesNotMatch(proxied, /<(?:input|button|form)[^>]*network/i, 'nothing on the page changes it');
+  assert.match(r.renderHealth({ ...base, offsiteBackup: null, network: { proxy: null, file: '/etc/x/network.json', error: '/etc/x/network.json: proxy must not carry a user or password; no outbound proxy is set' } }), /role="alert"[^>]*data-testid="health-network-refused"[\s\S]*?Outbound proxy refused:[\s\S]*?must not carry a user or password/);
+  assert.doesNotMatch(r.renderHealth({ ...base, offsiteBackup: null, network: null }), /health-network/);
   const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
   const fresh = { destination: 'rclone remote, backups bucket', lastOkAt: at, lastOkKey: 'events-41.db.age', lastAttemptAt: at, lastError: null, ageHours: 3, stale: false };
   const ok = r.renderHealth({ ...base, offsiteBackup: fresh, docs });

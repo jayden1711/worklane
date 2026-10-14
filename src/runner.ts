@@ -12,6 +12,7 @@ import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
+import { outboundEnv } from './network.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
@@ -167,6 +168,9 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', ex
     GH_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'no-gh-')),
     ...extra,
   });
+  // INVARIANT: no redirecting variable, whatever `base` or `extra` holds; a proxy only from root's network.json
+  // (src/network.ts). A provider run's endpoint is set by the runner after this, from agents.yaml's provider.
+  outboundEnv(env);
   // INVARIANT: no agent starts with the push gate's first-time-setup hatch, whatever `base` or `extra` holds.
   return withoutPushGateHatch(env);
 }
@@ -226,15 +230,18 @@ export function agentUserEnv(r: RunAs): Record<string, string> {
 
 /** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */
 export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
-  // INVARIANT: as agentEnv: an agent user never gets the push gate's hatch from the environment it is built on.
-  return withoutPushGateHatch({
-    ...env,
-    ...agentUserEnv(r),
-    // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
-    GIT_CONFIG_COUNT: '2',
-    GIT_CONFIG_KEY_1: 'safe.directory',
-    GIT_CONFIG_VALUE_1: '*',
-  });
+  // INVARIANT: as agentEnv: an agent user never gets the push gate's hatch from the environment it is built on, nor a
+  // redirecting variable; a proxy only from root's network.json (src/network.ts).
+  return withoutPushGateHatch(
+    outboundEnv({
+      ...env,
+      ...agentUserEnv(r),
+      // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_1: 'safe.directory',
+      GIT_CONFIG_VALUE_1: '*',
+    }),
+  );
 }
 
 /**
@@ -496,8 +503,10 @@ export class CliRunner implements AgentRunner {
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
     // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
     const providerDir = req.provider && !this.runAs && !this.lanes?.[req.lane ?? 'default']?.runAs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-provider-`)) : null;
-    const env = agentEnv(base, req.provider ? 'cli' : this.runtime, {
-      ...(req.provider ? { ANTHROPIC_BASE_URL: req.provider.baseUrl } : {}),
+    // A provider run's endpoint (agents.yaml providers.*.base_url, checked by the config schema): set after agentEnv and
+    // runAsEnv, which strip every redirecting variable, so it is the only endpoint a provider run gets.
+    const endpoint: Record<string, string> = req.provider ? { ANTHROPIC_BASE_URL: req.provider.baseUrl } : {};
+    const agentVars = agentEnv(base, req.provider ? 'cli' : this.runtime, {
       ...(providerDir ? { CLAUDE_CONFIG_DIR: providerDir } : {}),
       ...safeProjectEnv(req.env),
       ...identityEnv(this.identity),
@@ -506,12 +515,13 @@ export class CliRunner implements AgentRunner {
       ...(req.stateDir ? { [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: req.stateDir } : {}),
       ...(req.allowOnce?.length ? { [`${BRAND.envPrefix}_ALLOW_HOSTS`]: req.allowOnce.join(',') } : {}),
     });
+    const env: NodeJS.ProcessEnv = { ...agentVars, ...endpoint };
     const laneName = req.lane ?? 'default';
     const lane = this.lanes?.[laneName];
     if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
     if (req.resume !== undefined && !SESSION_ID.test(req.resume)) return { reason: 'failed', detail: `not a session id: ${JSON.stringify(req.resume.slice(0, 80))}; not starting`, costUsd: 0, turns: 0, model: req.model };
     const runAs = lane ? lane.runAs : this.runAs;
-    const runEnv = runAs ? runAsEnv(env, runAs) : env;
+    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint } : env;
     // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
     // could loosen them.
     let guard: Settings | null = null;
