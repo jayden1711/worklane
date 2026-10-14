@@ -308,8 +308,8 @@ export function PullRequestsView({ view }: { view: PrsView }) {
 
       {(view.holds ?? []).length > 0 && (
         <section className="space-y-2" aria-label="Hotspot holds" data-testid="prs-holds">
-          <div className="text-[13px] font-medium text-ink">Tasks held on a hotspot ({(view.holds ?? []).filter((h) => !h.until).length} held now)</div>
-          <RecordsTable testId="prs-holds-table" head={['Task', 'Held for', 'Files', 'How long']} className="[&_th:nth-child(1)]:w-[30%] [&_th:nth-child(2)]:w-24 [&_th:nth-child(4)]:w-36">
+          <div className="text-[13px] font-medium text-ink">Tasks held on another task ({(view.holds ?? []).filter((h) => !h.until).length} held now)</div>
+          <RecordsTable testId="prs-holds-table" head={['Task', 'Held for', 'Files or why', 'How long']} className="[&_th:nth-child(1)]:w-[30%] [&_th:nth-child(2)]:w-24 [&_th:nth-child(4)]:w-36">
             {(view.holds ?? []).slice(0, 30).map((h, i) => (
               <tr key={i} className="border-b border-line last:border-0" data-testid="hold-row" data-held={h.until ? 'released' : 'held'}>
                 <td className="primitive-table-cell text-[13px]">
@@ -323,9 +323,15 @@ export function PullRequestsView({ view }: { view: PrsView }) {
                     #{h.by}
                   </button>
                 </td>
-                <td className="primitive-table-cell font-mono text-[12px] text-ink-2" title={h.reason}>
-                  {h.files.join(', ')}
-                </td>
+                {h.kind === 'dependency' ? (
+                  <td className="primitive-table-cell text-[12.5px] text-ink-2" data-testid="hold-dependency">
+                    {h.reason}
+                  </td>
+                ) : (
+                  <td className="primitive-table-cell font-mono text-[12px] text-ink-2" title={h.reason}>
+                    {h.files.join(', ')}
+                  </td>
+                )}
                 <td className="primitive-table-cell">{h.until ? <span className="text-[12.5px] tabular-nums text-ink-2">waited {howLong(h.waitedMs ?? 0)}</span> : <DotPill tone="orange">held {sinceNow(h.since)}</DotPill>}</td>
               </tr>
             ))}
