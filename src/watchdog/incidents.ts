@@ -36,6 +36,8 @@ export const KINDS = {
   unit_down: { title: 'A service is down', severity: 'red' },
   crash_loop: { title: 'A service is crash-looping', severity: 'red' },
   update_rollback: { title: 'An engine update was rolled back', severity: 'red' },
+  // Raised by the engine updater (scripts/machine/<cli>-update.cjs): one engine commit for hours while main moved on.
+  update_stuck: { title: 'The engine is not updating', severity: 'amber' },
   claude_auth: { title: 'Claude sign-in is failing', severity: 'red' },
   claude_login_expiring: { title: 'A Claude login is about to expire', severity: 'amber' },
   github_auth: { title: 'GitHub access is failing', severity: 'red' },

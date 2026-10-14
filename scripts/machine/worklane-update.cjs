@@ -50,6 +50,10 @@
 // or refusal once per commit and reason). Every run also prints one line to stdout, the journal: the result, and for
 // a wait, refusal, hold or failed build the commit and the reason (`waiting b9634df: required check "x" hasn't run
 // on this commit`), secrets redacted.
+// Stuck: when the machine has stayed on one engine commit for updates.json "stuck_alert_minutes" (default 120) while
+// what it follows has moved on, it raises one watchdog incident (update_stuck: the installed commit, the newest one,
+// how long, and the reason it gives now), once per episode, and resolves it when an install succeeds or there is
+// nothing newer. Never while updates are off; a machine that is only busy ("not quiet") must have been busy that long.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -60,6 +64,7 @@ const CONFIG = '/etc/worklane/updates.json';
 const LOG = '/var/lib/worklane/updates.jsonl';
 const STATE = '/var/lib/worklane/update-state.json';
 const HELD = '/var/lib/worklane/update-held.json'; // the last rolled-back commit: { sha, at, failed }
+const STUCK = '/var/lib/worklane/update-stuck.json'; // since when the engine has been behind: { installed, since, tip, notQuietSince, raised }
 const CANARY = '/var/lib/worklane/canary.json'; // the canary running now, and when the last one was filed (root, 0600)
 const OPT = '/opt/worklane';
 const SLOTS = '/var/lib/worklane/agent-slots';
@@ -84,6 +89,8 @@ const CANARY_LIMIT_MIN = 120;
 const LOOKBACK = 20; // updates.json max_lookback: first-parent commits looked at, from main's tip back
 const LOOKBACK_MAX = 100;
 const PENDING_WAIT_MIN = 60; // updates.json pending_wait_minutes
+const STUCK_ALERT_MIN = 120; // updates.json stuck_alert_minutes
+const STUCK_INCIDENT = 'update_stuck'; // the watchdog incident's kind (src/watchdog/incidents.ts KINDS); its key is 'engine'
 const CHECKS_SPACING_MS = 1_000; // between two check-run calls in one run
 const CHECK_PAGES_MAX = 10; // pages of 100 check runs read for one commit
 const IDLE_AFTER_MS = 10 * 60_000; // WHY: a commit's checks take a moment to appear; before this, "nothing running" isn't idle
@@ -108,6 +115,58 @@ function fastForward(cmp) {
 function lookbackOf(cfg) {
   const n = cfg && cfg.max_lookback;
   return Number.isInteger(n) && n >= 1 ? Math.min(n, LOOKBACK_MAX) : LOOKBACK;
+}
+
+/** updates.json stuck_alert_minutes, in ms: a number above 0, else 120 minutes. */
+function stuckAlertMs(cfg) {
+  const n = cfg && cfg.stuck_alert_minutes;
+  return (typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : STUCK_ALERT_MIN) * 60_000;
+}
+
+/** `2 h 10 min` */
+const span = (ms) => {
+  const m = Math.floor(ms / 60_000);
+  return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
+};
+
+/**
+ * The stuck alert's next step, from what this run saw (pure). `state` is what the last run left (or null), `seen`
+ * this run's: { current, head, result, reason }, or null when updates are off. Behind: the run ended any way but
+ * installed or current, on an engine that isn't the newest commit (head unknown, a run that failed before asking:
+ * still behind if it was). Returns { state, raise?: { detail, fix }, resolve?: true }:
+ *   - not behind, or off: the state cleared, and the incident resolved if this episode raised one;
+ *   - behind: the clock runs from the first run that saw this engine behind; one raise per episode, once it has
+ *     been afterMs, and, when the reason is only a busy machine ("not quiet"), once that has lasted afterMs too.
+ */
+function stuckStep(state, seen, afterMs, now, what = 'main') {
+  const mine = state && seen && state.installed === seen.current ? state : null;
+  const behind = !!seen && !!seen.current && seen.result !== 'installed' && seen.result !== 'current' && (seen.head ? seen.head !== seen.current : !!mine);
+  if (!behind) return { state: null, ...(state && state.raised ? { resolve: true } : {}) };
+  const at = new Date(now).toISOString();
+  const busy = /^not quiet\b/.test(String(seen.reason || ''));
+  const next = { installed: seen.current, since: mine ? mine.since : at, tip: seen.head || (mine && mine.tip) || null, notQuietSince: busy ? (mine && mine.notQuietSince) || at : null, raised: !!(mine && mine.raised) };
+  // WHY: an engine that changed under an open alert (a rollback to an older one, say) ends that episode.
+  const out = { state: next, ...(state && state.raised && !mine ? { resolve: true } : {}) };
+  const stuckMs = now - Date.parse(next.since);
+  if (next.raised || !(stuckMs >= afterMs) || (busy && !(now - Date.parse(next.notQuietSince) >= afterMs))) return out;
+  next.raised = true;
+  const why = redact(String(seen.reason || '')).replace(/\s+/g, ' ').trim();
+  const detail = `the engine has been on ${short(next.installed)} for ${span(stuckMs)} while ${what} moved on${next.tip ? ` to ${short(next.tip)}` : ''}; the updater says: ${seen.result}${why ? `: ${why}` : ''}`;
+  return { ...out, raise: { detail: detail.slice(0, 600), fix: 'read the reason; the Updates panel on the Machine page and /var/lib/worklane/updates.jsonl have the history' } };
+}
+
+/** Apply stuckStep: save the state, raise or resolve the incident. Never throws: an alert must not stop an update. */
+function stuckCheck(deps, cfg, seen) {
+  if (typeof deps.stuckState !== 'function' || typeof deps.saveStuck !== 'function') return;
+  try {
+    const before = deps.stuckState();
+    const step = stuckStep(before, seen, stuckAlertMs(cfg), deps.now(), cfg && channelOf(cfg) === 'release' ? 'the newest release' : (cfg && cfg.branch) || 'main');
+    if (JSON.stringify(step.state) !== JSON.stringify(before || null)) deps.saveStuck(step.state);
+    if (step.resolve && typeof deps.resolveIncident === 'function') deps.resolveIncident(STUCK_INCIDENT, 'engine');
+    if (step.raise && typeof deps.raiseIncident === 'function') deps.raiseIncident(STUCK_INCIDENT, 'engine', step.raise.detail, step.raise.fix);
+  } catch {
+    // the update log has the reason either way
+  }
 }
 
 /** updates.json pending_wait_minutes, in ms: a number >= 0, else 60 minutes. */
@@ -612,13 +671,26 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
 
 async function run(deps) {
   const cfg = deps.config();
-  if (!cfg || cfg.enabled !== true) return 'disabled';
+  if (!cfg || cfg.enabled !== true) {
+    stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
+    return 'disabled';
+  }
   // A canary running now goes first: no other update starts until it has passed, failed or run out of time.
   if (cfg.canary) {
     const st = deps.canaryState() || {};
     if (st.pending) return checkCanaryNow(deps, cfg, st);
   }
-  const r = await update(deps, cfg);
+  // What this run saw, for the stuck alert: the installed engine, the newest commit, and the reason it noted.
+  const seen = { current: null, head: null, reason: '' };
+  const noting = { ...deps, note: (event, sha, reason, ...rest) => ((seen.reason = reason), deps.note(event, sha, reason, ...rest)) };
+  let r;
+  try {
+    r = await update(noting, cfg, seen);
+  } catch (e) {
+    stuckCheck(deps, cfg, { ...seen, result: 'error', reason: String(e && e.message ? e.message : e).slice(0, 300) });
+    throw e;
+  }
+  stuckCheck(deps, cfg, { ...seen, result: r });
   // Once a day, when no install just filed one: a canary on the engine as it is.
   if (cfg.canary && r !== 'installed' && r !== 'rolled_back' && dailyDue(deps.canaryState(), deps.now())) {
     const filed = startCanary(deps, cfg, 'daily', null);
@@ -627,10 +699,11 @@ async function run(deps) {
   return r;
 }
 
-async function update(deps, cfg) {
+async function update(deps, cfg, seen = {}) {
   const gh = repoFromUrl(cfg.repo_url);
   if (!gh) return deps.note('refused', null, `updates.json repo_url isn't a GitHub repository: ${cfg.repo_url}`, true);
   const current = deps.installed();
+  seen.current = current;
   const release = channelOf(cfg) === 'release';
   let head;
   let tag = null;
@@ -638,6 +711,7 @@ async function update(deps, cfg) {
     tag = newestRelease(parseTags(deps.exec('git', ['ls-remote', '--tags', cfg.repo_url, 'refs/tags/v*'])));
     if (!tag) return deps.note('waiting', null, `no release tag vX.Y.Z on ${cfg.repo_url} yet`, false);
     head = tag.commit;
+    seen.head = head;
     if (head === current) return 'current';
     // Never back: a tag no newer than the installed engine's version is not an update.
     const installedVersion = deps.installedVersion();
@@ -645,6 +719,7 @@ async function update(deps, cfg) {
   } else {
     head = deps.exec('git', ['ls-remote', cfg.repo_url, `refs/heads/${cfg.branch || 'main'}`]).split(/\s/)[0];
     if (!/^[0-9a-f]{40}$/.test(head)) return deps.note('refused', null, `no ${cfg.branch || 'main'} on ${cfg.repo_url}`, true);
+    seen.head = head;
     if (head === current) return 'current';
   }
   // A commit that was rolled back is never retried by itself: only a newer commit, or the owner turning
@@ -1017,6 +1092,8 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`)) {
     held: () => readJson(HELD),
     verdicts: () => readJson(VERDICTS),
     saveVerdicts: (map) => saveJson(VERDICTS, map, 0o644),
+    stuckState: () => readJson(STUCK),
+    saveStuck: (state) => (state ? saveJson(STUCK, state, 0o644) : fs.rmSync(STUCK, { force: true })),
     canaryState: () => readJson(CANARY),
     saveCanary: (state) => {
       const tmp = `${CANARY}.tmp`;
@@ -1073,4 +1150,4 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
