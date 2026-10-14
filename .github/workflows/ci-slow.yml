@@ -824,6 +824,66 @@ jobs:
           if jq -e '(.detail + " " + .retry) | test("by hand|credentials.sh")' <<<"$last"; then echo "the App step still names the manual way" >&2; exit 1; fi
           id wl-ci && id wl-ci-agent
           if [ -e /etc/systemd/system/worklane-dashboard-hub.service ] || systemctl is-active -q worklane-dashboard-hub.service; then echo "a hub was started with no sign-in App" >&2; exit 1; fi
+      - name: "the one command on a machine with no hub (bootstrap --hardened): it starts the hub's setup mode and prints its URL only once it answers 200; before that, no URL, the reason and the fix (#393)"
+        run: |
+          pub=https://hub.example.test u=worklane-dashboard-hub-setup.service
+          # The install command from a root-owned copy of this checkout whose pinned engine is this commit, its origin
+          # itself (engine.sh clones the origin of the scripts it runs from, and finds this commit's build in /opt).
+          # Only ENGINE_TAG differs, in the copy.
+          b=/var/tmp/one-url-boot sha="$(git rev-parse HEAD)"
+          sudo rsync -a --exclude node_modules --exclude dist "$GITHUB_WORKSPACE/" "$b/"
+          sudo chown -R root:root "$b" && sudo git -C "$b" remote set-url origin "$b"
+          sudo sed -i "s/^ENGINE_TAG=.*/ENGINE_TAG=$sha/" "$b/scripts/bootstrap.sh"
+          [ "$(sudo git -C "$b" diff --name-only)" = scripts/bootstrap.sh ]
+          boot() { set +e; sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner "$@" ci example/alpha > "$F/$log" 2>&1; rc=$?; set -e; tail -n 12 "$F/$log"; echo "rc=$rc"; }
+          last_is_url() { tail -n 1 "$F/$1" | grep -qE '^https?://'; }
+          # No https origin (no Tailscale here, no --public-url): no URL at all, the reason and the fix; nothing started.
+          log=boot-a.log
+          boot
+          [ "$rc" = 4 ]
+          grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/$log"
+          if last_is_url "$log"; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
+          if systemctl is-active -q "$u"; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
+          [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
+          # The origin given, but nothing serves it yet (tailscale serve): setup mode starts, and still no URL: it doesn't answer.
+          log=boot-b.log
+          boot --public-url "$pub"
+          [ "$rc" = 4 ]
+          systemctl is-active "$u"
+          grep -qF "no URL to open yet: the hub's setup mode runs on this machine (port 4399), but $pub doesn't reach it" "$F/$log"
+          grep -qF "fix: sudo tailscale serve --bg --https=443 http://127.0.0.1:4399, then run this again" "$F/$log"
+          if last_is_url "$log"; then echo "a URL that answers nothing was printed" >&2; exit 1; fi
+          # tailscale serve's stand-in: the origin's name on this machine, real TLS from a CA the system trusts, to port 4399.
+          sudo apt-get install -y -q socat > /dev/null
+          t="$RUNNER_TEMP/tls" && mkdir -p "$t"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/ca.key" -out "$t/ca.pem" -subj /CN=ci-hub-ca -days 2 -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign 2>/dev/null
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$t/leaf.key" -out "$t/leaf.csr" -subj /CN=hub.example.test 2>/dev/null
+          printf 'subjectAltName=DNS:hub.example.test\nextendedKeyUsage=serverAuth\n' > "$t/ext"
+          openssl x509 -req -in "$t/leaf.csr" -CA "$t/ca.pem" -CAkey "$t/ca.key" -CAcreateserial -out "$t/leaf.pem" -days 2 -extfile "$t/ext" 2>/dev/null
+          sudo cp "$t/ca.pem" /usr/local/share/ca-certificates/ci-hub-ca.crt && sudo update-ca-certificates > /dev/null
+          echo '127.0.0.1 hub.example.test' | sudo tee -a /etc/hosts > /dev/null
+          sudo sh -c "nohup socat openssl-listen:443,reuseaddr,fork,cert=$t/leaf.pem,key=$t/leaf.key,verify=0 tcp:127.0.0.1:4399 > $t/socat.log 2>&1 &"
+          for _ in $(seq 1 20); do [ "$(curl -s -o /dev/null -w '%{http_code}' "$pub/")" = 200 ] && break; sleep 1; done
+          tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
+          before="$(sudo sha256sum "$tf")"
+          # Served: the one URL, last, the only one in its block, no token in it; it answers 200 with setup mode's page.
+          for log in boot-c.log boot-d.log; do
+            boot --public-url "$pub"
+            [ "$rc" = 0 ]
+            [ "$(tail -n 1 "$F/$log")" = "$pub/" ]
+            closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/$log")"
+            [ "$(grep -c '://' <<< "$closing")" = 1 ]
+            if sudo grep -qFf "$tf" "$F/$log"; then echo "the setup token was printed" >&2; exit 1; fi
+            curl -s -o "$t/page.html" -w '%{http_code}\n' "$(tail -n 1 "$F/$log")" | grep -qx 200
+            grep -q 'This hub is in setup mode' "$t/page.html"
+            grep -qF "sudo cat $tf" "$F/$log"
+          done
+          # The rerun changed nothing: setup mode left running, its one-time token the same.
+          [ "$(sudo sha256sum "$tf")" = "$before" ]
+          [ "$(grep -c 'scripts/setup/dashboards.sh --setup' "$F/boot-d.log")" = 0 ]
+          # Back as the next steps expect it: no stand-in for tailscale serve.
+          sudo pkill -f 'socat openssl-listen:443' || true
+          sudo sed -i '/ hub\.example\.test$/d' /etc/hosts
       - name: "the sign-in App through the hub's setup mode (B8): wl-dash's one-time token from a 0600 file, never printed or in a URL; it turns itself off once the secret exists"
         run: |
           u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h=http://127.0.0.1:4399

@@ -491,7 +491,7 @@ test('slow-jobs.sh on a PR: the jobs whose paths it touches, all of them for a w
   assert.deepEqual(pr('docs/a.md'), []);
   assert.deepEqual(pr('docs/a.md', 'true'), all, 'the full-ci label');
   assert.deepEqual(pr('.github/workflows/ci.yml'), all);
-  assert.deepEqual(pr('scripts/bootstrap.sh'), ['bootstrap', 'bootstrap-windows']);
+  assert.deepEqual(pr('scripts/bootstrap.sh'), ['bootstrap', 'bootstrap-windows', 'testrun-real-systemd', 'add-project-real-systemd', 'auth-probe-real-users'], "the server install's ending is proven on real systemd (add-project's job)");
   assert.deepEqual(pr('src/dashboard-detach.ts'), ['bootstrap', 'bootstrap-windows'], "the install's last step, the wizard URL");
   assert.deepEqual(pr('web/src/components/DashboardKey.tsx'), ['bootstrap', 'bootstrap-windows'], 'the page that URL opens asks for the key');
   assert.deepEqual(pr('src/os/linux.ts'), ['testrun-real-systemd', 'add-project-real-systemd', 'auth-probe-real-users']);
