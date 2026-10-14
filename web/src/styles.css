@@ -172,6 +172,9 @@ html, body, #root { height: 100%; }
 body { background: var(--background); color: var(--foreground); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
 * { border-color: var(--border); }
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+/* A task graph node (components/GoalGraph.tsx): focus rings its box, since an SVG link has no box of its own. */
+.goal-node { cursor: pointer; outline: none; }
+.goal-node:hover rect:first-of-type, .goal-node:focus-visible rect:first-of-type { stroke: var(--ring) !important; stroke-width: 2.5; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 /* The wake word's listening marker (web/src/voice/WakeIndicator.tsx): a solid dot inside a ring, with a second ring that
    grows and fades from it. One colour (the mic's red), the dashboard's own tokens, in light and dark. Under reduced

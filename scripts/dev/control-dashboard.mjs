@@ -28,7 +28,9 @@
 // limit, resetting in 2 h: the banner and the Overview's usage line), --with-incidents (watchdog incidents for
 // Health: two open, one resolved, in a slot directory of its own under the temporary directory), --with-learnings
 // (failed-run notes for the Learnings panel on Reports: one cause seen 3 times, one seen once), --with-stage-labels
-// (earliest-failed-stage labels for the report preview's stage section on Reports, plan and review among them), --viewport <w>x<h> (default 1440x1000; under
+// (earliest-failed-stage labels for the report preview's stage section on Reports, plan and review among them), --with-goal
+// (two goals split into the demo's tasks for the task graph: #900, and #901 whose two other tasks form a dependency cycle),
+// --viewport <w>x<h> (default 1440x1000; under
 // 768 wide, e.g. 390x844, a phone), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
 // demo's owner, example-owner; the token is the owner's break-glass, so this only names who answers),
@@ -115,6 +117,7 @@ async function start() {
     if (flag('--with-incidents')) await seedIncidents(process.env.AGENT_SLOTS_DIR);
     if (flag('--with-learnings')) await seedLearnings(root, state.tasks.map((t) => t.issue));
     if (flag('--with-stage-labels')) await seedStageLabels(root, state.tasks.map((t) => t.issue));
+    if (flag('--with-goal')) await seedGoals(root, state.tasks.map((t) => t.issue));
 
     const profile = join(work, 'chrome');
     mkdirSync(profile);
@@ -266,6 +269,33 @@ async function seedStageLabels(root, issues) {
       log.append('run.stage_labeled', l, 'demo');
     } catch (e) {
       console.error(`--with-stage-labels: not recorded (${e.message.split('\n')[0]})`);
+    }
+  }
+}
+
+/** --with-goal: the demo files no goal; #900 is split into its first four tasks, #901 into the fifth and sixth, which wait on each other. */
+async function seedGoals(root, issues) {
+  const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
+  const svc = join(engine, 'dist', 'src', 'service.js');
+  if (!existsSync(logMod) || !existsSync(svc) || issues.length < 6) return;
+  const { EventLog } = await import(pathToFileURL(logMod).href);
+  const { logPath } = await import(pathToFileURL(svc).href);
+  const log = new EventLog(logPath(root));
+  const [a, b, c, d, e, f] = issues;
+  const seen = (issue, title) => ['issue.seen', { issue, title, labels: ['type:goal', 'goal:split'], author: 'example-owner', owner: 'example-owner', actionable: false, why: 'a goal' }];
+  const kid = (number, key, depends_on) => ({ number, key, depends_on, body_hash: '0000000000000000' });
+  const events = [
+    seen(900, 'Checkout totals, end to end'),
+    ['goal.split', { issue: 900, summary: 'Totals first, then the two views that show them, then the docs.', children: [kid(a, 'totals', []), kid(b, 'cart', [a]), kid(c, 'receipt', [a]), kid(d, 'docs', [b, c])] }],
+    seen(901, 'Discounts, both ways'),
+    ['goal.split', { issue: 901, summary: 'Two halves.', children: [kid(e, 'one', []), kid(f, 'two', [e])] }],
+    ['dependency.cycle', { issue: e, cycle: [e, f] }],
+  ];
+  for (const [type, payload] of events) {
+    try {
+      log.append(type, payload, 'demo');
+    } catch (e) {
+      console.error(`--with-goal: ${type} not recorded (${e.message.split('\n')[0]})`);
     }
   }
 }
