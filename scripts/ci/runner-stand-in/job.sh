@@ -9,9 +9,12 @@ bad() { echo "PROBE $j FAIL $*"; fail=1; }
 try() { local out; if out="$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$1" "$2" 2>&1)"; then echo connected; elif [ -z "$out" ]; then echo "timed out"; else echo "${out##*$'\n'}"; fi; }
 refused() { case "$1" in *"No route to host"* | *"Permission denied"*) return 0 ;; *) return 1 ;; esac; }
 
-# Files: none of worklane's, no other user's home, not this runner's registration.
+# Files: none of worklane's, no other user's home, not this runner's registration. Reaching one means writing to it
+# or seeing anything inside it: /root, under ProtectHome=tmpfs, is an empty read-only tmpfs, which is fine.
 for p in /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /var/lib/worklane-test "/home/$DEMO_USER" /root "$REG_DIR"; do
-  if [ -r "$p" ] || [ -w "$p" ] || [ -x "$p" ]; then bad "reaches $p"; else ok "can't reach $p"; fi
+  if [ -w "$p" ]; then bad "can write $p"
+  elif [ -r "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then bad "sees inside $p: $(ls -A "$p" | head -n 3 | tr '\n' ' ')"
+  else ok "can't reach $p"; fi
 done
 if [ "$HOME" = /home/runner ] && [ -w "$HOME" ]; then ok "HOME is /home/runner, writable"; else bad "HOME is $HOME"; fi
 if compgen -G "$HOME/marker-*" >/dev/null; then bad "an earlier job's file is in HOME: $(ls "$HOME")"; else ok "HOME is new"; fi
