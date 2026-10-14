@@ -15,6 +15,7 @@
 //
 // An owner may override from Discord (`deploy <sha>`, src/coordinator/deploy-commands.ts): a commit on the default
 // branch's first-parent line, moved by the same fast-forward-only path, recorded with the gate's state at the time.
+import { TestRunHeld } from '../testrun/gate.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EventLog } from '../events/log.js';
@@ -222,6 +223,8 @@ export class DeployGate {
     try {
       result = await this.d.start({ repo: this.d.repo, sha, kind: 'full', prs: [], changedFiles, tiers: this.d.config.tiers }, { signal });
     } catch (e) {
+      // WHY: held at the gate (src/testrun/gate.ts) is no verdict: the branch stays, and a later pass runs this commit.
+      if (e instanceof TestRunHeld) return;
       return this.verdict(sha, deploy, null, false, [...this.d.config.tiers], `the run couldn't start: ${(e as Error).message.slice(0, 500)}`);
     }
     // The coordinator stopping: no verdict; the same commit runs again after the restart.
