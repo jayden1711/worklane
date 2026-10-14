@@ -36,7 +36,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=3
+PROTOCOL=4
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -218,9 +218,26 @@ db_start() {
   exit 1
 }
 
+# systemd's version (systemd-run's first line, "systemd 255 (...)"); 0 when it can't be read.
+systemd_version() {
+  local v
+  v="$(systemd-run --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')"
+  echo "${v:-0}"
+}
+
+# systemd expands ${VAR} and $VAR in a unit's command line itself, as it does in ExecStart=, before bash sees it: a
+# shell-only ${x} or ${x%y} would become empty. A run's command is bash's alone. systemd 254 and later are told so
+# (--expand-environment=no, printed on the first line); an older one always expands, so each $ goes as $$, its escape
+# for a literal $ (the first line empty). The command follows on the next line.
+systemd_command() {
+  local v="$1" c="$2"
+  [[ "$v" =~ ^[0-9]+$ ]] || die "not a systemd version: $v"
+  if [ "$v" -ge 254 ]; then printf -- '--expand-environment=no\n%s' "$c"; else printf '\n%s' "${c//\$/\$\$}"; fi
+}
+
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d inaccessible p
-  local -a envs=()
+  local id="${1:-}" timeout="${2:-}" d inaccessible p cmd flag
+  local -a envs=() noexpand=()
   [ "$#" -ge 2 ] || die "usage: exec <id> <timeout_s> [--env K=V]... -- <command>"
   valid_id "$id"; shift 2
   [[ "$timeout" =~ ^[1-9][0-9]{0,5}$ ]] || die "timeout_s: seconds, got $timeout"
@@ -231,13 +248,16 @@ exec_run() {
   [ "${1:-}" = -- ] && [ "$#" -eq 2 ] || die "exec: -- then exactly one command string"
   d="$(run_dir "$id")"
   [ -d "$d/work" ] || die "no run $id"
+  cmd="$(systemd_command "$(systemd_version)" "$2")"
+  flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
+  [ -z "$flag" ] || noexpand=("$flag")
   inaccessible="-$sock_dir -$root/docker -$root/docker-home"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
   # The unit's own name carries the run id, so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
   # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
   # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
   # the run's stdout as its own and reads systemd-run's summary only as the final block of stderr.
-  exec systemd-run --wait --pipe --collect \
+  exec systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} \
     --unit="worklane-test-$name-$id-$$" --slice="$SLICE" --uid="$user" --gid="$user" \
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
@@ -247,7 +267,7 @@ exec_run() {
     --setenv=HOME="$d/home" --setenv=TMPDIR="$d/tmp" --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user" \
     ${envs[@]+"${envs[@]}"} \
-    /bin/bash -o pipefail -c "$2"
+    /bin/bash -o pipefail -c "$cmd"
 }
 
 # What is left of a run: its units, containers, volumes and directory, one per line ("" when nothing).

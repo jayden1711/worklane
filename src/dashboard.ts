@@ -50,6 +50,7 @@ import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
+import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
@@ -1130,6 +1131,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/throughput' && req.method === 'GET') {
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
+        }
+        // Repeated feedback (src/checks-from-feedback.ts): the constraints people's "no"s cluster into, each with its
+        // count, its evidence links and its proposal. People's words, so the owner's and the writers', like the runs.
+        if (url.pathname === '/api/constraints' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('repeated feedback is', who) });
+          const c = opts.cfg.project.checks_from_feedback;
+          return json(res, 200, constraintsView(readEvents(opts.eventsDb), { writers: opts.cfg.project.owners.writers, enabled: c.enabled, minSightings: c.min_sightings, maxPerWeek: c.max_proposals_per_week, now: new Date() }));
         }
         // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
         // A viewer gets only the figures the viewer-events allowlist permits, and never cost.

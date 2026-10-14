@@ -9,11 +9,11 @@ import type { EventPayload } from '../events/types.js';
 import { AGENTS_MD, taskNotes, withLearning } from '../learnings.js';
 import { checkedPush } from '../push-check.js';
 import { readRun, runsForIssue, type RunRecord } from '../run-record.js';
-import { Optimizer } from './optimize.js';
+import { ChecksFromFeedback } from './checks-from-feedback.js';
 
 export const PROMOTE_LEVEL_LABEL = 'review:L3';
 
-export abstract class Learnings extends Optimizer {
+export abstract class Learnings extends ChecksFromFeedback {
   noteLearnings(issue: number, doneWhen: string[] = []): number {
     const records = runsForIssue(this.d.stateDir, issue)
       .map((r) => readRun(this.d.stateDir, r.id))

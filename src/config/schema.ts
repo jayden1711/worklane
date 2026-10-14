@@ -96,6 +96,20 @@ export const ProjectConfig = z.strictObject({
     })
     .prefault({}),
   /**
+   * Fix-forward (src/fix-forward.ts): when the default branch goes red after an auto-merge (and the flaky re-run says
+   * the failure is real), the culprit is found first (several PRs merged since the last green: each first-parent
+   * commit tested on its own, binary search), then a fix task (an agent with the failing logs, the culprit's diff and
+   * the merged PRs) whose PR goes through the normal gates. The revert PR of the culprit is opened only when no fix is
+   * green within `max_attempts` (0: revert at once), or at once when the culprit touches `revert_first_paths` (globs)
+   * or the money path, auth or secrets (the money-path list and review.yaml's categories).
+   */
+  fix_forward: z
+    .strictObject({
+      max_attempts: z.number().int().min(0).max(5).default(2),
+      revert_first_paths: z.array(z.string().min(1)).default([]),
+    })
+    .prefault({}),
+  /**
    * The main watch (src/main-watch.ts), where GitHub doesn't protect the default branch. `direct_push_alert`: a
    * commit that lands there without a PR (a direct push, a force-push) is posted to the Discord ops channel at once,
    * mentioning the Discord owners. On by default; read as committed just before the push, so a push can't turn it off.
@@ -147,6 +161,20 @@ export const ProjectConfig = z.strictObject({
       at: hhmm.default('03:00'),
       max_usd: z.number().positive().max(100).default(5),
       max_prs: z.number().int().min(0).max(10).default(1),
+    })
+    .prefault({}),
+  /**
+   * Repeated "no"s become checks (src/checks-from-feedback.ts): people's words when they turn the harness's work
+   * down (reviews requesting changes, closed PRs, revised or rejected plans, objections, chat corrections), with
+   * the reverts as evidence, are grouped into constraints. At `min_sightings` one proposal per constraint: a draft
+   * ast-grep rule with its test cases (the repo has sgconfig.yml) or a test, as a draft PR quoting the evidence; an
+   * issue instead for a protected area. Never auto-merged; at most `max_proposals_per_week`. Off by default.
+   */
+  checks_from_feedback: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      min_sightings: z.number().int().min(2).max(20).default(2),
+      max_proposals_per_week: z.number().int().min(0).max(20).default(3),
     })
     .prefault({}),
   /**
@@ -241,6 +269,18 @@ export const AgentsConfig = z
     /** No longer used (trust stages were removed); accepted so existing configs still load. */
     stage: z.number().int().min(1).max(3).optional(),
     daily_budget_usd: z.number().positive(),
+    /** Worker attempts at one issue before it is blocked (counted across restarts and requeues; reset by a block or an answer). */
+    max_attempts: z.number().int().min(1).max(20).default(8),
+    /**
+     * One issue's budget, all its runs together (src/coordinator/loop-control.ts): agent run time in minutes and
+     * tokens in and out. An incident at 85% of either; the task is stopped at 100%. Unset: no such cap.
+     */
+    budget: z
+      .strictObject({
+        task_minutes: z.number().positive().optional(),
+        task_tokens: z.number().int().positive().optional(),
+      })
+      .optional(),
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
     /**
@@ -267,6 +307,8 @@ export const AgentsConfig = z
         intake_thread: model.optional(),
         stage_judge: model.optional(),
         eval_answer: model.optional(),
+        /** The read-only reflection run before a worker's retry (src/coordinator/loop-control.ts). */
+        reflection: model.optional(),
       })
       .optional(),
     /**

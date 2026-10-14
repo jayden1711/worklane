@@ -465,9 +465,9 @@ export function trustMetrics(events: MetricEvent[], o: { now?: Date } = {}): Tru
 // measured yet" (`measured: false` and why), never a 0.
 
 /**
- * Fix-forward (a red default branch fixed by a fix PR rather than reverted) isn't built yet. Its runs will record
- * this event, `{ outcome: 'fixed' | 'reverted' | 'gave_up' }` at least, one per red default branch it took on; until
- * one exists, the fix-forward figure says it is not measured yet.
+ * Fix-forward (a red default branch fixed by a fix PR rather than reverted; src/fix-forward.ts) records this event,
+ * `{ outcome: 'fixed' | 'reverted' | 'gave_up' }`, once per red default branch it took on; until one exists, the
+ * fix-forward figure says it is not measured yet.
  */
 export const FIX_FORWARD_EVENT = 'fix_forward.finished';
 /** The windows the delivery metrics cover, in days. */
@@ -634,7 +634,7 @@ export function deliveryMetrics(events: MetricEvent[], o: { now?: Date; budgetS:
         : { measured: false, why: 'neither the check of the default branch after a merge nor the main watch has run yet' },
       fixForward: fixForward.length
         ? { measured: true, attempts: ff.length, fixed: ff.filter((x) => x === 'fixed').length, reverted: ff.filter((x) => x === 'reverted').length, successRate: rate(ff.filter((x) => x === 'fixed').length, ff.length) }
-        : { measured: false, why: `fix-forward isn't built yet; this fills from its ${FIX_FORWARD_EVENT} events once it is` },
+        : { measured: false, why: `fix-forward hasn't taken on a red default branch yet; this fills from its ${FIX_FORWARD_EVENT} events` },
       prCi: prCi.length
         ? { measured: true, prs: ci.length, medianMinutes: median(ci.map((c) => c.minutes)), p90Minutes: pctile(ci.map((c) => c.minutes), 0.9), slowest: [...ci].sort((a, b) => b.minutes - a.minutes).slice(0, 3) }
         : { measured: false, why: "no merged PR's check runs have been read from GitHub yet" },
