@@ -65,7 +65,7 @@ test('the file is root\'s, under /etc/<cli>/', () => {
 
 test('every listed variable, and the other redirects, in every casing, is a redirect; ordinary ones are not', () => {
   for (const k of REDIRECTING) for (const c of [k, k.toLowerCase(), k.toUpperCase()]) assert.ok(isRedirectVar(c), c);
-  for (const k of ['PATH', 'HOME', 'ANTHROPIC_MODEL', 'CLAUDE_CONFIG_DIR', 'GH_CONFIG_DIR', 'GITHUB_REPOSITORY', 'GITHUB_TOKEN', 'NODE_EXTRA_CA_CERTS', 'GIT_CONFIG_COUNT', 'HTTP_PROXY_X']) assert.equal(isRedirectVar(k), false, k);
+  for (const k of ['PATH', 'HOME', 'ANTHROPIC_MODEL', 'CLAUDE_CONFIG_DIR', 'GH_CONFIG_DIR', 'GITHUB_REPOSITORY', 'GITHUB_TOKEN', 'GIT_CONFIG_COUNT', 'HTTP_PROXY_X']) assert.equal(isRedirectVar(k), false, k);
   const env = outboundEnv({ ...poisoned(), PATH: '/bin', KEEP: 'x' }, null);
   assert.deepEqual(env, { PATH: '/bin', KEEP: 'x' });
 });
@@ -75,10 +75,11 @@ test('network.json: a root-owned, unwritable file with an http(s) proxy sets it,
   const c = readNetworkConfig(f, { ownerUid: me });
   assert.equal(c.error, null);
   assert.deepEqual(c.proxy, { url: 'http://proxy.internal:3128', host: 'proxy.internal:3128', noProxy: 'localhost,127.0.0.1,.internal', file: f });
-  assert.deepEqual(outboundEnv({ ...poisoned(), PATH: '/bin' }, c.proxy), { PATH: '/bin', ...PROXY_SET('http://proxy.internal:3128', 'localhost,127.0.0.1,.internal') });
+  assert.equal(c.ca, null);
+  assert.deepEqual(outboundEnv({ ...poisoned(), PATH: '/bin' }, c), { PATH: '/bin', ...PROXY_SET('http://proxy.internal:3128', 'localhost,127.0.0.1,.internal') });
   assert.deepEqual(readNetworkConfig(networkFile({ proxy: 'https://[::1]:8443/' }), { ownerUid: me }).proxy?.url, 'https://[::1]:8443');
-  assert.deepEqual(readNetworkConfig(join(tmpdir(), 'none', 'network.json'), { ownerUid: me }), { proxy: null, error: null }, 'no file: no proxy, no error');
-  assert.deepEqual(readNetworkConfig(networkFile({}), { ownerUid: me }), { proxy: null, error: null }, 'no proxy key: none');
+  assert.deepEqual(readNetworkConfig(join(tmpdir(), 'none', 'network.json'), { ownerUid: me }), { proxy: null, ca: null, error: null }, 'no file: no proxy, no error');
+  assert.deepEqual(readNetworkConfig(networkFile({}), { ownerUid: me }), { proxy: null, ca: null, error: null }, 'no proxy key: none');
 });
 
 test('network.json: a bad or credentialed proxy is refused, and nothing is set', { skip: posixOnly }, () => {
@@ -109,7 +110,7 @@ test('network.json: a bad or credentialed proxy is refused, and nothing is set',
     const c = readNetworkConfig(networkFile(body), { ownerUid: me });
     assert.equal(c.proxy, null, JSON.stringify(body));
     assert.match(c.error ?? '', why, JSON.stringify(body));
-    assert.match(c.error ?? '', /no outbound proxy is set$/);
+    assert.match(c.error ?? '', /no outbound proxy or custom CA is set$/);
   }
 });
 
@@ -251,12 +252,12 @@ test('project commands (childEnv, through projectCommand): nothing redirects the
 
 test('the Health page\'s line: the proxy and its file when set, the refusal when refused, nothing when absent', { skip: posixOnly }, async () => {
   const f = networkFile({ proxy: 'http://proxy.internal:3128' });
-  assert.deepEqual(await withNetwork(f, () => networkHealth()), { proxy: 'proxy.internal:3128', file: f, error: null });
+  assert.deepEqual(await withNetwork(f, () => networkHealth()), { proxy: 'proxy.internal:3128', file: f, ca: null, error: null });
   assert.equal(await withNetwork(null, () => networkHealth()), null);
   const bad = networkFile({ proxy: 'http://u:p@proxy.internal:3128' });
   const refused = await withNetwork(bad, () => networkHealth());
   assert.equal(refused?.proxy, null);
   assert.match(refused?.error ?? '', /must not carry a user or password/);
   assert.doesNotMatch(refused?.error ?? '', /u:p/, 'never echoes the credential');
-  assert.deepEqual(await withNetwork(f, () => healthView([], null).network), { proxy: 'proxy.internal:3128', file: f, error: null });
+  assert.deepEqual(await withNetwork(f, () => healthView([], null).network), { proxy: 'proxy.internal:3128', file: f, ca: null, error: null });
 });

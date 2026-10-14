@@ -180,7 +180,8 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // WHY: a refused network.json means children go direct; say so at start, as the Health page does.
   const net = machineNetworkConfig();
   if (net.error) console.error(net.error);
-  else if (net.proxy) console.error(`outbound proxy: ${net.proxy.host} (from ${net.proxy.file})`);
+  if (net.proxy) console.error(`outbound proxy: ${net.proxy.host} (from ${net.proxy.file})`);
+  if (net.ca) console.error(`custom CA: ${net.ca.path}, ${net.ca.count} certificate(s)`);
   // The GitHub credential must reach this instance's repo and nothing else.
   const tokens = instanceTokens(i, env);
   let token = '';
