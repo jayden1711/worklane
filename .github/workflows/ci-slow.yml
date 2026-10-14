@@ -1219,6 +1219,76 @@ jobs:
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.state=="done" and (.detail|test("is already https://"))'
           [ "$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)" = "$since" ]
           [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 9 ]
+      # The first-run wizard's Tailscale screen, end to end on this machine: the instance's own dashboard (the owner's
+      # break-glass token, on loopback), the request in its event log, the real coordinator (worklane-ci.service) running
+      # the helper through sudo, the step's own unit, and the screen's view of it. The stand-in is logged out first.
+      - name: "tailscale from the dashboard: a confirmed step becomes a machine request the coordinator runs through the helper; the login link reaches the owner's view and no event or log"
+        run: |
+          d=/var/lib/worklane/tailscale
+          state="$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state"
+          port="$(node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/dashboard.js"); console.log(m.instancePort("ci"));')"
+          tok="$(sudo cat "$state/dashboard-token")"; echo "::add-mask::$tok"
+          api() { curl -sS --max-time 30 -H "Authorization: Bearer $tok" -H 'content-type: application/json' "$@" "http://127.0.0.1:$port$path"; }
+          code() { api -o "$F/ts-api.txt" -w '%{http_code}' "$@"; }
+          ended() { sudo grep -q "\"step\":\"$1\",\"state\":\"\(done\|failed\)\"" "$d/steps.jsonl" 2>/dev/null; }
+          idle() { for _ in $(seq 1 60); do systemctl is-active -q worklane-tailscale.service || return 0; sleep 1; done; return 1; }
+          # The view, as the steps above left the machine: everything done, nothing to open.
+          path=/api/tailscale; api | tee "$F/ts-view1.json"; echo
+          jq -e --arg n "$TS_NAME" '.machineOwner and .allowed and .status.installed and .status.state=="Running" and .status.name==$n and .status.https and .status.serve and (.status.funnel|not) and .status.hubUrl=="https://\($n)" and .next==null and .loginUrl==null and (.steps|map(.done)|all)' "$F/ts-view1.json"
+          # Logged out again (the stand-in's way), nothing served.
+          sudo rm -f /var/lib/ci-tailscale/state.json /var/lib/ci-tailscale/serve.json /var/lib/ci-tailscale/calls "$d/steps.jsonl"
+          sleep 4
+          path=/api/tailscale; api > "$F/ts-view2.json"
+          jq -e '.status.installed and .status.state=="NeedsLogin" and .status.name==null and .next=="up" and .run==null and .loginUrl==null' "$F/ts-view2.json"
+          # Looking asked for nothing; a step without its confirmation, or with anything but one of the four words, is refused.
+          path=/api/machine/tailscale
+          [ "$(code -X POST -d '{"action":"up"}')" = 400 ]
+          [ "$(code -X POST -d '{"action":"up --auth-key=tskey-auth-kCIexample-0123456789abcdef","confirm":true}')" = 400 ]
+          [ "$(code -X POST -d '{"action":"serve","confirm":true}')" = 409 ]
+          sleep 45
+          sudo test ! -e "$d/steps.jsonl"
+          sudo test ! -e /var/lib/ci-tailscale/calls || ! sudo grep -q '"up"' /var/lib/ci-tailscale/calls
+          # Confirmed: recorded, then run by the coordinator on its next tick.
+          [ "$(code -X POST -d '{"action":"up","confirm":true}')" = 200 ] || { cat "$F/ts-api.txt"; exit 1; }
+          jq -e '.pending and .request.args==["tailscale","up"] and .request.via=="tailscale"' "$F/ts-api.txt"
+          for _ in $(seq 1 180); do sudo test -s "$d/login-url" && break; sleep 1; done
+          sudo test -s "$d/login-url" || { sudo journalctl --no-pager -n 40 -u worklane-ci.service; exit 1; }
+          [ "$(sudo stat -c '%U %G %a' "$d/login-url")" = "wl-ci root 400" ]
+          id="$(sudo sed 's#.*/##' "$d/login-url")"; echo "::add-mask::$id"; [ "${#id}" = 16 ]
+          (umask 077; printf '%s\n' "$id" > "$F/ts-link-id")
+          # The owner's view has the link, exactly the file's; nothing else on the machine does.
+          sleep 4
+          path=/api/tailscale; api > "$F/ts-view3.json"
+          [ "$(jq -r '.loginUrl' "$F/ts-view3.json")" = "$(sudo cat "$d/login-url")" ]
+          jq -e '.run.step=="up" and .run.status=="waiting" and .busy=="tailscale up is running"' "$F/ts-view3.json" >/dev/null
+          rm -f "$F/ts-view3.json"
+          path=/api/machine/tailscale
+          [ "$(code -X POST -d '{"action":"up","confirm":true}')" = 409 ]
+          leaked() { sudo journalctl --no-pager > "$F/journal.txt" 2>&1 || true; sudo grep -qaFf "$F/ts-link-id" "$F/journal.txt" "$d/steps.jsonl" /var/lib/worklane/machine-changes.jsonl "$state"/events.db*; }
+          if leaked; then echo "the login link is in the journal, the steps, the changes log or the event log" >&2; exit 1; fi
+          # The event log has the request as two words, by the break-glass's owner, and the audit of it.
+          sudo grep -qaF '"args":["tailscale","up"]' "$state"/events.db*
+          sudo grep -qaF 'machine.tailscale' "$state"/events.db*
+          if sudo grep -qaF 'tskey' "$state"/events.db* /var/lib/ci-tailscale/calls "$d/steps.jsonl"; then echo "key text reached the event log, tailscale or the steps" >&2; exit 1; fi
+          # The owner logs in; the screen moves on to the next step, which is asked for and run the same way.
+          printf '{"BackendState":"Running","Self":{"DNSName":"%s."},"CertDomains":["%s"]}\n' "$TS_NAME" "$TS_NAME" | sudo tee /var/lib/ci-tailscale/login.json >/dev/null
+          for _ in $(seq 1 60); do ended up && break; sleep 1; done
+          sudo tail -n 1 "$d/steps.jsonl" | jq -e '.step=="up" and .state=="done"'
+          sudo test ! -e "$d/login-url"
+          if leaked; then echo "the login link is in the journal, the steps, the changes log or the event log" >&2; exit 1; fi
+          rm -f "$F/journal.txt" "$F/ts-link-id"
+          [ "$(sudo jq -c 'select(.args[0]=="up")' /var/lib/ci-tailscale/calls)" = '{"args":["up","--timeout=600s"],"authkey_env":false}' ]
+          idle; sleep 4
+          path=/api/tailscale; api > "$F/ts-view4.json"
+          jq -e --arg n "$TS_NAME" '.status.state=="Running" and .status.name==$n and (.status.serve|not) and .next=="serve" and .loginUrl==null and .run.status=="done"' "$F/ts-view4.json"
+          path=/api/machine/tailscale
+          [ "$(code -X POST -d '{"action":"serve","confirm":true}')" = 200 ] || { cat "$F/ts-api.txt"; exit 1; }
+          for _ in $(seq 1 180); do ended serve && break; sleep 1; done
+          sudo tail -n 1 "$d/steps.jsonl" | jq -e '.step=="serve" and .state=="done"'
+          idle; sleep 4
+          path=/api/tailscale; api > "$F/ts-view5.json"
+          jq -e '.status.serve and .next==null and (.steps|map(.done)|all)' "$F/ts-view5.json"
+          for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
       - name: the units and the fake's log, on failure
         if: failure()
         run: |

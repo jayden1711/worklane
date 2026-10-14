@@ -221,6 +221,7 @@
   "test/stuck-guard.test.ts": 5,
   "test/stuck-wiring.test.ts": 3414,
   "test/tailscale-script.test.ts": 21000,
+  "test/tailscale-setup.test.ts": 900,
   "test/testrun-dashboard.test.ts": 478,
   "test/testrun-pr-batch.test.ts": 2355,
   "test/testrun-predates.test.ts": 13729,

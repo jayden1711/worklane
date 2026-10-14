@@ -117,7 +117,7 @@ The Setup console's Add project is the screen for the agent App (first-run scree
 
 ### Tailscale HTTPS (the owner's step)
 
-The hub is reachable only over your tailnet, never the public internet:
+The hub is reachable only over your tailnet, never the public internet. The steps are below by hand; [Tailscale and HTTPS from the dashboard](#tailscale-and-https-from-the-dashboard) does the same from the Machine page, and `scripts/setup/tailscale.sh` from a terminal.
 
 1. In the Tailscale admin console, under DNS, enable **MagicDNS** and **HTTPS certificates**.
 2. On the machine, forward HTTPS on the tailnet to the hub's sign-in port:
@@ -250,9 +250,37 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Guardrail fingerprints fetched | local, server | `worklane guardrails refresh` |
 | Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
 | The instance's policy | server | `the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch` |
+| Reachable over Tailscale (HTTPS) | server | `sudo bash scripts/setup/tailscale.sh install, then up, serve and public-url (one step each; status reads only)` |
 | Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
 | The coordinator running | local | `worklane up` |
+
+## Tailscale and HTTPS from the dashboard
+
+The first-run wizard's Tailscale screen, for a server. It is the Machine page's **Tailscale and HTTPS** card (`/machine#tailscale`; the first-run step "Reachable over Tailscale (HTTPS)" opens it, and it stays there to run again). It's optional: on a machine without Tailscale, or if you never confirm a step, nothing changes and the hub keeps its URL.
+
+It's visible only to machine owners: the server sends everyone else none of its data (`GET /api/tailscale`, `src/tailscale-setup.ts`), and a local checkout has no such screen. It shows whether tailscale is installed and up (what `scripts/setup/tailscale.sh status --json` says, read as the instance's own user), the hub's URL now, and four steps in order. Each step shows what it changes first and needs a second click; each is a machine request, gated like any machine change (an owner here who is a machine owner, signed in, on an allowed device; or the break-glass), audited, one at a time:
+
+| Step | Machine request | What runs, as root | Without the dashboard |
+| --- | --- | --- | --- |
+| Install Tailscale | `tailscale install` | Tailscale's apt repository for this distribution, its signing key checked against the fingerprint pinned in `scripts/setup/lib.sh`, then the pinned version of the package. No install script. A tailscale already there is left alone. | `sudo bash scripts/setup/tailscale.sh install` |
+| Log this machine in | `tailscale up` | `tailscale up` with no auth key. It prints a login link and waits 10 minutes. | `sudo bash scripts/setup/tailscale.sh up` |
+| Put the hub on HTTPS | `tailscale serve` | `tailscale serve --bg --https=443 http://127.0.0.1:4399`, and nothing else. | `sudo bash scripts/setup/tailscale.sh serve` |
+| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...` |
+
+The dashboard never runs any of it: the coordinator runs the machine helper, which takes exactly those four commands (two fixed words each; no auth key, flag, URL or port can be passed) and starts the step as its own unit, `worklane-tailscale.service`. The card follows the step from the script's progress file, `/var/lib/worklane/tailscale/steps.jsonl`.
+
+**The login link** goes to the owner only. The script writes it to `/var/lib/worklane/tailscale/login-url`, mode 0400, owned by the asking instance's coordinator user, and deletes it when `up` ends. The dashboard serves it only to a machine owner, only while `up` waits, and only if it is exactly Tailscale's login page (`https://login.tailscale.com/a/<id>`); it shows as an "Open Tailscale's login page" button. The link is never in an event, an audit entry, the journal or the machine changes log. No auth key is used anywhere on this path.
+
+**Two things stay on other sites.** MagicDNS and HTTPS certificates are turned on in Tailscale's admin console (DNS); until they are, the HTTPS step says so and links there. After the URL step, set the sign-in App's callback URL on GitHub to exactly `https://<name>/auth/callback`: sign-in at the new URL fails until you do. The hub restarts for that step, so a session at the old URL ends; the break-glass still works.
+
+What it can never do:
+
+- Turn on Tailscale Funnel, or publish anything outside your tailnet. There is no funnel command on this path, `tailscale serve` is tailnet-only, and the hub itself listens on `127.0.0.1`. The card shows Funnel's state read-only; if Funnel is already on, the HTTPS and URL steps do nothing until an admin turns it off (`tailscale funnel reset`).
+- Choose what is forwarded or where: the serve step is one fixed command to the hub's sign-in port. It never forwards the break-glass port (4398) and never replaces something else already on 443.
+- Change what `tailscale up` exposes: it is run with no flags (no exit node, routes, SSH, login server or auth key).
+- Set the hub's URL to anything but this machine's own `*.ts.net` name, which the script reads from `tailscale status` on the machine; nobody types it.
+- Install a package that isn't signed by the pinned key.
 
 ## Switching the agents' Claude account
 

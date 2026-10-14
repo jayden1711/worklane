@@ -3,13 +3,15 @@
 // (memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage, and on a hub the
 // instances side by side), the test runs (queue, slots, the full-run lock's holder, tiers), and the machine-wide
 // settings (the slot caps, engine updates) with their history, and above them the Updates panel (the engine installed,
-// the last update, any rollback or hold, the canary's last result).
+// the last update, any rollback or hold, the canary's last result), and for the machine's owners the agents' Claude
+// account and Tailscale and HTTPS for the hub.
 import { DeployGateStatus } from '../components/DeployGate';
 import type { State } from '../api';
 import { HealthPanel } from '../components/HealthPanel';
 import { ProtectionStatus } from '../components/Protection';
 import { MachineSettings } from '../components/MachineSettings';
 import { ClaudeAccountPanel } from '../components/ClaudeAccount';
+import { TailscaleSetupPanel } from '../components/TailscaleSetup';
 import { UpdatesPanel } from '../components/UpdatesPanel';
 import { TestRunsPanel } from '../components/TestRuns';
 import { RecordsTable } from '../components/patterns';
@@ -62,6 +64,8 @@ export function MachinePage({ state }: { state: State }) {
         <HealthPanel />
         {/* The agents' Claude account: the machine owners' only (it renders nothing for anyone else). */}
         <ClaudeAccountPanel />
+        {/* Tailscale and HTTPS for the hub (the first-run wizard's screen): the machine owners' only, on a server instance. */}
+        <TailscaleSetupPanel />
         {/* The machine settings are the owners' and writers' (a viewer's request for them is refused). */}
         {state.canReadMachine ? (
           <>
